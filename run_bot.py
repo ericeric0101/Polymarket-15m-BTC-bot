@@ -13,16 +13,17 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import math
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import random
 import httpx
 import re
 import json
 import threading
 import uuid
+import subprocess
 
 # Add project to path
 project_root = Path(__file__).parent
@@ -65,7 +66,7 @@ from core.strategy_brain.fusion_engine.signal_fusion import get_fusion_engine
 from execution.risk_engine import get_risk_engine
 from execution.fee_rate_client import FeeRateClient
 from execution.parameter_tuner import ParameterTuner
-from execution.rebate_model import bps_to_fee_rate, estimate_quote_economics
+from execution.rebate_model import CRYPTO_FEE_CURVE, bps_to_fee_rate, estimate_quote_economics
 from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.grafana_exporter import get_grafana_exporter
@@ -73,6 +74,38 @@ from monitoring.trade_journal_db import TradeJournalDB
 from feedback.learning_engine import get_learning_engine
 
 load_dotenv()
+
+
+def auto_apply_local_patches() -> None:
+    """
+    Auto-apply local compatibility patches (idempotent).
+    """
+    enabled = os.getenv("AUTO_APPLY_NAUTILUS_PATCH", "1").strip().lower() not in ("0", "false", "no")
+    if not enabled:
+        return
+    scripts = [
+        Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_drop_log.py",
+        Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_ticksize_log.py",
+    ]
+    for script in scripts:
+        if not script.exists():
+            logger.debug(f"Patch script not found: {script}")
+            continue
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script), "--quiet"],
+                cwd=str(Path(__file__).parent),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            if proc.returncode != 0:
+                logger.warning(f"Auto patch script exited with code {proc.returncode}: {proc.stderr.strip()}")
+            else:
+                logger.debug(f"Auto patch script applied/verified: {script.name}")
+        except Exception as e:
+            logger.warning(f"Auto patch apply failed ({script.name}): {e}")
 
 
 def _build_btc_15m_slug_candidates(lookback: int = 1, lookahead: int = 4) -> List[str]:
@@ -612,14 +645,43 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_order_ttl_sec = int(os.getenv("MAKER_ORDER_TTL_SEC", "20"))
         self.maker_requote_threshold = Decimal(os.getenv("MAKER_REQUOTE_THRESHOLD", "0.002"))
         self.maker_balance_pause_sec = int(os.getenv("MAKER_BALANCE_PAUSE_SEC", "60"))
-        self.maker_fee_rate_bps_default = int(os.getenv("MAKER_FEE_RATE_BPS_DEFAULT", "1000"))
+        self.maker_fee_rate_default_decimal = Decimal(
+            os.getenv("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
+        )
+        if self.maker_fee_rate_default_decimal <= 0:
+            self.maker_fee_rate_default_decimal = CRYPTO_FEE_CURVE.fee_rate
+        self.maker_fee_rate_legacy_bps_default = int(os.getenv("MAKER_FEE_RATE_BPS_DEFAULT", "0"))
+        self.maker_fee_rate_bps_default = int(
+            (self.maker_fee_rate_default_decimal * Decimal("10000")).quantize(Decimal("1"))
+        )
         self.maker_max_order_usdc = Decimal(os.getenv("MAKER_MAX_ORDER_USDC", "1.0"))
         self.maker_cancel_cooldown_sec = int(os.getenv("MAKER_CANCEL_COOLDOWN_SEC", "2"))
         self.maker_cancel_ack_timeout_sec = int(os.getenv("MAKER_CANCEL_ACK_TIMEOUT_SEC", "8"))
         self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
+        self.maker_simulation_shadow = os.getenv("MAKER_SIMULATION_SHADOW", "1").strip().lower() not in ("0", "false", "no")
+        self.maker_sim_eval_sec = int(os.getenv("MAKER_SIM_EVAL_SEC", "60"))
+        self.sim_ack_latency_ms_min = int(os.getenv("SIM_ACK_LATENCY_MS_MIN", "120"))
+        self.sim_ack_latency_ms_max = int(os.getenv("SIM_ACK_LATENCY_MS_MAX", "800"))
+        self.sim_cancel_latency_ms_min = int(os.getenv("SIM_CANCEL_LATENCY_MS_MIN", "80"))
+        self.sim_cancel_latency_ms_max = int(os.getenv("SIM_CANCEL_LATENCY_MS_MAX", "500"))
+        self.sim_fill_base_prob = float(os.getenv("SIM_FILL_BASE_PROB", "0.08"))
+        self.sim_fill_edge_boost = float(os.getenv("SIM_FILL_EDGE_BOOST", "0.30"))
+        self.sim_fill_queue_penalty = float(os.getenv("SIM_FILL_QUEUE_PENALTY", "0.45"))
+        self.sim_fill_age_bonus_max = float(os.getenv("SIM_FILL_AGE_BONUS_MAX", "0.25"))
+        self.sim_fill_age_to_max_sec = max(1, int(os.getenv("SIM_FILL_AGE_TO_MAX_SEC", "25")))
+        self.sim_partial_fill_min_ratio = float(os.getenv("SIM_PARTIAL_FILL_MIN_RATIO", "0.2"))
+        self.sim_partial_fill_max_ratio = float(os.getenv("SIM_PARTIAL_FILL_MAX_RATIO", "1.0"))
+        self.quote_healthcheck_interval_sec = int(os.getenv("QUOTE_HEALTHCHECK_INTERVAL_SEC", "10"))
+        self.quote_stale_sec = int(os.getenv("QUOTE_STALE_SEC", "30"))
+        self.quote_invalid_tick_reload_threshold = int(os.getenv("QUOTE_INVALID_TICK_RELOAD_THRESHOLD", "80"))
+        self.quote_reload_cooldown_sec = int(os.getenv("QUOTE_RELOAD_COOLDOWN_SEC", "60"))
         self.last_quote_update_ts = 0.0
         self.quote_pause_until_ts = 0.0
         self.last_simulation_guard_log_ts = 0.0
+        self.last_valid_quote_ts = 0.0
+        self.consecutive_invalid_quote_ticks = 0
+        self.last_quote_watchdog_check_ts = 0.0
+        self.last_quote_watchdog_reload_ts = 0.0
         self.last_external_spot: Optional[Decimal] = None
         self.latest_external_spot: Optional[Decimal] = None
         self.latest_market_bid: Optional[Decimal] = None
@@ -628,6 +690,9 @@ class IntegratedBTCStrategy(Strategy):
         self.consecutive_denied_orders = 0
         self.maker_kill_switch = False
         self.active_maker_orders: Dict[str, Any] = {}
+        self.sim_maker_positions: List[Dict[str, Any]] = []
+        self.sim_maker_closed_total = 0
+        self.sim_maker_closed_wins = 0
         self.current_token_id: Optional[str] = None
         self.last_observed_fee_rate_bps: Optional[int] = None
         clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com")
@@ -641,6 +706,8 @@ class IntegratedBTCStrategy(Strategy):
         self._stopping = False
         self._reload_stop_event = threading.Event()
         self._reload_thread: Optional[threading.Thread] = None
+        self._quote_watchdog_stop_event = threading.Event()
+        self._quote_watchdog_thread: Optional[threading.Thread] = None
         self._maker_worker_lock = threading.Lock()
         self._decision_worker_lock = threading.Lock()
         self._maker_worker_running = False
@@ -671,6 +738,13 @@ class IntegratedBTCStrategy(Strategy):
         logger.info(f"  Maker auto-tune: {'ON' if self.auto_tune_enabled else 'OFF'}")
         logger.info(f"  Maker max order USDC: ${float(self.maker_max_order_usdc):.2f}")
         logger.info(f"  Maker cancel max retries: {self.maker_cancel_max_retries}")
+        logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
+        logger.info(f"  Maker fee default decimal: {float(self.maker_fee_rate_default_decimal):.6f}")
+        logger.info(
+            "  Quote watchdog: "
+            f"stale={self.quote_stale_sec}s invalid_threshold={self.quote_invalid_tick_reload_threshold} "
+            f"cooldown={self.quote_reload_cooldown_sec}s"
+        )
         logger.info(f"  Trade DB: {'ON' if self.trade_db_enabled else 'OFF'}")
         logger.info("=" * 80)
 
@@ -817,33 +891,62 @@ class IntegratedBTCStrategy(Strategy):
             return None
         return m.group(1)
 
+    def _infer_market_fee_rate_default(self) -> Decimal:
+        """
+        Infer fee-curve parameter by market type when /fee-rate is unavailable.
+        """
+        default_rate = self.maker_fee_rate_default_decimal
+        try:
+            instrument = self.cache.instrument(self.instrument_id) if self.instrument_id else None
+            info = getattr(instrument, "info", None) or {}
+            if not isinstance(info, dict):
+                return default_rate
+
+            gamma_original = info.get("_gamma_original")
+            fee_type = ""
+            if isinstance(gamma_original, dict):
+                fee_type = str(gamma_original.get("feeType", "")).strip().lower()
+
+            text = f"{str(info.get('market_slug', '')).lower()} {str(info.get('question', '')).lower()} {fee_type}"
+            if "crypto_15" in fee_type or "crypto_5" in fee_type or "btc-updown" in text:
+                return Decimal("0.25")
+            if "ncaab" in text or "serie a" in text or "serie_a" in text:
+                return Decimal("0.0175")
+        except Exception:
+            pass
+        return default_rate
+
     async def _get_dynamic_fee_rate(self) -> Optional[Decimal]:
         """
         Fetch dynamic fee rate from CLOB /fee-rate endpoint using current token_id.
         """
         if not self.current_token_id:
             return None
-        fee_bps = await self.fee_rate_client.get_fee_rate_bps(self.current_token_id)
-        fee_bps_value = int(fee_bps or 0)
+        fee_rate = await self.fee_rate_client.get_fee_rate_decimal(self.current_token_id)
         source = "clob_fee_rate"
-
-        # Some tokens can return 0/None from /fee-rate while actual fills still carry fees.
-        # Fall back to observed fill fee bps, then conservative default.
-        if fee_bps_value <= 0:
-            if self.last_observed_fee_rate_bps and self.last_observed_fee_rate_bps > 0:
-                fee_bps_value = int(self.last_observed_fee_rate_bps)
-                source = "observed_fill"
-            elif self.maker_fee_rate_bps_default > 0:
-                fee_bps_value = int(self.maker_fee_rate_bps_default)
-                source = "default"
-            else:
-                return None
-
-        fee_rate = bps_to_fee_rate(fee_bps_value)
+        if fee_rate is None or fee_rate <= 0:
+            fee_rate = self._infer_market_fee_rate_default()
+            source = "market_type_default"
+            if (fee_rate is None or fee_rate <= 0) and self.maker_fee_rate_legacy_bps_default > 0:
+                fee_rate = bps_to_fee_rate(self.maker_fee_rate_legacy_bps_default)
+                source = "legacy_bps_default"
+        if fee_rate is None or fee_rate <= 0:
+            return None
+        fee_bps_value = int((fee_rate * Decimal("10000")).quantize(Decimal("1")))
         logger.debug(
             f"Using fee rate source={source} bps={fee_bps_value} "
             f"decimal={float(fee_rate):.6f} token={self.current_token_id}"
         )
+        if source != "clob_fee_rate":
+            health = self.fee_rate_client.get_health_snapshot()
+            last_reason = str(health.get("last_error_reason", ""))
+            last_status = int(health.get("last_status_code", 0) or 0)
+            last_excerpt = str(health.get("last_response_excerpt", ""))
+            if last_reason or last_status:
+                logger.debug(
+                    "fee-rate fallback diagnostics: "
+                    f"reason={last_reason} status={last_status} excerpt={last_excerpt}"
+                )
         return fee_rate
 
     def _activate_maker_kill_switch(self, reason: str) -> None:
@@ -908,6 +1011,28 @@ class IntegratedBTCStrategy(Strategy):
         if not state:
             return
         order = state.get("order")
+        if state.get("simulated"):
+            coid = str(state.get("client_order_id", f"SIM-{side}-{int(time.time()*1000)}"))
+            now_ts = time.time()
+            cancel_latency_ms = random.randint(
+                min(self.sim_cancel_latency_ms_min, self.sim_cancel_latency_ms_max),
+                max(self.sim_cancel_latency_ms_min, self.sim_cancel_latency_ms_max),
+            )
+            state["pending_cancel"] = True
+            state["cancel_requested_ts"] = now_ts
+            state["cancel_effective_at"] = now_ts + (cancel_latency_ms / 1000.0)
+            state["cancel_reason"] = reason
+            self._db_order_event(
+                event_type="ORDER_SIM_CANCEL_REQUESTED",
+                client_order_id=coid,
+                side=side.upper(),
+                price=float(state.get("price", 0.0)),
+                qty=float(state.get("quantity", 0.0)),
+                status="PENDING_CANCEL",
+                reason=reason,
+                payload={"cancel_latency_ms": cancel_latency_ms},
+            )
+            return
         if order is None:
             self.active_maker_orders.pop(side, None)
             return
@@ -1037,6 +1162,274 @@ class IntegratedBTCStrategy(Strategy):
             logger.debug(f"Open-order cache reconciliation failed for {client_order_id}: {e}")
             return None
 
+    def _simulate_shadow_maker_fills_and_closes(self, bid_price: Decimal, ask_price: Decimal, now_ts: float) -> None:
+        """
+        In simulation mode, emulate maker order lifecycle:
+        - Submit -> ack latency -> resting.
+        - Cancel request -> cancel latency (can still fill before effective cancel).
+        - Queue-priority + edge + age based probabilistic partial fills.
+        - Evaluate PnL after hold period, including entry/exit fees.
+        """
+        mid_price = (bid_price + ask_price) / 2
+
+        # Advance simulated order states.
+        for side, state in list(self.active_maker_orders.items()):
+            if not state.get("simulated"):
+                continue
+            coid = str(state.get("client_order_id", f"SIM-{side}-{int(now_ts*1000)}"))
+
+            # Ack transition.
+            if state.get("status", "PENDING_ACK") == "PENDING_ACK":
+                ack_at = float(state.get("ack_at", 0.0))
+                if now_ts >= ack_at:
+                    state["status"] = "RESTING"
+                    self._db_order_event(
+                        event_type="ORDER_SIM_ACCEPTED",
+                        client_order_id=coid,
+                        side=side.upper(),
+                        price=float(state.get("price", 0.0)),
+                        qty=float(state.get("quantity", 0.0)),
+                        status="ACCEPTED",
+                    )
+
+            # Cancel transition.
+            if state.get("pending_cancel"):
+                cancel_effective_at = float(state.get("cancel_effective_at", 0.0))
+                if now_ts >= cancel_effective_at:
+                    self.active_maker_orders.pop(side, None)
+                    self.rebate_reporter.record_cancel(str(state.get("cancel_reason", "cancel")))
+                    self._db_order_event(
+                        event_type="ORDER_SIM_CANCELED",
+                        client_order_id=coid,
+                        side=side.upper(),
+                        price=float(state.get("price", 0.0)),
+                        qty=float(state.get("quantity", 0.0)),
+                        status="CANCELED",
+                        reason=str(state.get("cancel_reason", "cancel")),
+                    )
+                    continue
+
+            if state.get("status") != "RESTING":
+                continue
+
+            limit_price = Decimal(str(state.get("price", "0")))
+            qty = Decimal(str(state.get("quantity", "0")))
+            if qty <= 0:
+                continue
+            filled_qty = Decimal(str(state.get("filled_qty", "0")))
+            remaining_qty = qty - filled_qty
+            if remaining_qty <= 0:
+                continue
+
+            instrument = self.cache.instrument(self.instrument_id) if self.instrument_id else None
+            tick = Decimal("0.01")
+            if instrument is not None:
+                try:
+                    raw_tick = getattr(instrument, "price_increment", None)
+                    if raw_tick is not None:
+                        tick = Decimal(str(raw_tick))
+                    elif hasattr(instrument, "info") and instrument.info:
+                        maybe_tick = instrument.info.get("minimum_tick_size")
+                        if maybe_tick is not None:
+                            tick = Decimal(str(maybe_tick))
+                except Exception:
+                    pass
+            if tick <= 0:
+                tick = Decimal("0.01")
+
+            # Fill trigger:
+            # 1) hard cross (always eligible),
+            # 2) resting at/near top-of-book (maker can be hit without spread crossing).
+            crossed = False
+            near_top = False
+            if side == "buy":
+                crossed = ask_price <= limit_price
+                near_top = limit_price >= (bid_price - tick)
+            else:
+                crossed = bid_price >= limit_price
+                near_top = limit_price <= (ask_price + tick)
+
+            if not crossed and not near_top:
+                continue
+
+            created_ts = float(state.get("created_ts", now_ts))
+            age_sec = max(0.0, now_ts - created_ts)
+            queue_rank = float(state.get("queue_rank", 0.5))  # 0=front, 1=back
+            edge = float((limit_price - ask_price) if side == "buy" else (bid_price - limit_price))
+            edge = max(0.0, edge)
+
+            # If near top but not crossed, reward top-of-book proximity.
+            if side == "buy":
+                dist_to_best = max(Decimal("0"), bid_price - limit_price)
+            else:
+                dist_to_best = max(Decimal("0"), limit_price - ask_price)
+            proximity_ratio = 0.0
+            if tick > 0:
+                proximity_ratio = max(0.0, 1.0 - float(dist_to_best / tick))
+                proximity_ratio = min(1.0, proximity_ratio)
+
+            age_bonus = min(
+                self.sim_fill_age_bonus_max,
+                (age_sec / float(self.sim_fill_age_to_max_sec)) * self.sim_fill_age_bonus_max,
+            )
+            crossed_bonus = 0.45 if crossed else 0.0
+            top_book_bonus = 0.20 * proximity_ratio if near_top else 0.0
+            fill_prob = (
+                self.sim_fill_base_prob
+                + min(self.sim_fill_edge_boost, edge * 30.0)
+                + crossed_bonus
+                + top_book_bonus
+                + age_bonus
+                - (self.sim_fill_queue_penalty * queue_rank)
+            )
+            fill_prob = max(0.0, min(0.98, fill_prob))
+            if random.random() >= fill_prob:
+                continue
+
+            fill_ratio_low = max(0.01, min(self.sim_partial_fill_min_ratio, self.sim_partial_fill_max_ratio))
+            fill_ratio_high = max(fill_ratio_low, self.sim_partial_fill_max_ratio)
+            fill_ratio = random.uniform(fill_ratio_low, fill_ratio_high)
+            this_fill_qty = remaining_qty * Decimal(str(fill_ratio))
+            min_lot = Decimal("0.000001")
+            if this_fill_qty < min_lot:
+                this_fill_qty = min_lot
+            if this_fill_qty > remaining_qty:
+                this_fill_qty = remaining_qty
+
+            fee_rate_bps = int(state.get("fee_rate_bps", self.maker_fee_rate_bps_default))
+            fee_rate_dec = Decimal(str(max(0, fee_rate_bps))) / Decimal("10000")
+            entry_commission = (this_fill_qty * limit_price) * fee_rate_dec
+
+            state["filled_qty"] = filled_qty + this_fill_qty
+            state["entry_commission_usdc"] = Decimal(str(state.get("entry_commission_usdc", "0"))) + entry_commission
+            state["last_fill_ts"] = now_ts
+
+            status = "PARTIALLY_FILLED" if state["filled_qty"] < qty else "FILLED"
+            self._db_order_event(
+                event_type="ORDER_SIM_FILLED",
+                client_order_id=coid,
+                side=side.upper(),
+                price=float(limit_price),
+                qty=float(this_fill_qty),
+                status=status,
+                commission_usdc=float(entry_commission),
+                payload={
+                    "fill_prob": fill_prob,
+                    "queue_rank": queue_rank,
+                    "age_sec": age_sec,
+                    "edge": edge,
+                    "crossed": crossed,
+                    "near_top": near_top,
+                    "proximity_ratio": proximity_ratio,
+                    "filled_qty_total": float(state["filled_qty"]),
+                    "qty_total": float(qty),
+                    "fee_rate_bps": fee_rate_bps,
+                },
+            )
+
+            if state["filled_qty"] < qty:
+                continue
+
+            self.active_maker_orders.pop(side, None)
+            final_qty = state["filled_qty"]
+            if side == "buy":
+                self.inventory_delta_shares += final_qty
+            else:
+                self.inventory_delta_shares -= final_qty
+
+            self.sim_maker_positions.append(
+                {
+                    "client_order_id": coid,
+                    "side": side,
+                    "qty": final_qty,
+                    "entry_price": limit_price,
+                    "entry_commission_usdc": Decimal(str(state.get("entry_commission_usdc", "0"))),
+                    "fee_rate_bps": fee_rate_bps,
+                    "opened_ts": now_ts,
+                }
+            )
+
+        # Close simulated fills after hold horizon and compute win-rate.
+        remaining_positions: List[Dict[str, Any]] = []
+        for pos in self.sim_maker_positions:
+            opened_ts = float(pos.get("opened_ts", 0.0))
+            if now_ts - opened_ts < self.maker_sim_eval_sec:
+                remaining_positions.append(pos)
+                continue
+
+            side = str(pos.get("side"))
+            qty = Decimal(str(pos.get("qty", "0")))
+            entry = Decimal(str(pos.get("entry_price", "0")))
+            entry_commission = Decimal(str(pos.get("entry_commission_usdc", "0")))
+            fee_rate_bps = int(pos.get("fee_rate_bps", self.maker_fee_rate_bps_default))
+            fee_rate_dec = Decimal(str(max(0, fee_rate_bps))) / Decimal("10000")
+            if qty <= 0 or entry <= 0:
+                continue
+
+            if side == "buy":
+                gross_pnl = (mid_price - entry) * qty
+                self.inventory_delta_shares -= qty
+                direction = "long"
+            else:
+                gross_pnl = (entry - mid_price) * qty
+                self.inventory_delta_shares += qty
+                direction = "short"
+            exit_commission = (mid_price * qty) * fee_rate_dec
+            pnl = gross_pnl - entry_commission - exit_commission
+
+            self.sim_maker_closed_total += 1
+            if pnl > 0:
+                self.sim_maker_closed_wins += 1
+            win_rate = (
+                self.sim_maker_closed_wins / self.sim_maker_closed_total
+                if self.sim_maker_closed_total > 0
+                else 0.0
+            )
+
+            # Persist into existing performance tracker as synthetic maker trade.
+            try:
+                self.performance_tracker.record_trade(
+                    trade_id=f"sim_maker_{pos.get('client_order_id')}",
+                    direction=direction,
+                    entry_price=entry,
+                    exit_price=mid_price,
+                    size=entry * qty,
+                    entry_time=datetime.fromtimestamp(opened_ts, tz=timezone.utc),
+                    exit_time=datetime.now(timezone.utc),
+                    signal_score=0.0,
+                    signal_confidence=0.0,
+                    metadata={"sim_maker": True},
+                )
+            except Exception:
+                pass
+
+            self._db_order_event(
+                event_type="ORDER_SIM_CLOSED",
+                client_order_id=str(pos.get("client_order_id")),
+                side=side.upper(),
+                price=float(mid_price),
+                qty=float(qty),
+                status="CLOSED",
+                commission_usdc=float(entry_commission + exit_commission),
+                payload={
+                    "entry_price": float(entry),
+                    "exit_price": float(mid_price),
+                    "gross_pnl_usdc": float(gross_pnl),
+                    "pnl_usdc": float(pnl),
+                    "entry_commission_usdc": float(entry_commission),
+                    "exit_commission_usdc": float(exit_commission),
+                    "fee_rate_bps": fee_rate_bps,
+                    "win_rate": win_rate,
+                },
+            )
+            logger.info(
+                f"[SIM-MAKER] Closed {side.upper()} qty={float(qty):.6f} "
+                f"entry={float(entry):.4f} exit={float(mid_price):.4f} "
+                f"pnl={float(pnl):+.4f} win_rate={win_rate:.2%}"
+            )
+
+        self.sim_maker_positions = remaining_positions
+
     def _maybe_auto_tune(self, now_ts: float) -> None:
         if not self.auto_tune_enabled:
             return
@@ -1065,7 +1458,7 @@ class IntegratedBTCStrategy(Strategy):
         Place symmetric maker quotes if expected net economics is positive.
         """
         is_simulation = await self.check_simulation_mode()
-        if is_simulation:
+        if is_simulation and not self.maker_simulation_shadow:
             self._cancel_active_maker_orders()
             now_ts = time.time()
             if now_ts - self.last_simulation_guard_log_ts >= 30:
@@ -1088,6 +1481,8 @@ class IntegratedBTCStrategy(Strategy):
         self.last_quote_update_ts = now_ts
         self._maybe_auto_tune(now_ts)
         self._cleanup_stale_pending_cancels(now_ts)
+        if is_simulation and self.maker_simulation_shadow:
+            self._simulate_shadow_maker_fills_and_closes(bid_price, ask_price, now_ts)
 
         # Cancel stale quotes by TTL before computing new target quotes.
         for side in ("buy", "sell"):
@@ -1186,22 +1581,64 @@ class IntegratedBTCStrategy(Strategy):
                     continue
                 self._cancel_maker_order_side(side, reason="requote")
 
-            await self._submit_maker_quote(side, limit_price, econ)
+            await self._submit_maker_quote(side, limit_price, econ, dynamic_fee_rate)
 
-    async def _submit_maker_quote(self, side: str, limit_price: Decimal, econ) -> None:
+    async def _submit_maker_quote(self, side: str, limit_price: Decimal, econ, dynamic_fee_rate: Optional[Decimal] = None) -> None:
+        instrument = self.cache.instrument(self.instrument_id) if self.instrument_id else None
+        limit_price = self._align_price_to_tick(limit_price, side, instrument)
         if self.current_simulation_mode:
-            logger.warning("Simulation guard active: skip maker quote submission.")
+            sim_order_id = f"SIM-MAKER-{side.upper()}-{int(time.time() * 1000)}"
+            token_qty_sim = 0.0
+            if float(limit_price) > 0:
+                token_qty_sim = float(min(self.maker_quote_size_usdc, self.maker_max_order_usdc) / limit_price)
+            token_qty_sim = max(token_qty_sim, float(self.maker_min_shares))
+            now_ts = time.time()
+            ack_latency_ms = random.randint(
+                min(self.sim_ack_latency_ms_min, self.sim_ack_latency_ms_max),
+                max(self.sim_ack_latency_ms_min, self.sim_ack_latency_ms_max),
+            )
+            effective_fee_rate = dynamic_fee_rate
+            if effective_fee_rate is None or effective_fee_rate <= 0:
+                effective_fee_rate = self._infer_market_fee_rate_default()
+            fee_rate_bps = int((effective_fee_rate * Decimal("10000")).quantize(Decimal("1")))
+            self.active_maker_orders[side] = {
+                "order": None,
+                "simulated": True,
+                "client_order_id": sim_order_id,
+                "econ": econ,
+                "price": limit_price,
+                "side": side,
+                "token_id": self.current_token_id,
+                "quantity": Decimal(str(token_qty_sim)),
+                "created_ts": now_ts,
+                "status": "PENDING_ACK",
+                "ack_at": now_ts + (ack_latency_ms / 1000.0),
+                "queue_rank": random.uniform(0.0, 1.0),
+                "filled_qty": Decimal("0"),
+                "entry_commission_usdc": Decimal("0"),
+                "fee_rate_bps": fee_rate_bps,
+            }
             self._db_order_event(
-                event_type="ORDER_SKIP_SIMULATION",
-                side=side,
+                event_type="ORDER_SIM_SUBMIT",
+                client_order_id=sim_order_id,
+                side=side.upper(),
                 price=float(limit_price),
-                reason="simulation_guard",
+                qty=float(token_qty_sim),
+                status="PENDING_ACK",
                 expected_net_usdc=float(econ.expected_net_usdc),
+                payload={
+                    "ack_latency_ms": ack_latency_ms,
+                    "queue_rank": self.active_maker_orders[side]["queue_rank"],
+                    "fee_rate_bps": fee_rate_bps,
+                },
+            )
+            logger.info(
+                f"[SIM-MAKER] QUOTE {side.upper()} qty={token_qty_sim:.6f} px={float(limit_price):.4f} "
+                f"net={float(econ.expected_net_usdc):.6f}"
             )
             return
         if not self.instrument_id:
             return
-        instrument = self.cache.instrument(self.instrument_id)
         if not instrument:
             return
 
@@ -1235,7 +1672,8 @@ class IntegratedBTCStrategy(Strategy):
         token_qty = float(token_qty)
         qty = Quantity(token_qty, precision=precision)
         order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
-        price = Price.from_str(f"{float(limit_price):.4f}")
+        price_precision = int(getattr(instrument, "price_precision", 3))
+        price = Price.from_str(f"{float(limit_price):.{price_precision}f}")
         order_id = ClientOrderId(f"BTC-15M-MAKER-{side.upper()}-{int(time.time() * 1000)}")
 
         order_kwargs = dict(
@@ -1312,6 +1750,8 @@ class IntegratedBTCStrategy(Strategy):
         logger.info("=" * 80)
         logger.info("INTEGRATED BTC STRATEGY STARTED")
         logger.info("=" * 80)
+        self.last_valid_quote_ts = time.time()
+        self.consecutive_invalid_quote_ticks = 0
         
         # Find BTC instrument FIRST and wait for it
         if not self._wait_for_btc_instrument(timeout_sec=60, poll_interval_sec=2):
@@ -1372,6 +1812,9 @@ class IntegratedBTCStrategy(Strategy):
         self._reload_stop_event.clear()
         self._reload_thread = threading.Thread(target=self._start_reload_timer, daemon=True)
         self._reload_thread.start()
+        self._quote_watchdog_stop_event.clear()
+        self._quote_watchdog_thread = threading.Thread(target=self._start_quote_watchdog_timer, daemon=True)
+        self._quote_watchdog_thread.start()
         
         # Start Grafana if enabled
         if self.grafana_exporter:
@@ -1502,6 +1945,135 @@ class IntegratedBTCStrategy(Strategy):
                 logger.info("Instruments reloaded successfully")
             except Exception as e:
                 logger.error(f"Failed to reload instruments: {e}")
+
+    def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
+        """
+        Recover quote stream when valid bid/ask updates disappear for too long.
+        """
+        if now_ts - self.last_quote_watchdog_reload_ts < self.quote_reload_cooldown_sec:
+            return
+        self.last_quote_watchdog_reload_ts = now_ts
+
+        prev_instrument = str(self.instrument_id) if self.instrument_id else None
+        stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else None
+        logger.warning(
+            "Quote watchdog triggered: "
+            f"trigger={trigger} stale_for={stale_for if stale_for is not None else -1:.1f}s "
+            f"invalid_ticks={self.consecutive_invalid_quote_ticks}"
+        )
+        self._db_strategy_event(
+            "QUOTE_WATCHDOG_TRIGGERED",
+            {
+                "trigger": trigger,
+                "stale_for_sec": stale_for,
+                "invalid_ticks": self.consecutive_invalid_quote_ticks,
+                "instrument_before": prev_instrument,
+            },
+        )
+
+        # Prevent stale maker orders while market data is degraded.
+        self._cancel_active_maker_orders()
+
+        selected_ok = self._find_btc_instrument()
+        new_instrument = str(self.instrument_id) if self.instrument_id else None
+        if selected_ok and self.instrument_id is not None:
+            try:
+                self.subscribe_quote_ticks(self.instrument_id)
+            except Exception as e:
+                logger.debug(f"Quote watchdog subscribe failed: {e}")
+            logger.warning(f"Quote watchdog recovery complete: {prev_instrument} -> {new_instrument}")
+            self._db_strategy_event(
+                "QUOTE_WATCHDOG_RECOVERED",
+                {
+                    "instrument_before": prev_instrument,
+                    "instrument_after": new_instrument,
+                },
+            )
+            self.consecutive_invalid_quote_ticks = 0
+            self.last_valid_quote_ts = now_ts
+            return
+
+        logger.error("Quote watchdog recovery failed: no BTC 15-min instrument selected")
+        self._db_strategy_event(
+            "QUOTE_WATCHDOG_FAILED",
+            {
+                "instrument_before": prev_instrument,
+                "instrument_after": new_instrument,
+            },
+        )
+
+    def _maybe_run_quote_watchdog(self, trigger: str) -> None:
+        now_ts = time.time()
+        if now_ts - self.last_quote_watchdog_check_ts < self.quote_healthcheck_interval_sec:
+            return
+        self.last_quote_watchdog_check_ts = now_ts
+
+        stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else 0.0
+        stale_hit = self.last_valid_quote_ts > 0 and stale_for >= self.quote_stale_sec
+        invalid_hit = self.consecutive_invalid_quote_ticks >= self.quote_invalid_tick_reload_threshold
+        if not stale_hit and not invalid_hit:
+            return
+
+        reason = trigger
+        if stale_hit:
+            reason = f"{reason}|stale_quotes"
+        if invalid_hit:
+            reason = f"{reason}|invalid_ticks"
+        self._trigger_quote_watchdog_reload(reason, now_ts)
+
+    def _start_quote_watchdog_timer(self) -> None:
+        """
+        Background heartbeat for quote health.
+        Needed because DataClient can drop incomplete ticks before strategy receives them.
+        """
+        while not self._quote_watchdog_stop_event.wait(self.quote_healthcheck_interval_sec):
+            if self._stopping:
+                return
+            now_ts = time.time()
+            stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else None
+            if stale_for is None or stale_for < self.quote_stale_sec:
+                continue
+            self._trigger_quote_watchdog_reload("timer_stale_quotes", now_ts)
+
+    def _align_price_to_tick(self, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
+        """
+        Align quote price to current instrument tick size and precision.
+        """
+        aligned = price
+        tick = Decimal("0.001")
+        try:
+            if instrument is not None:
+                raw_tick = getattr(instrument, "price_increment", None)
+                if raw_tick is not None:
+                    if hasattr(raw_tick, "as_decimal"):
+                        tick = Decimal(str(raw_tick.as_decimal()))
+                    else:
+                        tick = Decimal(str(raw_tick))
+                elif hasattr(instrument, "info") and instrument.info:
+                    min_tick = instrument.info.get("minimum_tick_size")
+                    if min_tick:
+                        tick = Decimal(str(min_tick))
+        except Exception:
+            tick = Decimal("0.001")
+
+        if tick <= 0:
+            tick = Decimal("0.001")
+        units = aligned / tick
+        if side == "buy":
+            aligned = units.to_integral_value(rounding=ROUND_FLOOR) * tick
+        else:
+            aligned = units.to_integral_value(rounding=ROUND_CEILING) * tick
+
+        aligned = max(Decimal("0.01"), min(Decimal("0.99"), aligned))
+        try:
+            if instrument is not None:
+                precision = int(getattr(instrument, "price_precision", 3))
+                precision = max(0, precision)
+                quantum = Decimal("1").scaleb(-precision)
+                aligned = aligned.quantize(quantum)
+        except Exception:
+            pass
+        return aligned
 
     def _start_maker_worker(self, bid_decimal: Decimal, ask_decimal: Decimal) -> None:
         with self._maker_worker_lock:
@@ -1664,12 +2236,16 @@ class IntegratedBTCStrategy(Strategy):
         try:
             # Check if we have valid prices
             if tick.bid_price is None or tick.ask_price is None:
+                self.consecutive_invalid_quote_ticks += 1
                 logger.debug(f"Skipping incomplete quote: bid={tick.bid_price}, ask={tick.ask_price}")
+                self._maybe_run_quote_watchdog(trigger="incomplete_quote")
                 return
             
             # Get decimal values properly
             bid_decimal = tick.bid_price.as_decimal()
             ask_decimal = tick.ask_price.as_decimal()
+            self.last_valid_quote_ts = time.time()
+            self.consecutive_invalid_quote_ticks = 0
             self.latest_market_bid = bid_decimal
             self.latest_market_ask = ask_decimal
             
@@ -2201,8 +2777,11 @@ class IntegratedBTCStrategy(Strategy):
         """Called when strategy stops."""
         self._stopping = True
         self._reload_stop_event.set()
+        self._quote_watchdog_stop_event.set()
         if self._reload_thread and self._reload_thread.is_alive():
             self._reload_thread.join(timeout=2)
+        if self._quote_watchdog_thread and self._quote_watchdog_thread.is_alive():
+            self._quote_watchdog_thread.join(timeout=2)
         logger.info("Integrated BTC strategy stopped")
         logger.info(f"Total paper trades recorded: {len(self.paper_trades)}")
         self._cancel_active_maker_orders()
@@ -2255,136 +2834,229 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
     print(f"  Max Trade Size: $1.00")
     print(f"  Instrument Reload: Every 12 minutes")
     print(f"  Price History: Pre-loaded on startup")
+    auto_rollover_enabled = os.getenv("AUTO_NODE_ROLLOVER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+    auto_rollover_sec = max(300, int(os.getenv("AUTO_NODE_ROLLOVER_SEC", "1800")))
+    auto_rollover_cooldown_sec = max(1, int(os.getenv("AUTO_NODE_ROLLOVER_COOLDOWN_SEC", "3")))
+    auto_rollover_max_failures = max(1, int(os.getenv("AUTO_NODE_ROLLOVER_MAX_FAILURES", "5")))
+    auto_restart_on_unexpected_exit = os.getenv("AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT", "0").strip().lower() in ("1", "true", "yes", "on")
+    print(
+        f"  Auto Node Rollover: {'Enabled' if auto_rollover_enabled else 'Disabled'} "
+        f"({auto_rollover_sec}s)"
+    )
+    print(f"  Restart On Unexpected Exit: {'Enabled' if auto_restart_on_unexpected_exit else 'Disabled'}")
     print()
 
     auth = resolve_polymarket_auth()
     if not auth:
         raise RuntimeError("Cannot resolve Polymarket auth (provide PK or full API credentials).")
-    
-    # Safe alternative to monkey patching:
-    # Discover exact BTC 15-min slugs first, then load only those markets.
-    btc_slugs = resolve_btc_15m_market_slugs()
-    if not btc_slugs:
-        raise RuntimeError("No BTC 15-min market slugs resolved. Refusing to start.")
-    
-    primary_slug, instrument_ids = resolve_best_btc_15m_market(btc_slugs)
-    if not primary_slug:
-        raise RuntimeError("No primary BTC 15-min slug selected. Refusing to start.")
-    if not instrument_ids:
-        raise RuntimeError(f"No instrument IDs resolved for slug {primary_slug}. Refusing to start.")
 
-    now_utc = datetime.now(timezone.utc)
-    window_back_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_BACK_MINUTES", "5"))
-    window_forward_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_FORWARD_MINUTES", "120"))
-    end_date_min = (now_utc - timedelta(minutes=window_back_minutes)).isoformat()
-    end_date_max = (now_utc + timedelta(minutes=window_forward_minutes)).isoformat()
+    def _build_node_for_cycle(cycle_index: int) -> tuple[TradingNode, str]:
+        # Discover exact BTC 15-min slugs, then load a rolling window of nearby markets.
+        btc_slugs = resolve_btc_15m_market_slugs()
+        if not btc_slugs:
+            raise RuntimeError("No BTC 15-min market slugs resolved. Refusing to start.")
 
-    logger.info("=" * 80)
-    logger.info("Using SAFE slug-based market discovery")
-    logger.info(f"  Candidate BTC 15-min slugs: {btc_slugs}")
-    logger.info(f"  Primary slug: {primary_slug}")
-    logger.info(f"  Instrument IDs: {[inst.value for inst in instrument_ids]}")
-    logger.info(
-        f"  End-date window: {end_date_min} -> {end_date_max} "
-        f"(back={window_back_minutes}m, forward={window_forward_minutes}m)"
-    )
-    logger.info("=" * 80)
+        primary_slug, primary_instrument_ids = resolve_best_btc_15m_market(btc_slugs)
+        if not primary_slug:
+            raise RuntimeError("No primary BTC 15-min slug selected. Refusing to start.")
+        if not primary_instrument_ids:
+            raise RuntimeError(f"No instrument IDs resolved for slug {primary_slug}. Refusing to start.")
 
-    instrument_cfg = InstrumentProviderConfig(
-        load_all=False,
-        load_ids=frozenset(instrument_ids),
-        filters={
-            "active": True,
-            "closed": False,
-            "archived": False,
-            "end_date_min": end_date_min,
-            "end_date_max": end_date_max,
-            "limit": 25,
-        },
-        use_gamma_markets=True,
-    )
-    
-    # Polymarket data client config
-    poly_data_cfg = PolymarketDataClientConfig(
-        private_key=auth["private_key"],
-        signature_type=int(auth.get("signature_type", "0")),
-        funder=auth.get("funder") or None,
-        api_key=auth["api_key"],
-        api_secret=auth["api_secret"],
-        passphrase=auth["passphrase"],
-        instrument_provider=instrument_cfg,
-    )
-    
-    # Polymarket execution client config
-    poly_exec_cfg = PolymarketExecClientConfig(
-        private_key=auth["private_key"],
-        signature_type=int(auth.get("signature_type", "0")),
-        funder=auth.get("funder") or None,
-        api_key=auth["api_key"],
-        api_secret=auth["api_secret"],
-        passphrase=auth["passphrase"],
-        instrument_provider=instrument_cfg,
-    )
-    
-    # Trading node configuration
-    config = TradingNodeConfig(
-        environment="live",
-        trader_id="BTC-15MIN-INTEGRATED-001",
-        logging=LoggingConfig(
-            log_level="INFO",
-            log_directory="./logs/nautilus",
-        ),
-        data_engine=LiveDataEngineConfig(qsize=6000),
-        exec_engine=LiveExecEngineConfig(qsize=6000),
-        risk_engine=LiveRiskEngineConfig(
-            bypass=simulation,
-        ),
-        data_clients={POLYMARKET: poly_data_cfg},
-        exec_clients={POLYMARKET: poly_exec_cfg},
-    )
-    
-    # Create integrated strategy
-    strategy = IntegratedBTCStrategy(
-        redis_client=redis_client,
-        enable_grafana=enable_grafana,
-        test_mode=test_mode,
-        selected_slug=primary_slug,
-    )
-    
-    # Build Nautilus node
-    print("\nBuilding Nautilus node...")
-    print("=" * 80)
-    
-    node = TradingNode(config=config)
-    
-    # Add Polymarket factories
-    node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
-    node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
-    
-    # Add strategy
-    node.trader.add_strategy(strategy)
-    
-    # Build and start
-    node.build()
-    logger.info("Nautilus node built successfully")
-    
-    print()
-    print("=" * 80)
-    print("BOT STARTING")
-    print("=" * 80)
-    
-    try:
-        node.run()
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    finally:
-        node.dispose()
-        logger.info("Bot stopped")
+        load_slug_count = max(1, int(os.getenv("BTC_MARKET_LOAD_SLUG_COUNT", "3")))
+        ordered_slugs: List[str] = [primary_slug] + [s for s in btc_slugs if s != primary_slug]
+        slugs_to_load = ordered_slugs[:load_slug_count]
+        seen_ids: Set[str] = set()
+        instrument_ids: List[InstrumentId] = []
+        for slug in slugs_to_load:
+            ids = resolve_primary_btc_15m_instrument_ids(slug)
+            if not ids:
+                continue
+            for inst_id in ids:
+                if inst_id.value in seen_ids:
+                    continue
+                seen_ids.add(inst_id.value)
+                instrument_ids.append(inst_id)
+
+        if not instrument_ids:
+            instrument_ids = primary_instrument_ids
+
+        now_utc = datetime.now(timezone.utc)
+        window_back_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_BACK_MINUTES", "5"))
+        window_forward_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_FORWARD_MINUTES", "120"))
+        end_date_min = (now_utc - timedelta(minutes=window_back_minutes)).isoformat()
+        end_date_max = (now_utc + timedelta(minutes=window_forward_minutes)).isoformat()
+
+        logger.info("=" * 80)
+        logger.info(f"Using SAFE slug-based market discovery (cycle={cycle_index})")
+        logger.info(f"  Candidate BTC 15-min slugs: {btc_slugs}")
+        logger.info(f"  Primary slug: {primary_slug}")
+        logger.info(f"  Slugs loaded into provider: {slugs_to_load}")
+        logger.info(f"  Instrument IDs: {[inst.value for inst in instrument_ids]}")
+        logger.info(
+            f"  End-date window: {end_date_min} -> {end_date_max} "
+            f"(back={window_back_minutes}m, forward={window_forward_minutes}m)"
+        )
+        logger.info("=" * 80)
+
+        instrument_cfg = InstrumentProviderConfig(
+            load_all=False,
+            load_ids=frozenset(instrument_ids),
+            filters={
+                "active": True,
+                "closed": False,
+                "archived": False,
+                "end_date_min": end_date_min,
+                "end_date_max": end_date_max,
+                "limit": 25,
+            },
+            use_gamma_markets=True,
+        )
+
+        poly_data_cfg = PolymarketDataClientConfig(
+            private_key=auth["private_key"],
+            signature_type=int(auth.get("signature_type", "0")),
+            funder=auth.get("funder") or None,
+            api_key=auth["api_key"],
+            api_secret=auth["api_secret"],
+            passphrase=auth["passphrase"],
+            instrument_provider=instrument_cfg,
+        )
+
+        poly_exec_cfg = PolymarketExecClientConfig(
+            private_key=auth["private_key"],
+            signature_type=int(auth.get("signature_type", "0")),
+            funder=auth.get("funder") or None,
+            api_key=auth["api_key"],
+            api_secret=auth["api_secret"],
+            passphrase=auth["passphrase"],
+            instrument_provider=instrument_cfg,
+        )
+
+        config = TradingNodeConfig(
+            environment="live",
+            trader_id="BTC-15MIN-INTEGRATED-001",
+            logging=LoggingConfig(
+                log_level="INFO",
+                log_directory="./logs/nautilus",
+            ),
+            data_engine=LiveDataEngineConfig(qsize=6000),
+            exec_engine=LiveExecEngineConfig(qsize=6000),
+            risk_engine=LiveRiskEngineConfig(
+                bypass=simulation,
+            ),
+            data_clients={POLYMARKET: poly_data_cfg},
+            exec_clients={POLYMARKET: poly_exec_cfg},
+        )
+
+        strategy = IntegratedBTCStrategy(
+            redis_client=redis_client,
+            enable_grafana=enable_grafana,
+            test_mode=test_mode,
+            selected_slug=primary_slug,
+        )
+
+        print("\nBuilding Nautilus node...")
+        print("=" * 80)
+        node = TradingNode(config=config)
+        node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
+        node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
+        node.trader.add_strategy(strategy)
+        node.build()
+        logger.info("Nautilus node built successfully")
+        return node, primary_slug
+
+    cycle_idx = 0
+    consecutive_failures = 0
+    user_stopped = False
+
+    while True:
+        cycle_idx += 1
+        cycle_started_at = time.time()
+        node: Optional[TradingNode] = None
+        rollover_requested = threading.Event()
+        rollover_stop = threading.Event()
+        rollover_thread: Optional[threading.Thread] = None
+
+        try:
+            node, cycle_slug = _build_node_for_cycle(cycle_idx)
+            logger.info(f"Cycle {cycle_idx} ready (slug={cycle_slug})")
+
+            if auto_rollover_enabled:
+                def _rollover_worker() -> None:
+                    if rollover_stop.wait(auto_rollover_sec):
+                        return
+                    rollover_requested.set()
+                    logger.warning(
+                        f"Auto node rollover timer reached ({auto_rollover_sec}s). "
+                        "Stopping current node for market refresh."
+                    )
+                    try:
+                        if node is not None:
+                            node.stop()
+                    except Exception as e:
+                        logger.error(f"Failed to stop node during auto rollover: {e}")
+
+                rollover_thread = threading.Thread(target=_rollover_worker, daemon=True)
+                rollover_thread.start()
+
+            print()
+            print("=" * 80)
+            print(f"BOT STARTING (cycle {cycle_idx})")
+            print("=" * 80)
+            node.run()
+            consecutive_failures = 0
+        except KeyboardInterrupt:
+            user_stopped = True
+            print("\nShutting down...")
+        except Exception as e:
+            consecutive_failures += 1
+            logger.exception(f"Node cycle {cycle_idx} failed: {e}")
+        finally:
+            rollover_stop.set()
+            if rollover_thread and rollover_thread.is_alive():
+                rollover_thread.join(timeout=1)
+            if node is not None:
+                try:
+                    node.dispose()
+                except Exception as e:
+                    logger.warning(f"Node dispose raised: {e}")
+            logger.info(f"Bot cycle {cycle_idx} stopped")
+
+        if user_stopped:
+            break
+        if not auto_rollover_enabled:
+            break
+        if consecutive_failures >= auto_rollover_max_failures:
+            logger.error(
+                f"Auto rollover aborted after {consecutive_failures} consecutive failures "
+                f"(max={auto_rollover_max_failures})."
+            )
+            break
+
+        if rollover_requested.is_set():
+            logger.info("Starting next cycle after scheduled auto rollover...")
+        else:
+            run_sec = int(time.time() - cycle_started_at)
+            if auto_restart_on_unexpected_exit:
+                logger.warning(
+                    f"Node cycle exited without rollover request (runtime={run_sec}s). "
+                    "Attempting auto rebuild."
+                )
+            else:
+                logger.warning(
+                    f"Node cycle exited without rollover request (runtime={run_sec}s). "
+                    "Stopping loop to avoid restart churn. "
+                    "Set AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT=1 to force auto rebuild."
+                )
+                break
+        time.sleep(auto_rollover_cooldown_sec)
 
 
 def main():
     """Main entry point."""
     import argparse
+
+    auto_apply_local_patches()
     
     parser = argparse.ArgumentParser(description="Integrated BTC 15-Min Trading Bot")
     parser.add_argument(

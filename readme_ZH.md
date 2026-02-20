@@ -201,15 +201,39 @@ MAKER_VOL_RETURN_CLIP=0.20
 MAKER_VOL_ROLLING_WINDOW=30
 MAKER_VOL_EWMA_ALPHA=0.35
 MAKER_VOL_REAL_HISTORY_MAX=300
+QUOTE_HEALTHCHECK_INTERVAL_SEC=10
+QUOTE_STALE_SEC=30
+QUOTE_INVALID_TICK_RELOAD_THRESHOLD=80
+QUOTE_RELOAD_COOLDOWN_SEC=60
 MAKER_MAX_CONSECUTIVE_DENIED=5
 MAKER_ORDER_TTL_SEC=20
 MAKER_REQUOTE_THRESHOLD=0.002
 MAKER_CANCEL_COOLDOWN_SEC=2
 MAKER_CANCEL_ACK_TIMEOUT_SEC=8
 MAKER_CANCEL_MAX_RETRIES=3
+MAKER_SIMULATION_SHADOW=1
+MAKER_SIM_EVAL_SEC=60
+SIM_ACK_LATENCY_MS_MIN=120
+SIM_ACK_LATENCY_MS_MAX=800
+SIM_CANCEL_LATENCY_MS_MIN=80
+SIM_CANCEL_LATENCY_MS_MAX=500
+SIM_FILL_BASE_PROB=0.08
+SIM_FILL_EDGE_BOOST=0.30
+SIM_FILL_QUEUE_PENALTY=0.45
+SIM_FILL_AGE_BONUS_MAX=0.25
+SIM_FILL_AGE_TO_MAX_SEC=25
+SIM_PARTIAL_FILL_MIN_RATIO=0.2
+SIM_PARTIAL_FILL_MAX_RATIO=1.0
 MAKER_BALANCE_PAUSE_SEC=60
 MAKER_AUTO_TUNE=1
 MAKER_AUTO_TUNE_INTERVAL_SEC=300
+BTC_MARKET_LOAD_SLUG_COUNT=3
+AUTO_NODE_ROLLOVER_ENABLED=1
+AUTO_NODE_ROLLOVER_SEC=1800
+AUTO_NODE_ROLLOVER_COOLDOWN_SEC=3
+AUTO_NODE_ROLLOVER_MAX_FAILURES=5
+AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT=0
+AUTO_APPLY_NAUTILUS_PATCH=1
 EXTERNAL_SPOT_TIMEOUT_SEC=2.5
 POLYMARKET_CLOB_BASE_URL=https://clob.polymarket.com
 FEE_RATE_CACHE_TTL_SEC=300
@@ -221,6 +245,9 @@ REBATE_REPORT_DIR=./logs/rebate
 ## ▶️ 執行方式
 
 ```bash
+# (可選) 手動重套 Nautilus 降噪 patch（重建 venv 後建議先跑一次）
+python scripts/patch_nautilus_polymarket_drop_log.py
+
 # 只做啟動前安全檢查（不啟動交易）
 python run_bot.py --preflight-only
 
@@ -233,6 +260,22 @@ python run_bot.py
 # 實盤模式（真金白銀）
 python run_bot.py --live
 ```
+
+### 🟢 解鎖實盤真金模式 (Live Mode)
+為保護您的資金，本系統設計了**雙重安全鎖**來防止意外下真實訂單。若您在資料庫 (`trade_journal.db`) 看到 `ORDER_SIM_...`，代表機器人還在「影子模擬模式」中。
+要讓機器人真正消耗資金送出訂單到 Polymarket，您必須**同時解除以下兩道鎖**：
+
+1. **移除 `--test-mode` 標籤**：
+   啟動機器人時，絕對不能加上 `--test-mode`，否則會被強制切換為模擬。請改用 `python run_bot.py --live` 或一般啟動。
+2. **關閉 Redis 的模擬開關**：
+   您的 Redis 資料庫中也有一個保護開關。請在終端機執行以下指令將其關閉 (`0`)：
+   ```bash
+   redis-cli -n 2 set btc_trading:simulation_mode 0
+   ```
+   *註：若要重新鎖上模擬鎖，請執行 `redis-cli -n 2 set btc_trading:simulation_mode 1`*
+   *註：以`python run_bot.py --live` 啟動機器人時，程式就會自動把 Redis 裡面的 simulation_mode 設為 0 (關閉)*
+
+> ⚠️ **警告**：解除這兩道鎖後，系統將直接使用 `.env` 中 `POLYMARKET_PK` 綁定的錢包資產進行真實區塊鏈交易。請務必再次確認您的 `MAX_POSITION_SIZE` 與 `MAKER_QUOTE_SIZE_USDC` 額度！
 
 ### 檢查/重做 Allowance（Polygon）
 若遇到 `not enough balance / allowance`：
@@ -338,6 +381,14 @@ python redis_control.py status
 - Maker 單筆名義金額上限（`MAKER_MAX_ORDER_USDC`），若 `MAKER_MIN_SHARES` 導致最小可掛單名義超出上限，該次會跳過。
 - 撤單防抖與逾時清理（`MAKER_CANCEL_COOLDOWN_SEC`、`MAKER_CANCEL_ACK_TIMEOUT_SEC`）可降低 WebSocket 延遲造成的 ghost cancel loop。
 - 撤單逾時後會先做 cache 對帳，若仍 open（或無法判斷）會重試撤單；超過 `MAKER_CANCEL_MAX_RETRIES` 會觸發 maker kill switch。
+- Quote 健康 watchdog：連續收到不完整行情（缺 bid/ask）或長時間沒有有效雙邊 quote，會自動觸發重選 instrument 與重訂閱（`QUOTE_HEALTHCHECK_INTERVAL_SEC`、`QUOTE_STALE_SEC`、`QUOTE_INVALID_TICK_RELOAD_THRESHOLD`、`QUOTE_RELOAD_COOLDOWN_SEC`）。
+- 啟動時可同時載入多個 15m 市場 instrument，提供 watchdog 直接切市場能力（`BTC_MARKET_LOAD_SLUG_COUNT`）。
+- 長時間運行模式：啟用 node 自動輪替（`AUTO_NODE_ROLLOVER_*`），每個輪替週期會重建 node 並重新解析最新市場 IDs，適合 24hr 運行。
+- 若 node 非預期停止，預設不自動重啟（`AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT=0`），避免重啟迴圈；要強制重啟可改成 `1`。
+- 啟動時可自動重套本地 Nautilus 降噪 patch（`AUTO_APPLY_NAUTILUS_PATCH=1`），避免 venv 重建後遺失自訂節流。
+- 測試模式可啟用 shadow maker（`MAKER_SIMULATION_SHADOW=1`），不送真單但會模擬掛單/撤單/成交/平倉，並寫入 DB。
+- `MAKER_SIM_EVAL_SEC` 可設定模擬成交後的評估持有秒數，用於計算模擬勝率與 PnL。
+- 測試擬真可調：提交/撤單延遲、queue 懲罰、部分成交比例、年齡加權填單機率（`SIM_*` 參數）。
 
 5. **第四版分析與自動化**
 - 日報輸出 JSON + CSV（`rebate_report_YYYY-MM-DD.{json,csv}`）。
