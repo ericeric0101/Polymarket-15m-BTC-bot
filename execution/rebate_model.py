@@ -1,0 +1,95 @@
+"""
+Maker rebate and taker fee economics for fee-enabled Polymarket markets.
+"""
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Optional
+
+
+@dataclass
+class FeeCurveConfig:
+    """
+    Fee-curve parameters for a market type.
+    """
+    fee_rate: Decimal
+    exponent: Decimal
+    maker_rebate_share: Decimal
+
+
+@dataclass
+class QuoteEconomics:
+    """
+    Per-quote economics snapshot.
+    """
+    shares: Decimal
+    probability: Decimal
+    fee_equivalent_usdc: Decimal
+    expected_rebate_usdc: Decimal
+    expected_spread_capture_usdc: Decimal
+    expected_net_usdc: Decimal
+
+
+# 5-min and 15-min crypto markets.
+CRYPTO_FEE_CURVE = FeeCurveConfig(
+    fee_rate=Decimal("0.25"),
+    exponent=Decimal("2"),
+    maker_rebate_share=Decimal("0.20"),
+)
+
+
+def bps_to_fee_rate(bps: int) -> Decimal:
+    """
+    Convert basis points to decimal fee rate.
+    """
+    return Decimal(str(bps)) / Decimal("10000")
+
+
+def _clamp_probability(p: Decimal) -> Decimal:
+    return max(Decimal("0.01"), min(Decimal("0.99"), p))
+
+
+def estimate_fee_equivalent_usdc(
+    shares: Decimal,
+    probability: Decimal,
+    config: FeeCurveConfig = CRYPTO_FEE_CURVE,
+    fee_rate_override: Optional[Decimal] = None,
+) -> Decimal:
+    """
+    fee_equivalent = C × p × feeRate × (p × (1 - p))^exponent
+    """
+    p = _clamp_probability(probability)
+    shape = (p * (Decimal("1") - p)) ** config.exponent
+    fee_rate = fee_rate_override if fee_rate_override is not None else config.fee_rate
+    return shares * p * fee_rate * shape
+
+
+def estimate_quote_economics(
+    quote_size_usdc: Decimal,
+    probability: Decimal,
+    half_spread: Decimal,
+    adverse_selection_buffer: Decimal = Decimal("0"),
+    config: FeeCurveConfig = CRYPTO_FEE_CURVE,
+    fee_rate_override: Optional[Decimal] = None,
+) -> QuoteEconomics:
+    """
+    Estimate maker quote economics in USDC terms.
+    """
+    p = _clamp_probability(probability)
+    shares = quote_size_usdc / p if p > 0 else Decimal("0")
+    fee_equivalent = estimate_fee_equivalent_usdc(
+        shares=shares,
+        probability=p,
+        config=config,
+        fee_rate_override=fee_rate_override,
+    )
+    expected_rebate = fee_equivalent * config.maker_rebate_share
+    expected_spread_capture = shares * half_spread
+    expected_net = expected_spread_capture + expected_rebate - adverse_selection_buffer
+    return QuoteEconomics(
+        shares=shares,
+        probability=p,
+        fee_equivalent_usdc=fee_equivalent,
+        expected_rebate_usdc=expected_rebate,
+        expected_spread_capture_usdc=expected_spread_capture,
+        expected_net_usdc=expected_net,
+    )

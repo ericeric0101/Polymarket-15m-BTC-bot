@@ -1,0 +1,28 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local environment secrets
+.env
+.env.*
+!.env.example
+
+# Logs / runtime artifacts
+logs/
+*.log
+
+# Local databases and reports
+*.db
+*.sqlite
+paper_trades.json
+
+# OS / editor artifacts
+.DS_Store
+.vscode/
+.idea/
