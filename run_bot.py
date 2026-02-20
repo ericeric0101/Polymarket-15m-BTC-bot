@@ -708,6 +708,17 @@ class IntegratedBTCStrategy(Strategy):
         self._reload_thread: Optional[threading.Thread] = None
         self._quote_watchdog_stop_event = threading.Event()
         self._quote_watchdog_thread: Optional[threading.Thread] = None
+        self.auto_redeem_enabled = os.getenv("AUTO_REDEEM_ENABLED", "0").strip().lower() not in ("0", "false", "no")
+        self.auto_redeem_apply = os.getenv("AUTO_REDEEM_APPLY", "0").strip().lower() not in ("0", "false", "no")
+        self.auto_redeem_interval_sec = max(120, int(os.getenv("AUTO_REDEEM_INTERVAL_SEC", "900")))
+        self.auto_redeem_on_rollover = os.getenv("AUTO_REDEEM_ON_ROLLOVER", "1").strip().lower() not in ("0", "false", "no")
+        self.auto_redeem_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_TIMEOUT_SEC", "180")))
+        self.auto_redeem_slug_filter = os.getenv("AUTO_REDEEM_SLUG_FILTER", "btc-updown-15m").strip()
+        self._redeem_stop_event = threading.Event()
+        self._redeem_thread: Optional[threading.Thread] = None
+        self._redeem_job_lock = threading.Lock()
+        self._last_redeem_run_ts = 0.0
+        self.current_market_slug: Optional[str] = None
         self._maker_worker_lock = threading.Lock()
         self._decision_worker_lock = threading.Lock()
         self._maker_worker_running = False
@@ -740,6 +751,15 @@ class IntegratedBTCStrategy(Strategy):
         logger.info(f"  Maker cancel max retries: {self.maker_cancel_max_retries}")
         logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
         logger.info(f"  Maker fee default decimal: {float(self.maker_fee_rate_default_decimal):.6f}")
+        logger.info(f"  Auto redeem: {'ON' if self.auto_redeem_enabled else 'OFF'}")
+        if self.auto_redeem_enabled:
+            logger.info(
+                "  Auto redeem config: "
+                f"interval={self.auto_redeem_interval_sec}s "
+                f"apply={'ON' if self.auto_redeem_apply else 'OFF'} "
+                f"on_rollover={'ON' if self.auto_redeem_on_rollover else 'OFF'} "
+                f"slug_filter={self.auto_redeem_slug_filter or '(none)'}"
+            )
         logger.info(
             "  Quote watchdog: "
             f"stale={self.quote_stale_sec}s invalid_threshold={self.quote_invalid_tick_reload_threshold} "
@@ -1815,6 +1835,11 @@ class IntegratedBTCStrategy(Strategy):
         self._quote_watchdog_stop_event.clear()
         self._quote_watchdog_thread = threading.Thread(target=self._start_quote_watchdog_timer, daemon=True)
         self._quote_watchdog_thread.start()
+        if self.auto_redeem_enabled:
+            self._redeem_stop_event.clear()
+            self._redeem_thread = threading.Thread(target=self._start_auto_redeem_timer, daemon=True)
+            self._redeem_thread.start()
+            self._schedule_auto_redeem(reason="startup")
         
         # Start Grafana if enabled
         if self.grafana_exporter:
@@ -1939,12 +1964,87 @@ class IntegratedBTCStrategy(Strategy):
                 logger.info(f"Before reload: {len(instruments)} instruments in cache")
                 
                 # Re-find BTC instrument (this will select the active one)
+                previous_slug = self.current_market_slug
                 if not self._find_btc_instrument():
                     logger.warning("Reload completed but no BTC 15-min instrument found")
+                elif self.auto_redeem_enabled and self.auto_redeem_on_rollover and previous_slug and self.current_market_slug and previous_slug != self.current_market_slug:
+                    self._schedule_auto_redeem(reason=f"market_rollover:{previous_slug}->{self.current_market_slug}")
                 
                 logger.info("Instruments reloaded successfully")
             except Exception as e:
                 logger.error(f"Failed to reload instruments: {e}")
+
+    def _schedule_auto_redeem(self, reason: str) -> None:
+        """
+        Run redeem checker script in a detached worker so trading flow is never blocked.
+        """
+        if not self.auto_redeem_enabled:
+            return
+
+        def _runner() -> None:
+            if not self._redeem_job_lock.acquire(blocking=False):
+                logger.debug(f"Auto redeem skipped (already running): reason={reason}")
+                return
+            try:
+                now_ts = time.time()
+                self._last_redeem_run_ts = now_ts
+                script = Path(__file__).parent / "scripts" / "check_positions_and_redeem.py"
+                if not script.exists():
+                    logger.warning(f"Auto redeem script not found: {script}")
+                    return
+
+                cmd = [sys.executable, str(script)]
+                if self.auto_redeem_slug_filter:
+                    cmd.extend(["--slug", self.auto_redeem_slug_filter])
+                if self.auto_redeem_apply:
+                    cmd.append("--apply")
+
+                started = time.time()
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(Path(__file__).parent),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.auto_redeem_timeout_sec,
+                    check=False,
+                )
+                elapsed = time.time() - started
+                stdout_tail = "\n".join((proc.stdout or "").strip().splitlines()[-8:])
+                stderr_tail = "\n".join((proc.stderr or "").strip().splitlines()[-4:])
+                logger.info(
+                    f"Auto redeem run done: reason={reason} rc={proc.returncode} elapsed={elapsed:.1f}s "
+                    f"apply={'ON' if self.auto_redeem_apply else 'OFF'}"
+                )
+                if stdout_tail:
+                    logger.info(f"Auto redeem output (tail):\n{stdout_tail}")
+                if stderr_tail:
+                    logger.warning(f"Auto redeem stderr (tail):\n{stderr_tail}")
+                self._db_strategy_event(
+                    "AUTO_REDEEM_RUN",
+                    {
+                        "reason": reason,
+                        "return_code": proc.returncode,
+                        "elapsed_sec": elapsed,
+                        "apply": self.auto_redeem_apply,
+                    },
+                )
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Auto redeem timeout after {self.auto_redeem_timeout_sec}s (reason={reason})")
+            except Exception as e:
+                logger.warning(f"Auto redeem failed (reason={reason}): {e}")
+            finally:
+                self._redeem_job_lock.release()
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def _start_auto_redeem_timer(self) -> None:
+        """
+        Periodic auto redeem timer (default every 15 minutes).
+        """
+        while not self._redeem_stop_event.wait(self.auto_redeem_interval_sec):
+            if self._stopping:
+                return
+            self._schedule_auto_redeem(reason="interval")
 
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
@@ -2214,6 +2314,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.info(f"⚠ No current market, selecting next: {selected['slug']} (starts in {selected['time_diff_minutes']:.1f} min)")
         
         self.instrument_id = selected['instrument'].id
+        self.current_market_slug = str(selected.get("slug") or "")
         self.current_token_id = self._extract_token_id_from_instrument(str(self.instrument_id))
         self.subscribe_quote_ticks(self.instrument_id)
         return True
@@ -2778,10 +2879,13 @@ class IntegratedBTCStrategy(Strategy):
         self._stopping = True
         self._reload_stop_event.set()
         self._quote_watchdog_stop_event.set()
+        self._redeem_stop_event.set()
         if self._reload_thread and self._reload_thread.is_alive():
             self._reload_thread.join(timeout=2)
         if self._quote_watchdog_thread and self._quote_watchdog_thread.is_alive():
             self._quote_watchdog_thread.join(timeout=2)
+        if self._redeem_thread and self._redeem_thread.is_alive():
+            self._redeem_thread.join(timeout=2)
         logger.info("Integrated BTC strategy stopped")
         logger.info(f"Total paper trades recorded: {len(self.paper_trades)}")
         self._cancel_active_maker_orders()
