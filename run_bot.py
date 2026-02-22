@@ -16,6 +16,7 @@ import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 import random
 import httpx
@@ -555,6 +556,14 @@ def init_redis():
         return None
 
 
+class MarketPhase(Enum):
+    """Market lifecycle phases for BTC 15-min markets."""
+    WAITING = "WAITING"           # No active market; searching for next one
+    ACTIVE = "ACTIVE"             # Market is live, quoting is allowed
+    REDUCE_ONLY = "REDUCE_ONLY"   # Close to market end, only SELL allowed
+    SETTLING = "SETTLING"         # Market has ended, all orders cancelled
+
+
 class IntegratedBTCStrategy(Strategy):
     """
     Integrated BTC Strategy combining:
@@ -736,6 +745,19 @@ class IntegratedBTCStrategy(Strategy):
         self._redeem_job_lock = threading.Lock()
         self._last_redeem_run_ts = 0.0
         self.current_market_slug: Optional[str] = None
+        # --- Market Lifecycle State Machine ---
+        self.market_phase = MarketPhase.WAITING
+        self.market_settling_grace_sec = max(1, int(os.getenv("MARKET_SETTLING_GRACE_SEC", "15")))
+        self.market_next_poll_sec = max(5, int(os.getenv("MARKET_NEXT_POLL_SEC", "15")))
+        self._market_settling_since_ts: float = 0.0
+        self.next_market_slug: Optional[str] = None
+        self.next_market_start_ts: Optional[float] = None
+        self._lifecycle_stop_event = threading.Event()
+        self._lifecycle_thread: Optional[threading.Thread] = None
+        # --- Balance Pre-check ---
+        self._cached_usdc_balance: Optional[Decimal] = None
+        self._balance_last_check_ts: float = 0.0
+        self.balance_check_interval_sec = max(10, int(os.getenv("MAKER_BALANCE_CHECK_INTERVAL_SEC", "30")))
         self._maker_worker_lock = threading.Lock()
         self._decision_worker_lock = threading.Lock()
         self._maker_worker_running = False
@@ -1720,6 +1742,27 @@ class IntegratedBTCStrategy(Strategy):
         if time.time() < self.quote_pause_until_ts:
             return
 
+        # --- Market Lifecycle Gate ---
+        phase = self._update_market_phase()
+        if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
+            self._cancel_active_maker_orders()
+            return
+
+        # --- Balance Pre-check (non-simulation only) ---
+        if not is_simulation:
+            balance = self._refresh_balance_cache()
+            if balance is not None:
+                required = self.maker_quote_size_usdc * Decimal("1.1")  # 10% buffer
+                if balance < required:
+                    if time.time() - getattr(self, '_last_balance_warn_ts', 0) >= 60:
+                        logger.warning(
+                            f"Balance pre-check: insufficient USDC "
+                            f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
+                            f"Skipping maker quotes."
+                        )
+                        self._last_balance_warn_ts = time.time()
+                    return
+
         now_ts = time.time()
         if now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
             return
@@ -1816,9 +1859,13 @@ class IntegratedBTCStrategy(Strategy):
                 elif self.maker_quote_sides == "sell":
                     side_plan["buy"] = (quote_bid, bid_econ, False)
 
-            # --- REDUCE ONLY MODE (Time & Extreme Price Protection) ---
+            # --- REDUCE ONLY MODE (Time & Extreme Price & Lifecycle Protection) ---
             reduce_only_reason = None
-            if fair < self.maker_min_fair_price:
+            if phase == MarketPhase.REDUCE_ONLY:
+                end_ts = getattr(self, "current_market_end_timestamp", None)
+                time_left_min = ((end_ts - now_ts) / 60.0) if end_ts else 0
+                reduce_only_reason = f"lifecycle REDUCE_ONLY ({time_left_min:.1f}m left)"
+            elif fair < self.maker_min_fair_price:
                 reduce_only_reason = f"fair {float(fair):.4f} < min {float(self.maker_min_fair_price):.4f}"
             elif fair > self.maker_max_fair_price:
                 reduce_only_reason = f"fair {float(fair):.4f} > max {float(self.maker_max_fair_price):.4f}"
@@ -2137,13 +2184,19 @@ class IntegratedBTCStrategy(Strategy):
                 logger.debug(f"Could not get real price: {e}")
                 logger.debug("Using synthetic prices until real quotes arrive")
         
-        # Start instrument reload timer
+        # Start market lifecycle timer (replaces fixed 12-min reload)
+        self._lifecycle_stop_event.clear()
+        self._lifecycle_thread = threading.Thread(target=self._start_market_lifecycle_timer, daemon=True)
+        self._lifecycle_thread.start()
+        # Also start the legacy reload timer as a fallback
         self._reload_stop_event.clear()
         self._reload_thread = threading.Thread(target=self._start_reload_timer, daemon=True)
         self._reload_thread.start()
         self._quote_watchdog_stop_event.clear()
         self._quote_watchdog_thread = threading.Thread(target=self._start_quote_watchdog_timer, daemon=True)
         self._quote_watchdog_thread.start()
+        # Initialize phase based on current market
+        self._update_market_phase()
         if self.auto_redeem_enabled:
             self._redeem_stop_event.clear()
             self._redeem_thread = threading.Thread(target=self._start_auto_redeem_timer, daemon=True)
@@ -2475,13 +2528,322 @@ class IntegratedBTCStrategy(Strategy):
         logger.info(
             "STATUS "
             f"tradable={tradable} reason={reason_txt} "
+            f"phase={self.market_phase.value} "
             f"slug={self.current_market_slug or '-'} "
             f"instrument={self.instrument_id or '-'} "
             f"bid={bid_txt} ask={ask_txt} "
             f"stale_for={stale_for:.1f}s invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
+            f"{self._format_time_left()}"
         )
+
+    def _format_time_left(self) -> str:
+        """Format remaining time and next-market info for status line."""
+        parts: List[str] = []
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        if end_ts is not None:
+            remaining = end_ts - time.time()
+            if remaining > 0:
+                parts.append(f" time_left={remaining / 60:.1f}m")
+            else:
+                parts.append(f" time_left=ENDED({abs(remaining):.0f}s ago)")
+        if self.next_market_slug:
+            if self.next_market_start_ts:
+                until = self.next_market_start_ts - time.time()
+                parts.append(f" next={self.next_market_slug}(in {until / 60:.1f}m)")
+            else:
+                parts.append(f" next={self.next_market_slug}")
+        return "".join(parts)
+
+    # ------------------------------------------------------------------
+    # Market Lifecycle State Machine
+    # ------------------------------------------------------------------
+
+    def _update_market_phase(self) -> MarketPhase:
+        """
+        Evaluate current time vs market end timestamp and transition
+        between lifecycle phases.
+
+        Returns the current phase after evaluation.
+        """
+        now_ts = time.time()
+        prev_phase = self.market_phase
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+
+        if end_ts is None:
+            # No market end time known — we're waiting.
+            if self.market_phase not in (MarketPhase.WAITING, MarketPhase.SETTLING):
+                self._transition_market_phase(MarketPhase.WAITING, now_ts)
+            return self.market_phase
+
+        time_left_sec = end_ts - now_ts
+        time_left_min = time_left_sec / 60.0
+
+        if time_left_sec > self.maker_min_minutes_to_close * 60:
+            # Plenty of time — we're active.
+            if self.market_phase != MarketPhase.ACTIVE:
+                self._transition_market_phase(MarketPhase.ACTIVE, now_ts)
+
+        elif time_left_sec > 0:
+            # Close to end — reduce only.
+            if self.market_phase not in (MarketPhase.REDUCE_ONLY, MarketPhase.SETTLING):
+                self._transition_market_phase(MarketPhase.REDUCE_ONLY, now_ts)
+
+        else:
+            # Market has ended.
+            if self.market_phase == MarketPhase.SETTLING:
+                # Check if grace period is over.
+                if now_ts - self._market_settling_since_ts >= self.market_settling_grace_sec:
+                    self._transition_market_phase(MarketPhase.WAITING, now_ts)
+            elif self.market_phase != MarketPhase.WAITING:
+                self._transition_market_phase(MarketPhase.SETTLING, now_ts)
+                self._market_settling_since_ts = now_ts
+
+        return self.market_phase
+
+    def _transition_market_phase(self, new_phase: MarketPhase, now_ts: float) -> None:
+        """Log and record a market phase transition."""
+        old_phase = self.market_phase
+        self.market_phase = new_phase
+
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        time_left = (end_ts - now_ts) if end_ts else None
+
+        logger.warning(
+            f"MARKET PHASE: {old_phase.value} → {new_phase.value} "
+            f"slug={self.current_market_slug or '-'} "
+            f"time_left={time_left / 60:.1f}m" if time_left is not None else
+            f"MARKET PHASE: {old_phase.value} → {new_phase.value} "
+            f"slug={self.current_market_slug or '-'} "
+            f"time_left=N/A"
+        )
+        self._db_strategy_event(
+            "MARKET_PHASE_CHANGE",
+            {
+                "from": old_phase.value,
+                "to": new_phase.value,
+                "slug": self.current_market_slug,
+                "time_left_sec": time_left,
+            },
+        )
+
+        # Actions on transition
+        if new_phase == MarketPhase.SETTLING:
+            self._cancel_active_maker_orders()
+            logger.info("Settling: all maker orders cancelled. Waiting for grace period.")
+        elif new_phase == MarketPhase.WAITING:
+            self._cancel_active_maker_orders()
+            # Clear stale market end timestamp so we don't re-enter SETTLING.
+            self.current_market_end_timestamp = None
+            logger.info("Waiting: proactively searching for next market.")
+        elif new_phase == MarketPhase.REDUCE_ONLY:
+            # Cancel buy-side orders immediately.
+            for order_key, state in list(self.active_maker_orders.items()):
+                if str(state.get("side", "")) == "buy":
+                    self._cancel_maker_order_side(order_key, reason="reduce_only")
+
+    # ------------------------------------------------------------------
+    # Proactive Next-Market Detection
+    # ------------------------------------------------------------------
+
+    def _search_next_market(self) -> bool:
+        """
+        Proactively search for the next BTC 15-min market.
+        Updates self.next_market_slug and self.next_market_start_ts.
+        If a viable market is found, switches to it.
+
+        Returns True if a new market was found and activated.
+        """
+        try:
+            btc_slugs = resolve_btc_15m_market_slugs()
+            if not btc_slugs:
+                logger.debug("Next market search: no slugs found")
+                self.next_market_slug = None
+                self.next_market_start_ts = None
+                return False
+
+            now_ts = time.time()
+            best_slug = None
+            best_start_ts = None
+
+            for slug in btc_slugs:
+                # Extract timestamp from slug (e.g. btc-updown-15m-1771800300)
+                try:
+                    ts_str = slug.rsplit("-", 1)[-1]
+                    start_ts = int(ts_str)
+                except (ValueError, IndexError):
+                    continue
+
+                end_ts = start_ts + 900  # 15 minutes
+
+                # We want markets that haven't ended yet.
+                if end_ts <= now_ts:
+                    continue
+
+                if best_start_ts is None or start_ts < best_start_ts:
+                    best_slug = slug
+                    best_start_ts = start_ts
+
+            if best_slug:
+                self.next_market_slug = best_slug
+                self.next_market_start_ts = best_start_ts
+                time_until = best_start_ts - now_ts if best_start_ts else 0
+                logger.info(
+                    f"Next market found: {best_slug} "
+                    f"(starts in {time_until / 60:.1f}m)"
+                )
+
+                # Try to switch to this market
+                previous_slug = self.current_market_slug
+                if self._find_btc_instrument():
+                    if self.current_market_slug != previous_slug:
+                        logger.info(
+                            f"Switched to new market: {previous_slug} → {self.current_market_slug}"
+                        )
+                        if self.auto_redeem_enabled and self.auto_redeem_on_rollover and previous_slug:
+                            self._schedule_auto_redeem(
+                                reason=f"lifecycle_rollover:{previous_slug}->{self.current_market_slug}"
+                            )
+                    return True
+            else:
+                self.next_market_slug = None
+                self.next_market_start_ts = None
+                logger.debug("Next market search: no future markets found")
+
+        except Exception as e:
+            logger.warning(f"Next market search failed: {e}")
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Smart Market Lifecycle Timer (replaces fixed 12-min reload)
+    # ------------------------------------------------------------------
+
+    def _start_market_lifecycle_timer(self) -> None:
+        """
+        Market-aware timer that replaces the fixed 12-minute reload.
+        Sleeps intelligently based on market end time and transitions
+        the lifecycle state machine.
+        """
+        while not self._lifecycle_stop_event.is_set():
+            if self._stopping:
+                return
+
+            now_ts = time.time()
+            phase = self._update_market_phase()
+            end_ts = getattr(self, "current_market_end_timestamp", None)
+
+            if phase == MarketPhase.ACTIVE:
+                # Sleep until near market end, checking periodically.
+                if end_ts is not None:
+                    time_until_reduce = end_ts - now_ts - (self.maker_min_minutes_to_close * 60)
+                    if time_until_reduce > 30:
+                        # Sleep in chunks to allow stopping
+                        sleep_sec = min(time_until_reduce - 10, 60)
+                        self._lifecycle_stop_event.wait(max(5, sleep_sec))
+                    else:
+                        self._lifecycle_stop_event.wait(5)
+                else:
+                    # No end timestamp — fallback polling.
+                    self._lifecycle_stop_event.wait(60)
+                    # Try to reload instruments.
+                    try:
+                        if not self._find_btc_instrument():
+                            logger.warning("Lifecycle timer: no BTC instrument found")
+                    except Exception as e:
+                        logger.error(f"Lifecycle timer reload failed: {e}")
+
+            elif phase == MarketPhase.REDUCE_ONLY:
+                # Poll frequently until market ends.
+                self._lifecycle_stop_event.wait(5)
+
+            elif phase == MarketPhase.SETTLING:
+                # Wait for grace period to expire.
+                remaining_grace = self.market_settling_grace_sec - (now_ts - self._market_settling_since_ts)
+                if remaining_grace > 0:
+                    self._lifecycle_stop_event.wait(min(remaining_grace, 5))
+                # Phase will transition on next _update_market_phase call.
+
+            elif phase == MarketPhase.WAITING:
+                # Actively search for next market.
+                found = self._search_next_market()
+                if found:
+                    logger.info("Lifecycle timer: new market found, transitioning to ACTIVE")
+                    # _find_btc_instrument already called inside _search_next_market
+                    self._update_market_phase()
+                else:
+                    logger.info(
+                        f"Lifecycle timer: no market yet, retry in {self.market_next_poll_sec}s"
+                    )
+                    self._lifecycle_stop_event.wait(self.market_next_poll_sec)
+
+    # ------------------------------------------------------------------
+    # Balance Pre-check
+    # ------------------------------------------------------------------
+
+    def _refresh_balance_cache(self) -> Optional[Decimal]:
+        """
+        Refresh cached USDC balance from CLOB API.
+        Only queries if interval has elapsed.
+        Returns the cached balance.
+        """
+        now_ts = time.time()
+        if now_ts - self._balance_last_check_ts < self.balance_check_interval_sec:
+            return self._cached_usdc_balance
+
+        self._balance_last_check_ts = now_ts
+        try:
+            clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
+            # Use the Nautilus cache if available.
+            try:
+                accounts = self.cache.accounts()
+                if accounts:
+                    for acct in accounts:
+                        balances = getattr(acct, "balances", None)
+                        if balances:
+                            for balance in balances:
+                                currency = str(getattr(balance, "currency", ""))
+                                if "USDC" in currency.upper():
+                                    free = getattr(balance, "free", None)
+                                    if free is not None:
+                                        self._cached_usdc_balance = Decimal(str(free))
+                                        logger.debug(f"Balance cache updated (Nautilus): {self._cached_usdc_balance}")
+                                        return self._cached_usdc_balance
+            except Exception:
+                pass
+
+            # Fallback: use py_clob_client if available.
+            try:
+                from py_clob_client.client import ClobClient
+                pk = os.getenv("POLYMARKET_PK")
+                if pk:
+                    client = ClobClient(
+                        host=clob_base,
+                        key=pk,
+                        chain_id=int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
+                        signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                        funder=os.getenv("POLYMARKET_FUNDER") or None,
+                    )
+                    api_key = os.getenv("POLYMARKET_API_KEY")
+                    api_secret = os.getenv("POLYMARKET_API_SECRET")
+                    passphrase = os.getenv("POLYMARKET_PASSPHRASE")
+                    if api_key and api_secret and passphrase:
+                        client.set_api_creds(api_key=api_key, api_secret=api_secret, api_passphrase=passphrase)
+                    balances = client.get_balances()
+                    if balances:
+                        usdc_val = balances.get("USDC") or balances.get("usdc") or balances.get("USDC.e")
+                        if usdc_val is not None:
+                            self._cached_usdc_balance = Decimal(str(usdc_val))
+                            logger.debug(f"Balance cache updated (CLOB): {self._cached_usdc_balance}")
+                            return self._cached_usdc_balance
+            except Exception as e:
+                logger.debug(f"Balance cache CLOB fallback failed: {e}")
+
+        except Exception as e:
+            logger.debug(f"Balance cache refresh failed: {e}")
+
+        return self._cached_usdc_balance
 
     def _align_price_to_tick(self, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
         """
@@ -3324,9 +3686,12 @@ class IntegratedBTCStrategy(Strategy):
     def on_stop(self):
         """Called when strategy stops."""
         self._stopping = True
+        self._lifecycle_stop_event.set()
         self._reload_stop_event.set()
         self._quote_watchdog_stop_event.set()
         self._redeem_stop_event.set()
+        if self._lifecycle_thread and self._lifecycle_thread.is_alive():
+            self._lifecycle_thread.join(timeout=2)
         if self._reload_thread and self._reload_thread.is_alive():
             self._reload_thread.join(timeout=2)
         if self._quote_watchdog_thread and self._quote_watchdog_thread.is_alive():
