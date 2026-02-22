@@ -1,6 +1,7 @@
 """
 Maker rebate and taker fee economics for fee-enabled Polymarket markets.
 """
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
@@ -31,9 +32,9 @@ class QuoteEconomics:
 
 # 5-min and 15-min crypto markets.
 CRYPTO_FEE_CURVE = FeeCurveConfig(
-    fee_rate=Decimal("0.25"),
-    exponent=Decimal("2"),
-    maker_rebate_share=Decimal("0.20"),
+    fee_rate=Decimal(os.getenv("REBATE_FEE_RATE", "0.25")),
+    exponent=Decimal(os.getenv("REBATE_EXPONENT", "2")),
+    maker_rebate_share=Decimal(os.getenv("MAKER_REBATE_SHARE", "0.20")),
 )
 
 
