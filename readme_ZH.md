@@ -21,8 +21,8 @@
 - [交易模式](#交易模式)
 - [安全更新重點](#安全更新重點)
 - [專案結構](#專案結構)
+- [Dashboard 監控](#dashboard-監控grafana--prometheus)
 - [測試](#測試)
-- [常見問題](#常見問題)
 - [免責聲明](#免責聲明)
 
 ---
@@ -447,6 +447,101 @@ python core/strategy_brain/test_strategy.py
 python core/nautilus_core/test_nautilus.py
 python execution/test_execution.py
 ```
+
+---
+
+## 📊 Dashboard 監控（Grafana + Prometheus）
+
+Bot 內建 Prometheus 指標輸出（預設 `http://127.0.0.1:8000/metrics`），搭配 Grafana 可即時看到：
+- 真實錢包餘額、累計 PnL、勝率
+- 訂單統計（placed / filled / rejected）
+- 持倉、庫存、風險利用率
+- PnL 與餘額歷史圖表
+
+### 架構
+
+```text
+Bot (run_bot.py)
+  └─ 輸出 Prometheus 格式指標 (:8000/metrics)
+        ↑
+Prometheus (:9090) ── 每 5 秒抓取
+        ↑
+Grafana (:3000) ── 查詢 Prometheus，顯示圖表
+```
+
+> 💡 Bot 必須正在運行才有指標可抓。建議先啟動 bot → 再啟動 Prometheus → 最後開 Grafana 看板。
+
+### 1. 安裝
+
+```bash
+# macOS
+brew install prometheus grafana
+
+# Linux (Ubuntu/Debian)
+sudo apt install prometheus grafana
+```
+
+### 2. 啟動 Grafana
+
+```bash
+# macOS（背景服務，不需額外 terminal）
+brew services start grafana
+
+# Linux
+sudo systemctl start grafana-server
+```
+
+Grafana 預設帳密：`admin` / `admin`（首次登入會要求改密碼）。
+- 我的帳密則寫在.env中
+
+### 3. 啟動 Prometheus（需要額外 terminal）
+
+```bash
+# 方法一：前景執行（開新 terminal）
+prometheus --config.file=grafana/prometheus.yml
+
+# 方法二：背景執行（同一 terminal）
+prometheus --config.file=grafana/prometheus.yml &
+
+# 方法三：macOS 註冊為背景服務
+brew services start prometheus
+# 注意：用 brew services 時需手動將設定複製到 Homebrew 預設路徑
+```
+
+### 4. 連接 Grafana → Prometheus
+
+```bash
+# 用 curl 自動新增 data source（替換 <YOUR_PASS> 為你的 Grafana 密碼）
+curl -X POST -u "admin:<YOUR_PASS>" \
+  http://localhost:3000/api/datasources \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Prometheus","type":"prometheus","url":"http://localhost:9090","access":"proxy","isDefault":true}'
+```
+
+或在 Grafana 介面手動設定：Settings → Data Sources → Add → Prometheus → URL 填 `http://localhost:9090`
+
+### 5. 匯入 Dashboard
+
+```bash
+GRAFANA_USER=admin GRAFANA_PASS=<YOUR_PASS> python grafana/import_dashboard.py
+```
+
+或手動匯入：
+1. 打開 `http://localhost:3000`
+2. 左側 **+ → Import**
+3. 上傳 `grafana/dashboard.json`
+4. 選 Prometheus data source → Import
+
+### 6. 常用 `.env` 參數
+
+| 參數 | 預設值 | 說明 |
+|---|---|---|
+| `GRAFANA_EXPORTER_HOST` | `127.0.0.1` | Metrics server 綁定地址 |
+| `GRAFANA_EXPORTER_PORT` | `8000` | Metrics server 埠 |
+| `GRAFANA_USER` | （空） | Grafana 匯入腳本用帳號 |
+| `GRAFANA_PASS` | （空） | Grafana 匯入腳本用密碼 |
+
+> 💡 Bot 必須正在運行才有指標可抓。建議先啟動 bot → 再啟動 Prometheus → 最後開 Grafana 看板。
 
 ---
 

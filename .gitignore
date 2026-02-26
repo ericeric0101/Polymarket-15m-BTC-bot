@@ -26,3 +26,11 @@ paper_trades.json
 .DS_Store
 .vscode/
 .idea/
+
+# Prometheus TSDB data
+data/
+
+# Grafana runtime
+grafana-data/
+grafana-logs/
+grafana-plugins/

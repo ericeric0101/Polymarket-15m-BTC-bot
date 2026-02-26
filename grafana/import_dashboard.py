@@ -15,7 +15,7 @@ sys.path.insert(0, str(project_root))
 GRAFANA_URL = "http://localhost:3000"
 GRAFANA_USER = os.getenv("GRAFANA_USER")
 GRAFANA_PASS = os.getenv("GRAFANA_PASS")
-DASHBOARD_PATH = "dashboard.json"
+DASHBOARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.json")
 
 
 def require_grafana_credentials():

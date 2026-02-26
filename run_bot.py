@@ -758,6 +758,12 @@ class IntegratedBTCStrategy(Strategy):
         self._cached_usdc_balance: Optional[Decimal] = None
         self._balance_last_check_ts: float = 0.0
         self.balance_check_interval_sec = max(10, int(os.getenv("MAKER_BALANCE_CHECK_INTERVAL_SEC", "30")))
+
+        # --- Binance WebSocket for real-time BTC price ---
+        self._binance_ws_price: Optional[Decimal] = None
+        self._binance_ws_price_ts: float = 0.0
+        self._binance_ws_stop_event = threading.Event()
+        self._binance_ws_thread: Optional[threading.Thread] = None
         self._maker_worker_lock = threading.Lock()
         self._decision_worker_lock = threading.Lock()
         self._maker_worker_running = False
@@ -877,6 +883,73 @@ class IntegratedBTCStrategy(Strategy):
                 self.grafana_exporter.increment_order_counter(status)
             except Exception as e:
                 logger.debug(f"Failed to increment order metric [{status}]: {e}")
+
+    def _init_live_prom_metrics(self) -> None:
+        """Initialize Prometheus gauges/counters for live trading metrics."""
+        try:
+            from prometheus_client import Gauge, Counter
+            self._prom_live_pnl = Gauge('trading_live_realized_pnl', 'Cumulative realized PnL from live trades (USDC)')
+            self._prom_live_trades = Counter('trading_live_trades_total', 'Total live trades (position round-trips)')
+            self._prom_live_wins = Counter('trading_live_winning_trades', 'Live winning trades')
+            self._prom_live_losses = Counter('trading_live_losing_trades', 'Live losing trades')
+            self._prom_live_win_rate = Gauge('trading_live_win_rate', 'Live win rate percentage')
+            self._prom_live_open_pos = Gauge('trading_live_open_positions', 'Number of open positions')
+            self._prom_live_inventory = Gauge('trading_live_inventory_shares', 'Current inventory in shares')
+            self._live_cumulative_pnl = 0.0
+            self._live_total_trades = 0
+            self._live_total_wins = 0
+            self._prom_live_metrics_ok = True
+            logger.info("✓ Live Prometheus trading metrics initialized")
+        except Exception as e:
+            logger.debug(f"Failed to init live prom metrics: {e}")
+            self._prom_live_metrics_ok = False
+
+    def _push_position_closed_to_prometheus(self, realized_pnl: float, duration_ns: int) -> None:
+        """Push a completed round-trip trade to Prometheus metrics."""
+        if not getattr(self, '_prom_live_metrics_ok', False):
+            return
+        try:
+            self._live_cumulative_pnl += realized_pnl
+            self._live_total_trades += 1
+            won = realized_pnl > 0
+            if won:
+                self._live_total_wins += 1
+                self._prom_live_wins.inc()
+            else:
+                self._prom_live_losses.inc()
+            self._prom_live_trades.inc()
+            self._prom_live_pnl.set(self._live_cumulative_pnl)
+            win_rate = (self._live_total_wins / self._live_total_trades * 100) if self._live_total_trades > 0 else 0
+            self._prom_live_win_rate.set(win_rate)
+
+            # Also push to grafana_exporter if available
+            if self.grafana_exporter:
+                try:
+                    self.grafana_exporter.increment_trade_counter(won=won)
+                    dur_sec = duration_ns / 1e9 if duration_ns else 0
+                    if dur_sec > 0:
+                        self.grafana_exporter.record_trade_duration(dur_sec)
+                    # Update PnL gauge exposed by exporter
+                    self.grafana_exporter.total_pnl.set(self._live_cumulative_pnl)
+                    self.grafana_exporter.win_rate.set(win_rate)
+                except Exception:
+                    pass
+
+            logger.info(
+                f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
+                f"cum_pnl={self._live_cumulative_pnl:+.4f} win_rate={win_rate:.0f}%"
+            )
+        except Exception as e:
+            logger.debug(f"Failed to push position metrics: {e}")
+
+    def _update_inventory_metric(self) -> None:
+        """Update the inventory gauge in Prometheus."""
+        if not getattr(self, '_prom_live_metrics_ok', False):
+            return
+        try:
+            self._prom_live_inventory.set(float(self.inventory_delta_shares))
+        except Exception:
+            pass
     
     async def check_simulation_mode(self) -> bool:
         """Check Redis for current simulation mode."""
@@ -907,51 +980,129 @@ class IntegratedBTCStrategy(Strategy):
         
         return self.current_simulation_mode
 
+    # ------------------------------------------------------------------
+    # Binance WebSocket for real-time BTC price
+    # ------------------------------------------------------------------
+
+    def _start_binance_ws(self) -> None:
+        """Start a background thread that streams BTC price from Binance WebSocket."""
+        if self._binance_ws_thread is not None and self._binance_ws_thread.is_alive():
+            return
+        self._binance_ws_stop_event.clear()
+        self._binance_ws_thread = threading.Thread(
+            target=self._binance_ws_loop,
+            name="binance-ws",
+            daemon=True,
+        )
+        self._binance_ws_thread.start()
+        logger.info("Binance WebSocket thread started")
+
+    def _binance_ws_loop(self) -> None:
+        """
+        Persistent WebSocket connection to Binance Futures for BTC/USDT aggTrade.
+        Per Binance docs:
+        - Base URL: wss://fstream.binance.com
+        - Stream: /ws/btcusdt@aggTrade
+        - Connection valid for max 24 hours → reconnect at 23h
+        - Server pings every 3 min; must pong within 10 min
+        - Max 10 incoming messages/sec
+        """
+        import websockets.sync.client as ws_sync  # type: ignore
+
+        url = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+        reconnect_delay = 1.0
+        max_reconnect_delay = 30.0
+        max_connection_sec = 23 * 3600  # Reconnect before 24h limit
+        pong_interval_sec = 120  # Send unsolicited pong every 2 min
+
+        while not self._binance_ws_stop_event.is_set():
+            try:
+                with ws_sync.connect(
+                    url,
+                    close_timeout=5,
+                    ping_interval=None,    # We handle pong manually
+                    ping_timeout=None,
+                ) as ws:
+                    reconnect_delay = 1.0  # reset on success
+                    connect_ts = time.time()
+                    last_pong_ts = connect_ts
+                    logger.info("✓ Binance Futures WS connected (btcusdt@aggTrade)")
+                    while not self._binance_ws_stop_event.is_set():
+                        # Check 24h reconnect limit
+                        now = time.time()
+                        if now - connect_ts > max_connection_sec:
+                            logger.info("Binance WS: 23h limit reached, reconnecting...")
+                            break
+
+                        # Send unsolicited pong every 2 min to keep alive
+                        if now - last_pong_ts > pong_interval_sec:
+                            try:
+                                ws.pong()
+                                last_pong_ts = now
+                            except Exception:
+                                break
+
+                        try:
+                            raw = ws.recv(timeout=5)
+                        except TimeoutError:
+                            continue
+
+                        try:
+                            import json as _json
+                            data = _json.loads(raw)
+                            # aggTrade payload: {"p": "96123.45", "q": "0.1", ...}
+                            price_str = data.get("p")
+                            if price_str:
+                                self._binance_ws_price = Decimal(price_str)
+                                self._binance_ws_price_ts = time.time()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug(f"Binance WS error: {e}; reconnect in {reconnect_delay:.0f}s")
+                self._binance_ws_stop_event.wait(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
+
     async def _fetch_external_spot_price(self) -> Optional[Decimal]:
         """
-        Fetch BTC spot from Coinbase + Binance and average valid results.
+        Get BTC spot price. Primary: Binance WebSocket (near-zero latency).
+        Fallback: Coinbase HTTP (if WS is stale >10s).
         """
+        # Use Binance WS price if fresh (within 10 seconds)
+        if self._binance_ws_price is not None:
+            age = time.time() - self._binance_ws_price_ts
+            if age < 10.0:
+                price = self._binance_ws_price
+                if not getattr(self, "_logged_first_spot", False):
+                    logger.info(f"✓ First BTC spot via Binance WS: ${price:,.2f}")
+                    self._logged_first_spot = True
+                return price
+            else:
+                logger.debug(f"Binance WS price stale ({age:.1f}s), falling back to HTTP")
+
+        # Fallback: Coinbase HTTP
+        return await asyncio.to_thread(self._fetch_coinbase_spot_sync)
+
+    def _fetch_coinbase_spot_sync(self) -> Optional[Decimal]:
+        """Coinbase HTTP fallback for BTC spot price."""
         timeout = float(os.getenv("EXTERNAL_SPOT_TIMEOUT_SEC", "2.5"))
-        urls = (
-            ("coinbase", "https://api.exchange.coinbase.com/products/BTC-USD/ticker"),
-            ("binance", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
-        )
-        prices: List[Decimal] = []
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
-                responses = await asyncio.gather(
-                    *(client.get(url) for _, url in urls),
-                    return_exceptions=True,
-                )
-            for (source, _), resp in zip(urls, responses):
-                if isinstance(resp, Exception):
-                    logger.debug(f"{source} spot fetch failed: {resp}")
-                    continue
-                try:
-                    resp.raise_for_status()
-                    data = resp.json()
-                    raw = data.get("price")
-                    if raw is not None:
-                        prices.append(Decimal(str(raw)))
-                except Exception as e:
-                    logger.debug(f"{source} spot parse failed: {e}")
+            with httpx.Client(timeout=timeout, headers=headers) as client:
+                resp = client.get("https://api.exchange.coinbase.com/products/BTC-USD/ticker")
+                resp.raise_for_status()
+                data = resp.json()
+                raw = data.get("price")
+                if raw is not None:
+                    price = Decimal(str(raw))
+                    if not getattr(self, "_logged_first_spot", False):
+                        logger.info(f"✓ First BTC spot via Coinbase HTTP: ${price:,.2f}")
+                        self._logged_first_spot = True
+                    return price
         except Exception as e:
-            logger.debug(f"External spot fetch error: {e}")
-
-        if not prices:
-            return None
-            
-        avg_price = sum(prices) / Decimal(len(prices))
-        
-        # Log the first successful fetch to console
-        if not getattr(self, "_logged_first_spot", False):
-            logger.info(f"✓ First successful BTC spot fetch: ${avg_price:,.2f} (from {len(prices)} sources)")
-            self._logged_first_spot = True
-            
-        return avg_price
+            logger.debug(f"Coinbase spot fetch failed: {e}")
+        return None
 
     async def _compute_fair_probability(self, market_mid: Decimal) -> Decimal:
         """
@@ -1749,19 +1900,33 @@ class IntegratedBTCStrategy(Strategy):
             return
 
         # --- Balance Pre-check (non-simulation only) ---
+        _balance_forced_sell_only = False
         if not is_simulation:
             balance = self._refresh_balance_cache()
             if balance is not None:
                 required = self.maker_quote_size_usdc * Decimal("1.1")  # 10% buffer
                 if balance < required:
-                    if time.time() - getattr(self, '_last_balance_warn_ts', 0) >= 60:
-                        logger.warning(
-                            f"Balance pre-check: insufficient USDC "
-                            f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
-                            f"Skipping maker quotes."
-                        )
-                        self._last_balance_warn_ts = time.time()
-                    return
+                    if abs(self.inventory_delta_shares) > 0:
+                        # Have inventory — switch to SELL-only to free up capital
+                        _balance_forced_sell_only = True
+                        if time.time() - getattr(self, '_last_balance_warn_ts', 0) >= 60:
+                            logger.warning(
+                                f"Balance pre-check: low USDC "
+                                f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
+                                f"Switching to SELL-only until balance recovers. "
+                                f"inventory={float(self.inventory_delta_shares):.4f}"
+                            )
+                            self._last_balance_warn_ts = time.time()
+                    else:
+                        # No inventory and no balance — skip quoting entirely
+                        if time.time() - getattr(self, '_last_balance_warn_ts', 0) >= 60:
+                            logger.warning(
+                                f"Balance pre-check: insufficient USDC and no inventory "
+                                f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
+                                f"Skipping maker quotes."
+                            )
+                            self._last_balance_warn_ts = time.time()
+                        return
 
         now_ts = time.time()
         if now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
@@ -1876,15 +2041,28 @@ class IntegratedBTCStrategy(Strategy):
                     if time_left_min < self.maker_min_minutes_to_close:
                         reduce_only_reason = f"only {time_left_min:.1f}m until close"
             
-            if reduce_only_reason and "buy" in side_plan:
-                if not getattr(self, "_logged_reduce_only", False) or time.time() - getattr(self, "_last_ro_log_ts", 0) > 60:
-                    logger.warning(f"Maker Reduce-Only active ({reduce_only_reason}). Blocking BUY orders.")
-                    self._logged_reduce_only = True
-                    self._last_ro_log_ts = time.time()
-                side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
+            if reduce_only_reason:
+                if "buy" in side_plan:
+                    if not getattr(self, "_logged_reduce_only", False) or time.time() - getattr(self, "_last_ro_log_ts", 0) > 60:
+                        logger.warning(f"Maker Reduce-Only active ({reduce_only_reason}). Blocking BUY orders.")
+                        self._logged_reduce_only = True
+                        self._last_ro_log_ts = time.time()
+                    side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
+                # Also block SELL when price is at extreme (outside fair range), not just time-based reduce-only
+                if "sell" in side_plan and (fair < self.maker_min_fair_price or fair > self.maker_max_fair_price):
+                    if not getattr(self, "_logged_extreme_sell_block", False) or time.time() - getattr(self, "_last_extreme_log_ts", 0) > 60:
+                        logger.warning(f"Extreme price detected ({reduce_only_reason}). Blocking SELL orders too.")
+                        self._logged_extreme_sell_block = True
+                        self._last_extreme_log_ts = time.time()
+                    side_plan["sell"] = (side_plan["sell"][0], side_plan["sell"][1], False)
             elif "buy" in side_plan and getattr(self, "_logged_reduce_only", False):
-                self._logged_reduce_only = False # Reset if conditions normalize
+                self._logged_reduce_only = False  # Reset if conditions normalize
+                self._logged_extreme_sell_block = False
             # -----------------------------------------------------------
+
+            # --- Balance-forced SELL-only mode ---
+            if _balance_forced_sell_only and "buy" in side_plan:
+                side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
 
             for side, (limit_price, econ, should_quote) in side_plan.items():
                 order_key = self._order_key_for(side, inst_id)
@@ -1962,27 +2140,23 @@ class IntegratedBTCStrategy(Strategy):
             return
 
         # Live-only guard: prevent SELL submissions when we don't actually hold enough tokens.
+        # If sellable is less than requested, REDUCE the qty to sellable amount instead of skipping.
         if side == "sell" and not self.current_simulation_mode:
             sellable_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
-            if sellable_qty + Decimal("0.000001") < qty_dec:
-                logger.warning(
-                    "Skip maker SELL: insufficient sellable token quantity "
-                    f"(sellable={float(sellable_qty):.6f}, need={float(qty_dec):.6f}, "
-                    f"instrument={self.instrument_id})"
-                )
-                self._db_order_event(
-                    event_type="ORDER_SKIP_SELLABLE_QTY",
-                    side=side.upper(),
-                    price=float(limit_price),
-                    qty=float(qty_dec),
-                    reason="insufficient_sellable_qty",
-                    payload={
-                        "sellable_qty": float(sellable_qty),
-                        "needed_qty": float(qty_dec),
-                        "instrument_id": str(instrument_id),
-                    },
+            if sellable_qty < Decimal("0.01"):
+                logger.debug(
+                    "Skip maker SELL: no sellable tokens "
+                    f"(sellable={float(sellable_qty):.6f}, instrument={self.instrument_id})"
                 )
                 return
+            if sellable_qty + Decimal("0.000001") < qty_dec:
+                old_qty = qty_dec
+                qty_dec = sellable_qty.quantize(Decimal(str(10 ** (-precision))))
+                logger.info(
+                    f"Maker SELL qty reduced to sellable amount: "
+                    f"{float(old_qty):.6f} → {float(qty_dec):.6f} "
+                    f"(on-chain tokens after fees)"
+                )
 
         if self.current_simulation_mode:
             sim_order_id = f"SIM-MAKER-{side.upper()}-{int(time.time() * 1000)}"
@@ -2188,6 +2362,10 @@ class IntegratedBTCStrategy(Strategy):
         self._lifecycle_stop_event.clear()
         self._lifecycle_thread = threading.Thread(target=self._start_market_lifecycle_timer, daemon=True)
         self._lifecycle_thread.start()
+        # Initialize live Prometheus trading metrics
+        self._init_live_prom_metrics()
+        # Start Binance WebSocket for real-time BTC price
+        self._start_binance_ws()
         # Also start the legacy reload timer as a fallback
         self._reload_stop_event.clear()
         self._reload_thread = threading.Thread(target=self._start_reload_timer, daemon=True)
@@ -2402,11 +2580,156 @@ class IntegratedBTCStrategy(Strategy):
     def _start_auto_redeem_timer(self) -> None:
         """
         Periodic auto redeem timer (default every 15 minutes).
+        Also checks for YES/NO merge opportunities.
         """
         while not self._redeem_stop_event.wait(self.auto_redeem_interval_sec):
             if self._stopping:
                 return
             self._schedule_auto_redeem(reason="interval")
+            # Check for merge opportunities periodically
+            self._try_merge_yes_no_positions()
+
+    def _try_merge_yes_no_positions(self) -> None:
+        """
+        Check if we hold both YES and NO tokens for the same condition.
+        If so, merge the minimum overlapping amount back to USDC.
+        This recovers locked capital.
+        """
+        try:
+            pk = os.getenv("POLYMARKET_PK", "").strip()
+            if not pk or int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")) != 0:
+                return  # Can't do direct on-chain tx without EOA
+
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+            clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
+            rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+            chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
+
+            # Get current instruments to find YES/NO pairs
+            instruments = self.cache.instruments() if hasattr(self, 'cache') else []
+            if not instruments:
+                return
+
+            # Group instruments by condition_id (market)
+            from collections import defaultdict
+            condition_pairs: dict[str, list] = defaultdict(list)
+            for inst in instruments:
+                if hasattr(inst, 'info') and inst.info:
+                    condition_id = inst.info.get('condition_id', '')
+                    if condition_id:
+                        token_id = inst.info.get('token_id', '')
+                        if token_id:
+                            condition_pairs[condition_id].append({
+                                'token_id': token_id,
+                                'instrument': inst,
+                            })
+
+            # Only check conditions with 2 tokens (YES + NO)
+            if not hasattr(self, '_balance_clob_client') or self._balance_clob_client is None:
+                return
+            client = self._balance_clob_client
+
+            for condition_id, tokens in condition_pairs.items():
+                if len(tokens) < 2:
+                    continue
+
+                # Query on-chain balance for each token
+                balances = []
+                for t in tokens:
+                    try:
+                        params = BalanceAllowanceParams(
+                            asset_type=AssetType.CONDITIONAL,
+                            token_id=t['token_id'],
+                            signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                        )
+                        result = client.get_balance_allowance(params)
+                        balance_raw = int(result.get("balance", "0")) if result else 0
+                        balances.append(balance_raw)
+                    except Exception:
+                        balances.append(0)
+
+                # If we hold both tokens, merge the minimum amount
+                min_balance = min(balances)
+                if min_balance < 100000:  # Less than 0.1 USDC worth, skip
+                    continue
+
+                merge_amount_usdc = min_balance / 1_000_000
+                logger.info(
+                    f"Merge opportunity detected! condition={condition_id[:16]}... "
+                    f"overlap={merge_amount_usdc:.4f} USDC — executing merge"
+                )
+
+                # Execute on-chain merge
+                self._execute_merge_on_chain(
+                    pk=pk,
+                    condition_id=condition_id,
+                    amount=min_balance,
+                    rpc_url=rpc_url,
+                    chain_id=chain_id,
+                )
+
+        except Exception as e:
+            logger.debug(f"Merge check failed: {e}")
+
+    def _execute_merge_on_chain(
+        self, pk: str, condition_id: str, amount: int, rpc_url: str, chain_id: int
+    ) -> None:
+        """Execute CTF mergePositions on-chain."""
+        try:
+            from web3 import Web3
+            from web3.middleware import ExtraDataToPOAMiddleware
+
+            CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+            USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            CTF_MERGE_ABI = [{
+                "inputs": [
+                    {"internalType": "address", "name": "collateralToken", "type": "address"},
+                    {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+                    {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
+                    {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"},
+                    {"internalType": "uint256", "name": "amount", "type": "uint256"},
+                ],
+                "name": "mergePositions",
+                "outputs": [],
+                "stateMutability": "nonpayable",
+                "type": "function",
+            }]
+
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+            from eth_account import Account
+            acct = Account.from_key(pk)
+            owner = w3.to_checksum_address(acct.address)
+
+            contract = w3.eth.contract(
+                address=w3.to_checksum_address(CTF_ADDRESS),
+                abi=CTF_MERGE_ABI,
+            )
+
+            tx = contract.functions.mergePositions(
+                w3.to_checksum_address(USDC_ADDRESS),
+                b"\x00" * 32,
+                Web3.to_bytes(hexstr=condition_id),
+                [1, 2],  # YES=1, NO=2
+                amount,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": w3.eth.get_transaction_count(owner, "pending"),
+            })
+            signed = w3.eth.account.sign_transaction(tx, private_key=pk)
+            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=120)
+            usdc_recovered = amount / 1_000_000
+            logger.info(
+                f"✓ Merge SUCCESS: condition={condition_id[:16]}... "
+                f"recovered={usdc_recovered:.4f} USDC tx={txh.hex()} status={receipt.status}"
+            )
+        except Exception as e:
+            logger.warning(f"Merge on-chain failed: {e}")
 
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
@@ -2772,9 +3095,36 @@ class IntegratedBTCStrategy(Strategy):
                     logger.info("Lifecycle timer: new market found, transitioning to ACTIVE")
                     # _find_btc_instrument already called inside _search_next_market
                     self._update_market_phase()
+                    self._waiting_miss_count = 0
                 else:
+                    self._waiting_miss_count = getattr(self, '_waiting_miss_count', 0) + 1
+                    max_waiting_misses = int(os.getenv("MARKET_WAITING_MAX_MISSES", "3"))
+                    if self._waiting_miss_count >= max_waiting_misses and self.next_market_slug:
+                        # We know the next slug but can't find its instrument in Nautilus
+                        # → force a node rebuild to load fresh instruments
+                        logger.warning(
+                            f"Lifecycle timer: {self._waiting_miss_count} consecutive misses for "
+                            f"{self.next_market_slug}. Instruments stale — requesting node rollover."
+                        )
+                        self._waiting_miss_count = 0
+                        self._stopping = True
+                        self._rollover_requested_flag = True
+                        try:
+                            import nautilus_trader  # noqa: F811
+                            # Signal the trading node to stop, which triggers a rebuild in the outer loop
+                            if hasattr(self, '_trader') and hasattr(self._trader, 'node'):
+                                self._trader.node.stop()
+                            else:
+                                # Fallback — raise to break out of the lifecycle loop
+                                raise SystemExit("rollover_needed")
+                        except SystemExit:
+                            raise
+                        except Exception:
+                            pass
+                        return  # Exit lifecycle timer thread
                     logger.info(
-                        f"Lifecycle timer: no market yet, retry in {self.market_next_poll_sec}s"
+                        f"Lifecycle timer: no market yet (miss {self._waiting_miss_count}/"
+                        f"{max_waiting_misses}), retry in {self.market_next_poll_sec}s"
                     )
                     self._lifecycle_stop_event.wait(self.market_next_poll_sec)
 
@@ -2784,7 +3134,7 @@ class IntegratedBTCStrategy(Strategy):
 
     def _refresh_balance_cache(self) -> Optional[Decimal]:
         """
-        Refresh cached USDC balance from CLOB API.
+        Refresh cached USDC balance from CLOB API (get_balance_allowance).
         Only queries if interval has elapsed.
         Returns the cached balance.
         """
@@ -2794,51 +3144,67 @@ class IntegratedBTCStrategy(Strategy):
 
         self._balance_last_check_ts = now_ts
         try:
-            clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
-            # Use the Nautilus cache if available.
-            try:
-                accounts = self.cache.accounts()
-                if accounts:
-                    for acct in accounts:
-                        balances = getattr(acct, "balances", None)
-                        if balances:
-                            for balance in balances:
-                                currency = str(getattr(balance, "currency", ""))
-                                if "USDC" in currency.upper():
-                                    free = getattr(balance, "free", None)
-                                    if free is not None:
-                                        self._cached_usdc_balance = Decimal(str(free))
-                                        logger.debug(f"Balance cache updated (Nautilus): {self._cached_usdc_balance}")
-                                        return self._cached_usdc_balance
-            except Exception:
-                pass
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
 
-            # Fallback: use py_clob_client if available.
-            try:
-                from py_clob_client.client import ClobClient
+            # Reuse cached client if available
+            if not hasattr(self, '_balance_clob_client') or self._balance_clob_client is None:
+                clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
                 pk = os.getenv("POLYMARKET_PK")
-                if pk:
-                    client = ClobClient(
-                        host=clob_base,
-                        key=pk,
-                        chain_id=int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
-                        signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
-                        funder=os.getenv("POLYMARKET_FUNDER") or None,
-                    )
-                    api_key = os.getenv("POLYMARKET_API_KEY")
-                    api_secret = os.getenv("POLYMARKET_API_SECRET")
-                    passphrase = os.getenv("POLYMARKET_PASSPHRASE")
-                    if api_key and api_secret and passphrase:
-                        client.set_api_creds(api_key=api_key, api_secret=api_secret, api_passphrase=passphrase)
-                    balances = client.get_balances()
-                    if balances:
-                        usdc_val = balances.get("USDC") or balances.get("usdc") or balances.get("USDC.e")
-                        if usdc_val is not None:
-                            self._cached_usdc_balance = Decimal(str(usdc_val))
-                            logger.debug(f"Balance cache updated (CLOB): {self._cached_usdc_balance}")
-                            return self._cached_usdc_balance
-            except Exception as e:
-                logger.debug(f"Balance cache CLOB fallback failed: {e}")
+                if not pk:
+                    return self._cached_usdc_balance
+
+                client = ClobClient(
+                    host=clob_base,
+                    key=pk,
+                    chain_id=int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
+                    signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                    funder=os.getenv("POLYMARKET_FUNDER") or None,
+                )
+                api_key = os.getenv("POLYMARKET_API_KEY")
+                api_secret = os.getenv("POLYMARKET_API_SECRET")
+                passphrase = os.getenv("POLYMARKET_PASSPHRASE")
+                if api_key and api_secret and passphrase:
+                    client.set_api_creds(ApiCreds(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        api_passphrase=passphrase,
+                    ))
+                else:
+                    # Env vars are empty — derive creds from private key (same as Nautilus)
+                    try:
+                        derived = client.create_or_derive_api_creds()
+                        client.set_api_creds(derived)
+                        logger.info("Balance cache: derived API creds from private key")
+                    except Exception as e:
+                        logger.warning(f"Balance cache: failed to derive API creds: {e}")
+                        return self._cached_usdc_balance
+                self._balance_clob_client = client
+
+            client = self._balance_clob_client
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+            )
+            result = client.get_balance_allowance(params)
+            if result and isinstance(result, dict):
+                balance_val = result.get("balance")
+                if balance_val is not None:
+                    self._cached_usdc_balance = Decimal(str(balance_val)) / Decimal("1000000")  # USDC has 6 decimals
+                    logger.info(f"Balance cache updated: {float(self._cached_usdc_balance):.4f} USDC")
+                    # Export real balance to Prometheus for Grafana
+                    try:
+                        if not hasattr(self, '_prom_wallet_balance'):
+                            from prometheus_client import Gauge
+                            self._prom_wallet_balance = Gauge(
+                                'trading_wallet_balance_usdc',
+                                'Real on-chain wallet USDC balance'
+                            )
+                        self._prom_wallet_balance.set(float(self._cached_usdc_balance))
+                    except Exception:
+                        pass
+                    return self._cached_usdc_balance
 
         except Exception as e:
             logger.debug(f"Balance cache refresh failed: {e}")
@@ -3592,6 +3958,26 @@ class IntegratedBTCStrategy(Strategy):
             self._start_maker_worker(self.latest_market_bid, self.latest_market_ask)
         
         self._increment_order_metric("filled")
+        self._update_inventory_metric()
+
+    def on_event(self, event):
+        """Handle Nautilus events — catch PositionClosed for PnL tracking."""
+        event_type = type(event).__name__
+        if event_type == "PositionClosed":
+            try:
+                realized_pnl = float(getattr(event, 'realized_pnl', 0.0))
+                duration_ns = int(getattr(event, 'duration_ns', 0))
+                self._push_position_closed_to_prometheus(realized_pnl, duration_ns)
+            except Exception as e:
+                logger.debug(f"Failed to handle PositionClosed event for metrics: {e}")
+        elif event_type == "PositionOpened":
+            if getattr(self, '_prom_live_metrics_ok', False):
+                try:
+                    self._prom_live_open_pos.set(1)
+                except Exception:
+                    pass
+        elif event_type == "PositionChanged":
+            pass  # Could track unrealized PnL here
 
     def on_order_canceled(self, event):
         """Handle cancel acknowledgements to clear pending-cancel state."""
@@ -3690,6 +4076,7 @@ class IntegratedBTCStrategy(Strategy):
         self._reload_stop_event.set()
         self._quote_watchdog_stop_event.set()
         self._redeem_stop_event.set()
+        self._binance_ws_stop_event.set()
         if self._lifecycle_thread and self._lifecycle_thread.is_alive():
             self._lifecycle_thread.join(timeout=2)
         if self._reload_thread and self._reload_thread.is_alive():
@@ -3698,6 +4085,8 @@ class IntegratedBTCStrategy(Strategy):
             self._quote_watchdog_thread.join(timeout=2)
         if self._redeem_thread and self._redeem_thread.is_alive():
             self._redeem_thread.join(timeout=2)
+        if self._binance_ws_thread and self._binance_ws_thread.is_alive():
+            self._binance_ws_thread.join(timeout=2)
         logger.info("Integrated BTC strategy stopped")
         logger.info(f"Total paper trades recorded: {len(self.paper_trades)}")
         self._cancel_active_maker_orders()
@@ -3938,6 +4327,17 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
                 except Exception as e:
                     logger.warning(f"Node dispose raised: {e}")
             logger.info(f"Bot cycle {cycle_idx} stopped")
+
+        # Check if the strategy requested rollover due to stale instruments
+        try:
+            strategies = node.trader.strategies() if node else []
+            for strat in strategies:
+                if getattr(strat, '_rollover_requested_flag', False):
+                    rollover_requested.set()
+                    logger.info("Strategy requested rollover (stale instruments)")
+                    break
+        except Exception:
+            pass
 
         if user_stopped:
             break
