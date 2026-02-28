@@ -675,9 +675,16 @@ class IntegratedBTCStrategy(Strategy):
             (self.maker_fee_rate_default_decimal * Decimal("10000")).quantize(Decimal("1"))
         )
         self.maker_max_order_usdc = Decimal(os.getenv("MAKER_MAX_ORDER_USDC", "1.0"))
+        self.maker_auto_tune = os.getenv("MAKER_AUTO_TUNE", "0") == "1"
+        self.maker_auto_tune_interval_sec = int(os.getenv("MAKER_AUTO_TUNE_INTERVAL_SEC", "300"))
+        
+        self.maker_momentum_filter_pct = Decimal(os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.03"))
+        self.maker_momentum_window_ticks = int(os.getenv("MAKER_MOMENTUM_WINDOW_TICKS", "20"))
+        
+        # Performance / Execution
+        self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
         self.maker_cancel_cooldown_sec = int(os.getenv("MAKER_CANCEL_COOLDOWN_SEC", "2"))
         self.maker_cancel_ack_timeout_sec = int(os.getenv("MAKER_CANCEL_ACK_TIMEOUT_SEC", "8"))
-        self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
         self.maker_simulation_shadow = os.getenv("MAKER_SIMULATION_SHADOW", "1").strip().lower() not in ("0", "false", "no")
         self.maker_sim_eval_sec = int(os.getenv("MAKER_SIM_EVAL_SEC", "60"))
         self.sim_ack_latency_ms_min = int(os.getenv("SIM_ACK_LATENCY_MS_MIN", "120"))
@@ -2024,6 +2031,36 @@ class IntegratedBTCStrategy(Strategy):
                 elif self.maker_quote_sides == "sell":
                     side_plan["buy"] = (quote_bid, bid_econ, False)
 
+            # --- TREND / MOMENTUM FILTER ---------------------------------------------
+            # Prevent "catching a falling knife" (buy) or "stepping in front of a train" (sell).
+            if self.maker_momentum_filter_pct > 0 and len(self.real_price_history) >= self.maker_momentum_window_ticks:
+                recent_px = self.real_price_history[-1]
+                old_px = self.real_price_history[-self.maker_momentum_window_ticks]
+                trend_pct = (recent_px - old_px) / old_px if old_px > 0 else Decimal("0")
+                
+                if trend_pct <= -self.maker_momentum_filter_pct and "buy" in side_plan:
+                    reduce_only_reason = f"momentum filter (dropped {float(trend_pct*100):.1f}%)"
+                    side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
+                    if not getattr(self, "_logged_mom_buy", False) or time.time() - getattr(self, "_last_mom_ts", 0) > 30:
+                        logger.warning(f"Trend Protection: {reduce_only_reason}. Blocking BUY orders.")
+                        self._logged_mom_buy = True
+                        self._last_mom_ts = time.time()
+                elif "buy" in side_plan and getattr(self, "_logged_mom_buy", False):
+                    self._logged_mom_buy = False
+                    logger.info("Trend Protection: BUY blocking cleared.")
+                    
+                if trend_pct >= self.maker_momentum_filter_pct and "sell" in side_plan:
+                    reduce_only_reason = f"momentum filter (pumped {float(trend_pct*100):.1f}%)"
+                    side_plan["sell"] = (side_plan["sell"][0], side_plan["sell"][1], False)
+                    if not getattr(self, "_logged_mom_sell", False) or time.time() - getattr(self, "_last_mom_ts_s", 0) > 30:
+                        logger.warning(f"Trend Protection: {reduce_only_reason}. Blocking SELL orders.")
+                        self._logged_mom_sell = True
+                        self._last_mom_ts_s = time.time()
+                elif "sell" in side_plan and getattr(self, "_logged_mom_sell", False):
+                    self._logged_mom_sell = False
+                    logger.info("Trend Protection: SELL blocking cleared.")
+            # -------------------------------------------------------------------------
+            
             # --- REDUCE ONLY MODE (Time & Extreme Price & Lifecycle Protection) ---
             reduce_only_reason = None
             if phase == MarketPhase.REDUCE_ONLY:
@@ -3383,11 +3420,14 @@ class IntegratedBTCStrategy(Strategy):
             current_markets.sort(key=lambda x: abs(x['time_diff_minutes']))
             selected = current_markets[0]
             logger.info(f"✓ SELECTED CURRENT market: {selected['slug']}")
-        else:
+        elif future_markets:
             # Select the next future market
             future_markets.sort(key=lambda x: x['time_diff_minutes'])
             selected = future_markets[0]
             logger.info(f"⚠ No current market, selecting next: {selected['slug']} (starts in {selected['time_diff_minutes']:.1f} min)")
+        else:
+            logger.warning("No active or future BTC 15-min instruments found in cache. All are PAST.")
+            return False
         
         previous_instrument = str(self.instrument_id) if self.instrument_id else None
         self.current_market_slug = str(selected.get("slug") or "")

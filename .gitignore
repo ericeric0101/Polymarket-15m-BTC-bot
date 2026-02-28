@@ -34,3 +34,6 @@ data/
 grafana-data/
 grafana-logs/
 grafana-plugins/
+
+# test folders
+test/
