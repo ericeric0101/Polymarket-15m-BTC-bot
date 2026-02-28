@@ -690,6 +690,14 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_digital_sigma_floor = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_FLOOR", "0.20"))
         self.maker_digital_sigma_ceiling = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_CEILING", "2.00"))
         self.maker_digital_vol_scale = Decimal(os.getenv("MAKER_DIGITAL_VOL_SCALE", "1.00"))
+        self.taker_exit_enabled = os.getenv("TAKER_EXIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+        self.taker_exit_min_net_usdc = Decimal(os.getenv("TAKER_EXIT_MIN_NET_USDC", "0.02"))
+        self.taker_exit_stop_loss_usdc = Decimal(os.getenv("TAKER_EXIT_STOP_LOSS_USDC", "0.15"))
+        self.taker_exit_max_hold_sec = int(os.getenv("TAKER_EXIT_MAX_HOLD_SEC", "120"))
+        self.taker_exit_min_hold_sec = int(os.getenv("TAKER_EXIT_MIN_HOLD_SEC", "20"))
+        self.taker_exit_cooldown_sec = int(os.getenv("TAKER_EXIT_COOLDOWN_SEC", "8"))
+        self.taker_exit_slippage_buffer_pct = Decimal(os.getenv("TAKER_EXIT_SLIPPAGE_BUFFER_PCT", "0.002"))
+        self.taker_exit_only_on_profit = os.getenv("TAKER_EXIT_ONLY_ON_PROFIT", "0").strip().lower() in ("1", "true", "yes", "on")
         
         # Performance / Execution
         self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
@@ -729,6 +737,16 @@ class IntegratedBTCStrategy(Strategy):
         self.external_spot_history_max = max(60, int(os.getenv("EXTERNAL_SPOT_HISTORY_MAX", "1200")))
         self.market_strike_cache_by_slug: Dict[str, Decimal] = {}
         self._last_digital_pricer_log_ts = 0.0
+        self.live_inventory_cost: Dict[str, Dict[str, Any]] = {}
+        self.last_taker_exit_ts_by_inst: Dict[str, float] = {}
+        self.pending_taker_exit_by_inst: Dict[str, str] = {}
+        self.fee_log_interval_sec = max(5, int(os.getenv("FEE_LOG_INTERVAL_SEC", "60")))
+        self._last_fee_log_state_by_token: Dict[str, Dict[str, Any]] = {}
+        self.fee_rate_fetch_interval_sec = max(
+            5,
+            int(os.getenv("FEE_RATE_FETCH_INTERVAL_SEC", os.getenv("FEE_RATE_CACHE_TTL_SEC", "300"))),
+        )
+        self._fee_rate_local_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self.latest_market_bid: Optional[Decimal] = None
         self.latest_market_ask: Optional[Decimal] = None
         self._inventory_delta_shares = Decimal("0")
@@ -837,6 +855,17 @@ class IntegratedBTCStrategy(Strategy):
         logger.info(f"  Maker max fair price (buy ceiling): {self.maker_max_fair_price}")
         logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
         logger.info(f"  Maker fair pricer mode: {self.maker_fair_pricer_mode}")
+        logger.info(f"  Taker exit: {'ON' if self.taker_exit_enabled else 'OFF'}")
+        logger.info(f"  Fee-rate fetch interval: {self.fee_rate_fetch_interval_sec}s")
+        if self.taker_exit_enabled:
+            logger.info(
+                "  Taker exit config: "
+                f"min_net={float(self.taker_exit_min_net_usdc):.4f} "
+                f"stop_loss={float(self.taker_exit_stop_loss_usdc):.4f} "
+                f"min_hold={self.taker_exit_min_hold_sec}s "
+                f"max_hold={self.taker_exit_max_hold_sec}s "
+                f"cooldown={self.taker_exit_cooldown_sec}s"
+            )
         logger.info(f"  Maker fee default decimal: {float(self.maker_fee_rate_default_decimal):.6f}")
         logger.info(f"  Auto redeem: {'ON' if self.auto_redeem_enabled else 'OFF'}")
         if self.auto_redeem_enabled:
@@ -1300,6 +1329,236 @@ class IntegratedBTCStrategy(Strategy):
         return max(Decimal("0.01"), min(Decimal("0.99"), fair))
 
     @staticmethod
+    def _instrument_key(instrument_id: Any) -> str:
+        return str(instrument_id) if instrument_id is not None else ""
+
+    @staticmethod
+    def _normalize_side_text(side_val: Any) -> str:
+        txt = str(side_val or "").strip().lower()
+        if txt in {"buy", "bid"}:
+            return "buy"
+        if txt in {"sell", "ask"}:
+            return "sell"
+        if "buy" in txt:
+            return "buy"
+        if "sell" in txt:
+            return "sell"
+        if txt == "1":
+            return "buy"
+        if txt == "2":
+            return "sell"
+        return ""
+
+    def _update_live_inventory_cost_from_fill(
+        self,
+        instrument_id: Any,
+        side: str,
+        fill_price: Decimal,
+        fill_qty: Decimal,
+        commission: Decimal,
+    ) -> None:
+        inst_key = self._instrument_key(instrument_id)
+        if not inst_key or fill_qty <= 0 or fill_price <= 0:
+            return
+        state = self.live_inventory_cost.setdefault(
+            inst_key,
+            {
+                "qty": Decimal("0"),
+                "avg_entry_price": Decimal("0"),
+                "entry_fee_remaining": Decimal("0"),
+                "opened_ts": 0.0,
+            },
+        )
+        side_norm = self._normalize_side_text(side)
+        now_ts = time.time()
+        if side_norm == "buy":
+            old_qty = Decimal(str(state.get("qty", "0")))
+            old_avg = Decimal(str(state.get("avg_entry_price", "0")))
+            new_qty = old_qty + fill_qty
+            if new_qty <= 0:
+                return
+            if old_qty > 0 and old_avg > 0:
+                weighted_notional = (old_qty * old_avg) + (fill_qty * fill_price)
+            else:
+                weighted_notional = fill_qty * fill_price
+            state["qty"] = new_qty
+            state["avg_entry_price"] = weighted_notional / new_qty
+            state["entry_fee_remaining"] = Decimal(str(state.get("entry_fee_remaining", "0"))) + max(Decimal("0"), commission)
+            if float(state.get("opened_ts", 0.0)) <= 0:
+                state["opened_ts"] = now_ts
+            return
+
+        if side_norm != "sell":
+            return
+        old_qty = Decimal(str(state.get("qty", "0")))
+        if old_qty <= 0:
+            return
+        sell_qty = min(fill_qty, old_qty)
+        if sell_qty <= 0:
+            return
+        avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+        fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
+        alloc_ratio = sell_qty / old_qty if old_qty > 0 else Decimal("0")
+        entry_fee_alloc = fee_remaining * alloc_ratio
+        realized_net = (sell_qty * (fill_price - avg_entry)) - entry_fee_alloc - max(Decimal("0"), commission)
+
+        remaining_qty = old_qty - sell_qty
+        remaining_fee = max(Decimal("0"), fee_remaining - entry_fee_alloc)
+        if remaining_qty <= 0:
+            state["qty"] = Decimal("0")
+            state["avg_entry_price"] = Decimal("0")
+            state["entry_fee_remaining"] = Decimal("0")
+            state["opened_ts"] = 0.0
+        else:
+            state["qty"] = remaining_qty
+            state["entry_fee_remaining"] = remaining_fee
+        logger.info(
+            f"Inventory realized[{inst_key[:18]}..]: sold={float(sell_qty):.6f} "
+            f"entry={float(avg_entry):.4f} exit={float(fill_price):.4f} "
+            f"net_pnl={float(realized_net):+.4f} remaining={float(state['qty']):.6f}"
+        )
+
+    async def _maybe_taker_exit_positions(self, now_ts: float, is_simulation: bool) -> None:
+        if is_simulation or not self.taker_exit_enabled:
+            return
+        if self.taker_exit_cooldown_sec < 0:
+            return
+        target_instruments = self._maker_quote_instruments()
+        for inst_id in target_instruments:
+            inst_key = self._instrument_key(inst_id)
+            if not inst_key:
+                continue
+            state = self.live_inventory_cost.get(inst_key)
+            if not state:
+                continue
+            qty = Decimal(str(state.get("qty", "0")))
+            if qty <= 0:
+                continue
+            if inst_key in self.pending_taker_exit_by_inst:
+                continue
+            last_ts = float(self.last_taker_exit_ts_by_inst.get(inst_key, 0.0))
+            if now_ts - last_ts < self.taker_exit_cooldown_sec:
+                continue
+            quote = self._get_quote_for_instrument(inst_id)
+            if quote is None:
+                continue
+            best_bid, _best_ask = quote
+            if best_bid <= 0:
+                continue
+
+            token_id = self._extract_token_id_from_instrument(inst_key)
+            dynamic_fee_rate = await self._get_dynamic_fee_rate(token_id=token_id)
+            fee_rate = dynamic_fee_rate if (dynamic_fee_rate is not None and dynamic_fee_rate > 0) else self._infer_market_fee_rate_default()
+            if fee_rate is None or fee_rate < 0:
+                fee_rate = Decimal("0")
+
+            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            entry_fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
+            opened_ts = float(state.get("opened_ts", 0.0))
+            hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
+            slip = max(Decimal("0"), self.taker_exit_slippage_buffer_pct)
+            exit_px_effective = best_bid * (Decimal("1") - slip)
+            gross = qty * (exit_px_effective - avg_entry)
+            exit_fee_est = (qty * exit_px_effective) * fee_rate
+            net_if_exit = gross - entry_fee_remaining - exit_fee_est
+
+            trigger = ""
+            if net_if_exit >= self.taker_exit_min_net_usdc:
+                trigger = "take_profit"
+            elif hold_sec >= max(0, self.taker_exit_min_hold_sec) and net_if_exit <= -abs(self.taker_exit_stop_loss_usdc):
+                trigger = "stop_loss"
+            elif self.taker_exit_max_hold_sec > 0 and hold_sec >= self.taker_exit_max_hold_sec:
+                trigger = "max_hold"
+            if not trigger:
+                continue
+            if self.taker_exit_only_on_profit and trigger not in {"stop_loss", "max_hold"} and net_if_exit < self.taker_exit_min_net_usdc:
+                continue
+
+            sellable_qty = self._get_sellable_qty_for_current_instrument(instrument_id=inst_id)
+            qty_to_exit = min(qty, sellable_qty)
+            if qty_to_exit + Decimal("0.000001") < self.maker_min_shares:
+                continue
+            ok = self._submit_taker_exit_order(
+                instrument_id=inst_id,
+                quantity=qty_to_exit,
+                reason=trigger,
+                est_net_if_exit=net_if_exit,
+                best_bid=best_bid,
+                fee_rate=fee_rate,
+            )
+            if ok:
+                self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+
+    def _submit_taker_exit_order(
+        self,
+        instrument_id: Any,
+        quantity: Decimal,
+        reason: str,
+        est_net_if_exit: Decimal,
+        best_bid: Decimal,
+        fee_rate: Decimal,
+    ) -> bool:
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return False
+        instrument = self.cache.instrument(inst)
+        if instrument is None:
+            return False
+        precision = int(getattr(instrument, "size_precision", 6))
+        min_lot = Decimal(str(10 ** (-precision)))
+        qty_dec = max(min_lot, quantity).quantize(min_lot, rounding=ROUND_FLOOR)
+        if qty_dec + Decimal("0.000001") < self.maker_min_shares:
+            return False
+
+        self._cancel_maker_order_side("buy", reason="taker_exit", instrument_id=inst)
+        self._cancel_maker_order_side("sell", reason="taker_exit", instrument_id=inst)
+
+        qty = Quantity(float(qty_dec), precision=precision)
+        coid = ClientOrderId(f"BTC-15M-TAKER-EXIT-{int(time.time() * 1000)}")
+        order = self.order_factory.market(
+            instrument_id=inst,
+            order_side=OrderSide.SELL,
+            quantity=qty,
+            client_order_id=coid,
+            quote_quantity=False,
+            time_in_force=TimeInForce.IOC,
+        )
+        self.submit_order(order)
+        inst_key = self._instrument_key(inst)
+        self.pending_taker_exit_by_inst[inst_key] = str(coid)
+        logger.warning(
+            "TAKER EXIT submit: "
+            f"reason={reason} inst={inst_key} qty={float(qty_dec):.6f} "
+            f"best_bid={float(best_bid):.4f} est_net={float(est_net_if_exit):+.4f} "
+            f"fee_rate={float(fee_rate):.4f}"
+        )
+        self._db_order_event(
+            event_type="ORDER_TAKER_EXIT_SUBMIT",
+            client_order_id=str(coid),
+            side="SELL",
+            price=float(best_bid),
+            qty=float(qty_dec),
+            status="SUBMITTED",
+            reason=reason,
+            expected_net_usdc=float(est_net_if_exit),
+            payload={
+                "instrument_id": inst_key,
+                "fee_rate_decimal": float(fee_rate),
+                "best_bid": float(best_bid),
+            },
+        )
+        return True
+
+    def _clear_pending_taker_exit_for_order(self, client_order_id: str) -> None:
+        target = str(client_order_id or "")
+        if not target:
+            return
+        for inst_key, coid in list(self.pending_taker_exit_by_inst.items()):
+            if coid == target:
+                self.pending_taker_exit_by_inst.pop(inst_key, None)
+                break
+
+    @staticmethod
     def _extract_token_id_from_instrument(instrument_id: str) -> Optional[str]:
         """
         Extract token_id from Nautilus Polymarket instrument ID:
@@ -1454,6 +1713,19 @@ class IntegratedBTCStrategy(Strategy):
         token = token_id or self.current_token_id
         if not token:
             return None
+        now_ts = time.time()
+        local_cached = self._fee_rate_local_cache_by_token.get(token)
+        if local_cached is not None:
+            cached_ts = float(local_cached.get("ts", 0.0))
+            cached_rate = local_cached.get("fee_rate")
+            if (
+                isinstance(cached_rate, Decimal)
+                and cached_rate > 0
+                and cached_ts > 0
+                and (now_ts - cached_ts) < self.fee_rate_fetch_interval_sec
+            ):
+                return cached_rate
+
         fee_rate = await self.fee_rate_client.get_fee_rate_decimal(token)
         source = "clob_fee_rate"
         if fee_rate is None or fee_rate <= 0:
@@ -1464,11 +1736,28 @@ class IntegratedBTCStrategy(Strategy):
                 source = "legacy_bps_default"
         if fee_rate is None or fee_rate <= 0:
             return None
+        self._fee_rate_local_cache_by_token[token] = {"fee_rate": fee_rate, "ts": now_ts}
         fee_bps_value = int((fee_rate * Decimal("10000")).quantize(Decimal("1")))
-        logger.debug(
-            f"Using fee rate source={source} bps={fee_bps_value} "
-            f"decimal={float(fee_rate):.6f} token={token}"
+        prev_state = self._last_fee_log_state_by_token.get(token, {})
+        prev_ts = float(prev_state.get("ts", 0.0))
+        prev_bps = int(prev_state.get("bps", -1))
+        prev_source = str(prev_state.get("source", ""))
+        should_log = (
+            prev_ts <= 0
+            or (now_ts - prev_ts) >= self.fee_log_interval_sec
+            or prev_bps != fee_bps_value
+            or prev_source != source
         )
+        if should_log:
+            logger.debug(
+                f"Using fee rate source={source} bps={fee_bps_value} "
+                f"decimal={float(fee_rate):.6f} token={token}"
+            )
+            self._last_fee_log_state_by_token[token] = {
+                "ts": now_ts,
+                "bps": fee_bps_value,
+                "source": source,
+            }
         if source != "clob_fee_rate":
             health = self.fee_rate_client.get_health_snapshot()
             last_reason = str(health.get("last_error_reason", ""))
@@ -1495,6 +1784,8 @@ class IntegratedBTCStrategy(Strategy):
             return
         self._cancel_active_maker_orders()
         self.inventory_delta_shares = Decimal("0")
+        self.live_inventory_cost.clear()
+        self.pending_taker_exit_by_inst.clear()
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
             self.maker_kill_switch = False
             logger.warning("Maker kill switch auto-reset on market rollover.")
@@ -2143,6 +2434,9 @@ class IntegratedBTCStrategy(Strategy):
                             )
                             self._last_balance_warn_ts = time.time()
                         return
+
+        # Check whether current inventory should be force-closed via taker orders.
+        await self._maybe_taker_exit_positions(time.time(), is_simulation=is_simulation)
 
         now_ts = time.time()
         if now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
@@ -2920,20 +3214,36 @@ class IntegratedBTCStrategy(Strategy):
                 )
 
                 # Execute on-chain merge
-                self._execute_merge_on_chain(
+                success = self._execute_merge_on_chain(
                     pk=pk,
                     condition_id=condition_id,
                     amount=min_balance,
                     rpc_url=rpc_url,
                     chain_id=chain_id,
                 )
+                
+                # Deduct from live_inventory_cost if successful to prevent ghost inventory
+                if success:
+                    deduct_qty = Decimal(str(merge_amount_usdc))
+                    for t in tokens:
+                        inst_key = self._instrument_key(t['instrument'].id)
+                        state = self.live_inventory_cost.get(inst_key)
+                        if state:
+                            old_qty = Decimal(str(state.get("qty", "0")))
+                            if old_qty <= deduct_qty:
+                                self.live_inventory_cost.pop(inst_key, None)
+                            else:
+                                state["qty"] = old_qty - deduct_qty
+                                alloc = deduct_qty / old_qty if old_qty > 0 else Decimal("0")
+                                state["entry_fee_remaining"] = state.get("entry_fee_remaining", Decimal("0")) * (Decimal("1") - alloc)
+                    logger.info(f"Deducted {float(deduct_qty):.6f} from live_inventory_cost after merge.")
 
         except Exception as e:
             logger.debug(f"Merge check failed: {e}")
 
     def _execute_merge_on_chain(
         self, pk: str, condition_id: str, amount: int, rpc_url: str, chain_id: int
-    ) -> None:
+    ) -> bool:
         """Execute CTF mergePositions on-chain."""
         try:
             from web3 import Web3
@@ -2986,8 +3296,10 @@ class IntegratedBTCStrategy(Strategy):
                 f"✓ Merge SUCCESS: condition={condition_id[:16]}... "
                 f"recovered={usdc_recovered:.4f} USDC tx={txh.hex()} status={receipt.status}"
             )
+            return receipt.status == 1
         except Exception as e:
             logger.warning(f"Merge on-chain failed: {e}")
+            return False
 
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
@@ -4151,12 +4463,14 @@ class IntegratedBTCStrategy(Strategy):
         filled_id = str(event.client_order_id)
         filled_side: Optional[str] = None
         filled_econ = None
+        filled_inst: Any = None
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
             order = state.get("order")
             if order and str(order.client_order_id) == filled_id:
                 filled_side = side
                 filled_econ = state.get("econ")
+                filled_inst = state.get("instrument_id")
                 fill_qty = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
                 if fill_qty <= 0:
                     fill_qty = Decimal(str(state.get("quantity", "0")))
@@ -4173,6 +4487,22 @@ class IntegratedBTCStrategy(Strategy):
                 if total_qty <= 0 or accumulated >= total_qty:
                     self.active_maker_orders.pop(order_key, None)
                 break
+        if filled_inst is None:
+            filled_inst = getattr(event, "instrument_id", None) or self.instrument_id
+
+        fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
+        fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
+        fill_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
+        side_for_ledger = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
+        if side_for_ledger:
+            self._update_live_inventory_cost_from_fill(
+                instrument_id=filled_inst,
+                side=side_for_ledger,
+                fill_price=fill_price_dec,
+                fill_qty=fill_qty_dec,
+                commission=fill_commission_dec,
+            )
+        self._clear_pending_taker_exit_for_order(filled_id)
 
         self.consecutive_denied_orders = 0
         self.last_quote_update_ts = 0.0
@@ -4249,6 +4579,7 @@ class IntegratedBTCStrategy(Strategy):
     def on_order_canceled(self, event):
         """Handle cancel acknowledgements to clear pending-cancel state."""
         canceled_id = str(getattr(event, "client_order_id", "") or "")
+        self._clear_pending_taker_exit_for_order(canceled_id)
         for order_key, state in list(self.active_maker_orders.items()):
             order = state.get("order")
             if order and str(order.client_order_id) == canceled_id:
@@ -4261,6 +4592,33 @@ class IntegratedBTCStrategy(Strategy):
             side=str(getattr(event, "order_side", "")),
             status="CANCELED",
         )
+    
+    def on_order_cancel_rejected(self, event):
+        """Handle when an order cancellation is rejected by exchange (e.g. already canceled or matched)."""
+        rejected_id = str(getattr(event, "client_order_id", "") or "")
+        self._clear_pending_taker_exit_for_order(rejected_id)
+        reason = str(getattr(event, "reason", "") or "").lower()
+        
+        logger.warning(f"OrderCancelRejected for {rejected_id}: {reason}")
+        
+        # If it says it's already canceled or matched, it's safe to clear from our active tracking
+        # to prevent stuck states and kill-switch activations.
+        if "already canceled or matched" in reason or "order can't be found" in reason:
+            for order_key, state in list(self.active_maker_orders.items()):
+                order = state.get("order")
+                if order and str(order.client_order_id) == rejected_id:
+                    logger.info(f"Clearing {rejected_id} from active_maker_orders due to benign CancelReject.")
+                    self.active_maker_orders.pop(order_key, None)
+                    break
+            
+            self._db_order_event(
+                event_type="ORDER_CANCEL_REJECTED",
+                client_order_id=rejected_id,
+                venue_order_id=str(getattr(event, "venue_order_id", "")) if getattr(event, "venue_order_id", None) else None,
+                side=str(getattr(event, "order_side", "")),
+                status="CANCEL_REJECTED_RECONCILED",
+                reason=reason,
+            )
     
     def on_order_denied(self, event):
         """Handle when an order is denied."""
@@ -4279,6 +4637,7 @@ class IntegratedBTCStrategy(Strategy):
         logger.error("=" * 80)
 
         denied_id = str(event.client_order_id)
+        self._clear_pending_taker_exit_for_order(denied_id)
         for order_key, state in list(self.active_maker_orders.items()):
             order = state.get("order")
             if order and str(order.client_order_id) == denied_id:
