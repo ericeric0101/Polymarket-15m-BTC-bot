@@ -123,12 +123,23 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB log_run_start failed: {e}")
 
     def log_run_stop(self, run_id: str, notes: Optional[Dict[str, Any]] = None) -> None:
-        sql = "UPDATE strategy_runs SET ended_at=?, notes_json=? WHERE run_id=?"
+        select_sql = "SELECT notes_json FROM strategy_runs WHERE run_id=?"
+        update_sql = "UPDATE strategy_runs SET ended_at=?, notes_json=? WHERE run_id=?"
         try:
             with self._connect() as conn:
+                existing_notes: Dict[str, Any] = {}
+                row = conn.execute(select_sql, (run_id,)).fetchone()
+                if row and row[0]:
+                    try:
+                        parsed = json.loads(row[0])
+                        if isinstance(parsed, dict):
+                            existing_notes = parsed
+                    except Exception:
+                        existing_notes = {}
+                merged_notes = {**existing_notes, **(notes or {})}
                 conn.execute(
-                    sql,
-                    (_utc_now_iso(), json.dumps(notes or {}, ensure_ascii=False), run_id),
+                    update_sql,
+                    (_utc_now_iso(), json.dumps(merged_notes, ensure_ascii=False), run_id),
                 )
                 conn.commit()
         except Exception as e:

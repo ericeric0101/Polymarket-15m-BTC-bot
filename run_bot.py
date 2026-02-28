@@ -619,6 +619,7 @@ class IntegratedBTCStrategy(Strategy):
         self.price_history = []
         self.max_history = 100
         self.real_price_history: List[Decimal] = []
+        self.real_price_history_by_inst: Dict[str, List[Decimal]] = {}
         self.max_real_history = int(os.getenv("MAKER_VOL_REAL_HISTORY_MAX", "300"))
         
         # Paper trading tracker
@@ -680,6 +681,15 @@ class IntegratedBTCStrategy(Strategy):
         
         self.maker_momentum_filter_pct = Decimal(os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.03"))
         self.maker_momentum_window_ticks = int(os.getenv("MAKER_MOMENTUM_WINDOW_TICKS", "20"))
+        self.maker_fair_pricer_mode = os.getenv("MAKER_FAIR_PRICER_MODE", "drift").strip().lower()
+        if self.maker_fair_pricer_mode not in {"drift", "digital"}:
+            self.maker_fair_pricer_mode = "drift"
+        self.maker_digital_vol_window = max(10, int(os.getenv("MAKER_DIGITAL_VOL_WINDOW", "120")))
+        self.maker_digital_vol_min_points = max(5, int(os.getenv("MAKER_DIGITAL_VOL_MIN_POINTS", "20")))
+        self.maker_digital_sigma_default = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_DEFAULT", "0.60"))
+        self.maker_digital_sigma_floor = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_FLOOR", "0.20"))
+        self.maker_digital_sigma_ceiling = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_CEILING", "2.00"))
+        self.maker_digital_vol_scale = Decimal(os.getenv("MAKER_DIGITAL_VOL_SCALE", "1.00"))
         
         # Performance / Execution
         self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
@@ -715,6 +725,10 @@ class IntegratedBTCStrategy(Strategy):
         self.orderbook_unavailable_token: Optional[str] = None
         self.last_external_spot: Optional[Decimal] = None
         self.latest_external_spot: Optional[Decimal] = None
+        self.external_spot_history: List[Tuple[float, Decimal]] = []
+        self.external_spot_history_max = max(60, int(os.getenv("EXTERNAL_SPOT_HISTORY_MAX", "1200")))
+        self.market_strike_cache_by_slug: Dict[str, Decimal] = {}
+        self._last_digital_pricer_log_ts = 0.0
         self.latest_market_bid: Optional[Decimal] = None
         self.latest_market_ask: Optional[Decimal] = None
         self._inventory_delta_shares = Decimal("0")
@@ -802,6 +816,8 @@ class IntegratedBTCStrategy(Strategy):
         if value != old_val:
             self.inventory_last_update_ts = time.time()
             self._inventory_delta_shares = value
+
+    def _log_strategy_config_summary(self) -> None:
         logger.info("  Phase 7: Learning engine ready")
         logger.info("  $1 per trade maximum")
         logger.info("  Reloads instruments every 12 minutes")
@@ -820,6 +836,7 @@ class IntegratedBTCStrategy(Strategy):
         logger.info(f"  Maker min fair price (buy floor): {self.maker_min_fair_price}")
         logger.info(f"  Maker max fair price (buy ceiling): {self.maker_max_fair_price}")
         logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
+        logger.info(f"  Maker fair pricer mode: {self.maker_fair_pricer_mode}")
         logger.info(f"  Maker fee default decimal: {float(self.maker_fee_rate_default_decimal):.6f}")
         logger.info(f"  Auto redeem: {'ON' if self.auto_redeem_enabled else 'OFF'}")
         if self.auto_redeem_enabled:
@@ -1111,15 +1128,171 @@ class IntegratedBTCStrategy(Strategy):
             logger.debug(f"Coinbase spot fetch failed: {e}")
         return None
 
-    async def _compute_fair_probability(self, market_mid: Decimal) -> Decimal:
+    def _record_external_spot_observation(self, price: Decimal) -> None:
+        now_ts = time.time()
+        self.external_spot_history.append((now_ts, price))
+        if len(self.external_spot_history) > self.external_spot_history_max:
+            self.external_spot_history.pop(0)
+
+    @staticmethod
+    def _normal_cdf(x: float) -> float:
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def _extract_strike_from_question(self, question_text: str) -> Optional[Decimal]:
+        text = str(question_text or "")
+        if not text:
+            return None
+        candidates: List[Decimal] = []
+        for m in re.finditer(r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)", text):
+            raw = str(m.group(1) or "").replace(",", "").strip()
+            if not raw:
+                continue
+            try:
+                value = Decimal(raw)
+            except Exception:
+                continue
+            if value < Decimal("1000") or value > Decimal("1000000"):
+                continue
+            candidates.append(value)
+        if not candidates:
+            return None
+        ref_spot = self.latest_external_spot
+        if ref_spot is None or ref_spot <= 0:
+            return candidates[0]
+        return min(candidates, key=lambda v: abs(v - ref_spot))
+
+    def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return None
+        instrument = self.cache.instrument(inst)
+        if instrument is None:
+            return None
+        slug = self._extract_market_slug_from_instrument(instrument)
+        if slug and slug in self.market_strike_cache_by_slug:
+            return self.market_strike_cache_by_slug[slug]
+        info = getattr(instrument, "info", None) or {}
+        if not isinstance(info, dict):
+            return None
+        question = str(info.get("question", "") or "")
+        strike = self._extract_strike_from_question(question)
+        if strike is not None and slug:
+            self.market_strike_cache_by_slug[slug] = strike
+        return strike
+
+    def _estimate_external_spot_sigma_annualized(self) -> Optional[Decimal]:
+        if len(self.external_spot_history) < self.maker_digital_vol_min_points:
+            return None
+        sample = self.external_spot_history[-self.maker_digital_vol_window :]
+        returns: List[float] = []
+        dts: List[float] = []
+        for i in range(1, len(sample)):
+            prev_ts, prev_px = sample[i - 1]
+            cur_ts, cur_px = sample[i]
+            prev_f = float(prev_px)
+            cur_f = float(cur_px)
+            dt = float(cur_ts - prev_ts)
+            if prev_f <= 0 or cur_f <= 0 or dt <= 0:
+                continue
+            lr = math.log(cur_f / prev_f)
+            if not math.isfinite(lr):
+                continue
+            returns.append(lr)
+            dts.append(dt)
+        if len(returns) < max(2, self.maker_digital_vol_min_points - 1):
+            return None
+        mean_r = sum(returns) / len(returns)
+        denom = max(1, len(returns) - 1)
+        var = sum((r - mean_r) ** 2 for r in returns) / denom
+        if var <= 0:
+            return None
+        std_per_obs = math.sqrt(var)
+        avg_dt = sum(dts) / len(dts)
+        if avg_dt <= 0:
+            return None
+        sec_per_year = 365.0 * 24.0 * 3600.0
+        sigma_annual = std_per_obs * math.sqrt(sec_per_year / avg_dt)
+        if not math.isfinite(sigma_annual) or sigma_annual <= 0:
+            return None
+        return Decimal(str(sigma_annual))
+
+    def _digital_up_probability(
+        self,
+        spot: Decimal,
+        strike: Decimal,
+        sigma_annual: Decimal,
+        time_left_sec: float,
+    ) -> Decimal:
+        if spot <= 0 or strike <= 0:
+            return Decimal("0.5")
+        if time_left_sec <= 0:
+            return Decimal("1.0") if spot >= strike else Decimal("0.0")
+        sigma = max(Decimal("0.0001"), sigma_annual)
+        t_years = max(1e-9, float(time_left_sec) / (365.0 * 24.0 * 3600.0))
+        sigma_f = float(sigma)
+        denom = sigma_f * math.sqrt(t_years)
+        if denom <= 1e-12:
+            return Decimal("1.0") if spot >= strike else Decimal("0.0")
+        d2 = (math.log(float(spot / strike)) - 0.5 * (sigma_f ** 2) * t_years) / denom
+        p = self._normal_cdf(d2)
+        p = max(0.0, min(1.0, p))
+        return Decimal(str(p))
+
+    async def _compute_fair_probability(self, market_mid: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
         """
-        Build fair probability from market mid plus external BTC momentum adjustment.
+        Build fair probability from external BTC spot.
+        Modes:
+        - drift: legacy momentum shift on market_mid.
+        - digital: short-dated digital option probability using parsed strike + estimated sigma.
         """
         fair = market_mid
         external = await self._fetch_external_spot_price()
         if external:
             self.latest_external_spot = external
-            if self.last_external_spot and self.last_external_spot > 0:
+            self._record_external_spot_observation(external)
+            if self.maker_fair_pricer_mode == "digital":
+                strike = self._get_market_strike_for_instrument(instrument_id)
+                end_ts = getattr(self, "current_market_end_timestamp", None)
+                time_left_sec = float(end_ts - time.time()) if end_ts is not None else 0.0
+                sigma = self._estimate_external_spot_sigma_annualized()
+                if sigma is None or sigma <= 0:
+                    sigma = self.maker_digital_sigma_default
+                sigma = sigma * self.maker_digital_vol_scale
+                sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
+                if strike is not None:
+                    up_prob = self._digital_up_probability(
+                        spot=external,
+                        strike=strike,
+                        sigma_annual=sigma,
+                        time_left_sec=time_left_sec,
+                    )
+                    fair_up = max(Decimal("0.01"), min(Decimal("0.99"), up_prob))
+                    fair_down = Decimal("1.0") - fair_up
+                    fair_down = max(Decimal("0.01"), min(Decimal("0.99"), fair_down))
+                    instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
+                    outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
+                    if outcome == "up":
+                        fair = fair_up
+                    elif outcome == "down":
+                        fair = fair_down
+                    else:
+                        fair = market_mid
+                    now_ts = time.time()
+                    if now_ts - self._last_digital_pricer_log_ts >= 30:
+                        logger.info(
+                            "Digital pricer: "
+                            f"spot={float(external):.2f} strike={float(strike):.2f} "
+                            f"sigma={float(sigma):.4f} t_left={time_left_sec:.1f}s "
+                            f"fair_up={float(fair_up):.4f} outcome={outcome or 'unknown'}"
+                        )
+                        self._last_digital_pricer_log_ts = now_ts
+                else:
+                    logger.debug("Digital pricer fallback: strike unavailable, using drift mode.")
+                    if self.last_external_spot and self.last_external_spot > 0:
+                        drift = (external - self.last_external_spot) / self.last_external_spot
+                        shift = Decimal(str(max(-0.05, min(0.05, float(drift) * 8.0))))
+                        fair = market_mid + shift
+            elif self.last_external_spot and self.last_external_spot > 0:
                 drift = (external - self.last_external_spot) / self.last_external_spot
                 shift = Decimal(str(max(-0.05, min(0.05, float(drift) * 8.0))))
                 fair = market_mid + shift
@@ -1214,6 +1387,40 @@ class IntegratedBTCStrategy(Strategy):
             bid_decimal = max(Decimal("0.01"), mid_tmp - Decimal("0.005"))
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
         return bid_decimal, ask_decimal
+
+    def _append_real_mid_price(self, instrument_id: Any, mid_price: Decimal) -> None:
+        inst_key = str(instrument_id) if instrument_id is not None else ""
+        self.real_price_history.append(mid_price)
+        if len(self.real_price_history) > self.max_real_history:
+            self.real_price_history.pop(0)
+        if not inst_key:
+            return
+        history = self.real_price_history_by_inst.setdefault(inst_key, [])
+        history.append(mid_price)
+        if len(history) > self.max_real_history:
+            history.pop(0)
+
+    def _momentum_history_for_instrument(self, instrument_id: Any) -> List[Decimal]:
+        inst_key = str(instrument_id) if instrument_id is not None else ""
+        if inst_key:
+            per_inst = self.real_price_history_by_inst.get(inst_key)
+            if per_inst:
+                return per_inst
+        return self.real_price_history
+
+    def _get_total_sellable_qty(self, instrument_ids: Optional[List[Any]] = None) -> Decimal:
+        ids = instrument_ids or []
+        if not ids and self.instrument_id is not None:
+            ids = [self.instrument_id]
+        total = Decimal("0")
+        seen: set[str] = set()
+        for inst_id in ids:
+            key = str(inst_id)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            total += self._get_sellable_qty_for_current_instrument(instrument_id=inst_id)
+        return total
 
     def _infer_market_fee_rate_default(self) -> Decimal:
         """
@@ -1913,7 +2120,8 @@ class IntegratedBTCStrategy(Strategy):
             if balance is not None:
                 required = self.maker_quote_size_usdc * Decimal("1.1")  # 10% buffer
                 if balance < required:
-                    if abs(self.inventory_delta_shares) > 0:
+                    gross_sellable = self._get_total_sellable_qty(self._maker_quote_instruments())
+                    if gross_sellable > 0:
                         # Have inventory — switch to SELL-only to free up capital
                         _balance_forced_sell_only = True
                         if time.time() - getattr(self, '_last_balance_warn_ts', 0) >= 60:
@@ -1921,7 +2129,8 @@ class IntegratedBTCStrategy(Strategy):
                                 f"Balance pre-check: low USDC "
                                 f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
                                 f"Switching to SELL-only until balance recovers. "
-                                f"inventory={float(self.inventory_delta_shares):.4f}"
+                                f"net_inventory={float(self.inventory_delta_shares):.4f} "
+                                f"gross_sellable={float(gross_sellable):.4f}"
                             )
                             self._last_balance_warn_ts = time.time()
                     else:
@@ -1985,7 +2194,7 @@ class IntegratedBTCStrategy(Strategy):
             if quote is None:
                 continue
             inst_bid, inst_ask = quote
-            fair = await self._compute_fair_probability((inst_bid + inst_ask) / 2)
+            fair = await self._compute_fair_probability((inst_bid + inst_ask) / 2, instrument_id=inst_id)
             fair = self._apply_inventory_skew(fair)
             quote_bid = max(Decimal("0.01"), fair - self.maker_half_spread)
             quote_ask = min(Decimal("0.99"), fair + self.maker_half_spread)
@@ -2020,7 +2229,11 @@ class IntegratedBTCStrategy(Strategy):
             )
 
             if self.maker_quote_sides == "both_buy":
-                side_plan = {"buy": (quote_bid, bid_econ, bid_econ.expected_net_usdc >= self.maker_min_expected_net_usdc)}
+                if _balance_forced_sell_only:
+                    # In both_buy mode, fallback to SELL-only under low balance so capital can be recycled.
+                    side_plan = {"sell": (quote_ask, ask_econ, True)}
+                else:
+                    side_plan = {"buy": (quote_bid, bid_econ, bid_econ.expected_net_usdc >= self.maker_min_expected_net_usdc)}
             else:
                 side_plan = {
                     "buy": (quote_bid, bid_econ, bid_econ.expected_net_usdc >= self.maker_min_expected_net_usdc),
@@ -2033,9 +2246,10 @@ class IntegratedBTCStrategy(Strategy):
 
             # --- TREND / MOMENTUM FILTER ---------------------------------------------
             # Prevent "catching a falling knife" (buy) or "stepping in front of a train" (sell).
-            if self.maker_momentum_filter_pct > 0 and len(self.real_price_history) >= self.maker_momentum_window_ticks:
-                recent_px = self.real_price_history[-1]
-                old_px = self.real_price_history[-self.maker_momentum_window_ticks]
+            momentum_history = self._momentum_history_for_instrument(inst_id)
+            if self.maker_momentum_filter_pct > 0 and len(momentum_history) >= self.maker_momentum_window_ticks:
+                recent_px = momentum_history[-1]
+                old_px = momentum_history[-self.maker_momentum_window_ticks]
                 trend_pct = (recent_px - old_px) / old_px if old_px > 0 else Decimal("0")
                 
                 if trend_pct <= -self.maker_momentum_filter_pct and "buy" in side_plan:
@@ -2194,6 +2408,12 @@ class IntegratedBTCStrategy(Strategy):
                     f"{float(old_qty):.6f} → {float(qty_dec):.6f} "
                     f"(on-chain tokens after fees)"
                 )
+            if qty_dec + Decimal("0.000001") < self.maker_min_shares:
+                logger.info(
+                    "Skip maker SELL: reduced sellable qty is below minimum trade size "
+                    f"(qty={float(qty_dec):.6f}, min={float(self.maker_min_shares):.6f})"
+                )
+                return
 
         if self.current_simulation_mode:
             sim_order_id = f"SIM-MAKER-{side.upper()}-{int(time.time() * 1000)}"
@@ -2337,6 +2557,7 @@ class IntegratedBTCStrategy(Strategy):
         logger.info("=" * 80)
         logger.info("INTEGRATED BTC STRATEGY STARTED")
         logger.info("=" * 80)
+        self._log_strategy_config_summary()
         self.last_valid_quote_ts = time.time()
         self.consecutive_invalid_quote_ticks = 0
         
@@ -3549,14 +3770,11 @@ class IntegratedBTCStrategy(Strategy):
             
             # Update price history
             self.price_history.append(mid_price)
-            self.real_price_history.append(mid_price)
+            self._append_real_mid_price(tick.instrument_id, mid_price)
             
             # Limit history size
             if len(self.price_history) > self.max_history:
                 self.price_history.pop(0)
-            if len(self.real_price_history) > self.max_real_history:
-                self.real_price_history.pop(0)
-
             if self.maker_mode:
                 self._start_maker_worker(bid_decimal, ask_decimal)
                 return
@@ -3939,12 +4157,21 @@ class IntegratedBTCStrategy(Strategy):
             if order and str(order.client_order_id) == filled_id:
                 filled_side = side
                 filled_econ = state.get("econ")
-                qty = Decimal(str(state.get("quantity", "0")))
+                fill_qty = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
+                if fill_qty <= 0:
+                    fill_qty = Decimal(str(state.get("quantity", "0")))
+                total_qty = Decimal(str(state.get("quantity", "0")))
+                accumulated = Decimal(str(state.get("filled_qty", "0"))) + fill_qty
+                if accumulated > total_qty and total_qty > 0:
+                    fill_qty = max(Decimal("0"), total_qty - Decimal(str(state.get("filled_qty", "0"))))
+                    accumulated = total_qty
                 if side == "buy":
-                    self.inventory_delta_shares += qty
+                    self.inventory_delta_shares += fill_qty
                 else:
-                    self.inventory_delta_shares -= qty
-                self.active_maker_orders.pop(order_key, None)
+                    self.inventory_delta_shares -= fill_qty
+                state["filled_qty"] = accumulated
+                if total_qty <= 0 or accumulated >= total_qty:
+                    self.active_maker_orders.pop(order_key, None)
                 break
 
         self.consecutive_denied_orders = 0
