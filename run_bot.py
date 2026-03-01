@@ -1873,10 +1873,33 @@ class IntegratedBTCStrategy(Strategy):
         self.last_quote_update_ts = 0.0
         logger.info(f"Reset maker per-market state: {prev_instrument_id} -> {new_instrument_id}")
 
-    def _project_inventory_after_fill(self, side: str, qty: Decimal) -> Decimal:
-        if side == "buy":
-            return self.inventory_delta_shares + qty
-        return self.inventory_delta_shares - qty
+    def _project_inventory_after_fill(self, side: str, qty: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
+        inst_id = instrument_id if instrument_id is not None else self.instrument_id
+        projected = self.inventory_delta_shares
+        
+        # Calculate in-flight volume for the SAME side
+        target_side_str = "BUY" if side.lower() == "buy" else "SELL"
+        in_flight_qty = Decimal("0")
+        inst_target = str(inst_id) if inst_id else None
+        
+        for _, state in self.active_maker_orders.items():
+            o_side = str(state.get("side", "")).upper()
+            if o_side != target_side_str:
+                continue
+                
+            o_inst = str(state.get("instrument_id", ""))
+            if inst_target and o_inst != inst_target:
+                continue
+                
+            # If the order is in our active dict, assume its REMAINING quantity is occupying inventory capacity
+            # regardless of whether it lacks a VenueOrderId yet or is pending cancel.
+            o_qty = Decimal(str(state.get("quantity", "0")))
+            o_filled = Decimal(str(state.get("filled_qty", "0")))
+            in_flight_qty += max(Decimal("0"), o_qty - o_filled)
+            
+        if side.lower() == "buy":
+            return projected + in_flight_qty + qty
+        return projected - in_flight_qty - qty
 
     def _get_sellable_qty_for_current_instrument(self, instrument_id: Optional[Any] = None) -> Decimal:
         """
@@ -2089,7 +2112,11 @@ class IntegratedBTCStrategy(Strategy):
             )
             return
         if order is None:
-            self.active_maker_orders.pop(order_key, None)
+            # The order might just be missing a venue ID or dropped from cache temporarily.
+            # Don't pop it! Mark it pending_cancel to be cleaned up by the reconcile loop.
+            now_ts = time.time()
+            state["pending_cancel"] = True
+            state["last_cancel_ts"] = now_ts
             return
         try:
             status_text = str(getattr(order, "status", "")).upper()
@@ -2145,6 +2172,40 @@ class IntegratedBTCStrategy(Strategy):
                     self.active_maker_orders.pop(order_key, None)
                     continue
 
+                if is_open is None:
+                    unknown_retries = int(state.get("reconcile_unknown_retries", 0)) + 1
+                    state["reconcile_unknown_retries"] = unknown_retries
+                    
+                    if unknown_retries > self.maker_cancel_max_retries * 2:  # Give it a bit more leeway then drop
+                        logger.error(f"Cancel reconcile unknown for [{side}] {coid} exceeded max retries. Triggering Maker Kill Switch.")
+                        self._db_order_event(
+                            event_type="ORDER_CANCEL_RECONCILE_UNKNOWN_KILL",
+                            client_order_id=coid,
+                            side=side.upper(),
+                            status="KILL_SWITCH_UNKNOWN",
+                            reason="max_unknown_retries",
+                        )
+                        self._activate_maker_kill_switch(f"Order {coid} state unknown after {unknown_retries} retries")
+                        continue
+
+                    state["last_cancel_ts"] = now_ts
+                    pause_sec = max(1, min(self.maker_error_pause_sec, self.maker_cancel_ack_timeout_sec))
+                    self.quote_pause_until_ts = max(self.quote_pause_until_ts, now_ts + pause_sec)
+                    logger.warning(
+                        f"Cancel reconcile unknown for [{side}] {coid}; "
+                        f"keeping pending-cancel state and retrying later "
+                        f"(unknown_count={unknown_retries}, pause={pause_sec}s)."
+                    )
+                    self._db_order_event(
+                        event_type="ORDER_CANCEL_RECONCILE_UNKNOWN",
+                        client_order_id=coid,
+                        side=side.upper(),
+                        status="PENDING_CANCEL_UNKNOWN",
+                        reason="cache_unknown",
+                        payload={"unknown_count": unknown_retries},
+                    )
+                    continue
+
                 if retries < self.maker_cancel_max_retries and order is not None:
                     try:
                         self.cancel_order(order)
@@ -2176,7 +2237,7 @@ class IntegratedBTCStrategy(Strategy):
                     client_order_id=coid,
                     side=side.upper(),
                     status="PENDING_CANCEL_GIVE_UP",
-                    reason=f"open_or_unknown_after_retries={retries}",
+                    reason=f"open_after_retries={retries}",
                 )
                 self._activate_maker_kill_switch(
                     f"Cancel reconcile failed for {coid} after {retries} retries"
@@ -2201,8 +2262,9 @@ class IntegratedBTCStrategy(Strategy):
                 if oo:
                     open_orders.extend(list(oo))
 
+            # Empty cache can be a transient sync gap; treat as unknown, not closed.
             if len(open_orders) == 0:
-                return False
+                return None
 
             target = str(client_order_id)
             for o in open_orders:
@@ -2814,7 +2876,11 @@ class IntegratedBTCStrategy(Strategy):
                 current_price = Decimal(str(current.get("price", "0")))
                 if abs(current_price - limit_price) < self.maker_requote_threshold:
                     continue
+                # Safety-first requote: cancel existing order and wait for cancel ack/reconcile
+                # before submitting a replacement. This prevents multiple live orders on the same
+                # side/instrument when cancel acknowledgements are delayed or duplicated.
                 self._cancel_maker_order_side(order_key, reason="requote")
+                continue
 
             await self._submit_maker_quote(inst_id, side, limit_price, econ, dynamic_fee_rate)
 
@@ -2831,7 +2897,7 @@ class IntegratedBTCStrategy(Strategy):
         limit_price = self._align_price_to_tick(limit_price, side, instrument)
         precision = int(getattr(instrument, "size_precision", 6)) if instrument is not None else 6
         qty_dec = self._compute_maker_order_qty(limit_price, precision)
-        projected_inventory = self._project_inventory_after_fill(side, qty_dec)
+        projected_inventory = self._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
         if abs(projected_inventory) > self.maker_max_inventory_shares:
             logger.warning(
                 "Skip maker quote: projected inventory would exceed max "
@@ -2857,10 +2923,10 @@ class IntegratedBTCStrategy(Strategy):
         if side == "sell" and not self.current_simulation_mode:
             sellable_qty = self._get_effective_sellable_qty(instrument_id=instrument_id)
             if sellable_qty < Decimal("0.01"):
-                logger.debug(
-                    "Skip maker SELL: no sellable tokens "
-                    f"(sellable={float(sellable_qty):.6f}, instrument={self.instrument_id})"
-                )
+                # logger.debug(
+                #     "Skip maker SELL: no sellable tokens "
+                #     f"(sellable={float(sellable_qty):.6f}, instrument={self.instrument_id})"
+                # )
                 return
             if sellable_qty + Decimal("0.000001") < qty_dec:
                 old_qty = qty_dec
