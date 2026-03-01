@@ -560,7 +560,7 @@ class MarketPhase(Enum):
     """Market lifecycle phases for BTC 15-min markets."""
     WAITING = "WAITING"           # No active market; searching for next one
     ACTIVE = "ACTIVE"             # Market is live, quoting is allowed
-    REDUCE_ONLY = "REDUCE_ONLY"   # Close to market end, only SELL allowed
+    REDUCE_ONLY = "REDUCE_ONLY"   # Close to market end, BUY blocked (tail SELL block optional)
     SETTLING = "SETTLING"         # Market has ended, all orders cancelled
 
 
@@ -637,6 +637,7 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_half_spread = Decimal(os.getenv("MAKER_HALF_SPREAD", "0.01"))
         self.maker_quote_size_usdc = Decimal(os.getenv("MAKER_QUOTE_SIZE_USDC", "1.0"))
         self.maker_min_shares = Decimal(os.getenv("MAKER_MIN_SHARES", "5"))
+        self.maker_exchange_min_shares = Decimal(os.getenv("MAKER_EXCHANGE_MIN_SHARES", "5"))
         self.maker_fixed_shares = Decimal(os.getenv("MAKER_FIXED_SHARES", "0"))
         self.maker_quote_sides = os.getenv("MAKER_QUOTE_SIDES", "both").strip().lower()
         if self.maker_quote_sides not in {"both", "buy", "sell", "both_buy"}:
@@ -666,6 +667,10 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_min_minutes_to_close = float(os.getenv("MAKER_MIN_MINUTES_TO_CLOSE", "3.0"))
         self.maker_min_fair_price = Decimal(os.getenv("MAKER_MIN_FAIR_PRICE", "0.05"))
         self.maker_max_fair_price = Decimal(os.getenv("MAKER_MAX_FAIR_PRICE", "0.95"))
+        self.maker_reduce_only_no_new_sell_last_sec = max(
+            0,
+            int(os.getenv("MAKER_REDUCE_ONLY_NO_NEW_SELL_LAST_SEC", "45")),
+        )
         self.maker_fee_rate_default_decimal = Decimal(
             os.getenv("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
         )
@@ -698,6 +703,10 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_cooldown_sec = int(os.getenv("TAKER_EXIT_COOLDOWN_SEC", "8"))
         self.taker_exit_slippage_buffer_pct = Decimal(os.getenv("TAKER_EXIT_SLIPPAGE_BUFFER_PCT", "0.002"))
         self.taker_exit_only_on_profit = os.getenv("TAKER_EXIT_ONLY_ON_PROFIT", "0").strip().lower() in ("1", "true", "yes", "on")
+        self.taker_exit_disable_stop_loss_last_sec = max(
+            0,
+            int(os.getenv("TAKER_EXIT_DISABLE_STOP_LOSS_LAST_SEC", "45")),
+        )
         
         # Performance / Execution
         self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
@@ -736,10 +745,15 @@ class IntegratedBTCStrategy(Strategy):
         self.external_spot_history: List[Tuple[float, Decimal]] = []
         self.external_spot_history_max = max(60, int(os.getenv("EXTERNAL_SPOT_HISTORY_MAX", "1200")))
         self.market_strike_cache_by_slug: Dict[str, Decimal] = {}
+        self.market_strike_last_fetch_ts_by_slug: Dict[str, float] = {}
+        self.market_strike_fetch_cooldown_sec = max(10, int(os.getenv("MARKET_STRIKE_FETCH_COOLDOWN_SEC", "300")))
+        self.strike_fallback_log_interval_sec = max(10, int(os.getenv("STRIKE_FALLBACK_LOG_INTERVAL_SEC", "60")))
+        self._last_strike_fallback_log_ts = 0.0
         self._last_digital_pricer_log_ts = 0.0
         self.live_inventory_cost: Dict[str, Dict[str, Any]] = {}
         self.last_taker_exit_ts_by_inst: Dict[str, float] = {}
         self.pending_taker_exit_by_inst: Dict[str, str] = {}
+        self.taker_exit_tail_attempted_by_inst: Dict[str, float] = {}
         self.fee_log_interval_sec = max(5, int(os.getenv("FEE_LOG_INTERVAL_SEC", "60")))
         self._last_fee_log_state_by_token: Dict[str, Dict[str, Any]] = {}
         self.fee_rate_fetch_interval_sec = max(
@@ -797,6 +811,15 @@ class IntegratedBTCStrategy(Strategy):
         self._cached_usdc_balance: Optional[Decimal] = None
         self._balance_last_check_ts: float = 0.0
         self.balance_check_interval_sec = max(10, int(os.getenv("MAKER_BALANCE_CHECK_INTERVAL_SEC", "30")))
+        self.conditional_balance_check_interval_sec = max(
+            2, int(os.getenv("CONDITIONAL_BALANCE_CHECK_INTERVAL_SEC", "8"))
+        )
+        self.conditional_balance_safety_buffer_pct = max(
+            Decimal("0"),
+            min(Decimal("0.05"), Decimal(os.getenv("CONDITIONAL_BALANCE_SAFETY_BUFFER_PCT", "0.001"))),
+        )
+        self._conditional_balance_cache_by_token: Dict[str, Dict[str, Any]] = {}
+        self._sell_reject_pause_until_by_inst: Dict[str, float] = {}
 
         # --- Binance WebSocket for real-time BTC price ---
         self._binance_ws_price: Optional[Decimal] = None
@@ -849,10 +872,17 @@ class IntegratedBTCStrategy(Strategy):
             f"  Maker fixed shares: "
             f"{float(self.maker_fixed_shares):.6f}" if self.maker_fixed_shares > 0 else "  Maker fixed shares: OFF"
         )
+        logger.info(f"  Exchange min shares: {float(self.maker_exchange_min_shares):.6f}")
         logger.info(f"  Maker cancel max retries: {self.maker_cancel_max_retries}")
         logger.info(f"  Maker reduce-only time cutoff (min): {self.maker_min_minutes_to_close}")
+        logger.info(f"  Maker reduce-only no-new-SELL tail: {self.maker_reduce_only_no_new_sell_last_sec}s")
         logger.info(f"  Maker min fair price (buy floor): {self.maker_min_fair_price}")
         logger.info(f"  Maker max fair price (buy ceiling): {self.maker_max_fair_price}")
+        logger.info(
+            "  Conditional balance guard: "
+            f"interval={self.conditional_balance_check_interval_sec}s "
+            f"buffer={float(self.conditional_balance_safety_buffer_pct)*100:.2f}%"
+        )
         logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
         logger.info(f"  Maker fair pricer mode: {self.maker_fair_pricer_mode}")
         logger.info(f"  Taker exit: {'ON' if self.taker_exit_enabled else 'OFF'}")
@@ -864,7 +894,8 @@ class IntegratedBTCStrategy(Strategy):
                 f"stop_loss={float(self.taker_exit_stop_loss_usdc):.4f} "
                 f"min_hold={self.taker_exit_min_hold_sec}s "
                 f"max_hold={self.taker_exit_max_hold_sec}s "
-                f"cooldown={self.taker_exit_cooldown_sec}s"
+                f"cooldown={self.taker_exit_cooldown_sec}s "
+                f"disable_stop_loss_last={self.taker_exit_disable_stop_loss_last_sec}s"
             )
         logger.info(f"  Maker fee default decimal: {float(self.maker_fee_rate_default_decimal):.6f}")
         logger.info(f"  Auto redeem: {'ON' if self.auto_redeem_enabled else 'OFF'}")
@@ -1190,7 +1221,7 @@ class IntegratedBTCStrategy(Strategy):
             return candidates[0]
         return min(candidates, key=lambda v: abs(v - ref_spot))
 
-    def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
+    async def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
             return None
@@ -1202,11 +1233,36 @@ class IntegratedBTCStrategy(Strategy):
             return self.market_strike_cache_by_slug[slug]
         info = getattr(instrument, "info", None) or {}
         if not isinstance(info, dict):
-            return None
+            info = {}
         question = str(info.get("question", "") or "")
         strike = self._extract_strike_from_question(question)
         if strike is not None and slug:
             self.market_strike_cache_by_slug[slug] = strike
+            return strike
+        if not slug:
+            return strike
+
+        now_ts = time.time()
+        last_fetch_ts = float(self.market_strike_last_fetch_ts_by_slug.get(slug, 0.0))
+        if last_fetch_ts > 0 and (now_ts - last_fetch_ts) < self.market_strike_fetch_cooldown_sec:
+            return strike
+        self.market_strike_last_fetch_ts_by_slug[slug] = now_ts
+        try:
+            market = await _fetch_gamma_market_by_slug(slug)
+        except Exception:
+            market = None
+        if not isinstance(market, dict):
+            return strike
+        text_candidates: List[str] = []
+        for key in ("question", "title", "description"):
+            val = market.get(key)
+            if val:
+                text_candidates.append(str(val))
+        for txt in text_candidates:
+            parsed = self._extract_strike_from_question(txt)
+            if parsed is not None:
+                self.market_strike_cache_by_slug[slug] = parsed
+                return parsed
         return strike
 
     def _estimate_external_spot_sigma_annualized(self) -> Optional[Decimal]:
@@ -1280,7 +1336,7 @@ class IntegratedBTCStrategy(Strategy):
             self.latest_external_spot = external
             self._record_external_spot_observation(external)
             if self.maker_fair_pricer_mode == "digital":
-                strike = self._get_market_strike_for_instrument(instrument_id)
+                strike = await self._get_market_strike_for_instrument(instrument_id)
                 end_ts = getattr(self, "current_market_end_timestamp", None)
                 time_left_sec = float(end_ts - time.time()) if end_ts is not None else 0.0
                 sigma = self._estimate_external_spot_sigma_annualized()
@@ -1316,7 +1372,9 @@ class IntegratedBTCStrategy(Strategy):
                         )
                         self._last_digital_pricer_log_ts = now_ts
                 else:
-                    logger.debug("Digital pricer fallback: strike unavailable, using drift mode.")
+                    if time.time() - self._last_strike_fallback_log_ts >= self.strike_fallback_log_interval_sec:
+                        logger.debug("Digital pricer fallback: strike unavailable, using drift mode.")
+                        self._last_strike_fallback_log_ts = time.time()
                     if self.last_external_spot and self.last_external_spot > 0:
                         drift = (external - self.last_external_spot) / self.last_external_spot
                         shift = Decimal(str(max(-0.05, min(0.05, float(drift) * 8.0))))
@@ -1423,10 +1481,24 @@ class IntegratedBTCStrategy(Strategy):
             return
         if self.taker_exit_cooldown_sec < 0:
             return
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        time_left_sec = (end_ts - now_ts) if end_ts is not None else None
+        in_reduce_only_tail = (
+            time_left_sec is not None
+            and self.maker_reduce_only_no_new_sell_last_sec > 0
+            and time_left_sec <= float(self.maker_reduce_only_no_new_sell_last_sec)
+        )
+        stop_loss_disabled_in_tail = (
+            time_left_sec is not None
+            and self.taker_exit_disable_stop_loss_last_sec > 0
+            and time_left_sec <= float(self.taker_exit_disable_stop_loss_last_sec)
+        )
         target_instruments = self._maker_quote_instruments()
         for inst_id in target_instruments:
             inst_key = self._instrument_key(inst_id)
             if not inst_key:
+                continue
+            if in_reduce_only_tail and inst_key in self.taker_exit_tail_attempted_by_inst:
                 continue
             state = self.live_inventory_cost.get(inst_key)
             if not state:
@@ -1465,7 +1537,11 @@ class IntegratedBTCStrategy(Strategy):
             trigger = ""
             if net_if_exit >= self.taker_exit_min_net_usdc:
                 trigger = "take_profit"
-            elif hold_sec >= max(0, self.taker_exit_min_hold_sec) and net_if_exit <= -abs(self.taker_exit_stop_loss_usdc):
+            elif (
+                not stop_loss_disabled_in_tail
+                and hold_sec >= max(0, self.taker_exit_min_hold_sec)
+                and net_if_exit <= -abs(self.taker_exit_stop_loss_usdc)
+            ):
                 trigger = "stop_loss"
             elif self.taker_exit_max_hold_sec > 0 and hold_sec >= self.taker_exit_max_hold_sec:
                 trigger = "max_hold"
@@ -1474,9 +1550,9 @@ class IntegratedBTCStrategy(Strategy):
             if self.taker_exit_only_on_profit and trigger not in {"stop_loss", "max_hold"} and net_if_exit < self.taker_exit_min_net_usdc:
                 continue
 
-            sellable_qty = self._get_sellable_qty_for_current_instrument(instrument_id=inst_id)
+            sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
             qty_to_exit = min(qty, sellable_qty)
-            if qty_to_exit + Decimal("0.000001") < self.maker_min_shares:
+            if qty_to_exit + Decimal("0.000001") < self.maker_exchange_min_shares:
                 continue
             ok = self._submit_taker_exit_order(
                 instrument_id=inst_id,
@@ -1488,6 +1564,8 @@ class IntegratedBTCStrategy(Strategy):
             )
             if ok:
                 self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+                if in_reduce_only_tail:
+                    self.taker_exit_tail_attempted_by_inst[inst_key] = now_ts
 
     def _submit_taker_exit_order(
         self,
@@ -1507,7 +1585,7 @@ class IntegratedBTCStrategy(Strategy):
         precision = int(getattr(instrument, "size_precision", 6))
         min_lot = Decimal(str(10 ** (-precision)))
         qty_dec = max(min_lot, quantity).quantize(min_lot, rounding=ROUND_FLOOR)
-        if qty_dec + Decimal("0.000001") < self.maker_min_shares:
+        if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
             return False
 
         self._cancel_maker_order_side("buy", reason="taker_exit", instrument_id=inst)
@@ -1786,6 +1864,9 @@ class IntegratedBTCStrategy(Strategy):
         self.inventory_delta_shares = Decimal("0")
         self.live_inventory_cost.clear()
         self.pending_taker_exit_by_inst.clear()
+        self.taker_exit_tail_attempted_by_inst.clear()
+        self._sell_reject_pause_until_by_inst.clear()
+        self._conditional_balance_cache_by_token.clear()
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
             self.maker_kill_switch = False
             logger.warning("Maker kill switch auto-reset on market rollover.")
@@ -1815,6 +1896,73 @@ class IntegratedBTCStrategy(Strategy):
         except Exception as e:
             logger.debug(f"Could not read sellable qty from cache positions: {e}")
         return total
+
+    def _get_conditional_balance_for_token(self, token_id: Optional[str], force_refresh: bool = False) -> Optional[Decimal]:
+        """
+        Query CONDITIONAL token balance from CLOB and cache for a short interval.
+        Returns shares (Decimal) or None if unavailable.
+        """
+        token = str(token_id or "").strip()
+        if not token:
+            return None
+        now_ts = time.time()
+        cached = self._conditional_balance_cache_by_token.get(token)
+        if (
+            not force_refresh
+            and cached is not None
+            and (now_ts - float(cached.get("ts", 0.0))) < self.conditional_balance_check_interval_sec
+        ):
+            bal = cached.get("balance")
+            return Decimal(str(bal)) if bal is not None else None
+
+        try:
+            if not hasattr(self, "_balance_clob_client") or self._balance_clob_client is None:
+                self._balance_last_check_ts = 0.0
+                self._refresh_balance_cache()
+            client = getattr(self, "_balance_clob_client", None)
+            if client is None:
+                return Decimal(str(cached.get("balance"))) if cached and cached.get("balance") is not None else None
+
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token,
+                signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+            )
+            result = client.get_balance_allowance(params)
+            if result and isinstance(result, dict):
+                raw = result.get("balance")
+                if raw is not None:
+                    balance_shares = Decimal(str(raw)) / Decimal("1000000")
+                    self._conditional_balance_cache_by_token[token] = {
+                        "ts": now_ts,
+                        "balance": str(balance_shares),
+                    }
+                    return balance_shares
+        except Exception as e:
+            logger.debug(f"Conditional balance fetch failed for token={token}: {e}")
+
+        if cached and cached.get("balance") is not None:
+            return Decimal(str(cached.get("balance")))
+        return None
+
+    def _get_effective_sellable_qty(self, instrument_id: Optional[Any]) -> Decimal:
+        """
+        Conservative sellable qty:
+        min(cache open positions, on-chain conditional balance with safety buffer).
+        """
+        local_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
+        inst_txt = str(instrument_id or "")
+        token_id = self._extract_token_id_from_instrument(inst_txt)
+        onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
+        if onchain_qty is None:
+            return local_qty
+        safe_onchain = onchain_qty * (Decimal("1") - self.conditional_balance_safety_buffer_pct)
+        safe_onchain = max(Decimal("0"), safe_onchain)
+        if local_qty > 0:
+            return min(local_qty, safe_onchain)
+        return safe_onchain
 
     def _compute_maker_order_qty(self, limit_price: Decimal, precision: int) -> Decimal:
         """
@@ -2571,10 +2719,17 @@ class IntegratedBTCStrategy(Strategy):
             
             # --- REDUCE ONLY MODE (Time & Extreme Price & Lifecycle Protection) ---
             reduce_only_reason = None
+            reduce_only_tail_sell_block = False
+            reduce_only_tail_sec_left = None
             if phase == MarketPhase.REDUCE_ONLY:
                 end_ts = getattr(self, "current_market_end_timestamp", None)
                 time_left_min = ((end_ts - now_ts) / 60.0) if end_ts else 0
                 reduce_only_reason = f"lifecycle REDUCE_ONLY ({time_left_min:.1f}m left)"
+                if end_ts is not None and self.maker_reduce_only_no_new_sell_last_sec > 0:
+                    time_left_sec = end_ts - now_ts
+                    if time_left_sec <= float(self.maker_reduce_only_no_new_sell_last_sec):
+                        reduce_only_tail_sell_block = True
+                        reduce_only_tail_sec_left = max(0.0, time_left_sec)
             elif fair < self.maker_min_fair_price:
                 reduce_only_reason = f"fair {float(fair):.4f} < min {float(self.maker_min_fair_price):.4f}"
             elif fair > self.maker_max_fair_price:
@@ -2593,16 +2748,24 @@ class IntegratedBTCStrategy(Strategy):
                         self._logged_reduce_only = True
                         self._last_ro_log_ts = time.time()
                     side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
-                # Also block SELL when price is at extreme (outside fair range), not just time-based reduce-only
-                if "sell" in side_plan and (fair < self.maker_min_fair_price or fair > self.maker_max_fair_price):
-                    if not getattr(self, "_logged_extreme_sell_block", False) or time.time() - getattr(self, "_last_extreme_log_ts", 0) > 60:
-                        logger.warning(f"Extreme price detected ({reduce_only_reason}). Blocking SELL orders too.")
-                        self._logged_extreme_sell_block = True
-                        self._last_extreme_log_ts = time.time()
+                if "sell" in side_plan and reduce_only_tail_sell_block:
+                    if (
+                        not getattr(self, "_logged_reduce_only_tail_sell_block", False)
+                        or time.time() - getattr(self, "_last_ro_tail_sell_log_ts", 0) > 60
+                    ):
+                        logger.warning(
+                            "Maker Reduce-Only tail guard active "
+                            f"({reduce_only_tail_sec_left:.1f}s left <= {self.maker_reduce_only_no_new_sell_last_sec}s). "
+                            "Blocking new SELL quotes."
+                        )
+                        self._logged_reduce_only_tail_sell_block = True
+                        self._last_ro_tail_sell_log_ts = time.time()
                     side_plan["sell"] = (side_plan["sell"][0], side_plan["sell"][1], False)
+
             elif "buy" in side_plan and getattr(self, "_logged_reduce_only", False):
                 self._logged_reduce_only = False  # Reset if conditions normalize
                 self._logged_extreme_sell_block = False
+                self._logged_reduce_only_tail_sell_block = False
             # -----------------------------------------------------------
 
             # --- Balance-forced SELL-only mode ---
@@ -2610,6 +2773,11 @@ class IntegratedBTCStrategy(Strategy):
                 side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
 
             for side, (limit_price, econ, should_quote) in side_plan.items():
+                if side == "sell":
+                    inst_key = self._instrument_key(inst_id)
+                    sell_pause_until = float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0))
+                    if now_ts < sell_pause_until:
+                        should_quote = False
                 order_key = self._order_key_for(side, inst_id)
                 desired_quotes[order_key] = {
                     "side": side,
@@ -2687,7 +2855,7 @@ class IntegratedBTCStrategy(Strategy):
         # Live-only guard: prevent SELL submissions when we don't actually hold enough tokens.
         # If sellable is less than requested, REDUCE the qty to sellable amount instead of skipping.
         if side == "sell" and not self.current_simulation_mode:
-            sellable_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
+            sellable_qty = self._get_effective_sellable_qty(instrument_id=instrument_id)
             if sellable_qty < Decimal("0.01"):
                 logger.debug(
                     "Skip maker SELL: no sellable tokens "
@@ -2702,10 +2870,10 @@ class IntegratedBTCStrategy(Strategy):
                     f"{float(old_qty):.6f} → {float(qty_dec):.6f} "
                     f"(on-chain tokens after fees)"
                 )
-            if qty_dec + Decimal("0.000001") < self.maker_min_shares:
+            if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
                 logger.info(
                     "Skip maker SELL: reduced sellable qty is below minimum trade size "
-                    f"(qty={float(qty_dec):.6f}, min={float(self.maker_min_shares):.6f})"
+                    f"(qty={float(qty_dec):.6f}, min={float(self.maker_exchange_min_shares):.6f})"
                 )
                 return
 
@@ -4464,10 +4632,12 @@ class IntegratedBTCStrategy(Strategy):
         filled_side: Optional[str] = None
         filled_econ = None
         filled_inst: Any = None
+        maker_matched = False
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
             order = state.get("order")
             if order and str(order.client_order_id) == filled_id:
+                maker_matched = True
                 filled_side = side
                 filled_econ = state.get("econ")
                 filled_inst = state.get("instrument_id")
@@ -4494,6 +4664,14 @@ class IntegratedBTCStrategy(Strategy):
         fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
         fill_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
         side_for_ledger = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
+        # Non-maker fills (e.g. taker-exit IOC market sells) are not in active_maker_orders.
+        # Keep inventory_delta_shares in sync for those fills as well.
+        if not maker_matched and fill_qty_dec > 0:
+            side_norm = self._normalize_side_text(getattr(event, "order_side", ""))
+            if side_norm == "buy":
+                self.inventory_delta_shares += fill_qty_dec
+            elif side_norm == "sell":
+                self.inventory_delta_shares -= fill_qty_dec
         if side_for_ledger:
             self._update_live_inventory_cost_from_fill(
                 instrument_id=filled_inst,
@@ -4638,11 +4816,21 @@ class IntegratedBTCStrategy(Strategy):
 
         denied_id = str(event.client_order_id)
         self._clear_pending_taker_exit_for_order(denied_id)
+        rejected_side = ""
+        rejected_inst: Any = None
         for order_key, state in list(self.active_maker_orders.items()):
             order = state.get("order")
             if order and str(order.client_order_id) == denied_id:
+                rejected_side = str(state.get("side", "") or "")
+                rejected_inst = state.get("instrument_id")
                 self.active_maker_orders.pop(order_key, None)
                 break
+        if not rejected_side:
+            rejected_side = self._normalize_side_text(getattr(event, "order_side", ""))
+        if rejected_inst is None:
+            rejected_inst = getattr(event, "instrument_id", None)
+        if not rejected_side and denied_id.startswith("BTC-15M-TAKER-EXIT-"):
+            rejected_side = "sell"
 
         self.consecutive_denied_orders += 1
         reason = str(getattr(event, "reason", "") or "")
@@ -4681,12 +4869,30 @@ class IntegratedBTCStrategy(Strategy):
 
         if ("not enough balance" in lowered) or ("allowance" in lowered):
             pause_sec = max(1, self.maker_error_pause_sec)
-            self.quote_pause_until_ts = max(self.quote_pause_until_ts, time.time() + pause_sec)
-            self._cancel_active_maker_orders()
-            logger.warning(
-                f"Balance/allowance rejection detected; pause quoting for {pause_sec}s. "
-                "Check wallet balance and token allowance."
-            )
+            now_ts = time.time()
+            if rejected_side == "sell":
+                inst_key = self._instrument_key(rejected_inst)
+                if inst_key:
+                    self._sell_reject_pause_until_by_inst[inst_key] = max(
+                        float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0)),
+                        now_ts + pause_sec,
+                    )
+                # Keep BUY quotes alive; block SELL quotes only.
+                self._cancel_maker_order_side("sell", reason="sell_balance_reject", instrument_id=rejected_inst)
+                # Refresh conditional balance cache immediately to reduce repeated rejects.
+                token_id = self._extract_token_id_from_instrument(inst_key) if inst_key else None
+                self._get_conditional_balance_for_token(token_id=token_id, force_refresh=True)
+                logger.warning(
+                    f"SELL balance/allowance rejection detected; block SELL quoting for {pause_sec}s "
+                    f"(instrument={inst_key or '-'}) and keep BUY side active."
+                )
+            else:
+                self.quote_pause_until_ts = max(self.quote_pause_until_ts, now_ts + pause_sec)
+                self._cancel_active_maker_orders()
+                logger.warning(
+                    f"Balance/allowance rejection detected; pause quoting for {pause_sec}s. "
+                    "Check wallet balance and token allowance."
+                )
         self.rebate_reporter.record_denied()
         if self.consecutive_denied_orders >= self.maker_max_consecutive_denied:
             self._activate_maker_kill_switch(
