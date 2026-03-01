@@ -67,12 +67,14 @@ from core.strategy_brain.fusion_engine.signal_fusion import get_fusion_engine
 from execution.risk_engine import get_risk_engine
 from execution.fee_rate_client import FeeRateClient
 from execution.parameter_tuner import ParameterTuner
-from execution.rebate_model import CRYPTO_FEE_CURVE, bps_to_fee_rate, estimate_quote_economics
+from execution.rebate_model import CRYPTO_FEE_CURVE, bps_to_fee_rate
 from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.grafana_exporter import get_grafana_exporter
 from monitoring.trade_journal_db import TradeJournalDB
 from feedback.learning_engine import get_learning_engine
+from execution.maker_engine import MakerEngine, MakerEngineConfig
+from execution.sim_adapter import SimAdapter, SimAdapterConfig, PaperTrade
 
 load_dotenv()
 
@@ -505,30 +507,6 @@ def run_preflight_checks(simulation: bool) -> bool:
     logger.info("=" * 80)
     return True
 
-
-@dataclass
-class PaperTrade:
-    """Track paper/simulation trades"""
-    timestamp: datetime
-    direction: str
-    size_usd: float
-    price: float
-    signal_score: float
-    signal_confidence: float
-    outcome: str = "PENDING"
-    
-    def to_dict(self):
-        return {
-            'timestamp': self.timestamp.isoformat(),
-            'direction': self.direction,
-            'size_usd': self.size_usd,
-            'price': self.price,
-            'signal_score': self.signal_score,
-            'signal_confidence': self.signal_confidence,
-            'outcome': self.outcome,
-        }
-
-
 def init_redis():
     """Initialize Redis connection for simulation mode control."""
     try:
@@ -622,8 +600,7 @@ class IntegratedBTCStrategy(Strategy):
         self.real_price_history_by_inst: Dict[str, List[Decimal]] = {}
         self.max_real_history = int(os.getenv("MAKER_VOL_REAL_HISTORY_MAX", "300"))
         
-        # Paper trading tracker
-        self.paper_trades: List[PaperTrade] = []
+        # The PaperTrade list is now maintained inside SimAdapter
         
         # Last trading decision time (to prevent multiple trades per interval)
         self.last_trade_time = 0
@@ -651,15 +628,33 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_inventory_skew_max = Decimal(os.getenv("MAKER_INVENTORY_SKEW_MAX", "0.03"))
         self.maker_stale_inventory_sec = int(os.getenv("MAKER_STALE_INVENTORY_SEC", "30"))
         self.maker_stale_inventory_multiplier = Decimal(os.getenv("MAKER_STALE_INVENTORY_MULTIPLIER", "2.0"))
-        self.maker_volatility_pause_threshold = Decimal(os.getenv("MAKER_VOL_PAUSE_THRESHOLD", "0.03"))
-        self.maker_volatility_pause_sec = int(os.getenv("MAKER_VOL_PAUSE_SEC", "30"))
+        self.maker_vol_stressed_threshold = Decimal(os.getenv("MAKER_VOL_STRESSED_THRESHOLD", "0.015"))
+        self.maker_vol_extreme_threshold = Decimal(os.getenv("MAKER_VOL_EXTREME_THRESHOLD", "0.03"))
+        self.maker_vol_stressed_spread_mult = Decimal(os.getenv("MAKER_VOL_STRESSED_SPREAD_MULT", "2.0"))
+        self.maker_vol_stressed_size_mult = Decimal(os.getenv("MAKER_VOL_STRESSED_SIZE_MULT", "0.5"))
+        self.maker_vol_extreme_spread_mult = Decimal(os.getenv("MAKER_VOL_EXTREME_SPREAD_MULT", "3.0"))
+        
+        # --- Phase 3: Active Quoting Parameters ---
+        self.maker_pennying_enabled = os.getenv("MAKER_PENNYING_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+        self.maker_pennying_min_edge = Decimal(os.getenv("MAKER_PENNYING_MIN_EDGE", "0.005"))
+        self.maker_requote_max_per_sec = float(os.getenv("MAX_REQUOTE_PER_SEC", "1.0"))
+        self.maker_requote_hysteresis_ticks = Decimal(os.getenv("REQUOTE_HYSTERESIS_TICKS", "1"))
+        self.maker_execution_penalty_enable = os.getenv("MAKER_EXECUTION_PENALTY_ENABLE", "1").strip().lower() not in ("0", "false", "no")
+        self.maker_execution_penalty_floor_usdc = Decimal(os.getenv("MAKER_EXECUTION_PENALTY_FLOOR_USDC", "0.001"))
+        self.maker_execution_slippage_spread_mult = Decimal(os.getenv("MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT", "0.15"))
+        self.maker_execution_non_atomic_vol_mult = Decimal(os.getenv("MAKER_EXECUTION_NON_ATOMIC_VOL_MULT", "1.0"))
+        self.maker_execution_depth_impact_mult = Decimal(os.getenv("MAKER_EXECUTION_DEPTH_IMPACT_MULT", "1.0"))
+        self.maker_execution_vwap_mult = Decimal(os.getenv("MAKER_EXECUTION_VWAP_MULT", "1.0"))
+        self.orderbook_fetch_interval_sec = max(1, int(os.getenv("ORDERBOOK_FETCH_INTERVAL_SEC", "5")))
+        self.orderbook_levels_limit = max(1, int(os.getenv("ORDERBOOK_LEVELS_LIMIT", "10")))
+        self.requote_bucket_tokens = self.maker_requote_max_per_sec
+        self.requote_bucket_last_refill = time.time()
         self.maker_vol_warmup_quotes = int(os.getenv("MAKER_VOL_WARMUP_QUOTES", "30"))
         self.maker_vol_return_clip = Decimal(os.getenv("MAKER_VOL_RETURN_CLIP", "0.20"))
         self.maker_vol_rolling_window = int(os.getenv("MAKER_VOL_ROLLING_WINDOW", "30"))
         self.maker_vol_ewma_alpha = float(os.getenv("MAKER_VOL_EWMA_ALPHA", "0.35"))
         self.maker_max_consecutive_denied = int(os.getenv("MAKER_MAX_CONSECUTIVE_DENIED", "5"))
         self.maker_order_ttl_sec = int(os.getenv("MAKER_ORDER_TTL_SEC", "20"))
-        self.maker_requote_threshold = Decimal(os.getenv("MAKER_REQUOTE_THRESHOLD", "0.002"))
         self.maker_balance_pause_sec = int(os.getenv("MAKER_BALANCE_PAUSE_SEC", "60"))
         self.maker_error_pause_sec = int(os.getenv("MAKER_ERROR_PAUSE_SEC", "30"))
         
@@ -737,6 +732,49 @@ class IntegratedBTCStrategy(Strategy):
         self.consecutive_invalid_quote_ticks = 0
         self.last_quote_watchdog_check_ts = 0.0
         self.last_quote_watchdog_reload_ts = 0.0
+
+        # --- New Engines Init ---
+        maker_config = MakerEngineConfig(
+            maker_half_spread=self.maker_half_spread,
+            maker_quote_size_usdc=self.maker_quote_size_usdc,
+            maker_adverse_selection_buffer=self.maker_adverse_selection_buffer,
+            maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
+            maker_quote_sides=self.maker_quote_sides,
+            maker_inventory_skew_max=self.maker_inventory_skew_max,
+            maker_max_inventory_shares=self.maker_max_inventory_shares,
+            maker_stale_inventory_sec=self.maker_stale_inventory_sec,
+            maker_stale_inventory_multiplier=self.maker_stale_inventory_multiplier,
+            maker_vol_stressed_threshold=self.maker_vol_stressed_threshold,
+            maker_vol_extreme_threshold=self.maker_vol_extreme_threshold,
+            maker_vol_stressed_spread_mult=self.maker_vol_stressed_spread_mult,
+            maker_vol_stressed_size_mult=self.maker_vol_stressed_size_mult,
+            maker_vol_extreme_spread_mult=self.maker_vol_extreme_spread_mult,
+            maker_pennying_enabled=self.maker_pennying_enabled,
+            maker_pennying_min_edge=self.maker_pennying_min_edge,
+            maker_execution_penalty_enable=self.maker_execution_penalty_enable,
+            maker_execution_penalty_floor_usdc=self.maker_execution_penalty_floor_usdc,
+            maker_execution_slippage_spread_mult=self.maker_execution_slippage_spread_mult,
+            maker_execution_non_atomic_vol_mult=self.maker_execution_non_atomic_vol_mult,
+            maker_execution_depth_impact_mult=self.maker_execution_depth_impact_mult,
+            maker_execution_vwap_mult=self.maker_execution_vwap_mult,
+        )
+        self.maker_engine = MakerEngine(maker_config)
+
+        sim_config = SimAdapterConfig(
+            sim_fill_base_prob=self.sim_fill_base_prob,
+            sim_fill_edge_boost=self.sim_fill_edge_boost,
+            sim_fill_queue_penalty=self.sim_fill_queue_penalty,
+            sim_fill_age_bonus_max=self.sim_fill_age_bonus_max,
+            sim_fill_age_to_max_sec=self.sim_fill_age_to_max_sec,
+            sim_partial_fill_min_ratio=self.sim_partial_fill_min_ratio,
+            sim_partial_fill_max_ratio=self.sim_partial_fill_max_ratio,
+            maker_sim_eval_sec=self.maker_sim_eval_sec,
+            maker_fee_rate_bps_default=self.maker_fee_rate_bps_default,
+        )
+        self.sim_adapter = SimAdapter(sim_config)
+        # Backward-compatible alias: legacy code paths still use self.paper_trades.
+        self.paper_trades = self.sim_adapter.paper_trades
+
         self.last_status_log_ts = 0.0
         self.orderbook_unavailable_until_ts = 0.0
         self.orderbook_unavailable_token: Optional[str] = None
@@ -763,6 +801,8 @@ class IntegratedBTCStrategy(Strategy):
         self._fee_rate_local_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self.latest_market_bid: Optional[Decimal] = None
         self.latest_market_ask: Optional[Decimal] = None
+        self.latest_quote_depth_by_inst: Dict[str, Tuple[Optional[Decimal], Optional[Decimal]]] = {}
+        self.orderbook_levels_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self._inventory_delta_shares = Decimal("0")
         self.inventory_last_update_ts = 0.0
         self.consecutive_denied_orders = 0
@@ -885,6 +925,15 @@ class IntegratedBTCStrategy(Strategy):
         )
         logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
         logger.info(f"  Maker fair pricer mode: {self.maker_fair_pricer_mode}")
+        logger.info(f"  Execution penalty model: {'ON' if self.maker_execution_penalty_enable else 'OFF'}")
+        logger.info(
+            "  Execution penalty params: "
+            f"floor={float(self.maker_execution_penalty_floor_usdc):.6f} "
+            f"spread_mult={float(self.maker_execution_slippage_spread_mult):.4f} "
+            f"non_atomic_vol_mult={float(self.maker_execution_non_atomic_vol_mult):.4f} "
+            f"depth_impact_mult={float(self.maker_execution_depth_impact_mult):.4f} "
+            f"vwap_mult={float(self.maker_execution_vwap_mult):.4f}"
+        )
         logger.info(f"  Taker exit: {'ON' if self.taker_exit_enabled else 'OFF'}")
         logger.info(f"  Fee-rate fetch interval: {self.fee_rate_fetch_interval_sec}s")
         if self.taker_exit_enabled:
@@ -1194,10 +1243,7 @@ class IntegratedBTCStrategy(Strategy):
         if len(self.external_spot_history) > self.external_spot_history_max:
             self.external_spot_history.pop(0)
 
-    @staticmethod
-    def _normal_cdf(x: float) -> float:
-        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
+    # Removed math.erf wrappers locally
     def _extract_strike_from_question(self, question_text: str) -> Optional[Decimal]:
         text = str(question_text or "")
         if not text:
@@ -1301,28 +1347,6 @@ class IntegratedBTCStrategy(Strategy):
             return None
         return Decimal(str(sigma_annual))
 
-    def _digital_up_probability(
-        self,
-        spot: Decimal,
-        strike: Decimal,
-        sigma_annual: Decimal,
-        time_left_sec: float,
-    ) -> Decimal:
-        if spot <= 0 or strike <= 0:
-            return Decimal("0.5")
-        if time_left_sec <= 0:
-            return Decimal("1.0") if spot >= strike else Decimal("0.0")
-        sigma = max(Decimal("0.0001"), sigma_annual)
-        t_years = max(1e-9, float(time_left_sec) / (365.0 * 24.0 * 3600.0))
-        sigma_f = float(sigma)
-        denom = sigma_f * math.sqrt(t_years)
-        if denom <= 1e-12:
-            return Decimal("1.0") if spot >= strike else Decimal("0.0")
-        d2 = (math.log(float(spot / strike)) - 0.5 * (sigma_f ** 2) * t_years) / denom
-        p = self._normal_cdf(d2)
-        p = max(0.0, min(1.0, p))
-        return Decimal(str(p))
-
     async def _compute_fair_probability(self, market_mid: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
         """
         Build fair probability from external BTC spot.
@@ -1330,61 +1354,60 @@ class IntegratedBTCStrategy(Strategy):
         - drift: legacy momentum shift on market_mid.
         - digital: short-dated digital option probability using parsed strike + estimated sigma.
         """
+        # Delegated mathematical pricing logic to maker_engine
         fair = market_mid
         external = await self._fetch_external_spot_price()
         if external:
             self.latest_external_spot = external
             self._record_external_spot_observation(external)
+            
+            strike = None
+            sigma = self.maker_digital_sigma_default
+            time_left_sec = 0.0
+            outcome = ""
+            
             if self.maker_fair_pricer_mode == "digital":
                 strike = await self._get_market_strike_for_instrument(instrument_id)
                 end_ts = getattr(self, "current_market_end_timestamp", None)
                 time_left_sec = float(end_ts - time.time()) if end_ts is not None else 0.0
-                sigma = self._estimate_external_spot_sigma_annualized()
-                if sigma is None or sigma <= 0:
-                    sigma = self.maker_digital_sigma_default
+                est_sigma = self._estimate_external_spot_sigma_annualized()
+                if est_sigma and est_sigma > 0:
+                    sigma = est_sigma
                 sigma = sigma * self.maker_digital_vol_scale
                 sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
-                if strike is not None:
-                    up_prob = self._digital_up_probability(
-                        spot=external,
-                        strike=strike,
-                        sigma_annual=sigma,
-                        time_left_sec=time_left_sec,
-                    )
-                    fair_up = max(Decimal("0.01"), min(Decimal("0.99"), up_prob))
-                    fair_down = Decimal("1.0") - fair_up
-                    fair_down = max(Decimal("0.01"), min(Decimal("0.99"), fair_down))
-                    instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
-                    outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
-                    if outcome == "up":
-                        fair = fair_up
-                    elif outcome == "down":
-                        fair = fair_down
-                    else:
-                        fair = market_mid
-                    now_ts = time.time()
-                    if now_ts - self._last_digital_pricer_log_ts >= 30:
-                        logger.info(
-                            "Digital pricer: "
-                            f"spot={float(external):.2f} strike={float(strike):.2f} "
-                            f"sigma={float(sigma):.4f} t_left={time_left_sec:.1f}s "
-                            f"fair_up={float(fair_up):.4f} outcome={outcome or 'unknown'}"
-                        )
-                        self._last_digital_pricer_log_ts = now_ts
-                else:
+
+                instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
+                outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
+
+                if strike is None:
                     if time.time() - self._last_strike_fallback_log_ts >= self.strike_fallback_log_interval_sec:
                         logger.debug("Digital pricer fallback: strike unavailable, using drift mode.")
                         self._last_strike_fallback_log_ts = time.time()
-                    if self.last_external_spot and self.last_external_spot > 0:
-                        drift = (external - self.last_external_spot) / self.last_external_spot
-                        shift = Decimal(str(max(-0.05, min(0.05, float(drift) * 8.0))))
-                        fair = market_mid + shift
-            elif self.last_external_spot and self.last_external_spot > 0:
-                drift = (external - self.last_external_spot) / self.last_external_spot
-                shift = Decimal(str(max(-0.05, min(0.05, float(drift) * 8.0))))
-                fair = market_mid + shift
+                else:
+                    now_ts = time.time()
+                    if now_ts - self._last_digital_pricer_log_ts >= 30:
+                        logger.info(
+                            "Digital pricer inputs: "
+                            f"spot={float(external):.2f} strike={float(strike):.2f} "
+                            f"sigma={float(sigma):.4f} t_left={time_left_sec:.1f}s "
+                            f"outcome={outcome or 'unknown'}"
+                        )
+                        self._last_digital_pricer_log_ts = now_ts
+            
+            fair = MakerEngine.calculate_fair_price(
+                market_mid=market_mid,
+                external_spot=float(external),
+                last_external_spot=float(self.last_external_spot or 0.0),
+                strike=float(strike) if strike is not None else None,
+                sigma=float(sigma),
+                time_left_sec=time_left_sec,
+                outcome=outcome,
+                pricer_mode=self.maker_fair_pricer_mode
+            )
+            
             self.last_external_spot = external
-        return max(Decimal("0.01"), min(Decimal("0.99"), fair))
+            
+        return fair
 
     @staticmethod
     def _instrument_key(instrument_id: Any) -> str:
@@ -1848,6 +1871,71 @@ class IntegratedBTCStrategy(Strategy):
                 )
         return fee_rate
 
+    @staticmethod
+    def _parse_orderbook_levels(raw_levels: Any, limit: int) -> List[Tuple[Decimal, Decimal]]:
+        levels: List[Tuple[Decimal, Decimal]] = []
+        if not isinstance(raw_levels, list):
+            return levels
+        for lv in raw_levels:
+            if len(levels) >= limit:
+                break
+            px: Optional[Decimal] = None
+            qty: Optional[Decimal] = None
+            try:
+                if isinstance(lv, dict):
+                    px = Decimal(str(lv.get("price")))
+                    qty = Decimal(str(lv.get("size") if lv.get("size") is not None else lv.get("quantity")))
+                elif isinstance(lv, (list, tuple)) and len(lv) >= 2:
+                    px = Decimal(str(lv[0]))
+                    qty = Decimal(str(lv[1]))
+            except Exception:
+                continue
+            if px is None or qty is None:
+                continue
+            if px <= 0 or qty <= 0:
+                continue
+            levels.append((px, qty))
+        return levels
+
+    async def _get_orderbook_levels_for_token(
+        self,
+        token_id: Optional[str],
+    ) -> Tuple[Optional[List[Tuple[Decimal, Decimal]]], Optional[List[Tuple[Decimal, Decimal]]]]:
+        token = str(token_id or "").strip()
+        if not token:
+            return None, None
+        now_ts = time.time()
+        cached = self.orderbook_levels_cache_by_token.get(token)
+        if cached is not None:
+            cached_ts = float(cached.get("ts", 0.0))
+            if cached_ts > 0 and (now_ts - cached_ts) < self.orderbook_fetch_interval_sec:
+                return cached.get("bids"), cached.get("asks")
+
+        client = getattr(self, "_balance_clob_client", None)
+        if client is None:
+            # Try lazy init from existing balance refresh path.
+            self._refresh_balance_cache()
+            client = getattr(self, "_balance_clob_client", None)
+        if client is None:
+            return None, None
+
+        try:
+            raw = await asyncio.to_thread(client.get_order_book, token)
+            
+            # Robust extraction for both dict and object responses from py_clob_client
+            raw_bids = raw.get("bids") if isinstance(raw, dict) else getattr(raw, "bids", None)
+            raw_asks = raw.get("asks") if isinstance(raw, dict) else getattr(raw, "asks", None)
+            
+            bids = self._parse_orderbook_levels(raw_bids, self.orderbook_levels_limit)
+            asks = self._parse_orderbook_levels(raw_asks, self.orderbook_levels_limit)
+            self.orderbook_levels_cache_by_token[token] = {"ts": now_ts, "bids": bids, "asks": asks}
+            return bids, asks
+        except Exception as e:
+            logger.debug(f"Orderbook level fetch failed for token={token}: {e}")
+            if cached is not None:
+                return cached.get("bids"), cached.get("asks")
+            return None, None
+
     def _activate_maker_kill_switch(self, reason: str) -> None:
         self.maker_kill_switch = True
         self._cancel_active_maker_orders()
@@ -1867,6 +1955,8 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_tail_attempted_by_inst.clear()
         self._sell_reject_pause_until_by_inst.clear()
         self._conditional_balance_cache_by_token.clear()
+        self.latest_quote_depth_by_inst.clear()
+        self.orderbook_levels_cache_by_token.clear()
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
             self.maker_kill_switch = False
             logger.warning("Maker kill switch auto-reset on market rollover.")
@@ -2051,22 +2141,7 @@ class IntegratedBTCStrategy(Strategy):
 
         return Decimal(str(max(rolling_std, ewma_std)))
 
-    def _apply_inventory_skew(self, fair: Decimal) -> Decimal:
-        if self.maker_max_inventory_shares <= 0:
-            return fair
-        ratio = self.inventory_delta_shares / self.maker_max_inventory_shares
-        ratio = max(Decimal("-1"), min(Decimal("1"), ratio))
-        
-        multiplier = Decimal("1.0")
-        if self.inventory_delta_shares != 0 and self.inventory_last_update_ts > 0:
-            stale_time = time.time() - self.inventory_last_update_ts
-            if stale_time > self.maker_stale_inventory_sec:
-                multiplier = self.maker_stale_inventory_multiplier
-
-        # Long inventory => lower fair to encourage selling and reduce bid aggressiveness.
-        skew = ratio * self.maker_inventory_skew_max * multiplier
-        return max(Decimal("0.01"), min(Decimal("0.99"), fair - skew))
-
+    # _apply_inventory_skew removed (managed by MakerEngine)
     def _cancel_active_maker_orders(self) -> None:
         for order_key in list(self.active_maker_orders.keys()):
             self._cancel_maker_order_side(order_key, reason="risk")
@@ -2280,280 +2355,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.debug(f"Open-order cache reconciliation failed for {client_order_id}: {e}")
             return None
 
-    def _simulate_shadow_maker_fills_and_closes(self, bid_price: Decimal, ask_price: Decimal, now_ts: float) -> None:
-        """
-        In simulation mode, emulate maker order lifecycle:
-        - Submit -> ack latency -> resting.
-        - Cancel request -> cancel latency (can still fill before effective cancel).
-        - Queue-priority + edge + age based probabilistic partial fills.
-        - Evaluate PnL after hold period, including entry/exit fees.
-        """
-        mid_price = (bid_price + ask_price) / 2
-
-        # Advance simulated order states.
-        for order_key, state in list(self.active_maker_orders.items()):
-            side = str(state.get("side", "") or "")
-            if not state.get("simulated"):
-                continue
-            coid = str(state.get("client_order_id", f"SIM-{side}-{int(now_ts*1000)}"))
-
-            # Ack transition.
-            if state.get("status", "PENDING_ACK") == "PENDING_ACK":
-                ack_at = float(state.get("ack_at", 0.0))
-                if now_ts >= ack_at:
-                    state["status"] = "RESTING"
-                    self._db_order_event(
-                        event_type="ORDER_SIM_ACCEPTED",
-                        client_order_id=coid,
-                        side=side.upper(),
-                        price=float(state.get("price", 0.0)),
-                        qty=float(state.get("quantity", 0.0)),
-                        status="ACCEPTED",
-                    )
-
-            # Cancel transition.
-            if state.get("pending_cancel"):
-                cancel_effective_at = float(state.get("cancel_effective_at", 0.0))
-                if now_ts >= cancel_effective_at:
-                    self.active_maker_orders.pop(order_key, None)
-                    self.rebate_reporter.record_cancel(str(state.get("cancel_reason", "cancel")))
-                    self._db_order_event(
-                        event_type="ORDER_SIM_CANCELED",
-                        client_order_id=coid,
-                        side=side.upper(),
-                        price=float(state.get("price", 0.0)),
-                        qty=float(state.get("quantity", 0.0)),
-                        status="CANCELED",
-                        reason=str(state.get("cancel_reason", "cancel")),
-                    )
-                    continue
-
-            if state.get("status") != "RESTING":
-                continue
-
-            limit_price = Decimal(str(state.get("price", "0")))
-            qty = Decimal(str(state.get("quantity", "0")))
-            if qty <= 0:
-                continue
-            filled_qty = Decimal(str(state.get("filled_qty", "0")))
-            remaining_qty = qty - filled_qty
-            if remaining_qty <= 0:
-                continue
-
-            instrument_for_state = self._normalize_instrument_id(state.get("instrument_id") or self.instrument_id)
-            instrument = self.cache.instrument(instrument_for_state) if instrument_for_state else None
-            tick = Decimal("0.01")
-            if instrument is not None:
-                try:
-                    raw_tick = getattr(instrument, "price_increment", None)
-                    if raw_tick is not None:
-                        tick = Decimal(str(raw_tick))
-                    elif hasattr(instrument, "info") and instrument.info:
-                        maybe_tick = instrument.info.get("minimum_tick_size")
-                        if maybe_tick is not None:
-                            tick = Decimal(str(maybe_tick))
-                except Exception:
-                    pass
-            if tick <= 0:
-                tick = Decimal("0.01")
-
-            state_inst = self._normalize_instrument_id(state.get("instrument_id"))
-            state_quote = self._get_quote_for_instrument(state_inst) if state_inst else None
-            eval_bid = state_quote[0] if state_quote is not None else bid_price
-            eval_ask = state_quote[1] if state_quote is not None else ask_price
-
-            # Fill trigger:
-            # 1) hard cross (always eligible),
-            # 2) resting at/near top-of-book (maker can be hit without spread crossing).
-            crossed = False
-            near_top = False
-            if side == "buy":
-                crossed = eval_ask <= limit_price
-                near_top = limit_price >= (eval_bid - tick)
-            else:
-                crossed = eval_bid >= limit_price
-                near_top = limit_price <= (eval_ask + tick)
-
-            if not crossed and not near_top:
-                continue
-
-            created_ts = float(state.get("created_ts", now_ts))
-            age_sec = max(0.0, now_ts - created_ts)
-            queue_rank = float(state.get("queue_rank", 0.5))  # 0=front, 1=back
-            edge = float((limit_price - ask_price) if side == "buy" else (bid_price - limit_price))
-            edge = max(0.0, edge)
-
-            # If near top but not crossed, reward top-of-book proximity.
-            if side == "buy":
-                dist_to_best = max(Decimal("0"), eval_bid - limit_price)
-            else:
-                dist_to_best = max(Decimal("0"), limit_price - eval_ask)
-            proximity_ratio = 0.0
-            if tick > 0:
-                proximity_ratio = max(0.0, 1.0 - float(dist_to_best / tick))
-                proximity_ratio = min(1.0, proximity_ratio)
-
-            age_bonus = min(
-                self.sim_fill_age_bonus_max,
-                (age_sec / float(self.sim_fill_age_to_max_sec)) * self.sim_fill_age_bonus_max,
-            )
-            crossed_bonus = 0.45 if crossed else 0.0
-            top_book_bonus = 0.20 * proximity_ratio if near_top else 0.0
-            fill_prob = (
-                self.sim_fill_base_prob
-                + min(self.sim_fill_edge_boost, edge * 30.0)
-                + crossed_bonus
-                + top_book_bonus
-                + age_bonus
-                - (self.sim_fill_queue_penalty * queue_rank)
-            )
-            fill_prob = max(0.0, min(0.98, fill_prob))
-            if random.random() >= fill_prob:
-                continue
-
-            fill_ratio_low = max(0.01, min(self.sim_partial_fill_min_ratio, self.sim_partial_fill_max_ratio))
-            fill_ratio_high = max(fill_ratio_low, self.sim_partial_fill_max_ratio)
-            fill_ratio = random.uniform(fill_ratio_low, fill_ratio_high)
-            this_fill_qty = remaining_qty * Decimal(str(fill_ratio))
-            min_lot = Decimal("0.000001")
-            if this_fill_qty < min_lot:
-                this_fill_qty = min_lot
-            if this_fill_qty > remaining_qty:
-                this_fill_qty = remaining_qty
-
-            fee_rate_bps = int(state.get("fee_rate_bps", self.maker_fee_rate_bps_default))
-            fee_rate_dec = Decimal(str(max(0, fee_rate_bps))) / Decimal("10000")
-            entry_commission = (this_fill_qty * limit_price) * fee_rate_dec
-
-            state["filled_qty"] = filled_qty + this_fill_qty
-            state["entry_commission_usdc"] = Decimal(str(state.get("entry_commission_usdc", "0"))) + entry_commission
-            state["last_fill_ts"] = now_ts
-
-            status = "PARTIALLY_FILLED" if state["filled_qty"] < qty else "FILLED"
-            self._db_order_event(
-                event_type="ORDER_SIM_FILLED",
-                client_order_id=coid,
-                side=side.upper(),
-                price=float(limit_price),
-                qty=float(this_fill_qty),
-                status=status,
-                commission_usdc=float(entry_commission),
-                payload={
-                    "fill_prob": fill_prob,
-                    "queue_rank": queue_rank,
-                    "age_sec": age_sec,
-                    "edge": edge,
-                    "crossed": crossed,
-                    "near_top": near_top,
-                    "proximity_ratio": proximity_ratio,
-                    "filled_qty_total": float(state["filled_qty"]),
-                    "qty_total": float(qty),
-                    "fee_rate_bps": fee_rate_bps,
-                },
-            )
-
-            if state["filled_qty"] < qty:
-                continue
-
-            self.active_maker_orders.pop(order_key, None)
-            final_qty = state["filled_qty"]
-            if side == "buy":
-                self.inventory_delta_shares += final_qty
-            else:
-                self.inventory_delta_shares -= final_qty
-
-            self.sim_maker_positions.append(
-                {
-                    "client_order_id": coid,
-                    "side": side,
-                    "qty": final_qty,
-                    "entry_price": limit_price,
-                    "entry_commission_usdc": Decimal(str(state.get("entry_commission_usdc", "0"))),
-                    "fee_rate_bps": fee_rate_bps,
-                    "opened_ts": now_ts,
-                }
-            )
-
-        # Close simulated fills after hold horizon and compute win-rate.
-        remaining_positions: List[Dict[str, Any]] = []
-        for pos in self.sim_maker_positions:
-            opened_ts = float(pos.get("opened_ts", 0.0))
-            if now_ts - opened_ts < self.maker_sim_eval_sec:
-                remaining_positions.append(pos)
-                continue
-
-            side = str(pos.get("side"))
-            qty = Decimal(str(pos.get("qty", "0")))
-            entry = Decimal(str(pos.get("entry_price", "0")))
-            entry_commission = Decimal(str(pos.get("entry_commission_usdc", "0")))
-            fee_rate_bps = int(pos.get("fee_rate_bps", self.maker_fee_rate_bps_default))
-            fee_rate_dec = Decimal(str(max(0, fee_rate_bps))) / Decimal("10000")
-            if qty <= 0 or entry <= 0:
-                continue
-
-            if side == "buy":
-                gross_pnl = (mid_price - entry) * qty
-                self.inventory_delta_shares -= qty
-                direction = "long"
-            else:
-                gross_pnl = (entry - mid_price) * qty
-                self.inventory_delta_shares += qty
-                direction = "short"
-            exit_commission = (mid_price * qty) * fee_rate_dec
-            pnl = gross_pnl - entry_commission - exit_commission
-
-            self.sim_maker_closed_total += 1
-            if pnl > 0:
-                self.sim_maker_closed_wins += 1
-            win_rate = (
-                self.sim_maker_closed_wins / self.sim_maker_closed_total
-                if self.sim_maker_closed_total > 0
-                else 0.0
-            )
-
-            # Persist into existing performance tracker as synthetic maker trade.
-            try:
-                self.performance_tracker.record_trade(
-                    trade_id=f"sim_maker_{pos.get('client_order_id')}",
-                    direction=direction,
-                    entry_price=entry,
-                    exit_price=mid_price,
-                    size=entry * qty,
-                    entry_time=datetime.fromtimestamp(opened_ts, tz=timezone.utc),
-                    exit_time=datetime.now(timezone.utc),
-                    signal_score=0.0,
-                    signal_confidence=0.0,
-                    metadata={"sim_maker": True},
-                )
-            except Exception:
-                pass
-
-            self._db_order_event(
-                event_type="ORDER_SIM_CLOSED",
-                client_order_id=str(pos.get("client_order_id")),
-                side=side.upper(),
-                price=float(mid_price),
-                qty=float(qty),
-                status="CLOSED",
-                commission_usdc=float(entry_commission + exit_commission),
-                payload={
-                    "entry_price": float(entry),
-                    "exit_price": float(mid_price),
-                    "gross_pnl_usdc": float(gross_pnl),
-                    "pnl_usdc": float(pnl),
-                    "entry_commission_usdc": float(entry_commission),
-                    "exit_commission_usdc": float(exit_commission),
-                    "fee_rate_bps": fee_rate_bps,
-                    "win_rate": win_rate,
-                },
-            )
-            logger.info(
-                f"[SIM-MAKER] Closed {side.upper()} qty={float(qty):.6f} "
-                f"entry={float(entry):.4f} exit={float(mid_price):.4f} "
-                f"pnl={float(pnl):+.4f} win_rate={win_rate:.2%}"
-            )
-
-        self.sim_maker_positions = remaining_positions
+    # Simulation logic extracted to execution/sim_adapter.py
 
     def _maybe_auto_tune(self, now_ts: float) -> None:
         if not self.auto_tune_enabled:
@@ -2576,6 +2378,9 @@ class IntegratedBTCStrategy(Strategy):
             )
         self.maker_half_spread = new_half
         self.maker_min_expected_net_usdc = new_min
+        # Keep decoupled maker engine config in sync with auto-tuned values.
+        self.maker_engine.config.maker_half_spread = new_half
+        self.maker_engine.config.maker_min_expected_net_usdc = new_min
         self.last_auto_tune_ts = now_ts
 
     def _maker_quote_instruments(self) -> List[InstrumentId]:
@@ -2655,7 +2460,19 @@ class IntegratedBTCStrategy(Strategy):
         self._maybe_auto_tune(now_ts)
         self._cleanup_stale_pending_cancels(now_ts)
         if is_simulation and self.maker_simulation_shadow:
-            self._simulate_shadow_maker_fills_and_closes(bid_price, ask_price, now_ts)
+            self.inventory_delta_shares = self.sim_adapter.simulate_shadow_maker_fills_and_closes(
+                active_maker_orders=self.active_maker_orders,
+                inventory_delta_shares=self.inventory_delta_shares,
+                bid_price=bid_price,
+                ask_price=ask_price,
+                now_ts=now_ts,
+                get_quote_for_instrument_fn=self._get_quote_for_instrument,
+                normalize_instrument_id_fn=self._normalize_instrument_id,
+                instrument_cache_fn=self.cache.instrument,
+                db_event_fn=self._db_order_event,
+                record_cancel_fn=self.rebate_reporter.record_cancel,
+                record_trade_fn=self.performance_tracker.record_trade
+            )
 
         # Cancel stale quotes by TTL before computing new target quotes.
         for order_key, state in list(self.active_maker_orders.items()):
@@ -2676,19 +2493,22 @@ class IntegratedBTCStrategy(Strategy):
             logger.debug(
                 f"Volatility gate warmup: real_quotes={len(self.real_price_history)}/{self.maker_vol_warmup_quotes}"
             )
-        elif recent_vol > self.maker_volatility_pause_threshold:
-            self.quote_pause_until_ts = time.time() + self.maker_volatility_pause_sec
-            self._cancel_active_maker_orders()
-            logger.warning(
-                f"Volatility pause triggered: recent_vol={float(recent_vol):.4f} "
-                f"threshold={float(self.maker_volatility_pause_threshold):.4f} "
-                f"pause_sec={self.maker_volatility_pause_sec}"
-            )
-            return
+        else:
+            # We no longer pause the engine on high volatility.
+            # Volatility Regimes inside MakerEngine handle STRESSED and EXTREME states.
+            pass
 
         target_instruments = self._maker_quote_instruments()
         if not target_instruments:
             return
+
+        # Refill Requote Token Bucket
+        time_passed = max(0.0, now_ts - self.requote_bucket_last_refill)
+        self.requote_bucket_tokens = min(
+            self.maker_requote_max_per_sec,
+            self.requote_bucket_tokens + (time_passed * self.maker_requote_max_per_sec)
+        )
+        self.requote_bucket_last_refill = now_ts
 
         desired_quotes: Dict[str, Dict[str, Any]] = {}
         target_inst_set = {str(inst) for inst in target_instruments}
@@ -2699,54 +2519,54 @@ class IntegratedBTCStrategy(Strategy):
                 continue
             inst_bid, inst_ask = quote
             fair = await self._compute_fair_probability((inst_bid + inst_ask) / 2, instrument_id=inst_id)
-            fair = self._apply_inventory_skew(fair)
-            quote_bid = max(Decimal("0.01"), fair - self.maker_half_spread)
-            quote_ask = min(Decimal("0.99"), fair + self.maker_half_spread)
-
-            # Keep quotes passive relative to current top of book to reduce taker fills.
-            quote_bid = min(quote_bid, inst_bid)
-            quote_ask = max(quote_ask, inst_ask)
-            if quote_bid >= quote_ask:
-                continue
+            
+            instrument_for_tick = self._normalize_instrument_id(inst_id)
+            instrument = self.cache.instrument(instrument_for_tick) if instrument_for_tick else None
+            tick = Decimal("0.01")
+            if instrument is not None:
+                try:
+                    raw_tick = getattr(instrument, "price_increment", None)
+                    if raw_tick is not None:
+                        tick = Decimal(str(raw_tick))
+                    elif hasattr(instrument, "info") and instrument.info:
+                        maybe_tick = instrument.info.get("minimum_tick_size")
+                        if maybe_tick is not None:
+                            tick = Decimal(str(maybe_tick))
+                except Exception:
+                    pass
+            if tick <= 0:
+                tick = Decimal("0.01")
 
             token_id = self._extract_token_id_from_instrument(str(inst_id))
             dynamic_fee_rate = await self._get_dynamic_fee_rate(token_id=token_id)
+            bid_levels, ask_levels = await self._get_orderbook_levels_for_token(token_id)
             self.rebate_reporter.record_api_health(self.fee_rate_client.get_health_snapshot())
             if dynamic_fee_rate is not None:
                 logger.debug(
                     f"Using dynamic fee rate: {float(dynamic_fee_rate):.6f} for token {token_id}"
                 )
+            fee_rate_val = dynamic_fee_rate if dynamic_fee_rate is not None else self.maker_fee_rate_default_decimal
+            depth_key = str(inst_id)
+            bid_depth, ask_depth = self.latest_quote_depth_by_inst.get(depth_key, (None, None))
 
-            bid_econ = estimate_quote_economics(
-                quote_size_usdc=self.maker_quote_size_usdc,
-                probability=quote_bid,
-                half_spread=(fair - quote_bid),
-                adverse_selection_buffer=self.maker_adverse_selection_buffer,
-                fee_rate_override=dynamic_fee_rate,
+            side_plan = self.maker_engine.generate_quote_plan(
+                inst_bid=inst_bid,
+                inst_ask=inst_ask,
+                fair_price=fair,
+                fee_rate=fee_rate_val,
+                inventory_delta_shares=self.inventory_delta_shares,
+                inventory_last_update_ts=self.inventory_last_update_ts,
+                current_time_ts=now_ts,
+                tick_size=tick,
+                recent_vol=recent_vol,
+                balance_forced_sell_only=_balance_forced_sell_only,
+                bid_depth=bid_depth,
+                ask_depth=ask_depth,
+                bid_levels=bid_levels,
+                ask_levels=ask_levels,
             )
-            ask_econ = estimate_quote_economics(
-                quote_size_usdc=self.maker_quote_size_usdc,
-                probability=quote_ask,
-                half_spread=(quote_ask - fair),
-                adverse_selection_buffer=self.maker_adverse_selection_buffer,
-                fee_rate_override=dynamic_fee_rate,
-            )
-
-            if self.maker_quote_sides == "both_buy":
-                if _balance_forced_sell_only:
-                    # In both_buy mode, fallback to SELL-only under low balance so capital can be recycled.
-                    side_plan = {"sell": (quote_ask, ask_econ, True)}
-                else:
-                    side_plan = {"buy": (quote_bid, bid_econ, bid_econ.expected_net_usdc >= self.maker_min_expected_net_usdc)}
-            else:
-                side_plan = {
-                    "buy": (quote_bid, bid_econ, bid_econ.expected_net_usdc >= self.maker_min_expected_net_usdc),
-                    "sell": (quote_ask, ask_econ, ask_econ.expected_net_usdc >= self.maker_min_expected_net_usdc),
-                }
-                if self.maker_quote_sides == "buy":
-                    side_plan["sell"] = (quote_ask, ask_econ, False)
-                elif self.maker_quote_sides == "sell":
-                    side_plan["buy"] = (quote_bid, bid_econ, False)
+            if not side_plan:
+                continue
 
             # --- TREND / MOMENTUM FILTER ---------------------------------------------
             # Prevent "catching a falling knife" (buy) or "stepping in front of a train" (sell).
@@ -2874,8 +2694,40 @@ class IntegratedBTCStrategy(Strategy):
                 if current.get("pending_cancel"):
                     continue
                 current_price = Decimal(str(current.get("price", "0")))
-                if abs(current_price - limit_price) < self.maker_requote_threshold:
+                # Use per-instrument tick size here (not leaked from prior loop iterations).
+                inst_for_tick = self._normalize_instrument_id(inst_id)
+                inst_obj = self.cache.instrument(inst_for_tick) if inst_for_tick else None
+                tick = Decimal("0.01")
+                if inst_obj is not None:
+                    try:
+                        raw_tick = getattr(inst_obj, "price_increment", None)
+                        if raw_tick is not None:
+                            tick = Decimal(str(raw_tick))
+                        elif hasattr(inst_obj, "info") and inst_obj.info:
+                            maybe_tick = inst_obj.info.get("minimum_tick_size")
+                            if maybe_tick is not None:
+                                tick = Decimal(str(maybe_tick))
+                    except Exception:
+                        pass
+                if tick <= 0:
+                    tick = Decimal("0.01")
+                distance = abs(current_price - limit_price)
+                if distance < (self.maker_requote_hysteresis_ticks * tick):
                     continue
+                
+                # Token Bucket guard against cancel storms
+                if self.requote_bucket_tokens < 1.0:
+                    now_ts = time.time()
+                    if now_ts - getattr(self, "_last_rl_log_ts", 0) > 10:
+                        logger.warning(
+                            f"Rate Limiter: out of requote tokens ({float(self.requote_bucket_tokens):.2f}/{self.maker_requote_max_per_sec}). "
+                            "Skipping requote."
+                        )
+                        self._last_rl_log_ts = now_ts
+                    continue
+                
+                self.requote_bucket_tokens -= 1.0
+
                 # Safety-first requote: cancel existing order and wait for cancel ack/reconcile
                 # before submitting a replacement. This prevents multiple live orders on the same
                 # side/instrument when cancel acknowledgements are delayed or duplicated.
@@ -4282,6 +4134,20 @@ class IntegratedBTCStrategy(Strategy):
 
             bid_decimal = tick.bid_price.as_decimal() if tick.bid_price is not None else None
             ask_decimal = tick.ask_price.as_decimal() if tick.ask_price is not None else None
+            bid_size_decimal: Optional[Decimal] = None
+            ask_size_decimal: Optional[Decimal] = None
+            try:
+                if getattr(tick, "bid_size", None) is not None:
+                    bs = tick.bid_size
+                    bid_size_decimal = bs.as_decimal() if hasattr(bs, "as_decimal") else Decimal(str(bs))
+            except Exception:
+                bid_size_decimal = None
+            try:
+                if getattr(tick, "ask_size", None) is not None:
+                    a_s = tick.ask_size
+                    ask_size_decimal = a_s.as_decimal() if hasattr(a_s, "as_decimal") else Decimal(str(a_s))
+            except Exception:
+                ask_size_decimal = None
 
             # Tolerate one-sided quotes to avoid long no-quote stalls around market transitions.
             if bid_decimal is None and ask_decimal is not None:
@@ -4310,6 +4176,7 @@ class IntegratedBTCStrategy(Strategy):
             self.consecutive_invalid_quote_ticks = 0
             self.latest_market_bid = bid_decimal
             self.latest_market_ask = ask_decimal
+            self.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
             
             # Calculate mid price
             mid_price = (bid_decimal + ask_decimal) / 2
