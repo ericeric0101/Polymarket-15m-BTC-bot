@@ -172,8 +172,8 @@ class PolymarketBTCIntegration:
     def _create_nautilus_config(self) -> TradingNodeConfig:
         """Create Nautilus trading node configuration."""
         
-        # Get current and next BTC 15-min market slugs
-        btc_markets = get_next_btc_15m_markets(count=2)  # Current + next market
+        # Get current and next BTC 15-min market slugs (6 markets total)
+        btc_markets = get_next_btc_15m_markets(count=6)  # Current + 5 future markets
         
         # Instrument provider config - use Gamma Markets API for faster filtering
         instrument_cfg = InstrumentProviderConfig(

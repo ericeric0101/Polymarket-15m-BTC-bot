@@ -208,41 +208,57 @@ def select_primary_btc_15m_slug(slugs: List[str]) -> Optional[str]:
 
 
 async def _fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
-    """
-    Fetch one Gamma market record by slug.
-    """
+    # Attempt to fetch full event which contains eventMetadata.priceToBeat
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
     timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.get(
-            f"{api_base}/markets",
-            params={
-                "active": "true",
-                "closed": "false",
-                "archived": "false",
-                "slug": slug,
-                "limit": 1,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, list) and data:
-            return data[0]
-        # Fallback: some responses are better populated via event-slug endpoint.
-        event_resp = await client.get(f"{api_base}/events/slug/{slug}")
-        if event_resp.status_code == 200:
-            payload = event_resp.json()
-            if isinstance(payload, dict):
-                markets = payload.get("markets") or []
-                if isinstance(markets, list) and markets:
-                    return markets[0]
-            elif isinstance(payload, list):
-                for event in payload:
-                    if not isinstance(event, dict):
-                        continue
-                    markets = event.get("markets") or []
-                    if isinstance(markets, list) and markets:
+    
+    # Try fetching the event first
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{api_base}/events", params={"slug": slug})
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    event = data[0]
+                    # Expose priceToBeat inside the first market for legacy compatibility if available
+                    event_meta = event.get("eventMetadata", {}) or {}
+                    if not isinstance(event_meta, dict):
+                        event_meta = {}
+                    if not event_meta and isinstance(event.get("event_metadata"), dict):
+                        event_meta = event.get("event_metadata") or {}
+                    ptb = event_meta.get("priceToBeat")
+                    if ptb is None:
+                        ptb = event_meta.get("price_to_beat")
+                    if ptb is None:
+                        ptb = event.get("priceToBeat")
+                    if ptb is None:
+                        ptb = event.get("price_to_beat")
+                    markets = event.get("markets", [])
+                    if markets and ptb is not None:
+                        markets[0]["_priceToBeat"] = ptb
+                    if markets:
                         return markets[0]
+    except Exception as e:
+        logger.debug(f"Fetch gamma event failed for slug={slug}: {e}")
+        
+    # Fallback to fetching market directly
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                f"{api_base}/markets",
+                # Keep this broad. 15m BTC markets can transiently fail strict active/closed filters.
+                params={"slug": slug, "limit": 5},
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                for m in data:
+                    if isinstance(m, dict) and str(m.get("slug", "") or "") == slug:
+                        return m
+                if isinstance(data[0], dict):
+                    return data[0]
+    except Exception as e:
+        logger.error(f"Failed to fetch market from Gamma API for slug={slug}: {e}")
     return None
 
 
@@ -629,7 +645,7 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_stale_inventory_sec = int(os.getenv("MAKER_STALE_INVENTORY_SEC", "30"))
         self.maker_stale_inventory_multiplier = Decimal(os.getenv("MAKER_STALE_INVENTORY_MULTIPLIER", "2.0"))
         self.maker_vol_stressed_threshold = Decimal(os.getenv("MAKER_VOL_STRESSED_THRESHOLD", "0.015"))
-        self.maker_vol_extreme_threshold = Decimal(os.getenv("MAKER_VOL_EXTREME_THRESHOLD", "0.03"))
+        self.maker_vol_extreme_threshold = Decimal(os.getenv("MAKER_VOL_EXTREME_THRESHOLD", "0.08"))
         self.maker_vol_stressed_spread_mult = Decimal(os.getenv("MAKER_VOL_STRESSED_SPREAD_MULT", "2.0"))
         self.maker_vol_stressed_size_mult = Decimal(os.getenv("MAKER_VOL_STRESSED_SIZE_MULT", "0.5"))
         self.maker_vol_extreme_spread_mult = Decimal(os.getenv("MAKER_VOL_EXTREME_SPREAD_MULT", "3.0"))
@@ -642,9 +658,9 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_execution_penalty_enable = os.getenv("MAKER_EXECUTION_PENALTY_ENABLE", "1").strip().lower() not in ("0", "false", "no")
         self.maker_execution_penalty_floor_usdc = Decimal(os.getenv("MAKER_EXECUTION_PENALTY_FLOOR_USDC", "0.001"))
         self.maker_execution_slippage_spread_mult = Decimal(os.getenv("MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT", "0.15"))
-        self.maker_execution_non_atomic_vol_mult = Decimal(os.getenv("MAKER_EXECUTION_NON_ATOMIC_VOL_MULT", "1.0"))
+        self.maker_execution_non_atomic_vol_mult = Decimal(os.getenv("MAKER_EXECUTION_NON_ATOMIC_VOL_MULT", "0.2"))
         self.maker_execution_depth_impact_mult = Decimal(os.getenv("MAKER_EXECUTION_DEPTH_IMPACT_MULT", "1.0"))
-        self.maker_execution_vwap_mult = Decimal(os.getenv("MAKER_EXECUTION_VWAP_MULT", "1.0"))
+        self.maker_execution_vwap_mult = Decimal(os.getenv("MAKER_EXECUTION_VWAP_MULT", "0.5"))
         self.orderbook_fetch_interval_sec = max(1, int(os.getenv("ORDERBOOK_FETCH_INTERVAL_SEC", "5")))
         self.orderbook_levels_limit = max(1, int(os.getenv("ORDERBOOK_LEVELS_LIMIT", "10")))
         self.requote_bucket_tokens = self.maker_requote_max_per_sec
@@ -679,7 +695,7 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_auto_tune = os.getenv("MAKER_AUTO_TUNE", "0") == "1"
         self.maker_auto_tune_interval_sec = int(os.getenv("MAKER_AUTO_TUNE_INTERVAL_SEC", "300"))
         
-        self.maker_momentum_filter_pct = Decimal(os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.03"))
+        self.maker_momentum_filter_pct = Decimal(os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.06"))
         self.maker_momentum_window_ticks = int(os.getenv("MAKER_MOMENTUM_WINDOW_TICKS", "20"))
         self.maker_fair_pricer_mode = os.getenv("MAKER_FAIR_PRICER_MODE", "drift").strip().lower()
         if self.maker_fair_pricer_mode not in {"drift", "digital"}:
@@ -1268,13 +1284,27 @@ class IntegratedBTCStrategy(Strategy):
         return min(candidates, key=lambda v: abs(v - ref_spot))
 
     async def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
+        def _coerce_decimal(value: Any) -> Optional[Decimal]:
+            if value is None:
+                return None
+            try:
+                out = Decimal(str(value))
+            except Exception:
+                return None
+            return out if out > 0 else None
+
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
+            logger.debug(f"[DEBUG_STRIKE] inst is None for {instrument_id}")
             return None
         instrument = self.cache.instrument(inst)
         if instrument is None:
+            logger.debug(f"[DEBUG_STRIKE] instrument cache miss for {inst}")
             return None
         slug = self._extract_market_slug_from_instrument(instrument)
+        if not slug:
+            slug = str(self.current_market_slug or "")
+        logger.debug(f"[DEBUG_STRIKE] Extracted slug: '{slug}' for inst: {inst}")
         if slug and slug in self.market_strike_cache_by_slug:
             return self.market_strike_cache_by_slug[slug]
         info = getattr(instrument, "info", None) or {}
@@ -1286,19 +1316,57 @@ class IntegratedBTCStrategy(Strategy):
             self.market_strike_cache_by_slug[slug] = strike
             return strike
         if not slug:
+            logger.debug(f"[DEBUG_STRIKE] No slug found. Returning fallback strike={strike}")
             return strike
 
+        # For 15m markets, the title doesn't contain the strike, so we MUST hit the API.
+        # Check if we already tried recently and failed to avoid spamming the API on every loop.
         now_ts = time.time()
         last_fetch_ts = float(self.market_strike_last_fetch_ts_by_slug.get(slug, 0.0))
-        if last_fetch_ts > 0 and (now_ts - last_fetch_ts) < self.market_strike_fetch_cooldown_sec:
+        if last_fetch_ts > 0 and (now_ts - last_fetch_ts) < float(self.market_strike_fetch_cooldown_sec):
+            logger.debug(
+                f"[DEBUG_STRIKE] cooldown active for slug: {slug} "
+                f"({now_ts - last_fetch_ts:.1f}s < {self.market_strike_fetch_cooldown_sec}s). Returning cached/fallback."
+            )
             return strike
+
         self.market_strike_last_fetch_ts_by_slug[slug] = now_ts
         try:
             market = await _fetch_gamma_market_by_slug(slug)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"[DEBUG_STRIKE] Pricer strike API fetch failed: {e}")
             market = None
+
         if not isinstance(market, dict):
+            logger.debug(f"[DEBUG_STRIKE] Extracted market from Gamma API is not a dict: type={type(market)}. Returning {strike}")
             return strike
+
+        # First try direct market keys.
+        for key in ("_priceToBeat", "priceToBeat", "price_to_beat"):
+            ptb = _coerce_decimal(market.get(key))
+            if ptb is not None:
+                self.market_strike_cache_by_slug[slug] = ptb
+                return ptb
+
+        # Then try nested event metadata from markets endpoint shape.
+        events = market.get("events")
+        if isinstance(events, list):
+            for e in events:
+                if not isinstance(e, dict):
+                    continue
+                event_meta = e.get("eventMetadata", {}) or {}
+                if not isinstance(event_meta, dict):
+                    event_meta = {}
+                if not event_meta and isinstance(e.get("event_metadata"), dict):
+                    event_meta = e.get("event_metadata") or {}
+                for key in ("priceToBeat", "price_to_beat"):
+                    ptb = _coerce_decimal(event_meta.get(key))
+                    if ptb is not None:
+                        self.market_strike_cache_by_slug[slug] = ptb
+                        return ptb
+
+        logger.debug(f"[DEBUG_STRIKE] priceToBeat not found in market payload keys: {list(market.keys())}")
+            
         text_candidates: List[str] = []
         for key in ("question", "title", "description"):
             val = market.get(key)
@@ -1674,7 +1742,10 @@ class IntegratedBTCStrategy(Strategy):
     def _extract_market_slug_from_instrument(instrument: Any) -> str:
         info = getattr(instrument, "info", None) or {}
         if isinstance(info, dict):
-            return str(info.get("market_slug", "") or "")
+            for key in ("market_slug", "slug", "event_slug", "marketSlug", "eventSlug"):
+                s = str(info.get(key, "") or "")
+                if s:
+                    return s
         return ""
 
     def _extract_outcome_from_instrument(self, instrument: Any) -> str:
@@ -2542,9 +2613,10 @@ class IntegratedBTCStrategy(Strategy):
             bid_levels, ask_levels = await self._get_orderbook_levels_for_token(token_id)
             self.rebate_reporter.record_api_health(self.fee_rate_client.get_health_snapshot())
             if dynamic_fee_rate is not None:
-                logger.debug(
-                    f"Using dynamic fee rate: {float(dynamic_fee_rate):.6f} for token {token_id}"
-                )
+                pass
+                # logger.debug(
+                #     f"Using dynamic fee rate: {float(dynamic_fee_rate):.6f} for token {token_id}"
+                # )
             fee_rate_val = dynamic_fee_rate if dynamic_fee_rate is not None else self.maker_fee_rate_default_decimal
             depth_key = str(inst_id)
             bid_depth, ask_depth = self.latest_quote_depth_by_inst.get(depth_key, (None, None))
