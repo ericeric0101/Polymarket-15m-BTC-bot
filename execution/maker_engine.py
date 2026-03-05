@@ -275,10 +275,11 @@ class MakerEngine:
         ask_depth: Optional[Decimal] = None,
         bid_levels: Optional[List[Tuple[Decimal, Decimal]]] = None,
         ask_levels: Optional[List[Tuple[Decimal, Decimal]]] = None,
-    ) -> Dict[str, Tuple[Decimal, QuoteEconomics, bool]]:
+    ) -> Dict[str, Tuple[Decimal, QuoteEconomics, bool, Decimal, Decimal]]:
         """
         Produce target limit prices and economic estimations for buy and sell sides.
-        Returns mapped dictionary: {"buy": (price, econ, True/False), ...}
+        Returns mapped dictionary:
+        {"buy": (price, econ, should_quote, robust_net, execution_penalty), ...}
         """
         regime, spread_mult, size_mult, regime_reduce_only = self.determine_regime(recent_vol)
         
@@ -401,9 +402,17 @@ class MakerEngine:
                 quote_bid,
                 bid_econ,
                 robust_bid_net >= self.config.maker_min_expected_net_usdc,
+                robust_bid_net,
+                bid_exec_penalty,
             )
         else:
-            side_plan["buy"] = (quote_bid, bid_econ, False)
+            side_plan["buy"] = (
+                quote_bid,
+                bid_econ,
+                False,
+                bid_econ.expected_net_usdc - bid_exec_penalty,
+                bid_exec_penalty,
+            )
             
         if allowed_sell:
             robust_ask_net = ask_econ.expected_net_usdc - ask_exec_penalty
@@ -411,8 +420,16 @@ class MakerEngine:
                 quote_ask,
                 ask_econ,
                 robust_ask_net >= self.config.maker_min_expected_net_usdc,
+                robust_ask_net,
+                ask_exec_penalty,
             )
         else:
-            side_plan["sell"] = (quote_ask, ask_econ, False)
+            side_plan["sell"] = (
+                quote_ask,
+                ask_econ,
+                False,
+                ask_econ.expected_net_usdc - ask_exec_penalty,
+                ask_exec_penalty,
+            )
 
         return side_plan

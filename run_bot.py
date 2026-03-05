@@ -90,6 +90,7 @@ def auto_apply_local_patches() -> None:
         Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_drop_log.py",
         Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_ticksize_log.py",
         Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_trade_log.py",
+        Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_execution.py",
     ]
     for script in scripts:
         if not script.exists():
@@ -236,6 +237,9 @@ async def _fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                     markets = event.get("markets", [])
                     if markets and ptb is not None:
                         markets[0]["_priceToBeat"] = ptb
+                    # Also pass through eventMetadata so downstream can check it
+                    if markets and isinstance(event_meta, dict) and event_meta:
+                        markets[0]["eventMetadata"] = event_meta
                     if markets:
                         return markets[0]
     except Exception as e:
@@ -484,9 +488,7 @@ def run_preflight_checks(simulation: bool) -> bool:
     """
     Run safety checks before starting trading node.
     """
-    logger.info("=" * 80)
-    logger.info("PREFLIGHT CHECK START")
-    logger.info("=" * 80)
+    logger.info("Preflight check started.")
 
     auth = resolve_polymarket_auth()
     if not auth:
@@ -497,7 +499,9 @@ def run_preflight_checks(simulation: bool) -> bool:
     if not slugs:
         logger.error("Preflight failed: no BTC 15-min market slugs resolved")
         return False
-    logger.info(f"Preflight market slugs: {slugs}")
+    startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
+    if startup_verbose:
+        logger.info(f"Preflight market slugs: {slugs}")
 
     primary_slug, instrument_ids = resolve_best_btc_15m_market(slugs)
     if not primary_slug:
@@ -506,9 +510,9 @@ def run_preflight_checks(simulation: bool) -> bool:
     if not instrument_ids:
         logger.error(f"Preflight failed: no instrument IDs resolved for slug {primary_slug}")
         return False
-    logger.info(
-        f"Preflight primary slug: {primary_slug}, instrument_ids: {[inst.value for inst in instrument_ids]}"
-    )
+    logger.info(f"Preflight market: primary_slug={primary_slug} instruments={len(instrument_ids)}")
+    if startup_verbose:
+        logger.info(f"Preflight instrument_ids: {[inst.value for inst in instrument_ids]}")
 
     redis_client = init_redis()
     if redis_client:
@@ -520,7 +524,6 @@ def run_preflight_checks(simulation: bool) -> bool:
     logger.info(f"Preflight mode target: {mode_text}")
     logger.info("Polymarket auth check: OK")
     logger.info("PREFLIGHT CHECK PASSED")
-    logger.info("=" * 80)
     return True
 
 def init_redis():
@@ -577,6 +580,7 @@ class IntegratedBTCStrategy(Strategy):
         self.redis_client = redis_client
         self.current_simulation_mode = True
         self.selected_slug = selected_slug
+        self.startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
         
         # Phase 4: Signal Processors
         self.spike_detector = SpikeDetectionProcessor(
@@ -799,8 +803,27 @@ class IntegratedBTCStrategy(Strategy):
         self.external_spot_history: List[Tuple[float, Decimal]] = []
         self.external_spot_history_max = max(60, int(os.getenv("EXTERNAL_SPOT_HISTORY_MAX", "1200")))
         self.market_strike_cache_by_slug: Dict[str, Decimal] = {}
-        self.market_strike_last_fetch_ts_by_slug: Dict[str, float] = {}
-        self.market_strike_fetch_cooldown_sec = max(10, int(os.getenv("MARKET_STRIKE_FETCH_COOLDOWN_SEC", "300")))
+        self.market_strike_source_by_slug: Dict[str, str] = {}
+        self.market_start_ts_by_slug: Dict[str, int] = {}
+        self.market_strike_anchor_max_lag_sec = max(10, int(os.getenv("MARKET_STRIKE_ANCHOR_MAX_LAG_SEC", "180")))
+        self.market_strike_anchor_near_sec = max(5, int(os.getenv("MARKET_STRIKE_ANCHOR_NEAR_SEC", "30")))
+        self.market_strike_rest_retry_sec = max(10, int(os.getenv("MARKET_STRIKE_REST_RETRY_SEC", "60")))
+        self.market_strike_rest_last_try_ts_by_slug: Dict[str, float] = {}
+        self.market_strike_gamma_validate_interval_sec = max(
+            30, int(os.getenv("MARKET_STRIKE_GAMMA_VALIDATE_INTERVAL_SEC", "180"))
+        )
+        self.market_strike_gamma_warn_abs_usd = max(
+            Decimal("1"), Decimal(str(os.getenv("MARKET_STRIKE_GAMMA_WARN_ABS_USD", "5")))
+        )
+        self.market_strike_gamma_mismatch_warn_interval_sec = max(
+            30, int(os.getenv("MARKET_STRIKE_GAMMA_WARN_INTERVAL_SEC", "120"))
+        )
+        self.market_strike_last_gamma_validate_ts_by_slug: Dict[str, float] = {}
+        self.market_strike_last_gamma_warn_ts_by_slug: Dict[str, float] = {}
+        self._last_strike_slug_log_ts = 0.0
+        self.no_quote_diag_interval_sec = max(10, int(os.getenv("NO_QUOTE_DIAG_INTERVAL_SEC", "30")))
+        self._last_no_quote_diag_ts_by_inst: Dict[str, float] = {}
+        self._last_sellable_skip_log_ts_by_inst: Dict[str, float] = {}
         self.strike_fallback_log_interval_sec = max(10, int(os.getenv("STRIKE_FALLBACK_LOG_INTERVAL_SEC", "60")))
         self._last_strike_fallback_log_ts = 0.0
         self._last_digital_pricer_log_ts = 0.0
@@ -893,15 +916,8 @@ class IntegratedBTCStrategy(Strategy):
         ) if self.trade_db_enabled else None
 
         if test_mode:
-            logger.info("=" * 80)
             logger.info("⚠️  TEST MODE ACTIVE - Trading every minute!")
-            logger.info("=" * 80)
-        
-        logger.info("=" * 80)
-        logger.info("INTEGRATED BTC STRATEGY INITIALIZED")
-        logger.info("  Phase 4: Signal processors ready")
-        logger.info("  Phase 5: Risk engine ready")
-        logger.info("  Phase 6: Performance tracking ready")
+        logger.info("Integrated BTC strategy initialized.")
 
     @property
     def inventory_delta_shares(self) -> Decimal:
@@ -915,70 +931,30 @@ class IntegratedBTCStrategy(Strategy):
             self._inventory_delta_shares = value
 
     def _log_strategy_config_summary(self) -> None:
-        logger.info("  Phase 7: Learning engine ready")
-        logger.info("  $1 per trade maximum")
-        logger.info("  Reloads instruments every 12 minutes")
-        logger.info(f"  Maker mode: {'ON' if self.maker_mode else 'OFF'}")
-        logger.info(f"  Maker quote sides: {self.maker_quote_sides.upper()}")
-        logger.info(f"  Maker post-only flag: {'ON' if self.maker_use_post_only else 'OFF'}")
-        logger.info(f"  Maker post-only strict: {'ON' if self.maker_post_only_strict else 'OFF'}")
-        logger.info(f"  Maker auto-tune: {'ON' if self.auto_tune_enabled else 'OFF'}")
-        logger.info(f"  Maker max order USDC: ${float(self.maker_max_order_usdc):.2f}")
         logger.info(
-            f"  Maker fixed shares: "
-            f"{float(self.maker_fixed_shares):.6f}" if self.maker_fixed_shares > 0 else "  Maker fixed shares: OFF"
+            "Config summary: "
+            f"mode={'maker' if self.maker_mode else 'signal'} "
+            f"quote_sides={self.maker_quote_sides} "
+            f"pricer={self.maker_fair_pricer_mode} "
+            f"post_only={'on' if self.maker_use_post_only else 'off'} "
+            f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
+            f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
+            f"trade_db={'on' if self.trade_db_enabled else 'off'}"
         )
-        logger.info(f"  Exchange min shares: {float(self.maker_exchange_min_shares):.6f}")
-        logger.info(f"  Maker cancel max retries: {self.maker_cancel_max_retries}")
-        logger.info(f"  Maker reduce-only time cutoff (min): {self.maker_min_minutes_to_close}")
-        logger.info(f"  Maker reduce-only no-new-SELL tail: {self.maker_reduce_only_no_new_sell_last_sec}s")
-        logger.info(f"  Maker min fair price (buy floor): {self.maker_min_fair_price}")
-        logger.info(f"  Maker max fair price (buy ceiling): {self.maker_max_fair_price}")
         logger.info(
-            "  Conditional balance guard: "
-            f"interval={self.conditional_balance_check_interval_sec}s "
-            f"buffer={float(self.conditional_balance_safety_buffer_pct)*100:.2f}%"
+            "Risk/ops: "
+            f"max_order_usdc={float(self.maker_max_order_usdc):.2f} "
+            f"reduce_only_cutoff_min={self.maker_min_minutes_to_close:.1f} "
+            f"watchdog_stale={self.quote_stale_sec}s"
         )
-        logger.info(f"  Maker simulation shadow: {'ON' if self.maker_simulation_shadow else 'OFF'}")
-        logger.info(f"  Maker fair pricer mode: {self.maker_fair_pricer_mode}")
-        logger.info(f"  Execution penalty model: {'ON' if self.maker_execution_penalty_enable else 'OFF'}")
-        logger.info(
-            "  Execution penalty params: "
-            f"floor={float(self.maker_execution_penalty_floor_usdc):.6f} "
-            f"spread_mult={float(self.maker_execution_slippage_spread_mult):.4f} "
-            f"non_atomic_vol_mult={float(self.maker_execution_non_atomic_vol_mult):.4f} "
-            f"depth_impact_mult={float(self.maker_execution_depth_impact_mult):.4f} "
-            f"vwap_mult={float(self.maker_execution_vwap_mult):.4f}"
-        )
-        logger.info(f"  Taker exit: {'ON' if self.taker_exit_enabled else 'OFF'}")
-        logger.info(f"  Fee-rate fetch interval: {self.fee_rate_fetch_interval_sec}s")
-        if self.taker_exit_enabled:
+        if self.startup_verbose:
             logger.info(
-                "  Taker exit config: "
-                f"min_net={float(self.taker_exit_min_net_usdc):.4f} "
-                f"stop_loss={float(self.taker_exit_stop_loss_usdc):.4f} "
-                f"min_hold={self.taker_exit_min_hold_sec}s "
-                f"max_hold={self.taker_exit_max_hold_sec}s "
-                f"cooldown={self.taker_exit_cooldown_sec}s "
-                f"disable_stop_loss_last={self.taker_exit_disable_stop_loss_last_sec}s"
+                "Verbose config: "
+                f"fee_interval={self.fee_rate_fetch_interval_sec}s "
+                f"balance_guard={self.conditional_balance_check_interval_sec}s/"
+                f"{float(self.conditional_balance_safety_buffer_pct)*100:.2f}% "
+                f"taker_exit={'on' if self.taker_exit_enabled else 'off'}"
             )
-        logger.info(f"  Maker fee default decimal: {float(self.maker_fee_rate_default_decimal):.6f}")
-        logger.info(f"  Auto redeem: {'ON' if self.auto_redeem_enabled else 'OFF'}")
-        if self.auto_redeem_enabled:
-            logger.info(
-                "  Auto redeem config: "
-                f"interval={self.auto_redeem_interval_sec}s "
-                f"apply={'ON' if self.auto_redeem_apply else 'OFF'} "
-                f"on_rollover={'ON' if self.auto_redeem_on_rollover else 'OFF'} "
-                f"slug_filter={self.auto_redeem_slug_filter or '(none)'}"
-            )
-        logger.info(
-            "  Quote watchdog: "
-            f"stale={self.quote_stale_sec}s invalid_threshold={self.quote_invalid_tick_reload_threshold} "
-            f"cooldown={self.quote_reload_cooldown_sec}s"
-        )
-        logger.info(f"  Trade DB: {'ON' if self.trade_db_enabled else 'OFF'}")
-        logger.info("=" * 80)
 
     def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         if not self.trade_db:
@@ -1283,7 +1259,19 @@ class IntegratedBTCStrategy(Strategy):
             return candidates[0]
         return min(candidates, key=lambda v: abs(v - ref_spot))
 
-    async def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
+    @staticmethod
+    def _extract_market_start_ts_from_slug(slug: str) -> Optional[int]:
+        txt = str(slug or "").strip()
+        if not txt:
+            return None
+        try:
+            ts = int(txt.rsplit("-", 1)[-1])
+            return ts if ts > 0 else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_price_to_beat_from_market_payload(market: Dict[str, Any]) -> Optional[Decimal]:
         def _coerce_decimal(value: Any) -> Optional[Decimal]:
             if value is None:
                 return None
@@ -1293,6 +1281,112 @@ class IntegratedBTCStrategy(Strategy):
                 return None
             return out if out > 0 else None
 
+        for key in ("_priceToBeat", "priceToBeat", "price_to_beat"):
+            ptb = _coerce_decimal(market.get(key))
+            if ptb is not None:
+                return ptb
+
+        event_meta = market.get("eventMetadata", {}) or {}
+        if not isinstance(event_meta, dict):
+            event_meta = {}
+        if not event_meta and isinstance(market.get("event_metadata"), dict):
+            event_meta = market.get("event_metadata") or {}
+        for key in ("priceToBeat", "price_to_beat"):
+            ptb = _coerce_decimal(event_meta.get(key))
+            if ptb is not None:
+                return ptb
+        return None
+
+    def _resolve_opening_strike_from_history(self, start_ts: int) -> Optional[Tuple[float, Decimal]]:
+        if not self.external_spot_history:
+            return None
+        max_lag = float(self.market_strike_anchor_max_lag_sec)
+        future_candidates: List[Tuple[float, Decimal]] = []
+        near_candidates: List[Tuple[float, Decimal]] = []
+        near_window = float(self.market_strike_anchor_near_sec)
+        for ts, px in self.external_spot_history:
+            if ts >= float(start_ts) and ts <= float(start_ts) + max_lag:
+                future_candidates.append((ts, px))
+            if abs(ts - float(start_ts)) <= near_window:
+                near_candidates.append((ts, px))
+        if future_candidates:
+            future_candidates.sort(key=lambda x: x[0])
+            return future_candidates[0]
+        if near_candidates:
+            near_candidates.sort(key=lambda x: (abs(x[0] - float(start_ts)), x[0]))
+            return near_candidates[0]
+        return None
+
+    def _fetch_binance_open_price_sync(self, start_ts: int) -> Optional[Decimal]:
+        timeout = float(os.getenv("EXTERNAL_SPOT_TIMEOUT_SEC", "2.5"))
+        minute_start_ts = int(start_ts) - (int(start_ts) % 60)
+        params = {
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "startTime": minute_start_ts * 1000,
+            "limit": 1,
+        }
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get("https://fapi.binance.com/fapi/v1/klines", params=params)
+                resp.raise_for_status()
+                data = resp.json()
+            if isinstance(data, list) and data and isinstance(data[0], list) and len(data[0]) >= 2:
+                price = Decimal(str(data[0][1]))
+                if price > 0:
+                    return price
+        except Exception as e:
+            logger.debug(f"Binance open-price backfill failed: {e}")
+        return None
+
+    async def _maybe_validate_strike_with_gamma(self, slug: str, local_strike: Decimal) -> None:
+        now_ts = time.time()
+        last_validate = float(self.market_strike_last_gamma_validate_ts_by_slug.get(slug, 0.0))
+        if now_ts - last_validate < float(self.market_strike_gamma_validate_interval_sec):
+            return
+        self.market_strike_last_gamma_validate_ts_by_slug[slug] = now_ts
+        try:
+            market = await _fetch_gamma_market_by_slug(slug)
+        except Exception:
+            return
+        if not isinstance(market, dict):
+            return
+        gamma_ptb = self._extract_price_to_beat_from_market_payload(market)
+        if gamma_ptb is None:
+            return
+        diff_abs = abs(gamma_ptb - local_strike)
+        if diff_abs <= self.market_strike_gamma_warn_abs_usd:
+            return
+        last_warn = float(self.market_strike_last_gamma_warn_ts_by_slug.get(slug, 0.0))
+        if now_ts - last_warn < float(self.market_strike_gamma_mismatch_warn_interval_sec):
+            return
+        self.market_strike_last_gamma_warn_ts_by_slug[slug] = now_ts
+        logger.warning(
+            f"Strike validation mismatch for {slug}: "
+            f"local={float(local_strike):.2f} gamma_priceToBeat={float(gamma_ptb):.2f} "
+            f"diff=${float(diff_abs):.2f}. Keeping local opening strike."
+        )
+
+    def _log_strike_status(self, slug: Optional[str]) -> None:
+        slug_txt = str(slug or "").strip()
+        if not slug_txt:
+            logger.info(
+                "Strike status: slug unavailable; digital pricer will temporarily fallback until market slug resolves."
+            )
+            return
+        strike = self.market_strike_cache_by_slug.get(slug_txt)
+        source = self.market_strike_source_by_slug.get(slug_txt, "pending")
+        if strike is None:
+            logger.info(
+                f"Strike status: slug={slug_txt} source={source} value=pending "
+                "(digital pricer may fallback to drift until opening anchor is locked)."
+            )
+            return
+        logger.info(
+            f"Strike status: slug={slug_txt} source={source} value=${float(strike):.2f} (locked); spot remains realtime."
+        )
+
+    async def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
             logger.debug(f"[DEBUG_STRIKE] inst is None for {instrument_id}")
@@ -1304,9 +1398,14 @@ class IntegratedBTCStrategy(Strategy):
         slug = self._extract_market_slug_from_instrument(instrument)
         if not slug:
             slug = str(self.current_market_slug or "")
-        logger.debug(f"[DEBUG_STRIKE] Extracted slug: '{slug}' for inst: {inst}")
+        _strike_log_now = time.time()
+        if _strike_log_now - getattr(self, '_last_strike_slug_log_ts', 0.0) >= 5.0:
+            logger.debug(f"[DEBUG_STRIKE] Extracted slug: '{slug}' for inst: {inst}")
+            self._last_strike_slug_log_ts = _strike_log_now
         if slug and slug in self.market_strike_cache_by_slug:
-            return self.market_strike_cache_by_slug[slug]
+            cached = self.market_strike_cache_by_slug[slug]
+            await self._maybe_validate_strike_with_gamma(slug, cached)
+            return cached
         info = getattr(instrument, "info", None) or {}
         if not isinstance(info, dict):
             info = {}
@@ -1314,69 +1413,51 @@ class IntegratedBTCStrategy(Strategy):
         strike = self._extract_strike_from_question(question)
         if strike is not None and slug:
             self.market_strike_cache_by_slug[slug] = strike
+            self.market_strike_source_by_slug[slug] = "question"
             return strike
         if not slug:
             logger.debug(f"[DEBUG_STRIKE] No slug found. Returning fallback strike={strike}")
             return strike
 
-        # For 15m markets, the title doesn't contain the strike, so we MUST hit the API.
-        # Check if we already tried recently and failed to avoid spamming the API on every loop.
-        now_ts = time.time()
-        last_fetch_ts = float(self.market_strike_last_fetch_ts_by_slug.get(slug, 0.0))
-        if last_fetch_ts > 0 and (now_ts - last_fetch_ts) < float(self.market_strike_fetch_cooldown_sec):
-            logger.debug(
-                f"[DEBUG_STRIKE] cooldown active for slug: {slug} "
-                f"({now_ts - last_fetch_ts:.1f}s < {self.market_strike_fetch_cooldown_sec}s). Returning cached/fallback."
+        start_ts = self.market_start_ts_by_slug.get(slug)
+        if start_ts is None:
+            parsed_start = self._extract_market_start_ts_from_slug(slug)
+            if parsed_start is not None:
+                start_ts = parsed_start
+                self.market_start_ts_by_slug[slug] = parsed_start
+        if start_ts is None:
+            logger.debug(f"[DEBUG_STRIKE] No start_ts parsed for slug={slug}. Returning fallback strike={strike}")
+            return strike
+
+        anchor = self._resolve_opening_strike_from_history(start_ts)
+        if anchor is not None:
+            anchor_ts, anchor_px = anchor
+            self.market_strike_cache_by_slug[slug] = anchor_px
+            self.market_strike_source_by_slug[slug] = "spot_history_open"
+            logger.info(
+                f"[STRIKE] Locked opening strike from spot history: "
+                f"${float(anchor_px):.2f} for slug={slug} "
+                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
             )
-            return strike
+            await self._maybe_validate_strike_with_gamma(slug, anchor_px)
+            return anchor_px
 
-        self.market_strike_last_fetch_ts_by_slug[slug] = now_ts
-        try:
-            market = await _fetch_gamma_market_by_slug(slug)
-        except Exception as e:
-            logger.debug(f"[DEBUG_STRIKE] Pricer strike API fetch failed: {e}")
-            market = None
+        now_ts = time.time()
+        last_try = float(self.market_strike_rest_last_try_ts_by_slug.get(slug, 0.0))
+        if now_ts >= float(start_ts) and (now_ts - last_try) >= float(self.market_strike_rest_retry_sec):
+            self.market_strike_rest_last_try_ts_by_slug[slug] = now_ts
+            backfilled = await asyncio.to_thread(self._fetch_binance_open_price_sync, start_ts)
+            if backfilled is not None:
+                self.market_strike_cache_by_slug[slug] = backfilled
+                self.market_strike_source_by_slug[slug] = "binance_rest_open"
+                logger.info(
+                    f"[STRIKE] Locked opening strike from Binance REST backfill: "
+                    f"${float(backfilled):.2f} for slug={slug}"
+                )
+                await self._maybe_validate_strike_with_gamma(slug, backfilled)
+                return backfilled
 
-        if not isinstance(market, dict):
-            logger.debug(f"[DEBUG_STRIKE] Extracted market from Gamma API is not a dict: type={type(market)}. Returning {strike}")
-            return strike
-
-        # First try direct market keys.
-        for key in ("_priceToBeat", "priceToBeat", "price_to_beat"):
-            ptb = _coerce_decimal(market.get(key))
-            if ptb is not None:
-                self.market_strike_cache_by_slug[slug] = ptb
-                return ptb
-
-        # Then try nested event metadata from markets endpoint shape.
-        events = market.get("events")
-        if isinstance(events, list):
-            for e in events:
-                if not isinstance(e, dict):
-                    continue
-                event_meta = e.get("eventMetadata", {}) or {}
-                if not isinstance(event_meta, dict):
-                    event_meta = {}
-                if not event_meta and isinstance(e.get("event_metadata"), dict):
-                    event_meta = e.get("event_metadata") or {}
-                for key in ("priceToBeat", "price_to_beat"):
-                    ptb = _coerce_decimal(event_meta.get(key))
-                    if ptb is not None:
-                        self.market_strike_cache_by_slug[slug] = ptb
-                        return ptb
-
-        logger.debug(f"[DEBUG_STRIKE] priceToBeat not found in market payload keys: {list(market.keys())}")
-            
-        text_candidates: List[str] = []
-        for key in ("question", "title", "description"):
-            val = market.get(key)
-            if val:
-                text_candidates.append(str(val))
-        for txt in text_candidates:
-            parsed = self._extract_strike_from_question(txt)
-            if parsed is not None:
-                self.market_strike_cache_by_slug[slug] = parsed
-                return parsed
+        logger.debug(f"[DEBUG_STRIKE] Opening strike pending for slug={slug}; fallback={strike}")
         return strike
 
     def _estimate_external_spot_sigma_annualized(self) -> Optional[Decimal]:
@@ -2583,10 +2664,14 @@ class IntegratedBTCStrategy(Strategy):
 
         desired_quotes: Dict[str, Dict[str, Any]] = {}
         target_inst_set = {str(inst) for inst in target_instruments}
+        diag_context_by_inst: Dict[str, Dict[str, Any]] = {}
+        submitted_attempts = 0
 
         for inst_id in target_instruments:
+            inst_key = self._instrument_key(inst_id)
             quote = self._get_quote_for_instrument(inst_id)
             if quote is None:
+                diag_context_by_inst[inst_key] = {"reason": "no_quote_tick"}
                 continue
             inst_bid, inst_ask = quote
             fair = await self._compute_fair_probability((inst_bid + inst_ask) / 2, instrument_id=inst_id)
@@ -2618,6 +2703,13 @@ class IntegratedBTCStrategy(Strategy):
                 #     f"Using dynamic fee rate: {float(dynamic_fee_rate):.6f} for token {token_id}"
                 # )
             fee_rate_val = dynamic_fee_rate if dynamic_fee_rate is not None else self.maker_fee_rate_default_decimal
+            diag_context_by_inst[inst_key] = {
+                "reason": "ok",
+                "fair": fair,
+                "bid": inst_bid,
+                "ask": inst_ask,
+                "fee_rate": fee_rate_val,
+            }
             depth_key = str(inst_id)
             bid_depth, ask_depth = self.latest_quote_depth_by_inst.get(depth_key, (None, None))
 
@@ -2638,7 +2730,18 @@ class IntegratedBTCStrategy(Strategy):
                 ask_levels=ask_levels,
             )
             if not side_plan:
+                diag_context_by_inst[inst_key]["reason"] = "invalid_quote_plan"
                 continue
+
+            def _set_side_should_quote(plan_side: str, new_should_quote: bool) -> None:
+                existing = side_plan.get(plan_side)
+                if not existing:
+                    return
+                lp = existing[0]
+                ec = existing[1]
+                robust_net = existing[3] if len(existing) > 3 else None
+                exec_penalty = existing[4] if len(existing) > 4 else None
+                side_plan[plan_side] = (lp, ec, new_should_quote, robust_net, exec_penalty)
 
             # --- TREND / MOMENTUM FILTER ---------------------------------------------
             # Prevent "catching a falling knife" (buy) or "stepping in front of a train" (sell).
@@ -2650,7 +2753,7 @@ class IntegratedBTCStrategy(Strategy):
                 
                 if trend_pct <= -self.maker_momentum_filter_pct and "buy" in side_plan:
                     reduce_only_reason = f"momentum filter (dropped {float(trend_pct*100):.1f}%)"
-                    side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
+                    _set_side_should_quote("buy", False)
                     if not getattr(self, "_logged_mom_buy", False) or time.time() - getattr(self, "_last_mom_ts", 0) > 30:
                         logger.warning(f"Trend Protection: {reduce_only_reason}. Blocking BUY orders.")
                         self._logged_mom_buy = True
@@ -2661,7 +2764,7 @@ class IntegratedBTCStrategy(Strategy):
                     
                 if trend_pct >= self.maker_momentum_filter_pct and "sell" in side_plan:
                     reduce_only_reason = f"momentum filter (pumped {float(trend_pct*100):.1f}%)"
-                    side_plan["sell"] = (side_plan["sell"][0], side_plan["sell"][1], False)
+                    _set_side_should_quote("sell", False)
                     if not getattr(self, "_logged_mom_sell", False) or time.time() - getattr(self, "_last_mom_ts_s", 0) > 30:
                         logger.warning(f"Trend Protection: {reduce_only_reason}. Blocking SELL orders.")
                         self._logged_mom_sell = True
@@ -2701,7 +2804,7 @@ class IntegratedBTCStrategy(Strategy):
                         logger.warning(f"Maker Reduce-Only active ({reduce_only_reason}). Blocking BUY orders.")
                         self._logged_reduce_only = True
                         self._last_ro_log_ts = time.time()
-                    side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
+                    _set_side_should_quote("buy", False)
                 if "sell" in side_plan and reduce_only_tail_sell_block:
                     if (
                         not getattr(self, "_logged_reduce_only_tail_sell_block", False)
@@ -2714,7 +2817,7 @@ class IntegratedBTCStrategy(Strategy):
                         )
                         self._logged_reduce_only_tail_sell_block = True
                         self._last_ro_tail_sell_log_ts = time.time()
-                    side_plan["sell"] = (side_plan["sell"][0], side_plan["sell"][1], False)
+                    _set_side_should_quote("sell", False)
 
             elif "buy" in side_plan and getattr(self, "_logged_reduce_only", False):
                 self._logged_reduce_only = False  # Reset if conditions normalize
@@ -2724,14 +2827,45 @@ class IntegratedBTCStrategy(Strategy):
 
             # --- Balance-forced SELL-only mode ---
             if _balance_forced_sell_only and "buy" in side_plan:
-                side_plan["buy"] = (side_plan["buy"][0], side_plan["buy"][1], False)
+                _set_side_should_quote("buy", False)
 
-            for side, (limit_price, econ, should_quote) in side_plan.items():
+            for side, quote_data in side_plan.items():
+                limit_price = quote_data[0]
+                econ = quote_data[1]
+                should_quote = quote_data[2]
+                robust_net = quote_data[3] if len(quote_data) > 3 else None
+                exec_penalty = quote_data[4] if len(quote_data) > 4 else None
+                diag_reason = ""
+                if not should_quote:
+                    diag_reason = (
+                        f"econ_gate robust_net={float(robust_net):.6f} "
+                        f"(expected_net={float(econ.expected_net_usdc):.6f}, "
+                        f"exec_penalty={float(exec_penalty):.6f}) "
+                        f"< min={float(self.maker_min_expected_net_usdc):.6f}"
+                    )
                 if side == "sell":
                     inst_key = self._instrument_key(inst_id)
                     sell_pause_until = float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0))
                     if now_ts < sell_pause_until:
                         should_quote = False
+                        diag_reason = f"sell_pause {sell_pause_until - now_ts:.1f}s"
+                    # Live-mode pre-check: if sellable is below exchange min size, do not even attempt submit.
+                    if should_quote and not self.current_simulation_mode:
+                        sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
+                        if sellable_qty + Decimal("0.000001") < self.maker_exchange_min_shares:
+                            should_quote = False
+                            diag_reason = (
+                                f"sellable_below_min sellable={float(sellable_qty):.6f} "
+                                f"< min={float(self.maker_exchange_min_shares):.6f}"
+                            )
+                if reduce_only_reason and side == "buy":
+                    diag_reason = f"reduce_only: {reduce_only_reason}"
+                if reduce_only_tail_sell_block and side == "sell":
+                    diag_reason = (
+                        f"reduce_only_tail_guard: <= {self.maker_reduce_only_no_new_sell_last_sec}s"
+                    )
+                if _balance_forced_sell_only and side == "buy":
+                    diag_reason = "balance_forced_sell_only"
                 order_key = self._order_key_for(side, inst_id)
                 desired_quotes[order_key] = {
                     "side": side,
@@ -2740,6 +2874,9 @@ class IntegratedBTCStrategy(Strategy):
                     "econ": econ,
                     "should_quote": should_quote,
                     "dynamic_fee_rate": dynamic_fee_rate,
+                    "diag_reason": diag_reason,
+                    "robust_net": robust_net,
+                    "exec_penalty": exec_penalty,
                 }
 
         # Cancel orders that are no longer desired for target instruments.
@@ -2755,6 +2892,7 @@ class IntegratedBTCStrategy(Strategy):
         for order_key, desired in desired_quotes.items():
             if not bool(desired.get("should_quote", False)):
                 continue
+            submitted_attempts += 1
             side = str(desired["side"])
             inst_id = desired["instrument_id"]
             limit_price = Decimal(str(desired["price"]))
@@ -2808,6 +2946,45 @@ class IntegratedBTCStrategy(Strategy):
 
             await self._submit_maker_quote(inst_id, side, limit_price, econ, dynamic_fee_rate)
 
+        # Diagnostic log when no side is quotable and no active orders exist.
+        if submitted_attempts == 0:
+            for inst_id in target_instruments:
+                inst_key = self._instrument_key(inst_id)
+                per_inst = [
+                    d for d in desired_quotes.values()
+                    if self._instrument_key(d.get("instrument_id")) == inst_key
+                ]
+                if any(bool(d.get("should_quote", False)) for d in per_inst):
+                    continue
+                if self._active_order_keys(instrument_id=inst_id):
+                    continue
+                last_diag = float(self._last_no_quote_diag_ts_by_inst.get(inst_key, 0.0))
+                if now_ts - last_diag < float(self.no_quote_diag_interval_sec):
+                    continue
+                self._last_no_quote_diag_ts_by_inst[inst_key] = now_ts
+                ctx = diag_context_by_inst.get(inst_key, {})
+                blocked = ", ".join(
+                    f"{d.get('side')}={d.get('diag_reason') or 'blocked'}"
+                    for d in per_inst
+                ) if per_inst else str(ctx.get("reason", "no_quote_tick"))
+                fair = ctx.get("fair")
+                bid = ctx.get("bid")
+                ask = ctx.get("ask")
+                fee_rate = ctx.get("fee_rate")
+                msg_parts = [
+                    f"NO_QUOTE diagnostic: inst={inst_key}",
+                    f"phase={phase.value}",
+                ]
+                if isinstance(fair, Decimal):
+                    msg_parts.append(f"fair={float(fair):.4f}")
+                if isinstance(bid, Decimal) and isinstance(ask, Decimal):
+                    msg_parts.append(f"bid={float(bid):.4f}")
+                    msg_parts.append(f"ask={float(ask):.4f}")
+                if isinstance(fee_rate, Decimal):
+                    msg_parts.append(f"fee_rate={float(fee_rate):.6f}")
+                msg_parts.append(f"blocked={blocked}")
+                logger.info(" ".join(msg_parts))
+
     async def _submit_maker_quote(
         self,
         instrument_id: Any,
@@ -2847,24 +3024,37 @@ class IntegratedBTCStrategy(Strategy):
         if side == "sell" and not self.current_simulation_mode:
             sellable_qty = self._get_effective_sellable_qty(instrument_id=instrument_id)
             if sellable_qty < Decimal("0.01"):
-                # logger.debug(
-                #     "Skip maker SELL: no sellable tokens "
-                #     f"(sellable={float(sellable_qty):.6f}, instrument={self.instrument_id})"
-                # )
+                inst_key = self._instrument_key(instrument_id)
+                now_ts = time.time()
+                last_skip = float(self._last_sellable_skip_log_ts_by_inst.get(inst_key, 0.0))
+                if now_ts - last_skip >= float(self.no_quote_diag_interval_sec):
+                    self._last_sellable_skip_log_ts_by_inst[inst_key] = now_ts
+                    logger.info(
+                        "NO_QUOTE diagnostic: "
+                        f"inst={inst_key} side=sell reason=no_sellable_inventory "
+                        f"sellable={float(sellable_qty):.6f} inventory={float(self.inventory_delta_shares):.6f}"
+                    )
                 return
             if sellable_qty + Decimal("0.000001") < qty_dec:
                 old_qty = qty_dec
                 qty_dec = sellable_qty.quantize(Decimal(str(10 ** (-precision))))
-                logger.info(
-                    f"Maker SELL qty reduced to sellable amount: "
-                    f"{float(old_qty):.6f} → {float(qty_dec):.6f} "
-                    f"(on-chain tokens after fees)"
-                )
+                if qty_dec + Decimal("0.000001") >= self.maker_exchange_min_shares:
+                    logger.info(
+                        f"Maker SELL qty reduced to sellable amount: "
+                        f"{float(old_qty):.6f} → {float(qty_dec):.6f} "
+                        f"(on-chain tokens after fees)"
+                    )
             if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
-                logger.info(
-                    "Skip maker SELL: reduced sellable qty is below minimum trade size "
-                    f"(qty={float(qty_dec):.6f}, min={float(self.maker_exchange_min_shares):.6f})"
-                )
+                inst_key = self._instrument_key(instrument_id)
+                now_ts = time.time()
+                last_skip = float(self._last_sellable_skip_log_ts_by_inst.get(inst_key, 0.0))
+                if now_ts - last_skip >= float(self.no_quote_diag_interval_sec):
+                    self._last_sellable_skip_log_ts_by_inst[inst_key] = now_ts
+                    logger.info(
+                        "NO_QUOTE diagnostic: "
+                        f"inst={inst_key} side=sell reason=sellable_below_min_after_reduce "
+                        f"qty={float(qty_dec):.6f} min={float(self.maker_exchange_min_shares):.6f}"
+                    )
                 return
 
         if self.current_simulation_mode:
@@ -3006,9 +3196,7 @@ class IntegratedBTCStrategy(Strategy):
     
     def on_start(self):
         """Called when strategy starts."""
-        logger.info("=" * 80)
-        logger.info("INTEGRATED BTC STRATEGY STARTED")
-        logger.info("=" * 80)
+        logger.info("Strategy start sequence initiated.")
         self._log_strategy_config_summary()
         self.last_valid_quote_ts = time.time()
         self.consecutive_invalid_quote_ticks = 0
@@ -3039,13 +3227,8 @@ class IntegratedBTCStrategy(Strategy):
             },
         )
         
-        # Generate synthetic history regardless (for testing)
-        # This ensures we have price data even if no BTC instrument found
-        logger.info("Generating synthetic price history for testing...")
-        
-        # Check if we already have price history
+        # Ensure we have sufficient history.
         if len(self.price_history) < 20:
-            # Generate synthetic history directly (not async since we're in sync context)
             self._generate_synthetic_history(target_count=20, existing_count=len(self.price_history))
         
         # Try to get real price if instrument exists and we have quotes
@@ -3063,7 +3246,6 @@ class IntegratedBTCStrategy(Strategy):
                     self.real_price_history.append(current_price)
                     if len(self.real_price_history) > self.max_real_history:
                         self.real_price_history.pop(0)
-                    logger.info(f"Real price from cache: ${float(current_price):.4f}")
             except Exception as e:
                 logger.debug(f"Could not get real price: {e}")
                 logger.debug("Using synthetic prices until real quotes arrive")
@@ -3095,15 +3277,11 @@ class IntegratedBTCStrategy(Strategy):
         if self.grafana_exporter:
             threading.Thread(target=self._start_grafana_sync, daemon=True).start()
         
-        logger.info("=" * 80)
-        logger.info("Strategy active - will trade every 15 minutes")
-        logger.info(f"Price history: {len(self.price_history)} points")
+        logger.info(f"Strategy active. price_history_points={len(self.price_history)}")
         if len(self.price_history) >= 20:
-            logger.info("✓ READY TO TRADE at next 15-minute mark!")
+            logger.info("Ready to trade at next interval.")
         else:
-            logger.warning(f"⚠ Need more history ({len(self.price_history)}/20)")
-        logger.info("=" * 80)
-        logger.info("Use Ctrl+C to stop")
+            logger.warning(f"Need more history ({len(self.price_history)}/20)")
                 
     def _preload_history_sync(self):
         """Synchronous wrapper for history preload."""
@@ -3116,9 +3294,7 @@ class IntegratedBTCStrategy(Strategy):
     
     async def _preload_price_history(self):
         """Pre-load price history from cache or generate synthetic data for testing."""
-        logger.info("=" * 80)
-        logger.info("PRE-LOADING PRICE HISTORY")
-        logger.info("=" * 80)
+        logger.info("Preloading price history...")
         
         # Get current instrument
         if not self.instrument_id:
@@ -3130,7 +3306,6 @@ class IntegratedBTCStrategy(Strategy):
         if quote:
             current_price = (quote.bid_price + quote.ask_price) / 2
             self.price_history.append(current_price)
-            logger.info(f"Current price from cache: ${float(current_price):.4f}")
         
         # Try to get historical quotes from cache
         # Note: This depends on your data provider storing history
@@ -3139,7 +3314,6 @@ class IntegratedBTCStrategy(Strategy):
             for quote in quotes[-20:]:  # Take last 20 quotes
                 mid_price = (quote.bid_price + quote.ask_price) / 2
                 self.price_history.append(mid_price)
-            logger.info(f"Loaded {len(quotes)} historical quotes from cache")
         
         # Remove duplicates while preserving order
         seen = set()
@@ -3156,35 +3330,24 @@ class IntegratedBTCStrategy(Strategy):
             logger.warning(f"Only {len(self.price_history)} historical quotes found, generating synthetic data to fill")
             self._generate_synthetic_history(existing_count=len(self.price_history))
         
-        logger.info(f"Final price history: {len(self.price_history)} points")
+        logger.info(f"Price history preload complete: points={len(self.price_history)}")
         if len(self.price_history) >= 20:
-            logger.info("✓ SUFFICIENT HISTORY - Ready to trade!")
+            logger.info("Price history is sufficient.")
         else:
-            logger.warning("⚠ Still need more history - will collect from live data")
-        
-        # Show first few prices
-        logger.info("Sample price points:")
-        for i, price in enumerate(self.price_history[:5]):
-            logger.info(f"  Price {i+1}: ${float(price):.4f}")
-        
-        logger.info("=" * 80)
+            logger.warning("Still need more history - will collect from live data")
     
     def _generate_synthetic_history(self, target_count: int = 20, existing_count: int = 0):
         """Generate synthetic price history for testing/initialization."""
         # Get current price if available
         if self.price_history and len(self.price_history) > 0:
             base_price = self.price_history[-1]
-            logger.info(f"Using last real price as base: ${float(base_price):.4f}")
         else:
             # Use a reasonable default for prediction markets
             base_price = Decimal("0.5")
-            logger.info(f"No real price available, using default base: ${float(base_price):.4f}")
         
         needed = target_count - existing_count
         if needed <= 0:
             return
-        
-        logger.info(f"Generating {needed} synthetic price points")
         
         # Generate realistic looking price movement (random walk)
         for i in range(needed):
@@ -3198,20 +3361,16 @@ class IntegratedBTCStrategy(Strategy):
             self.price_history.append(new_price)
             base_price = new_price
         
-        logger.info(f"Generated {needed} synthetic price points")
-        logger.info(f"Now have {len(self.price_history)} total price points")
+        logger.info(f"Synthetic history added: +{needed} (total={len(self.price_history)})")
     
     def _start_reload_timer(self):
         """Start timer to reload instruments every 12 minutes."""
         while not self._reload_stop_event.wait(720):  # 12 minutes
-            logger.info("=" * 80)
-            logger.info("RELOADING INSTRUMENTS (12-minute interval)")
-            logger.info("=" * 80)
+            logger.info("Reloading instruments (timer)...")
             
             try:
                 # Request instrument reload from data client
                 instruments = self.cache.instruments()
-                logger.info(f"Before reload: {len(instruments)} instruments in cache")
                 
                 # Re-find BTC instrument (this will select the active one)
                 previous_slug = self.current_market_slug
@@ -3220,7 +3379,7 @@ class IntegratedBTCStrategy(Strategy):
                 elif self.auto_redeem_enabled and self.auto_redeem_on_rollover and previous_slug and self.current_market_slug and previous_slug != self.current_market_slug:
                     self._schedule_auto_redeem(reason=f"market_rollover:{previous_slug}->{self.current_market_slug}")
                 
-                logger.info("Instruments reloaded successfully")
+                logger.info(f"Instruments reload complete. cached={len(instruments)}")
             except Exception as e:
                 logger.error(f"Failed to reload instruments: {e}")
 
@@ -3619,7 +3778,6 @@ class IntegratedBTCStrategy(Strategy):
         Returns the current phase after evaluation.
         """
         now_ts = time.time()
-        prev_phase = self.market_phase
         end_ts = getattr(self, "current_market_end_timestamp", None)
 
         if end_ts is None:
@@ -3629,7 +3787,6 @@ class IntegratedBTCStrategy(Strategy):
             return self.market_phase
 
         time_left_sec = end_ts - now_ts
-        time_left_min = time_left_sec / 60.0
 
         if time_left_sec > self.maker_min_minutes_to_close * 60:
             # Plenty of time — we're active.
@@ -4020,7 +4177,8 @@ class IntegratedBTCStrategy(Strategy):
     def _find_btc_instrument(self):
         """Find the CURRENT active BTC 15-min instrument."""
         instruments = self.cache.instruments()
-        logger.info(f"Checking {len(instruments)} loaded instruments...")
+        if self.startup_verbose:
+            logger.info(f"Checking {len(instruments)} loaded instruments...")
         
         if not instruments:
             logger.error("NO INSTRUMENTS LOADED!")
@@ -4098,34 +4256,38 @@ class IntegratedBTCStrategy(Strategy):
         current_markets = [i for i in btc_instruments if i['time_diff_minutes'] <= 0 and i['time_diff_minutes'] > -15]
         future_markets = [i for i in btc_instruments if i['time_diff_minutes'] > 0]
         
-        logger.info("=" * 80)
-        logger.info("BTC 15-MIN INSTRUMENTS:")
-        for i in btc_instruments:
-            status = "CURRENT" if i in current_markets else "FUTURE" if i['time_diff_minutes'] > 0 else "PAST"
-            logger.info(f"  {i['slug']}: {status} (starts in {i['time_diff_minutes']:.1f} min)")
-        logger.info("=" * 80)
+        if self.startup_verbose:
+            logger.info(
+                f"Market candidates: total={len(btc_instruments)} "
+                f"current={len(current_markets)} future={len(future_markets)}"
+            )
         
         # Select the current market if available
         if current_markets:
             # Sort by closest to now
             current_markets.sort(key=lambda x: abs(x['time_diff_minutes']))
             selected = current_markets[0]
-            logger.info(f"✓ SELECTED CURRENT market: {selected['slug']}")
         elif future_markets:
             # Select the next future market
             future_markets.sort(key=lambda x: x['time_diff_minutes'])
             selected = future_markets[0]
-            logger.info(f"⚠ No current market, selecting next: {selected['slug']} (starts in {selected['time_diff_minutes']:.1f} min)")
+            logger.warning(
+                f"No current market, selecting next: {selected['slug']} "
+                f"(starts in {selected['time_diff_minutes']:.1f} min)"
+            )
         else:
             logger.warning("No active or future BTC 15-min instruments found in cache. All are PAST.")
             return False
         
         previous_instrument = str(self.instrument_id) if self.instrument_id else None
+        previous_slug = str(self.current_market_slug or "")
         self.current_market_slug = str(selected.get("slug") or "")
         
         # The market_timestamp from the slug is the START time of the 15-min market.
         # The true end time is exactly 15 minutes (900 seconds) later.
         start_ts = selected.get("market_timestamp")
+        if self.current_market_slug and start_ts:
+            self.market_start_ts_by_slug[self.current_market_slug] = int(start_ts)
         self.current_market_end_timestamp = start_ts + 900 if start_ts else None
         market_instruments = []
         for item in btc_instruments:
@@ -4171,6 +4333,13 @@ class IntegratedBTCStrategy(Strategy):
         self.current_market_instruments = market_instruments or [selected["instrument"].id]
         self.instrument_id = self.current_market_instruments[0]
         self.current_token_id = self._extract_token_id_from_instrument(str(self.instrument_id))
+        logger.info(
+            f"Selected market: slug={self.current_market_slug} "
+            f"instruments={len(self.current_market_instruments)} "
+            f"primary={self.instrument_id}"
+        )
+        if self.current_market_slug != previous_slug:
+            self._log_strike_status(self.current_market_slug)
         self._reset_maker_state_for_new_market(previous_instrument, str(self.instrument_id))
         for inst_id in self.current_market_instruments:
             self.subscribe_quote_ticks(inst_id)
@@ -4953,10 +5122,8 @@ class IntegratedBTCStrategy(Strategy):
 
 def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, test_mode: bool = False):
     """Run the integrated BTC 15-min trading bot."""
-    print("=" * 80)
-    print("INTEGRATED POLYMARKET BTC 15-MIN TRADING BOT")
-    print("Nautilus + 7-Phase System + Redis Control")
-    print("=" * 80)
+    startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
+    logger.info("Starting integrated Polymarket BTC 15-min trading bot.")
     
     # Initialize Redis
     redis_client = init_redis()
@@ -4969,24 +5136,23 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
         except Exception as e:
             logger.warning(f"Could not set Redis simulation mode: {e}")
     
-    print(f"\nConfiguration:")
-    print(f"  Initial Mode: {'SIMULATION' if simulation else 'LIVE TRADING'}")
-    print(f"  Redis Control: {'Enabled' if redis_client else 'Disabled'}")
-    print(f"  Grafana: {'Enabled' if enable_grafana else 'Disabled'}")
-    print(f"  Max Trade Size: $1.00")
-    print(f"  Instrument Reload: Every 12 minutes")
-    print(f"  Price History: Pre-loaded on startup")
     auto_rollover_enabled = os.getenv("AUTO_NODE_ROLLOVER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
     auto_rollover_sec = max(300, int(os.getenv("AUTO_NODE_ROLLOVER_SEC", "1800")))
     auto_rollover_cooldown_sec = max(1, int(os.getenv("AUTO_NODE_ROLLOVER_COOLDOWN_SEC", "3")))
     auto_rollover_max_failures = max(1, int(os.getenv("AUTO_NODE_ROLLOVER_MAX_FAILURES", "5")))
     auto_restart_on_unexpected_exit = os.getenv("AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT", "0").strip().lower() in ("1", "true", "yes", "on")
-    print(
-        f"  Auto Node Rollover: {'Enabled' if auto_rollover_enabled else 'Disabled'} "
-        f"({auto_rollover_sec}s)"
+    logger.info(
+        "Startup config: "
+        f"mode={'SIMULATION' if simulation else 'LIVE'} "
+        f"redis={'on' if redis_client else 'off'} "
+        f"grafana={'on' if enable_grafana else 'off'} "
+        f"auto_rollover={'on' if auto_rollover_enabled else 'off'}({auto_rollover_sec}s)"
     )
-    print(f"  Restart On Unexpected Exit: {'Enabled' if auto_restart_on_unexpected_exit else 'Disabled'}")
-    print()
+    if startup_verbose:
+        logger.info(
+            f"Startup detail: restart_on_unexpected_exit={'on' if auto_restart_on_unexpected_exit else 'off'} "
+            f"rollover_cooldown={auto_rollover_cooldown_sec}s max_failures={auto_rollover_max_failures}"
+        )
 
     auth = resolve_polymarket_auth()
     if not auth:
@@ -5028,17 +5194,13 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
         end_date_min = (now_utc - timedelta(minutes=window_back_minutes)).isoformat()
         end_date_max = (now_utc + timedelta(minutes=window_forward_minutes)).isoformat()
 
-        logger.info("=" * 80)
-        logger.info(f"Using SAFE slug-based market discovery (cycle={cycle_index})")
-        logger.info(f"  Candidate BTC 15-min slugs: {btc_slugs}")
-        logger.info(f"  Primary slug: {primary_slug}")
-        logger.info(f"  Slugs loaded into provider: {slugs_to_load}")
-        logger.info(f"  Instrument IDs: {[inst.value for inst in instrument_ids]}")
         logger.info(
-            f"  End-date window: {end_date_min} -> {end_date_max} "
-            f"(back={window_back_minutes}m, forward={window_forward_minutes}m)"
+            f"Market discovery cycle={cycle_index}: primary={primary_slug} "
+            f"load_slugs={len(slugs_to_load)} instrument_ids={len(instrument_ids)} "
+            f"window_back={window_back_minutes}m window_forward={window_forward_minutes}m"
         )
-        logger.info("=" * 80)
+        if os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on"):
+            logger.info(f"Market discovery details: slugs={slugs_to_load} ids={[inst.value for inst in instrument_ids]}")
 
         instrument_cfg = InstrumentProviderConfig(
             load_all=False,
@@ -5098,8 +5260,7 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
             selected_slug=primary_slug,
         )
 
-        print("\nBuilding Nautilus node...")
-        print("=" * 80)
+        logger.info("Building Nautilus node...")
         node = TradingNode(config=config)
         node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
         node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
@@ -5142,15 +5303,12 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
                 rollover_thread = threading.Thread(target=_rollover_worker, daemon=True)
                 rollover_thread.start()
 
-            print()
-            print("=" * 80)
-            print(f"BOT STARTING (cycle {cycle_idx})")
-            print("=" * 80)
+            logger.info(f"Bot cycle {cycle_idx} starting...")
             node.run()
             consecutive_failures = 0
         except KeyboardInterrupt:
             user_stopped = True
-            print("\nShutting down...")
+            logger.info("Shutdown requested by user.")
         except Exception as e:
             consecutive_failures += 1
             logger.exception(f"Node cycle {cycle_idx} failed: {e}")
