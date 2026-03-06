@@ -174,6 +174,18 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Redeem winners on-chain")
     parser.add_argument("--rpc-url", default=None, help="Polygon RPC URL")
     parser.add_argument("--chain-id", type=int, default=None, help="Chain ID override")
+    parser.add_argument(
+        "--min-condition-size",
+        type=float,
+        default=None,
+        help="Skip redeem for a condition when total redeemable size is below this threshold",
+    )
+    parser.add_argument(
+        "--min-total-size",
+        type=float,
+        default=None,
+        help="Skip the whole redeem run when selected redeemable total size is below this threshold",
+    )
     args = parser.parse_args()
 
     load_dotenv(args.env_file, override=False)
@@ -182,6 +194,16 @@ def main() -> int:
     signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
     chain_id = args.chain_id or int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
     rpc_url = args.rpc_url or os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+    min_condition_size = (
+        float(os.getenv("AUTO_REDEEM_MIN_CONDITION_SIZE", "0.10"))
+        if args.min_condition_size is None
+        else max(0.0, float(args.min_condition_size))
+    )
+    min_total_size = (
+        float(os.getenv("AUTO_REDEEM_MIN_TOTAL_SIZE", "0.50"))
+        if args.min_total_size is None
+        else max(0.0, float(args.min_total_size))
+    )
 
     env_addresses = [
         os.getenv("POLYMARKET_FUNDER", "").strip(),
@@ -259,6 +281,7 @@ def main() -> int:
             return 1
 
     redeemable_conditions: list[str] = []
+    redeemable_condition_sizes: dict[str, float] = defaultdict(float)
     seen: set[str] = set()
     for p in owner_positions:
         if not _slug_match(p, args.slug):
@@ -266,22 +289,51 @@ def main() -> int:
         if not bool(p.get("redeemable")):
             continue
         cid = str(p.get("conditionId") or "")
-        if cid and cid not in seen:
+        if not cid:
+            continue
+        redeemable_condition_sizes[cid] += float(p.get("size") or 0.0)
+        if cid not in seen:
             seen.add(cid)
             redeemable_conditions.append(cid)
+
+    filtered_redeemable_conditions: list[str] = []
+    skipped_small_conditions: list[tuple[str, float]] = []
+    for cid in redeemable_conditions:
+        total_size = redeemable_condition_sizes.get(cid, 0.0)
+        if total_size + 1e-12 < min_condition_size:
+            skipped_small_conditions.append((cid, total_size))
+            continue
+        filtered_redeemable_conditions.append(cid)
+
+    selected_total_size = sum(redeemable_condition_sizes.get(cid, 0.0) for cid in filtered_redeemable_conditions)
 
     print("\n=== Redeem Plan ===")
     print(f"Owner: {owner}")
     print(f"Chain ID: {chain_id}")
     print(f"RPC URL: {rpc_url}")
-    print(f"Redeemable conditions: {json.dumps(redeemable_conditions)}")
+    print(f"Min condition size: {min_condition_size:.6f}")
+    print(f"Min total size: {min_total_size:.6f}")
+    print(f"Redeemable conditions (raw): {json.dumps(redeemable_conditions)}")
+    if skipped_small_conditions:
+        skipped_fmt = ", ".join(f"{cid}:{size:.6f}" for cid, size in skipped_small_conditions)
+        print(f"Skipped small conditions: {skipped_fmt}")
+    print(f"Redeemable conditions (selected): {json.dumps(filtered_redeemable_conditions)}")
+    print(f"Selected total redeemable size: {selected_total_size:.6f}")
+
+    if selected_total_size + 1e-12 < min_total_size:
+        print(
+            f"Skip redeem run: selected_total_size={selected_total_size:.6f} "
+            f"< min_total_size={min_total_size:.6f}"
+        )
+        print("Redeem flow complete.")
+        return 0
 
     _redeem_conditions(
         private_key=private_key,
         owner_address=owner,
         chain_id=chain_id,
         rpc_url=rpc_url,
-        condition_ids=redeemable_conditions,
+        condition_ids=filtered_redeemable_conditions,
     )
     print("Redeem flow complete.")
     return 0

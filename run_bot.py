@@ -91,6 +91,7 @@ def auto_apply_local_patches() -> None:
         Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_ticksize_log.py",
         Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_trade_log.py",
         Path(__file__).parent / "scripts" / "patch_nautilus_polymarket_execution.py",
+        Path(__file__).parent / "scripts" / "patch_py_clob_http_helpers.py",
     ]
     for script in scripts:
         if not script.exists():
@@ -824,6 +825,10 @@ class IntegratedBTCStrategy(Strategy):
         self.no_quote_diag_interval_sec = max(10, int(os.getenv("NO_QUOTE_DIAG_INTERVAL_SEC", "30")))
         self._last_no_quote_diag_ts_by_inst: Dict[str, float] = {}
         self._last_sellable_skip_log_ts_by_inst: Dict[str, float] = {}
+        self.maker_gate_block_grace_sec = max(0, int(os.getenv("MAKER_GATE_BLOCK_GRACE_SEC", "4")))
+        self._gate_block_since_by_order_key: Dict[str, float] = {}
+        self._gate_block_reason_by_order_key: Dict[str, str] = {}
+        self._gate_last_cancel_ts_by_order_key: Dict[str, float] = {}
         self.strike_fallback_log_interval_sec = max(10, int(os.getenv("STRIKE_FALLBACK_LOG_INTERVAL_SEC", "60")))
         self._last_strike_fallback_log_ts = 0.0
         self._last_digital_pricer_log_ts = 0.0
@@ -871,6 +876,7 @@ class IntegratedBTCStrategy(Strategy):
         self.auto_redeem_interval_sec = max(120, int(os.getenv("AUTO_REDEEM_INTERVAL_SEC", "900")))
         self.auto_redeem_on_rollover = os.getenv("AUTO_REDEEM_ON_ROLLOVER", "1").strip().lower() not in ("0", "false", "no")
         self.auto_redeem_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_TIMEOUT_SEC", "180")))
+        self.auto_redeem_min_gap_sec = max(0, int(os.getenv("AUTO_REDEEM_MIN_GAP_SEC", "300")))
         self.auto_redeem_slug_filter = os.getenv("AUTO_REDEEM_SLUG_FILTER", "btc-updown-15m").strip()
         self._redeem_stop_event = threading.Event()
         self._redeem_thread: Optional[threading.Thread] = None
@@ -2837,12 +2843,22 @@ class IntegratedBTCStrategy(Strategy):
                 exec_penalty = quote_data[4] if len(quote_data) > 4 else None
                 diag_reason = ""
                 if not should_quote:
-                    diag_reason = (
-                        f"econ_gate robust_net={float(robust_net):.6f} "
-                        f"(expected_net={float(econ.expected_net_usdc):.6f}, "
-                        f"exec_penalty={float(exec_penalty):.6f}) "
-                        f"< min={float(self.maker_min_expected_net_usdc):.6f}"
-                    )
+                    robust_net_val = robust_net if isinstance(robust_net, Decimal) else None
+                    robust_net_display = float(robust_net) if isinstance(robust_net, Decimal) else float("nan")
+                    exec_penalty_display = float(exec_penalty) if isinstance(exec_penalty, Decimal) else 0.0
+                    if robust_net_val is not None and robust_net_val < self.maker_min_expected_net_usdc:
+                        diag_reason = (
+                            f"econ_gate robust_net={float(robust_net_val):.6f} "
+                            f"(expected_net={float(econ.expected_net_usdc):.6f}, "
+                            f"exec_penalty={exec_penalty_display:.6f}) "
+                            f"< min={float(self.maker_min_expected_net_usdc):.6f}"
+                        )
+                    else:
+                        diag_reason = (
+                            f"side_disabled robust_net={robust_net_display:.6f} "
+                            f"(expected_net={float(econ.expected_net_usdc):.6f}, "
+                            f"exec_penalty={exec_penalty_display:.6f})"
+                        )
                 if side == "sell":
                     inst_key = self._instrument_key(inst_id)
                     sell_pause_until = float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0))
@@ -2885,8 +2901,39 @@ class IntegratedBTCStrategy(Strategy):
             if state_inst not in target_inst_set:
                 continue
             desired = desired_quotes.get(order_key)
-            if desired is None or not bool(desired.get("should_quote", False)):
-                self._cancel_maker_order_side(order_key, reason="risk")
+            if desired is None:
+                self._cancel_maker_order_side(order_key, reason="risk:no_desired_quote")
+                continue
+            if bool(desired.get("should_quote", False)):
+                self._gate_block_since_by_order_key.pop(order_key, None)
+                self._gate_block_reason_by_order_key.pop(order_key, None)
+                continue
+
+            reason = str(desired.get("diag_reason", "risk") or "risk")
+
+            # sell_pause means "don't place new SELL", but keep existing working orders.
+            if reason.startswith("sell_pause"):
+                continue
+
+            soft_block = (
+                reason.startswith("econ_gate")
+                or reason.startswith("reduce_only")
+                or reason.startswith("balance_forced_sell_only")
+            )
+            if soft_block:
+                prev_reason = self._gate_block_reason_by_order_key.get(order_key, "")
+                if prev_reason != reason:
+                    self._gate_block_reason_by_order_key[order_key] = reason
+                    self._gate_block_since_by_order_key[order_key] = now_ts
+                blocked_for = now_ts - float(self._gate_block_since_by_order_key.get(order_key, now_ts))
+                if blocked_for < float(self.maker_gate_block_grace_sec):
+                    continue
+
+            last_cancel = float(self._gate_last_cancel_ts_by_order_key.get(order_key, 0.0))
+            if now_ts - last_cancel < float(self.maker_cancel_cooldown_sec):
+                continue
+            self._gate_last_cancel_ts_by_order_key[order_key] = now_ts
+            self._cancel_maker_order_side(order_key, reason=f"risk:{reason}")
 
         # Quote desired sides with selective requote.
         for order_key, desired in desired_quotes.items():
@@ -2996,6 +3043,41 @@ class IntegratedBTCStrategy(Strategy):
         instrument_id = self._normalize_instrument_id(instrument_id)
         instrument = self.cache.instrument(instrument_id) if instrument_id else None
         limit_price = self._align_price_to_tick(limit_price, side, instrument)
+
+        # Pre-submit clamp: avoid posting BUY quotes that cross best ask.
+        # This removes structural crossing when spread is tight (e.g. 1 tick).
+        quote_now = self._get_quote_for_instrument(instrument_id)
+        if quote_now is not None and side == "buy":
+            _best_bid_now, best_ask_now = quote_now
+            if limit_price >= best_ask_now:
+                tick = Decimal("0.01")
+                try:
+                    raw_tick = getattr(instrument, "price_increment", None) if instrument is not None else None
+                    if raw_tick is not None:
+                        tick = Decimal(str(raw_tick.as_decimal() if hasattr(raw_tick, "as_decimal") else raw_tick))
+                    elif instrument is not None and hasattr(instrument, "info") and instrument.info:
+                        min_tick = instrument.info.get("minimum_tick_size")
+                        if min_tick is not None:
+                            tick = Decimal(str(min_tick))
+                except Exception:
+                    tick = Decimal("0.01")
+                if tick <= 0:
+                    tick = Decimal("0.01")
+
+                old_limit_price = limit_price
+                limit_price = self._align_price_to_tick(best_ask_now - tick, "buy", instrument)
+                if limit_price >= best_ask_now:
+                    logger.warning(
+                        f"Skip crossing BUY quote {float(old_limit_price):.4f} >= ask {float(best_ask_now):.4f} "
+                        f"(retreat failed -> {float(limit_price):.4f})"
+                    )
+                    return
+                logger.info(
+                    "Adjusted BUY quote to avoid crossing: "
+                    f"{float(old_limit_price):.4f} -> {float(limit_price):.4f} "
+                    f"(ask={float(best_ask_now):.4f})"
+                )
+
         precision = int(getattr(instrument, "size_precision", 6)) if instrument is not None else 6
         qty_dec = self._compute_maker_order_qty(limit_price, precision)
         projected_inventory = self._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
@@ -3396,6 +3478,15 @@ class IntegratedBTCStrategy(Strategy):
                 return
             try:
                 now_ts = time.time()
+                if self.auto_redeem_min_gap_sec > 0 and self._last_redeem_run_ts > 0:
+                    elapsed_since_last = now_ts - self._last_redeem_run_ts
+                    if elapsed_since_last < float(self.auto_redeem_min_gap_sec):
+                        logger.info(
+                            "Auto redeem skipped by min gap: "
+                            f"reason={reason} elapsed={elapsed_since_last:.1f}s "
+                            f"required={self.auto_redeem_min_gap_sec}s"
+                        )
+                        return
                 self._last_redeem_run_ts = now_ts
                 script = Path(__file__).parent / "scripts" / "check_positions_and_redeem.py"
                 if not script.exists():
@@ -5216,6 +5307,10 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
             use_gamma_markets=True,
         )
 
+        poly_http_max_retries = max(1, int(os.getenv("POLY_HTTP_MAX_RETRIES", "4")))
+        poly_http_retry_initial_ms = max(50, int(os.getenv("POLY_HTTP_RETRY_INITIAL_MS", "250")))
+        poly_http_retry_max_ms = max(poly_http_retry_initial_ms, int(os.getenv("POLY_HTTP_RETRY_MAX_MS", "2000")))
+
         poly_data_cfg = PolymarketDataClientConfig(
             private_key=auth["private_key"],
             signature_type=int(auth.get("signature_type", "0")),
@@ -5235,6 +5330,9 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
             api_secret=auth["api_secret"],
             passphrase=auth["passphrase"],
             instrument_provider=instrument_cfg,
+            max_retries=poly_http_max_retries,
+            retry_delay_initial_ms=poly_http_retry_initial_ms,
+            retry_delay_max_ms=poly_http_retry_max_ms,
         )
 
         config = TradingNodeConfig(
