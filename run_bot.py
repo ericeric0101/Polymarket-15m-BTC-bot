@@ -696,6 +696,10 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_fee_rate_bps_default = int(
             (self.maker_fee_rate_default_decimal * Decimal("10000")).quantize(Decimal("1"))
         )
+        # Strategy-side economics calibration: maker fee is treated as 0 by default.
+        self.maker_econ_fee_rate_decimal = Decimal(os.getenv("MAKER_ECON_FEE_RATE_DECIMAL", "0"))
+        if self.maker_econ_fee_rate_decimal < 0:
+            self.maker_econ_fee_rate_decimal = Decimal("0")
         self.maker_max_order_usdc = Decimal(os.getenv("MAKER_MAX_ORDER_USDC", "1.0"))
         self.maker_auto_tune = os.getenv("MAKER_AUTO_TUNE", "0") == "1"
         self.maker_auto_tune_interval_sec = int(os.getenv("MAKER_AUTO_TUNE_INTERVAL_SEC", "300"))
@@ -829,6 +833,14 @@ class IntegratedBTCStrategy(Strategy):
         self._gate_block_since_by_order_key: Dict[str, float] = {}
         self._gate_block_reason_by_order_key: Dict[str, str] = {}
         self._gate_last_cancel_ts_by_order_key: Dict[str, float] = {}
+        self._cancel_ack_dedupe_window_sec = max(
+            1, int(os.getenv("MAKER_CANCEL_ACK_DEDUPE_WINDOW_SEC", "3"))
+        )
+        self._last_cancel_ack_ts_by_client_order_id: Dict[str, float] = {}
+        # Requote state machine: upgrade target "version" only when desired price
+        # moves outside hysteresis band. Active orders requote only when lagging version.
+        self._target_anchor_price_by_order_key: Dict[str, Decimal] = {}
+        self._target_version_by_order_key: Dict[str, int] = {}
         self.strike_fallback_log_interval_sec = max(10, int(os.getenv("STRIKE_FALLBACK_LOG_INTERVAL_SEC", "60")))
         self._last_strike_fallback_log_ts = 0.0
         self._last_digital_pricer_log_ts = 0.0
@@ -1585,6 +1597,36 @@ class IntegratedBTCStrategy(Strategy):
             return "sell"
         return ""
 
+    @staticmethod
+    def _reason_family(reason: str) -> str:
+        """
+        Collapse verbose diagnostic strings into stable reason families.
+        This avoids state-machine jitter when numeric diagnostics change every tick.
+        """
+        r = str(reason or "")
+        if r.startswith("econ_gate"):
+            return "econ_gate"
+        if r.startswith("reduce_only_tail_guard"):
+            return "reduce_only_tail_guard"
+        if r.startswith("reduce_only"):
+            return "reduce_only"
+        if r.startswith("balance_forced_sell_only"):
+            return "balance_forced_sell_only"
+        if r.startswith("sell_pause"):
+            return "sell_pause"
+        if r.startswith("sellable_below_min"):
+            return "sellable_below_min"
+        if r.startswith("side_disabled"):
+            return "side_disabled"
+        if r.startswith("risk:no_desired_quote"):
+            return "no_desired_quote"
+        return "risk"
+
+    @staticmethod
+    def _is_maker_fill_liquidity(liquidity_side: Any) -> bool:
+        txt = str(liquidity_side or "").strip().upper()
+        return txt in {"MAKER", "1"}
+
     def _update_live_inventory_cost_from_fill(
         self,
         instrument_id: Any,
@@ -1592,10 +1634,10 @@ class IntegratedBTCStrategy(Strategy):
         fill_price: Decimal,
         fill_qty: Decimal,
         commission: Decimal,
-    ) -> None:
+    ) -> Optional[Decimal]:
         inst_key = self._instrument_key(instrument_id)
         if not inst_key or fill_qty <= 0 or fill_price <= 0:
-            return
+            return None
         state = self.live_inventory_cost.setdefault(
             inst_key,
             {
@@ -1622,16 +1664,16 @@ class IntegratedBTCStrategy(Strategy):
             state["entry_fee_remaining"] = Decimal(str(state.get("entry_fee_remaining", "0"))) + max(Decimal("0"), commission)
             if float(state.get("opened_ts", 0.0)) <= 0:
                 state["opened_ts"] = now_ts
-            return
+            return None
 
         if side_norm != "sell":
-            return
+            return None
         old_qty = Decimal(str(state.get("qty", "0")))
         if old_qty <= 0:
-            return
+            return None
         sell_qty = min(fill_qty, old_qty)
         if sell_qty <= 0:
-            return
+            return None
         avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
         fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
         alloc_ratio = sell_qty / old_qty if old_qty > 0 else Decimal("0")
@@ -1653,6 +1695,7 @@ class IntegratedBTCStrategy(Strategy):
             f"entry={float(avg_entry):.4f} exit={float(fill_price):.4f} "
             f"net_pnl={float(realized_net):+.4f} remaining={float(state['qty']):.6f}"
         )
+        return realized_net
 
     async def _maybe_taker_exit_positions(self, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
@@ -2322,14 +2365,20 @@ class IntegratedBTCStrategy(Strategy):
             return
         side = str(state.get("side", "") or "")
         order = state.get("order")
+        now_ts = time.time()
+        if state.get("pending_cancel"):
+            last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
+            if last_cancel_ts > 0 and (now_ts - last_cancel_ts) < self.maker_cancel_cooldown_sec:
+                logger.debug(f"Skip duplicate cancel [{side}] within cooldown")
+                return
         if state.get("simulated"):
             coid = str(state.get("client_order_id", f"SIM-{side}-{int(time.time()*1000)}"))
-            now_ts = time.time()
             cancel_latency_ms = random.randint(
                 min(self.sim_cancel_latency_ms_min, self.sim_cancel_latency_ms_max),
                 max(self.sim_cancel_latency_ms_min, self.sim_cancel_latency_ms_max),
             )
             state["pending_cancel"] = True
+            state["last_cancel_ts"] = now_ts
             state["cancel_requested_ts"] = now_ts
             state["cancel_effective_at"] = now_ts + (cancel_latency_ms / 1000.0)
             state["cancel_reason"] = reason
@@ -2347,9 +2396,9 @@ class IntegratedBTCStrategy(Strategy):
         if order is None:
             # The order might just be missing a venue ID or dropped from cache temporarily.
             # Don't pop it! Mark it pending_cancel to be cleaned up by the reconcile loop.
-            now_ts = time.time()
             state["pending_cancel"] = True
             state["last_cancel_ts"] = now_ts
+            state["cancel_reason"] = reason
             return
         try:
             status_text = str(getattr(order, "status", "")).upper()
@@ -2357,16 +2406,11 @@ class IntegratedBTCStrategy(Strategy):
                 logger.debug(f"Skip cancel [{side}] because order state is terminal: {status_text}")
                 self.active_maker_orders.pop(order_key, None)
             else:
-                now_ts = time.time()
-                if state.get("pending_cancel"):
-                    last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
-                    if now_ts - last_cancel_ts < self.maker_cancel_cooldown_sec:
-                        logger.debug(f"Skip duplicate cancel [{side}] within cooldown")
-                        return
                 self.cancel_order(order)
                 state["pending_cancel"] = True
                 state["last_cancel_ts"] = now_ts
                 state["cancel_retries"] = int(state.get("cancel_retries", 0))
+                state["cancel_reason"] = reason
                 logger.info(f"Cancelled maker order [{side}] {order.client_order_id}")
         except Exception as e:
             logger.debug(f"Failed to cancel maker order [{side}]: {e}")
@@ -2708,7 +2752,7 @@ class IntegratedBTCStrategy(Strategy):
                 # logger.debug(
                 #     f"Using dynamic fee rate: {float(dynamic_fee_rate):.6f} for token {token_id}"
                 # )
-            fee_rate_val = dynamic_fee_rate if dynamic_fee_rate is not None else self.maker_fee_rate_default_decimal
+            fee_rate_val = self.maker_econ_fee_rate_decimal
             diag_context_by_inst[inst_key] = {
                 "reason": "ok",
                 "fair": fair,
@@ -2739,7 +2783,13 @@ class IntegratedBTCStrategy(Strategy):
                 diag_context_by_inst[inst_key]["reason"] = "invalid_quote_plan"
                 continue
 
-            def _set_side_should_quote(plan_side: str, new_should_quote: bool) -> None:
+            side_disable_reason_by_side: Dict[str, str] = {}
+
+            def _set_side_should_quote(
+                plan_side: str,
+                new_should_quote: bool,
+                disable_reason: Optional[str] = None,
+            ) -> None:
                 existing = side_plan.get(plan_side)
                 if not existing:
                     return
@@ -2748,6 +2798,17 @@ class IntegratedBTCStrategy(Strategy):
                 robust_net = existing[3] if len(existing) > 3 else None
                 exec_penalty = existing[4] if len(existing) > 4 else None
                 side_plan[plan_side] = (lp, ec, new_should_quote, robust_net, exec_penalty)
+                if not new_should_quote and disable_reason:
+                    side_disable_reason_by_side[plan_side] = str(disable_reason)
+                elif new_should_quote:
+                    side_disable_reason_by_side.pop(plan_side, None)
+
+            if self.maker_quote_sides == "buy":
+                side_disable_reason_by_side["sell"] = "quote_mode_buy_only"
+            elif self.maker_quote_sides == "sell":
+                side_disable_reason_by_side["buy"] = "quote_mode_sell_only"
+            elif self.maker_quote_sides == "both_buy":
+                side_disable_reason_by_side["sell"] = "quote_mode_both_buy"
 
             # --- TREND / MOMENTUM FILTER ---------------------------------------------
             # Prevent "catching a falling knife" (buy) or "stepping in front of a train" (sell).
@@ -2759,7 +2820,7 @@ class IntegratedBTCStrategy(Strategy):
                 
                 if trend_pct <= -self.maker_momentum_filter_pct and "buy" in side_plan:
                     reduce_only_reason = f"momentum filter (dropped {float(trend_pct*100):.1f}%)"
-                    _set_side_should_quote("buy", False)
+                    _set_side_should_quote("buy", False, "momentum_buy_block")
                     if not getattr(self, "_logged_mom_buy", False) or time.time() - getattr(self, "_last_mom_ts", 0) > 30:
                         logger.warning(f"Trend Protection: {reduce_only_reason}. Blocking BUY orders.")
                         self._logged_mom_buy = True
@@ -2770,7 +2831,7 @@ class IntegratedBTCStrategy(Strategy):
                     
                 if trend_pct >= self.maker_momentum_filter_pct and "sell" in side_plan:
                     reduce_only_reason = f"momentum filter (pumped {float(trend_pct*100):.1f}%)"
-                    _set_side_should_quote("sell", False)
+                    _set_side_should_quote("sell", False, "momentum_sell_block")
                     if not getattr(self, "_logged_mom_sell", False) or time.time() - getattr(self, "_last_mom_ts_s", 0) > 30:
                         logger.warning(f"Trend Protection: {reduce_only_reason}. Blocking SELL orders.")
                         self._logged_mom_sell = True
@@ -2810,7 +2871,7 @@ class IntegratedBTCStrategy(Strategy):
                         logger.warning(f"Maker Reduce-Only active ({reduce_only_reason}). Blocking BUY orders.")
                         self._logged_reduce_only = True
                         self._last_ro_log_ts = time.time()
-                    _set_side_should_quote("buy", False)
+                    _set_side_should_quote("buy", False, "reduce_only_buy_block")
                 if "sell" in side_plan and reduce_only_tail_sell_block:
                     if (
                         not getattr(self, "_logged_reduce_only_tail_sell_block", False)
@@ -2823,7 +2884,7 @@ class IntegratedBTCStrategy(Strategy):
                         )
                         self._logged_reduce_only_tail_sell_block = True
                         self._last_ro_tail_sell_log_ts = time.time()
-                    _set_side_should_quote("sell", False)
+                    _set_side_should_quote("sell", False, "reduce_only_tail_sell_block")
 
             elif "buy" in side_plan and getattr(self, "_logged_reduce_only", False):
                 self._logged_reduce_only = False  # Reset if conditions normalize
@@ -2833,7 +2894,7 @@ class IntegratedBTCStrategy(Strategy):
 
             # --- Balance-forced SELL-only mode ---
             if _balance_forced_sell_only and "buy" in side_plan:
-                _set_side_should_quote("buy", False)
+                _set_side_should_quote("buy", False, "balance_forced_sell_only")
 
             for side, quote_data in side_plan.items():
                 limit_price = quote_data[0]
@@ -2854,8 +2915,9 @@ class IntegratedBTCStrategy(Strategy):
                             f"< min={float(self.maker_min_expected_net_usdc):.6f}"
                         )
                     else:
+                        side_disable_reason = side_disable_reason_by_side.get(side, "unspecified")
                         diag_reason = (
-                            f"side_disabled robust_net={robust_net_display:.6f} "
+                            f"side_disabled:{side_disable_reason} robust_net={robust_net_display:.6f} "
                             f"(expected_net={float(econ.expected_net_usdc):.6f}, "
                             f"exec_penalty={exec_penalty_display:.6f})"
                         )
@@ -2910,24 +2972,30 @@ class IntegratedBTCStrategy(Strategy):
                 continue
 
             reason = str(desired.get("diag_reason", "risk") or "risk")
+            reason_family = self._reason_family(reason)
 
             # sell_pause means "don't place new SELL", but keep existing working orders.
-            if reason.startswith("sell_pause"):
+            if reason_family == "sell_pause":
                 continue
 
             soft_block = (
-                reason.startswith("econ_gate")
-                or reason.startswith("reduce_only")
-                or reason.startswith("balance_forced_sell_only")
+                reason_family == "econ_gate"
+                or reason_family == "reduce_only"
+                or reason_family == "reduce_only_tail_guard"
+                or reason_family == "balance_forced_sell_only"
+                or reason_family == "side_disabled"
             )
             if soft_block:
                 prev_reason = self._gate_block_reason_by_order_key.get(order_key, "")
-                if prev_reason != reason:
-                    self._gate_block_reason_by_order_key[order_key] = reason
+                if prev_reason != reason_family:
+                    self._gate_block_reason_by_order_key[order_key] = reason_family
                     self._gate_block_since_by_order_key[order_key] = now_ts
                 blocked_for = now_ts - float(self._gate_block_since_by_order_key.get(order_key, now_ts))
                 if blocked_for < float(self.maker_gate_block_grace_sec):
                     continue
+            else:
+                self._gate_block_reason_by_order_key.pop(order_key, None)
+                self._gate_block_since_by_order_key.pop(order_key, None)
 
             last_cancel = float(self._gate_last_cancel_ts_by_order_key.get(order_key, 0.0))
             if now_ts - last_cancel < float(self.maker_cancel_cooldown_sec):
@@ -2946,30 +3014,46 @@ class IntegratedBTCStrategy(Strategy):
             econ = desired["econ"]
             dynamic_fee_rate = desired.get("dynamic_fee_rate")
 
+            # Use per-instrument tick size to build stable target versions.
+            inst_for_tick = self._normalize_instrument_id(inst_id)
+            inst_obj = self.cache.instrument(inst_for_tick) if inst_for_tick else None
+            tick = Decimal("0.01")
+            if inst_obj is not None:
+                try:
+                    raw_tick = getattr(inst_obj, "price_increment", None)
+                    if raw_tick is not None:
+                        tick = Decimal(str(raw_tick))
+                    elif hasattr(inst_obj, "info") and inst_obj.info:
+                        maybe_tick = inst_obj.info.get("minimum_tick_size")
+                        if maybe_tick is not None:
+                            tick = Decimal(str(maybe_tick))
+                except Exception:
+                    pass
+            if tick <= 0:
+                tick = Decimal("0.01")
+
+            # Requote state machine:
+            # - keep an anchor price per order_key
+            # - bump target version only when desired price leaves hysteresis band
+            # - active order requires update only when its target_version lags
+            prev_anchor = self._target_anchor_price_by_order_key.get(order_key)
+            target_version = int(self._target_version_by_order_key.get(order_key, 0))
+            if prev_anchor is None:
+                target_version += 1
+                self._target_anchor_price_by_order_key[order_key] = limit_price
+                self._target_version_by_order_key[order_key] = target_version
+            else:
+                if abs(limit_price - prev_anchor) >= (self.maker_requote_hysteresis_ticks * tick):
+                    target_version += 1
+                    self._target_anchor_price_by_order_key[order_key] = limit_price
+                    self._target_version_by_order_key[order_key] = target_version
+
             current = self.active_maker_orders.get(order_key)
             if current:
                 if current.get("pending_cancel"):
                     continue
-                current_price = Decimal(str(current.get("price", "0")))
-                # Use per-instrument tick size here (not leaked from prior loop iterations).
-                inst_for_tick = self._normalize_instrument_id(inst_id)
-                inst_obj = self.cache.instrument(inst_for_tick) if inst_for_tick else None
-                tick = Decimal("0.01")
-                if inst_obj is not None:
-                    try:
-                        raw_tick = getattr(inst_obj, "price_increment", None)
-                        if raw_tick is not None:
-                            tick = Decimal(str(raw_tick))
-                        elif hasattr(inst_obj, "info") and inst_obj.info:
-                            maybe_tick = inst_obj.info.get("minimum_tick_size")
-                            if maybe_tick is not None:
-                                tick = Decimal(str(maybe_tick))
-                    except Exception:
-                        pass
-                if tick <= 0:
-                    tick = Decimal("0.01")
-                distance = abs(current_price - limit_price)
-                if distance < (self.maker_requote_hysteresis_ticks * tick):
+                current_target_version = int(current.get("target_version", 0) or 0)
+                if current_target_version >= target_version:
                     continue
                 
                 # Token Bucket guard against cancel storms
@@ -2991,7 +3075,14 @@ class IntegratedBTCStrategy(Strategy):
                 self._cancel_maker_order_side(order_key, reason="requote")
                 continue
 
-            await self._submit_maker_quote(inst_id, side, limit_price, econ, dynamic_fee_rate)
+            await self._submit_maker_quote(
+                inst_id,
+                side,
+                limit_price,
+                econ,
+                dynamic_fee_rate,
+                target_version=target_version,
+            )
 
         # Diagnostic log when no side is quotable and no active orders exist.
         if submitted_attempts == 0:
@@ -3039,10 +3130,22 @@ class IntegratedBTCStrategy(Strategy):
         limit_price: Decimal,
         econ,
         dynamic_fee_rate: Optional[Decimal] = None,
+        target_version: Optional[int] = None,
     ) -> None:
         instrument_id = self._normalize_instrument_id(instrument_id)
         instrument = self.cache.instrument(instrument_id) if instrument_id else None
         limit_price = self._align_price_to_tick(limit_price, side, instrument)
+        expected_net_usdc = Decimal(str(getattr(econ, "expected_net_usdc", "0")))
+        if expected_net_usdc <= Decimal("0"):
+            self._db_order_event(
+                event_type="ORDER_SKIP_EXPECTED_NET",
+                side=side.upper(),
+                price=float(limit_price),
+                status="SKIPPED",
+                reason="expected_net_non_positive",
+                expected_net_usdc=float(expected_net_usdc),
+            )
+            return
 
         # Pre-submit clamp: avoid posting BUY quotes that cross best ask.
         # This removes structural crossing when spread is tight (e.g. 1 tick).
@@ -3169,6 +3272,7 @@ class IntegratedBTCStrategy(Strategy):
                 "filled_qty": Decimal("0"),
                 "entry_commission_usdc": Decimal("0"),
                 "fee_rate_bps": fee_rate_bps,
+                "target_version": int(target_version or 0),
             }
             self._db_order_event(
                 event_type="ORDER_SIM_SUBMIT",
@@ -3249,6 +3353,7 @@ class IntegratedBTCStrategy(Strategy):
             "token_id": self._extract_token_id_from_instrument(str(instrument_id)),
             "quantity": Decimal(str(token_qty)),
             "created_ts": time.time(),
+            "target_version": int(target_version or 0),
         }
         self._db_order_event(
             event_type="ORDER_SUBMIT",
@@ -4927,7 +5032,11 @@ class IntegratedBTCStrategy(Strategy):
 
         fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
         fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
-        fill_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
+        raw_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
+        liquidity_side_raw = getattr(event, "liquidity_side", "")
+        is_maker_fill = self._is_maker_fill_liquidity(liquidity_side_raw)
+        # Normalize maker economics: maker fills are treated as zero-fee for strategy PnL/DB.
+        fill_commission_dec = Decimal("0") if is_maker_fill else raw_commission_dec
         side_for_ledger = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
         # Non-maker fills (e.g. taker-exit IOC market sells) are not in active_maker_orders.
         # Keep inventory_delta_shares in sync for those fills as well.
@@ -4937,8 +5046,9 @@ class IntegratedBTCStrategy(Strategy):
                 self.inventory_delta_shares += fill_qty_dec
             elif side_norm == "sell":
                 self.inventory_delta_shares -= fill_qty_dec
+        realized_net_usdc = None
         if side_for_ledger:
-            self._update_live_inventory_cost_from_fill(
+            realized_net_usdc = self._update_live_inventory_cost_from_fill(
                 instrument_id=filled_inst,
                 side=side_for_ledger,
                 fill_price=fill_price_dec,
@@ -4953,7 +5063,7 @@ class IntegratedBTCStrategy(Strategy):
         # Learn effective fee bps from real fills to keep economics aligned with venue reality.
         try:
             notional = Decimal(str(float(event.last_qty))) * Decimal(str(float(event.last_px)))
-            commission = Decimal(str(float(event.commission)))
+            commission = fill_commission_dec
             if notional > 0 and commission >= 0:
                 observed_bps = int(round(float((commission / notional) * Decimal("10000"))))
                 if observed_bps > 0:
@@ -4978,10 +5088,28 @@ class IntegratedBTCStrategy(Strategy):
             price=float(getattr(event, "last_px", 0.0)),
             qty=float(getattr(event, "last_qty", 0.0)),
             status="FILLED",
-            commission_usdc=float(getattr(event, "commission", 0.0)),
+            expected_net_usdc=(
+                float(getattr(filled_econ, "expected_net_usdc", 0.0))
+                if filled_econ is not None
+                else None
+            ),
+            commission_usdc=float(fill_commission_dec),
             payload={
-                "liquidity_side": str(getattr(event, "liquidity_side", "")),
+                "liquidity_side": str(liquidity_side_raw),
                 "inventory_delta_shares": float(self.inventory_delta_shares),
+                "raw_commission_usdc": float(raw_commission_dec),
+                "effective_commission_usdc": float(fill_commission_dec),
+                "expected_rebate_usdc": (
+                    float(getattr(filled_econ, "expected_rebate_usdc", 0.0))
+                    if filled_econ is not None
+                    else None
+                ),
+                "expected_spread_capture_usdc": (
+                    float(getattr(filled_econ, "expected_spread_capture_usdc", 0.0))
+                    if filled_econ is not None
+                    else None
+                ),
+                "realized_net_usdc": (float(realized_net_usdc) if realized_net_usdc is not None else None),
             },
         )
         self.rebate_reporter.flush_daily_report()
@@ -5022,10 +5150,20 @@ class IntegratedBTCStrategy(Strategy):
     def on_order_canceled(self, event):
         """Handle cancel acknowledgements to clear pending-cancel state."""
         canceled_id = str(getattr(event, "client_order_id", "") or "")
+        now_ts = time.time()
+        if canceled_id:
+            last_ack_ts = float(self._last_cancel_ack_ts_by_client_order_id.get(canceled_id, 0.0))
+            if (now_ts - last_ack_ts) < float(self._cancel_ack_dedupe_window_sec):
+                logger.debug(f"Skip duplicate cancel ack log for {canceled_id}")
+                return
+            self._last_cancel_ack_ts_by_client_order_id[canceled_id] = now_ts
         self._clear_pending_taker_exit_for_order(canceled_id)
+        cancel_reason = ""
         for order_key, state in list(self.active_maker_orders.items()):
             order = state.get("order")
-            if order and str(order.client_order_id) == canceled_id:
+            state_coid = str(state.get("client_order_id", "") or "")
+            if (order and str(order.client_order_id) == canceled_id) or (state_coid and state_coid == canceled_id):
+                cancel_reason = str(state.get("cancel_reason", "") or "")
                 self.active_maker_orders.pop(order_key, None)
                 break
         self._db_order_event(
@@ -5034,6 +5172,7 @@ class IntegratedBTCStrategy(Strategy):
             venue_order_id=str(getattr(event, "venue_order_id", "")) if getattr(event, "venue_order_id", None) else None,
             side=str(getattr(event, "order_side", "")),
             status="CANCELED",
+            reason=cancel_reason,
         )
     
     def on_order_cancel_rejected(self, event):
