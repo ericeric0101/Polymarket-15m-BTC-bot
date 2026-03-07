@@ -805,6 +805,8 @@ class IntegratedBTCStrategy(Strategy):
         self.orderbook_unavailable_token: Optional[str] = None
         self.last_external_spot: Optional[Decimal] = None
         self.latest_external_spot: Optional[Decimal] = None
+        self.external_spot_consecutive_failures: int = 0  # BUG-5 FIX
+        self.external_spot_max_failures: int = int(os.getenv("EXTERNAL_SPOT_MAX_FAILURES", "10"))
         self.external_spot_history: List[Tuple[float, Decimal]] = []
         self.external_spot_history_max = max(60, int(os.getenv("EXTERNAL_SPOT_HISTORY_MAX", "1200")))
         self.market_strike_cache_by_slug: Dict[str, Decimal] = {}
@@ -857,6 +859,9 @@ class IntegratedBTCStrategy(Strategy):
         self._fee_rate_local_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self.latest_market_bid: Optional[Decimal] = None
         self.latest_market_ask: Optional[Decimal] = None
+        self.latest_market_bid_ts: float = 0.0  # BUG-2 FIX: timestamp for staleness check
+        self.latest_market_ask_ts: float = 0.0
+        self.stale_quote_synth_max_age_sec: float = float(os.getenv("STALE_QUOTE_SYNTH_MAX_AGE_SEC", "10"))
         self.latest_quote_depth_by_inst: Dict[str, Tuple[Optional[Decimal], Optional[Decimal]]] = {}
         self.orderbook_levels_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self._inventory_delta_shares = Decimal("0")
@@ -1526,6 +1531,7 @@ class IntegratedBTCStrategy(Strategy):
         external = await self._fetch_external_spot_price()
         if external:
             self.latest_external_spot = external
+            self.external_spot_consecutive_failures = 0  # BUG-5 FIX: reset on success
             self._record_external_spot_observation(external)
             
             strike = None
@@ -1573,6 +1579,19 @@ class IntegratedBTCStrategy(Strategy):
             )
             
             self.last_external_spot = external
+        else:
+            # BUG-5 FIX: track consecutive external spot failures and pause quoting
+            self.external_spot_consecutive_failures += 1
+            if self.external_spot_consecutive_failures >= self.external_spot_max_failures:
+                pause_sec = min(30.0, self.external_spot_consecutive_failures * 2.0)
+                self.quote_pause_until_ts = max(
+                    self.quote_pause_until_ts, time.time() + pause_sec
+                )
+                if self.external_spot_consecutive_failures % 10 == 0:
+                    logger.warning(
+                        f"External spot unavailable for {self.external_spot_consecutive_failures} "
+                        f"consecutive attempts; pausing quotes for {pause_sec:.0f}s"
+                    )
             
         return fair
 
@@ -2288,7 +2307,13 @@ class IntegratedBTCStrategy(Strategy):
         min_lot = Decimal(str(10 ** (-precision)))
         min_qty = max(min_lot, self.maker_min_shares)
         if self.maker_fixed_shares > 0:
-            return max(self.maker_fixed_shares, min_qty)
+            qty = max(self.maker_fixed_shares, min_qty)
+            # BUG-3 FIX: enforce notional cap even for fixed shares
+            if limit_price > 0 and self.maker_max_order_usdc > 0:
+                max_shares_by_notional = self.maker_max_order_usdc / limit_price
+                if qty > max_shares_by_notional:
+                    qty = max(max_shares_by_notional, min_qty)
+            return qty
 
         quote_notional_usdc = min(self.maker_quote_size_usdc, self.maker_max_order_usdc)
         if quote_notional_usdc < self.maker_quote_size_usdc:
@@ -3749,7 +3774,17 @@ class IntegratedBTCStrategy(Strategy):
                                 state["qty"] = old_qty - deduct_qty
                                 alloc = deduct_qty / old_qty if old_qty > 0 else Decimal("0")
                                 state["entry_fee_remaining"] = state.get("entry_fee_remaining", Decimal("0")) * (Decimal("1") - alloc)
-                    logger.info(f"Deducted {float(deduct_qty):.6f} from live_inventory_cost after merge.")
+                    # BUG-1 FIX: sync inventory_delta_shares after merge
+                    old_delta = self.inventory_delta_shares
+                    self.inventory_delta_shares = max(
+                        Decimal("0"),
+                        self.inventory_delta_shares - deduct_qty,
+                    )
+                    logger.info(
+                        f"Deducted {float(deduct_qty):.6f} from live_inventory_cost "
+                        f"and inventory_delta after merge. "
+                        f"delta {float(old_delta):.6f} -> {float(self.inventory_delta_shares):.6f}"
+                    )
 
         except Exception as e:
             logger.debug(f"Merge check failed: {e}")
@@ -4587,13 +4622,18 @@ class IntegratedBTCStrategy(Strategy):
                 ask_size_decimal = None
 
             # Tolerate one-sided quotes to avoid long no-quote stalls around market transitions.
+            # BUG-2 FIX: add staleness TTL to prevent using very old cached values.
+            _synth_now = time.time()
+            _stale_max = self.stale_quote_synth_max_age_sec
             if bid_decimal is None and ask_decimal is not None:
-                if self.latest_market_bid is not None:
+                bid_age = _synth_now - self.latest_market_bid_ts if self.latest_market_bid_ts > 0 else float("inf")
+                if self.latest_market_bid is not None and bid_age < _stale_max:
                     bid_decimal = self.latest_market_bid
                 else:
                     bid_decimal = max(Decimal("0.01"), ask_decimal - Decimal("0.01"))
             if ask_decimal is None and bid_decimal is not None:
-                if self.latest_market_ask is not None:
+                ask_age = _synth_now - self.latest_market_ask_ts if self.latest_market_ask_ts > 0 else float("inf")
+                if self.latest_market_ask is not None and ask_age < _stale_max:
                     ask_decimal = self.latest_market_ask
                 else:
                     ask_decimal = min(Decimal("0.99"), bid_decimal + Decimal("0.01"))
@@ -4613,6 +4653,8 @@ class IntegratedBTCStrategy(Strategy):
             self.consecutive_invalid_quote_ticks = 0
             self.latest_market_bid = bid_decimal
             self.latest_market_ask = ask_decimal
+            self.latest_market_bid_ts = time.time()  # BUG-2 FIX: track freshness
+            self.latest_market_ask_ts = self.latest_market_bid_ts
             self.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
             
             # Calculate mid price
