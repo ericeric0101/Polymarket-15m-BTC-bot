@@ -715,6 +715,10 @@ class IntegratedBTCStrategy(Strategy):
         self.maker_digital_sigma_floor = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_FLOOR", "0.20"))
         self.maker_digital_sigma_ceiling = Decimal(os.getenv("MAKER_DIGITAL_SIGMA_CEILING", "2.00"))
         self.maker_digital_vol_scale = Decimal(os.getenv("MAKER_DIGITAL_VOL_SCALE", "1.00"))
+        # Dynamic sigma: time decay (sigma decreases as expiry approaches)
+        self.maker_digital_sigma_time_decay_enabled = os.getenv("MAKER_DIGITAL_SIGMA_TIME_DECAY", "1") == "1"
+        self.maker_digital_sigma_time_decay_ref_sec = float(os.getenv("MAKER_DIGITAL_SIGMA_TIME_DECAY_REF_SEC", "600"))
+        self.maker_digital_sigma_time_decay_min = float(os.getenv("MAKER_DIGITAL_SIGMA_TIME_DECAY_MIN", "0.30"))
         self.taker_exit_enabled = os.getenv("TAKER_EXIT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
         self.taker_exit_min_net_usdc = Decimal(os.getenv("TAKER_EXIT_MIN_NET_USDC", "0.02"))
         self.taker_exit_stop_loss_usdc = Decimal(os.getenv("TAKER_EXIT_STOP_LOSS_USDC", "0.15"))
@@ -726,6 +730,11 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_disable_stop_loss_last_sec = max(
             0,
             int(os.getenv("TAKER_EXIT_DISABLE_STOP_LOSS_LAST_SEC", "45")),
+        )
+        
+        # Hold-to-redeem: if avg buy cost >= threshold, hold position to settlement
+        self.hold_to_redeem_cost_threshold = Decimal(
+            os.getenv("MAKER_HOLD_TO_REDEEM_COST_THRESHOLD", "0.65")
         )
         
         # Performance / Execution
@@ -752,6 +761,12 @@ class IntegratedBTCStrategy(Strategy):
         self.quote_reload_cooldown_sec = int(os.getenv("QUOTE_RELOAD_COOLDOWN_SEC", "60"))
         self.last_quote_update_ts = 0.0
         self.quote_pause_until_ts = 0.0
+        # --- Adverse Selection Protection ---
+        self.post_fill_buy_cooldown_sec: float = float(os.getenv("MAKER_POST_FILL_BUY_COOLDOWN_SEC", "15"))
+        self.buy_cooldown_until_ts: float = 0.0
+        self.max_consecutive_losses: int = int(os.getenv("MAKER_MAX_CONSECUTIVE_LOSSES", "3"))
+        self.loss_pause_sec: float = float(os.getenv("MAKER_LOSS_PAUSE_SEC", "60"))
+        self.recent_fill_pnl_results: list = []  # list of realized_net_usdc from recent fills
         self.last_simulation_guard_log_ts = 0.0
         self.last_valid_quote_ts = 0.0
         self.consecutive_invalid_quote_ticks = 0
@@ -1549,6 +1564,13 @@ class IntegratedBTCStrategy(Strategy):
                 sigma = sigma * self.maker_digital_vol_scale
                 sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
 
+                # Dynamic sigma: time decay — reduce sigma as expiry approaches
+                if self.maker_digital_sigma_time_decay_enabled and time_left_sec > 0:
+                    ref = self.maker_digital_sigma_time_decay_ref_sec
+                    decay = max(self.maker_digital_sigma_time_decay_min, min(1.0, time_left_sec / ref))
+                    sigma = sigma * Decimal(str(round(decay, 4)))
+                    sigma = max(self.maker_digital_sigma_floor, sigma)
+
                 instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
                 outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
 
@@ -1765,6 +1787,21 @@ class IntegratedBTCStrategy(Strategy):
                 fee_rate = Decimal("0")
 
             avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+
+            # Hold-to-redeem: skip taker exit if avg entry >= threshold
+            if (
+                self.hold_to_redeem_cost_threshold > 0
+                and avg_entry >= self.hold_to_redeem_cost_threshold
+            ):
+                if not getattr(self, "_logged_hold_redeem_te", False) or now_ts - getattr(self, "_last_hold_redeem_te_log", 0) > 60:
+                    logger.info(
+                        f"Hold-to-redeem: skipping taker exit. "
+                        f"avg_entry={float(avg_entry):.2f} >= threshold={float(self.hold_to_redeem_cost_threshold):.2f}"
+                    )
+                    self._logged_hold_redeem_te = True
+                    self._last_hold_redeem_te_log = now_ts
+                continue
+
             entry_fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
             opened_ts = float(state.get("opened_ts", 0.0))
             hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
@@ -2429,7 +2466,10 @@ class IntegratedBTCStrategy(Strategy):
             status_text = str(getattr(order, "status", "")).upper()
             if any(flag in status_text for flag in ("REJECTED", "FILLED", "CANCELED", "CANCELLED")):
                 logger.debug(f"Skip cancel [{side}] because order state is terminal: {status_text}")
-                self.active_maker_orders.pop(order_key, None)
+                # Keep local tracking until fill/cancel event handlers reconcile inventory/state.
+                state["pending_cancel"] = True
+                state["last_cancel_ts"] = now_ts
+                state["cancel_reason"] = reason
             else:
                 self.cancel_order(order)
                 state["pending_cancel"] = True
@@ -2834,6 +2874,44 @@ class IntegratedBTCStrategy(Strategy):
                 side_disable_reason_by_side["buy"] = "quote_mode_sell_only"
             elif self.maker_quote_sides == "both_buy":
                 side_disable_reason_by_side["sell"] = "quote_mode_both_buy"
+
+            # --- POST-FILL BUY COOLDOWN -----------------------------------------------
+            # After a buy fill, block new buy orders for a cooldown period to prevent
+            # cascade adverse selection (informed traders sweeping consecutive buy orders).
+            if "buy" in side_plan and time.time() < self.buy_cooldown_until_ts:
+                remaining = self.buy_cooldown_until_ts - time.time()
+                _set_side_should_quote("buy", False, f"post_fill_buy_cooldown_{remaining:.0f}s")
+                if not getattr(self, "_logged_buy_cd", False) or time.time() - getattr(self, "_last_buy_cd_log_ts", 0) > 30:
+                    logger.info(f"Post-fill buy cooldown active: {remaining:.1f}s remaining")
+                    self._logged_buy_cd = True
+                    self._last_buy_cd_log_ts = time.time()
+            elif getattr(self, "_logged_buy_cd", False):
+                self._logged_buy_cd = False
+                logger.info("Post-fill buy cooldown cleared.")
+
+            # --- HOLD-TO-REDEEM PROTECTION ---------------------------------------------
+            # If avg entry cost >= threshold, block SELL quotes (hold to settlement)
+            if (
+                "sell" in side_plan
+                and self.hold_to_redeem_cost_threshold > 0
+                and self.inventory_delta_shares > 0
+            ):
+                # check avg entry price across all instruments
+                _max_avg_entry = Decimal("0")
+                for _ik, _st in self.live_inventory_cost.items():
+                    _q = Decimal(str(_st.get("qty", "0")))
+                    _ae = Decimal(str(_st.get("avg_entry_price", "0")))
+                    if _q > 0 and _ae > _max_avg_entry:
+                        _max_avg_entry = _ae
+                if _max_avg_entry >= self.hold_to_redeem_cost_threshold:
+                    _set_side_should_quote("sell", False, f"hold_to_redeem_avg_entry_{float(_max_avg_entry):.2f}")
+                    if not getattr(self, "_logged_hold_redeem_q", False) or time.time() - getattr(self, "_last_hold_redeem_q_log", 0) > 60:
+                        logger.info(
+                            f"Hold-to-redeem: blocking SELL quotes. "
+                            f"avg_entry={float(_max_avg_entry):.2f} >= {float(self.hold_to_redeem_cost_threshold):.2f}"
+                        )
+                        self._logged_hold_redeem_q = True
+                        self._last_hold_redeem_q_log = time.time()
 
             # --- TREND / MOMENTUM FILTER ---------------------------------------------
             # Prevent "catching a falling knife" (buy) or "stepping in front of a train" (sell).
@@ -4070,6 +4148,7 @@ class IntegratedBTCStrategy(Strategy):
         # Actions on transition
         if new_phase == MarketPhase.SETTLING:
             self._cancel_active_maker_orders()
+            self._record_market_settlement()
             logger.info("Settling: all maker orders cancelled. Waiting for grace period.")
         elif new_phase == MarketPhase.WAITING:
             self._cancel_active_maker_orders()
@@ -4081,6 +4160,97 @@ class IntegratedBTCStrategy(Strategy):
             for order_key, state in list(self.active_maker_orders.items()):
                 if str(state.get("side", "")) == "buy":
                     self._cancel_maker_order_side(order_key, reason="reduce_only")
+
+    def _record_market_settlement(self) -> None:
+        """
+        Record settlement outcome for PnL tracking when market ends.
+        Uses BTC spot vs strike to determine UP/DOWN and calculates
+        redeem value for any inventory held at settlement.
+        """
+        try:
+            inv = float(self.inventory_delta_shares)
+            if inv < 0.001:
+                logger.info("Settlement: no inventory to settle.")
+                return
+
+            # Get BTC spot price from external feed (do NOT use contract 0..1 quote history).
+            # Priority: latest external spot -> last external spot -> fresh Binance WS tick.
+            spot = 0.0
+            if self.latest_external_spot is not None and self.latest_external_spot > 0:
+                spot = float(self.latest_external_spot)
+            elif self.last_external_spot is not None and self.last_external_spot > 0:
+                spot = float(self.last_external_spot)
+            elif self._binance_ws_price is not None and self._binance_ws_price > 0:
+                ws_age = time.time() - float(self._binance_ws_price_ts or 0.0)
+                if ws_age <= 60.0:
+                    spot = float(self._binance_ws_price)
+            if spot <= 0 and self.external_spot_history:
+                _, hist_px = self.external_spot_history[-1]
+                if hist_px > 0:
+                    spot = float(hist_px)
+
+            # Get strike from cache
+            slug = self.current_market_slug or ""
+            strike = 0.0
+            if slug and slug in self.market_strike_cache_by_slug:
+                strike = float(self.market_strike_cache_by_slug[slug])
+
+            if spot <= 0 or strike <= 0:
+                logger.warning(
+                    f"Settlement: cannot determine outcome. spot={spot} strike={strike} "
+                    f"inv={inv} slug={slug}"
+                )
+                return
+
+            # Guard against scale mismatch (e.g. spot=0.5 contract price vs strike=67,000 BTC spot).
+            if spot < 1000 and strike > 1000:
+                logger.warning(
+                    f"Settlement: invalid spot/strike scale mismatch. "
+                    f"spot={spot:.6f} strike={strike:.2f} inv={inv} slug={slug}. "
+                    "Skipping settlement PnL to avoid false outcome."
+                )
+                self._db_strategy_event("MARKET_SETTLEMENT_INVALID_DATA", {
+                    "slug": slug,
+                    "spot": spot,
+                    "strike": strike,
+                    "inventory_shares": inv,
+                    "reason": "spot_strike_scale_mismatch",
+                })
+                return
+
+            outcome = "UP" if spot >= strike else "DOWN"
+            redeem_per_share = 1.0 if outcome == "UP" else 0.0
+            redeem_value = inv * redeem_per_share
+
+            # Calculate inventory cost from live_inventory_cost ledger
+            inv_cost = 0.0
+            for inst_key, state in self.live_inventory_cost.items():
+                qty = float(state.get("qty", 0))
+                avg_entry = float(state.get("avg_entry_price", 0))
+                if qty > 0 and avg_entry > 0:
+                    inv_cost += qty * avg_entry
+
+            settlement_pnl = redeem_value - inv_cost
+
+            logger.info(
+                f"SETTLEMENT: slug={slug} spot={spot:.2f} strike={strike:.2f} "
+                f"outcome={outcome} inv={inv:.4f} redeem=${redeem_value:.4f} "
+                f"cost=${inv_cost:.4f} pnl={settlement_pnl:+.4f}"
+            )
+
+            self._db_strategy_event("MARKET_SETTLEMENT", {
+                "slug": slug,
+                "spot": spot,
+                "strike": strike,
+                "outcome": outcome,
+                "inventory_shares": inv,
+                "redeem_per_share": redeem_per_share,
+                "redeem_value_usdc": redeem_value,
+                "inventory_cost_usdc": inv_cost,
+                "settlement_pnl_usdc": settlement_pnl,
+            })
+        except Exception as e:
+            logger.warning(f"Settlement recording failed: {e}")
 
     # ------------------------------------------------------------------
     # Proactive Next-Market Detection
@@ -5155,6 +5325,38 @@ class IntegratedBTCStrategy(Strategy):
             },
         )
         self.rebate_reporter.flush_daily_report()
+
+        # --- Adverse Selection Protection: Post-fill buy cooldown ---
+        fill_side_norm = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
+        if fill_side_norm == "buy" and self.post_fill_buy_cooldown_sec > 0:
+            self.buy_cooldown_until_ts = time.time() + self.post_fill_buy_cooldown_sec
+            logger.info(
+                f"Post-fill buy cooldown activated: {self.post_fill_buy_cooldown_sec}s "
+                f"(no new BUY orders until cooldown expires)"
+            )
+
+        # --- Adverse Selection Protection: Consecutive loss tracking ---
+        if realized_net_usdc is not None:
+            self.recent_fill_pnl_results.append(float(realized_net_usdc))
+            # Keep only the last N results (N = max_consecutive_losses * 2 for window)
+            max_history = max(10, self.max_consecutive_losses * 2)
+            if len(self.recent_fill_pnl_results) > max_history:
+                self.recent_fill_pnl_results = self.recent_fill_pnl_results[-max_history:]
+            # Check for consecutive losses
+            if self.max_consecutive_losses > 0 and len(self.recent_fill_pnl_results) >= self.max_consecutive_losses:
+                tail = self.recent_fill_pnl_results[-self.max_consecutive_losses:]
+                if all(pnl < 0 for pnl in tail):
+                    total_loss = sum(tail)
+                    self.quote_pause_until_ts = max(
+                        self.quote_pause_until_ts,
+                        time.time() + self.loss_pause_sec,
+                    )
+                    logger.warning(
+                        f"Consecutive loss pause activated: {self.max_consecutive_losses} consecutive losses "
+                        f"(total={total_loss:.4f} USDC). Pausing all quoting for {self.loss_pause_sec}s."
+                    )
+                    # Reset to avoid re-triggering on the same tail
+                    self.recent_fill_pnl_results.clear()
 
         # Immediately replenish missing side after fill when maker mode is active.
         if (

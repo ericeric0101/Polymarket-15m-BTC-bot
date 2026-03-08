@@ -245,6 +245,39 @@ venv/bin/python /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/
 venv/bin/python /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/trade_db_report.py --run-id <RUN_ID> --limit 100
 ```
 
+### PnL 對帳報表（含結算/兌現）
+為了避免只看 `ORDER_FILLED` 而漏掉結算兌現，請使用：
+
+```bash
+# 最近 6 小時（預設）
+venv/bin/python /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/pnl_reconcile_report.py --hours 6
+
+# 指定 run_id
+venv/bin/python /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/pnl_reconcile_report.py --run-id <RUN_ID> --hours 24
+
+# 全期間
+venv/bin/python /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/pnl_reconcile_report.py --hours 0
+```
+
+輸出欄位解讀：
+- `Trading PnL`: 來自 `ORDER_FILLED.payload.realized_net_usdc`（已實現成交損益）
+- `Settlement PnL`: 來自 `MARKET_SETTLEMENT.payload.settlement_pnl_usdc`（市場結算損益，含 redeem 概念）
+- `Combined`: `Trading PnL + Settlement PnL`，是較完整的策略損益視角
+- `Auto Redeem Events`: 自動 redeem 腳本執行次數與 apply 開關狀態
+- `Data Quality`: 針對結算資料做健全性檢查（例如 spot 是否異常地落在 0~1）
+
+注意：
+- 若 `Data Quality` 顯示 `tiny_spot_rows > 0`，代表 settlement 可能誤用合約價格（0~1）當 BTC 現貨，`Settlement PnL` 會有偏差，不可直接當最終績效。
+
+### Settlement outcome 用錯價格來源（spot）如何修正
+目前常見問題是：結算判斷拿到的是合約價格（0~1），不是 BTC 現貨價格（數萬）。
+
+建議修正方向：
+1. 在 `run_bot.py` 的 `_record_market_settlement()` 中，不要用 `self.real_price_history[-1]` 當 BTC spot。  
+2. 改用獨立的 BTC 現貨來源（例如你現有的 spot feed/metadata/外部價格快取），並在取不到時標記 `outcome="UNKNOWN"`，不要硬算 `UP/DOWN`。  
+3. 對寫入 `MARKET_SETTLEMENT` 的資料加防呆：若 `spot < 1000` 且 `strike > 1000`，直接記錄警告並跳過 settlement PnL 計算。  
+4. 分析時優先看 `scripts/pnl_reconcile_report.py` 的 `Data Quality` 區塊，確保 settlement 資料可信再使用 `Combined`。
+
 可搭配環境變數：
 - `TRADE_DB_ENABLED=1`
 - `TRADE_DB_PATH=./logs/trade_journal.db`
@@ -484,6 +517,86 @@ A: 可以，但建議加上程序監控、日誌輪替、及主機安全策略�
 
 **Q: 測試模式和一般模式差異？**  
 A: 測試模式每分鐘觸發；一般模式每 15 分鐘觸發。
+
+## 💰 調整投入金額時的參數連動指南
+
+Bot 在改變每筆投入金額時，**不能只改一個參數**——多個參數彼此牽連，需要同步調整。以下是完整的參數連動關係和推薦設定。
+
+### ❓ 為什麼提高金額可以改善掛單頻率？
+
+Execution penalty 的計算公式為：
+
+```
+penalty = notional × spread × slippage_mult
+        + notional × vol × non_atomic_mult
+        + floor
+```
+
+而判斷條件是 `robust_net = expected_net - penalty ≥ min_net`。
+
+當 `MAKER_FIXED_SHARES=6`，價格 ≈ 0.40 時，notional 只有 **$2.40**，此時：
+- `expected_net` ≈ 0.05~0.09 USDC（很小）
+- `penalty` ≈ 0.12~0.29 USDC（相對太大）
+- 結果 `robust_net` 長期為負 → bot 不掛單
+
+提高到 **$10** 每筆時，`expected_net` 會等比放大 ~4x，penalty 也放大但**比例結構更合理**，需同時微調 penalty multipliers 才能充分發揮效益。
+
+### 📋 參數連動速查表
+
+| 參數 | 說明 | 當前值（~$3） | **$10 推薦** | **$20 推薦** |
+|------|------|:---:|:---:|:---:|
+| **訂單大小** | | | | |
+| `MAKER_FIXED_SHARES` | 每筆固定掛單數量 | `6` | `15` | `25` |
+| `MAKER_QUOTE_SIZE_USDC` | 掛單名義金額上限 | `6.0` | `12.0` | `22.0` |
+| `MAKER_MAX_ORDER_USDC` | 單筆名義硬上限 | `5.5` | `12.0` | `22.0` |
+| `MAKER_MIN_SHARES` | 最小掛單數量 | `6` | `10` | `15` |
+| **庫存控制** | | | | |
+| `MAKER_MAX_INVENTORY_SHARES` | 最大庫存限額 | `13` | `30` | `50` |
+| `MAKER_INVENTORY_SKEW_MAX` | 庫存偏移最大值 | `0.05` | `0.05` | `0.04` |
+| **經濟門檻** | | | | |
+| `MAKER_MIN_EXPECTED_NET_USDC` | 最低預期淨值 | `0.0005` | `0.001` | `0.002` |
+| `MAKER_ADVERSE_SELECTION_BUFFER` | 逆選擇緩衝 | `0.001` | `0.002` | `0.003` |
+| **執行懲罰** | | | | |
+| `MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT` | 滑價乘數 | `0.15` | `0.08` | `0.08` |
+| `MAKER_EXECUTION_NON_ATOMIC_VOL_MULT` | 波動乘數 | `0.2` | `0.08` | `0.10` |
+| `MAKER_EXECUTION_VWAP_MULT` | VWAP 乘數 | `0.5` | `0.3` | `0.3` |
+| `MAKER_EXECUTION_PENALTY_FLOOR_USDC` | 懲罰下限 | `0.001` | `0.0005` | `0.001` |
+| **Taker 出場** | | | | |
+| `TAKER_EXIT_MIN_NET_USDC` | Taker 最低利潤 | `0.2` | `0.5` | `1.0` |
+
+### ⚙️ 設定邏輯說明
+
+1. **`MAKER_FIXED_SHARES`**：核心參數。以 `目標金額 / 平均掛單價格` 計算。BTC 15m 市場價格通常在 0.30~0.70 之間，取中位 0.50 → $10 ÷ 0.50 ≈ 20，但較低價格的掛單也很多，取 15 偏保守。
+
+2. **`MAKER_MAX_ORDER_USDC`** 和 **`MAKER_QUOTE_SIZE_USDC`**：需 ≥ `MAKER_FIXED_SHARES × 最高預期價格`（15 × 0.80 = 12）。這兩個值應設為相同或接近。
+
+3. **`MAKER_MAX_INVENTORY_SHARES`**：建議設為 `MAKER_FIXED_SHARES × 2`，允許最多 2 筆掛成交。太高會增加方向性曝險。
+
+4. **Execution penalty multipliers**：金額放大後，penalty 的絕對值也放大但 expected_net 放大得更快。降低 multipliers 可讓 bot 更積極掛單，但注意不要降到 0 以免完全失去風控。
+
+5. **`TAKER_EXIT_MIN_NET_USDC`**：應與投入金額等比例調整。$10 投入時，至少要求 $0.50 利潤才值得付 taker 手續費。
+
+### ⚡ 快速套用（$10 方案）
+
+複製以下內容直接覆蓋 `.env` 中對應行：
+
+```env
+# === $10 方案 ===
+MAKER_FIXED_SHARES=15
+MAKER_QUOTE_SIZE_USDC=12.0
+MAKER_MAX_ORDER_USDC=12.0
+MAKER_MIN_SHARES=10
+MAKER_MAX_INVENTORY_SHARES=30
+MAKER_MIN_EXPECTED_NET_USDC=0.001
+MAKER_ADVERSE_SELECTION_BUFFER=0.002
+MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT=0.08
+MAKER_EXECUTION_NON_ATOMIC_VOL_MULT=0.08
+MAKER_EXECUTION_VWAP_MULT=0.3
+MAKER_EXECUTION_PENALTY_FLOOR_USDC=0.0005
+TAKER_EXIT_MIN_NET_USDC=0.5
+```
+
+> ⚠️ **注意**：調整後請確認帳戶 USDC 餘額足夠（建議至少 `MAKER_MAX_INVENTORY_SHARES × 最高價格` = 30 × 0.80 = **$24**）。你目前餘額約 $67，足以支撐 $10 方案。
 
 ---
 

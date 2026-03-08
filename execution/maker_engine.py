@@ -392,9 +392,7 @@ class MakerEngine:
                 allowed_buy = False
             elif inventory_delta_shares < 0:
                 allowed_sell = False
-            else:
-                allowed_buy = False
-                allowed_sell = False
+            # else: inventory=0, nothing to reduce → allow both sides
 
         if allowed_buy:
             robust_bid_net = bid_econ.expected_net_usdc - bid_exec_penalty
