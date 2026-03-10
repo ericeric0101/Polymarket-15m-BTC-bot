@@ -275,7 +275,7 @@ class MakerEngine:
         ask_depth: Optional[Decimal] = None,
         bid_levels: Optional[List[Tuple[Decimal, Decimal]]] = None,
         ask_levels: Optional[List[Tuple[Decimal, Decimal]]] = None,
-    ) -> Dict[str, Tuple[Decimal, QuoteEconomics, bool, Decimal, Decimal]]:
+    ) -> Dict[str, Tuple[Decimal, QuoteEconomics, bool, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal, Decimal]]:
         """
         Produce target limit prices and economic estimations for buy and sell sides.
         Returns mapped dictionary:
@@ -394,6 +394,45 @@ class MakerEngine:
                 allowed_sell = False
             # else: inventory=0, nothing to reduce → allow both sides
 
+        bid_fee_ps = (
+            bid_econ.fee_equivalent_usdc / bid_econ.shares
+            if bid_econ.shares > 0
+            else Decimal("0")
+        )
+        ask_fee_ps = (
+            ask_econ.fee_equivalent_usdc / ask_econ.shares
+            if ask_econ.shares > 0
+            else Decimal("0")
+        )
+        bid_exec_penalty_ps = (
+            bid_exec_penalty / bid_econ.shares
+            if bid_econ.shares > 0
+            else Decimal("0")
+        )
+        ask_exec_penalty_ps = (
+            ask_exec_penalty / ask_econ.shares
+            if ask_econ.shares > 0
+            else Decimal("0")
+        )
+        bid_adverse_ps = (
+            self.config.maker_adverse_selection_buffer / bid_econ.shares
+            if bid_econ.shares > 0
+            else Decimal("0")
+        )
+        ask_adverse_ps = (
+            self.config.maker_adverse_selection_buffer / ask_econ.shares
+            if ask_econ.shares > 0
+            else Decimal("0")
+        )
+
+        # Directional edge:
+        # BUY  -> value minus paid price and execution/friction costs
+        # SELL -> received price minus fair value and execution/friction costs
+        bid_directional_edge_ps = fair_price - quote_bid - bid_fee_ps - bid_exec_penalty_ps - bid_adverse_ps
+        ask_directional_edge_ps = quote_ask - fair_price - ask_fee_ps - ask_exec_penalty_ps - ask_adverse_ps
+        bid_directional_edge_usdc = bid_directional_edge_ps * bid_econ.shares
+        ask_directional_edge_usdc = ask_directional_edge_ps * ask_econ.shares
+
         if allowed_buy:
             robust_bid_net = bid_econ.expected_net_usdc - bid_exec_penalty
             side_plan["buy"] = (
@@ -402,6 +441,11 @@ class MakerEngine:
                 robust_bid_net >= self.config.maker_min_expected_net_usdc,
                 robust_bid_net,
                 bid_exec_penalty,
+                bid_directional_edge_ps,
+                bid_directional_edge_usdc,
+                fair_price,
+                bid_fee_ps,
+                bid_exec_penalty_ps + bid_adverse_ps,
             )
         else:
             side_plan["buy"] = (
@@ -410,6 +454,11 @@ class MakerEngine:
                 False,
                 bid_econ.expected_net_usdc - bid_exec_penalty,
                 bid_exec_penalty,
+                bid_directional_edge_ps,
+                bid_directional_edge_usdc,
+                fair_price,
+                bid_fee_ps,
+                bid_exec_penalty_ps + bid_adverse_ps,
             )
             
         if allowed_sell:
@@ -420,6 +469,11 @@ class MakerEngine:
                 robust_ask_net >= self.config.maker_min_expected_net_usdc,
                 robust_ask_net,
                 ask_exec_penalty,
+                ask_directional_edge_ps,
+                ask_directional_edge_usdc,
+                fair_price,
+                ask_fee_ps,
+                ask_exec_penalty_ps + ask_adverse_ps,
             )
         else:
             side_plan["sell"] = (
@@ -428,6 +482,11 @@ class MakerEngine:
                 False,
                 ask_econ.expected_net_usdc - ask_exec_penalty,
                 ask_exec_penalty,
+                ask_directional_edge_ps,
+                ask_directional_edge_usdc,
+                fair_price,
+                ask_fee_ps,
+                ask_exec_penalty_ps + ask_adverse_ps,
             )
 
         return side_plan

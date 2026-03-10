@@ -2862,7 +2862,23 @@ class IntegratedBTCStrategy(Strategy):
                 ec = existing[1]
                 robust_net = existing[3] if len(existing) > 3 else None
                 exec_penalty = existing[4] if len(existing) > 4 else None
-                side_plan[plan_side] = (lp, ec, new_should_quote, robust_net, exec_penalty)
+                directional_edge_ps = existing[5] if len(existing) > 5 else None
+                directional_edge_usdc = existing[6] if len(existing) > 6 else None
+                p_fair = existing[7] if len(existing) > 7 else None
+                fee_ps = existing[8] if len(existing) > 8 else None
+                other_cost_ps = existing[9] if len(existing) > 9 else None
+                side_plan[plan_side] = (
+                    lp,
+                    ec,
+                    new_should_quote,
+                    robust_net,
+                    exec_penalty,
+                    directional_edge_ps,
+                    directional_edge_usdc,
+                    p_fair,
+                    fee_ps,
+                    other_cost_ps,
+                )
                 if not new_should_quote and disable_reason:
                     side_disable_reason_by_side[plan_side] = str(disable_reason)
                 elif new_should_quote:
@@ -3005,6 +3021,11 @@ class IntegratedBTCStrategy(Strategy):
                 should_quote = quote_data[2]
                 robust_net = quote_data[3] if len(quote_data) > 3 else None
                 exec_penalty = quote_data[4] if len(quote_data) > 4 else None
+                directional_edge_ps = quote_data[5] if len(quote_data) > 5 else None
+                directional_edge_usdc = quote_data[6] if len(quote_data) > 6 else None
+                p_fair = quote_data[7] if len(quote_data) > 7 else None
+                fee_ps = quote_data[8] if len(quote_data) > 8 else None
+                other_cost_ps = quote_data[9] if len(quote_data) > 9 else None
                 diag_reason = ""
                 if not should_quote:
                     robust_net_val = robust_net if isinstance(robust_net, Decimal) else None
@@ -3058,6 +3079,11 @@ class IntegratedBTCStrategy(Strategy):
                     "diag_reason": diag_reason,
                     "robust_net": robust_net,
                     "exec_penalty": exec_penalty,
+                    "directional_edge_ps": directional_edge_ps,
+                    "directional_edge_usdc": directional_edge_usdc,
+                    "p_fair": p_fair,
+                    "fee_ps": fee_ps,
+                    "other_cost_ps": other_cost_ps,
                 }
 
         # Cancel orders that are no longer desired for target instruments.
@@ -3116,6 +3142,15 @@ class IntegratedBTCStrategy(Strategy):
             limit_price = Decimal(str(desired["price"]))
             econ = desired["econ"]
             dynamic_fee_rate = desired.get("dynamic_fee_rate")
+            directional_snapshot = {
+                "directional_edge_ps": desired.get("directional_edge_ps"),
+                "directional_edge_usdc": desired.get("directional_edge_usdc"),
+                "p_fair": desired.get("p_fair"),
+                "fee_ps": desired.get("fee_ps"),
+                "other_cost_ps": desired.get("other_cost_ps"),
+                "exec_penalty_usdc": desired.get("exec_penalty"),
+                "robust_net_usdc": desired.get("robust_net"),
+            }
 
             # Use per-instrument tick size to build stable target versions.
             inst_for_tick = self._normalize_instrument_id(inst_id)
@@ -3184,6 +3219,7 @@ class IntegratedBTCStrategy(Strategy):
                 limit_price,
                 econ,
                 dynamic_fee_rate,
+                directional_snapshot=directional_snapshot,
                 target_version=target_version,
             )
 
@@ -3233,6 +3269,7 @@ class IntegratedBTCStrategy(Strategy):
         limit_price: Decimal,
         econ,
         dynamic_fee_rate: Optional[Decimal] = None,
+        directional_snapshot: Optional[Dict[str, Any]] = None,
         target_version: Optional[int] = None,
     ) -> None:
         instrument_id = self._normalize_instrument_id(instrument_id)
@@ -3363,6 +3400,7 @@ class IntegratedBTCStrategy(Strategy):
                 "simulated": True,
                 "client_order_id": sim_order_id,
                 "econ": econ,
+                "directional_snapshot": directional_snapshot or {},
                 "price": limit_price,
                 "side": side,
                 "instrument_id": instrument_id,
@@ -3389,6 +3427,31 @@ class IntegratedBTCStrategy(Strategy):
                     "ack_latency_ms": ack_latency_ms,
                     "queue_rank": self.active_maker_orders[order_key]["queue_rank"],
                     "fee_rate_bps": fee_rate_bps,
+                    "directional_edge_ps": (
+                        float(directional_snapshot.get("directional_edge_ps"))
+                        if directional_snapshot and directional_snapshot.get("directional_edge_ps") is not None
+                        else None
+                    ),
+                    "directional_edge_usdc": (
+                        float(directional_snapshot.get("directional_edge_usdc"))
+                        if directional_snapshot and directional_snapshot.get("directional_edge_usdc") is not None
+                        else None
+                    ),
+                    "p_fair": (
+                        float(directional_snapshot.get("p_fair"))
+                        if directional_snapshot and directional_snapshot.get("p_fair") is not None
+                        else None
+                    ),
+                    "fee_ps": (
+                        float(directional_snapshot.get("fee_ps"))
+                        if directional_snapshot and directional_snapshot.get("fee_ps") is not None
+                        else None
+                    ),
+                    "other_cost_ps": (
+                        float(directional_snapshot.get("other_cost_ps"))
+                        if directional_snapshot and directional_snapshot.get("other_cost_ps") is not None
+                        else None
+                    ),
                 },
             )
             logger.info(
@@ -3450,6 +3513,7 @@ class IntegratedBTCStrategy(Strategy):
         self.active_maker_orders[order_key] = {
             "order": order,
             "econ": econ,
+            "directional_snapshot": directional_snapshot or {},
             "price": limit_price,
             "side": side,
             "instrument_id": instrument_id,
@@ -3470,6 +3534,41 @@ class IntegratedBTCStrategy(Strategy):
                 "maker": True,
                 "rebate_estimate_usdc": float(econ.expected_rebate_usdc),
                 "spread_capture_estimate_usdc": float(econ.expected_spread_capture_usdc),
+                "directional_edge_ps": (
+                    float(directional_snapshot.get("directional_edge_ps"))
+                    if directional_snapshot and directional_snapshot.get("directional_edge_ps") is not None
+                    else None
+                ),
+                "directional_edge_usdc": (
+                    float(directional_snapshot.get("directional_edge_usdc"))
+                    if directional_snapshot and directional_snapshot.get("directional_edge_usdc") is not None
+                    else None
+                ),
+                "p_fair": (
+                    float(directional_snapshot.get("p_fair"))
+                    if directional_snapshot and directional_snapshot.get("p_fair") is not None
+                    else None
+                ),
+                "fee_ps": (
+                    float(directional_snapshot.get("fee_ps"))
+                    if directional_snapshot and directional_snapshot.get("fee_ps") is not None
+                    else None
+                ),
+                "other_cost_ps": (
+                    float(directional_snapshot.get("other_cost_ps"))
+                    if directional_snapshot and directional_snapshot.get("other_cost_ps") is not None
+                    else None
+                ),
+                "exec_penalty_usdc": (
+                    float(directional_snapshot.get("exec_penalty_usdc"))
+                    if directional_snapshot and directional_snapshot.get("exec_penalty_usdc") is not None
+                    else None
+                ),
+                "robust_net_usdc": (
+                    float(directional_snapshot.get("robust_net_usdc"))
+                    if directional_snapshot and directional_snapshot.get("robust_net_usdc") is not None
+                    else None
+                ),
             },
         )
         self.rebate_reporter.record_quote(
@@ -5213,6 +5312,7 @@ class IntegratedBTCStrategy(Strategy):
         filled_id = str(event.client_order_id)
         filled_side: Optional[str] = None
         filled_econ = None
+        filled_directional_snapshot: Dict[str, Any] = {}
         filled_inst: Any = None
         maker_matched = False
         for order_key, state in list(self.active_maker_orders.items()):
@@ -5222,6 +5322,9 @@ class IntegratedBTCStrategy(Strategy):
                 maker_matched = True
                 filled_side = side
                 filled_econ = state.get("econ")
+                snap = state.get("directional_snapshot")
+                if isinstance(snap, dict):
+                    filled_directional_snapshot = snap
                 filled_inst = state.get("instrument_id")
                 fill_qty = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
                 if fill_qty <= 0:
@@ -5319,6 +5422,41 @@ class IntegratedBTCStrategy(Strategy):
                 "expected_spread_capture_usdc": (
                     float(getattr(filled_econ, "expected_spread_capture_usdc", 0.0))
                     if filled_econ is not None
+                    else None
+                ),
+                "directional_edge_ps_submit": (
+                    float(filled_directional_snapshot.get("directional_edge_ps"))
+                    if filled_directional_snapshot.get("directional_edge_ps") is not None
+                    else None
+                ),
+                "directional_edge_usdc_submit": (
+                    float(filled_directional_snapshot.get("directional_edge_usdc"))
+                    if filled_directional_snapshot.get("directional_edge_usdc") is not None
+                    else None
+                ),
+                "p_fair_submit": (
+                    float(filled_directional_snapshot.get("p_fair"))
+                    if filled_directional_snapshot.get("p_fair") is not None
+                    else None
+                ),
+                "fee_ps_submit": (
+                    float(filled_directional_snapshot.get("fee_ps"))
+                    if filled_directional_snapshot.get("fee_ps") is not None
+                    else None
+                ),
+                "other_cost_ps_submit": (
+                    float(filled_directional_snapshot.get("other_cost_ps"))
+                    if filled_directional_snapshot.get("other_cost_ps") is not None
+                    else None
+                ),
+                "exec_penalty_usdc_submit": (
+                    float(filled_directional_snapshot.get("exec_penalty_usdc"))
+                    if filled_directional_snapshot.get("exec_penalty_usdc") is not None
+                    else None
+                ),
+                "robust_net_usdc_submit": (
+                    float(filled_directional_snapshot.get("robust_net_usdc"))
+                    if filled_directional_snapshot.get("robust_net_usdc") is not None
                     else None
                 ),
                 "realized_net_usdc": (float(realized_net_usdc) if realized_net_usdc is not None else None),
