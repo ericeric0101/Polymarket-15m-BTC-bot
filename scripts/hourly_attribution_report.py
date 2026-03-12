@@ -13,19 +13,222 @@ Breakdown per hour:
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
+from bisect import bisect_right
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 
 def _fmt(x: float, digits: int = 6) -> str:
     return f"{x:.{digits}f}"
 
 
+def _cutoff_iso_utc(hours: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+def _norm_side(side: str) -> str:
+    s = str(side or "").strip().lower()
+    if s in {"1", "buy", "bid"}:
+        return "buy"
+    if s in {"2", "sell", "ask"}:
+        return "sell"
+    return ""
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _compute_monitor_kpis(
+    cur: sqlite3.Cursor,
+    cutoff_iso: str,
+    high_cost_threshold: float,
+) -> Dict[str, float]:
+    taker_sell_row = cur.execute(
+        """
+        SELECT
+          SUM(CASE WHEN side IN ('2','SELL','sell') THEN 1 ELSE 0 END) AS sell_fills,
+          SUM(
+            CASE
+              WHEN side IN ('2','SELL','sell')
+               AND COALESCE(CAST(json_extract(payload_json,'$.liquidity_side') AS TEXT), '') IN ('2','TAKER','taker')
+              THEN 1 ELSE 0
+            END
+          ) AS taker_sell_fills
+        FROM order_events
+        WHERE event_type='ORDER_FILLED'
+          AND ts >= ?
+        """,
+        (cutoff_iso,),
+    ).fetchone()
+    sell_fills = int(taker_sell_row["sell_fills"] or 0)
+    taker_sell_fills = int(taker_sell_row["taker_sell_fills"] or 0)
+    taker_sell_pct = (100.0 * taker_sell_fills / sell_fills) if sell_fills > 0 else 0.0
+
+    phase_rows = cur.execute(
+        """
+        SELECT ts, json_extract(payload_json,'$.slug') AS slug
+        FROM strategy_events
+        WHERE event_type='MARKET_PHASE_CHANGE'
+          AND ts >= ?
+        ORDER BY ts
+        """,
+        (cutoff_iso,),
+    ).fetchall()
+    prev_phase_row = cur.execute(
+        """
+        SELECT ts, json_extract(payload_json,'$.slug') AS slug
+        FROM strategy_events
+        WHERE event_type='MARKET_PHASE_CHANGE'
+          AND ts < ?
+        ORDER BY ts DESC
+        LIMIT 1
+        """,
+        (cutoff_iso,),
+    ).fetchone()
+    timeline: List[Tuple[str, str]] = []
+    if prev_phase_row and prev_phase_row["slug"]:
+        timeline.append((str(prev_phase_row["ts"]), str(prev_phase_row["slug"])))
+    for r in phase_rows:
+        slug = r["slug"]
+        if slug:
+            timeline.append((str(r["ts"]), str(slug)))
+    timeline.sort(key=lambda x: x[0])
+    phase_ts = [x[0] for x in timeline]
+
+    fills = cur.execute(
+        """
+        SELECT ts, side, price, qty, payload_json
+        FROM order_events
+        WHERE event_type='ORDER_FILLED'
+          AND ts >= ?
+        ORDER BY ts
+        """,
+        (cutoff_iso,),
+    ).fetchall()
+    settlements = cur.execute(
+        """
+        SELECT
+          json_extract(payload_json,'$.slug') AS slug,
+          json_extract(payload_json,'$.outcome') AS outcome,
+          COALESCE(json_extract(payload_json,'$.settlement_pnl_usdc'),0) AS settlement_pnl_usdc
+        FROM strategy_events
+        WHERE event_type='MARKET_SETTLEMENT'
+          AND ts >= ?
+        """,
+        (cutoff_iso,),
+    ).fetchall()
+
+    by_slug: Dict[str, Dict[str, float]] = {}
+    for row in fills:
+        if not phase_ts:
+            continue
+        ts = str(row["ts"])
+        i = bisect_right(phase_ts, ts) - 1
+        if i < 0:
+            continue
+        slug = timeline[i][1]
+        if not slug:
+            continue
+        side = _norm_side(str(row["side"]))
+        px = _safe_float(row["price"], 0.0)
+        qty = _safe_float(row["qty"], 0.0)
+        payload = {}
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            payload = {}
+        realized = _safe_float(payload.get("realized_net_usdc"), 0.0)
+        d = by_slug.setdefault(
+            slug,
+            {
+                "buy_notional": 0.0,
+                "buy_qty": 0.0,
+                "sell_notional": 0.0,
+                "sell_qty": 0.0,
+                "max_buy": 0.0,
+                "realized": 0.0,
+                "settlement": 0.0,
+                "is_up": 0.0,
+            },
+        )
+        if side == "buy":
+            d["buy_notional"] += px * qty
+            d["buy_qty"] += qty
+            d["max_buy"] = max(d["max_buy"], px)
+        elif side == "sell":
+            d["sell_notional"] += px * qty
+            d["sell_qty"] += qty
+        d["realized"] += realized
+
+    for row in settlements:
+        slug = str(row["slug"] or "")
+        if not slug:
+            continue
+        d = by_slug.setdefault(
+            slug,
+            {
+                "buy_notional": 0.0,
+                "buy_qty": 0.0,
+                "sell_notional": 0.0,
+                "sell_qty": 0.0,
+                "max_buy": 0.0,
+                "realized": 0.0,
+                "settlement": 0.0,
+                "is_up": 0.0,
+            },
+        )
+        d["settlement"] = _safe_float(row["settlement_pnl_usdc"], 0.0)
+        d["is_up"] = 1.0 if str(row["outcome"] or "").upper() == "UP" else 0.0
+
+    high_cost_roundtrip_loss = 0.0
+    high_cost_roundtrip_n = 0
+    up_settle_but_sold_lower_loss = 0.0
+    up_settle_but_sold_lower_n = 0
+    for _, d in by_slug.items():
+        if d["buy_qty"] <= 0 or d["sell_qty"] <= 0:
+            continue
+        avg_buy = d["buy_notional"] / d["buy_qty"]
+        avg_sell = d["sell_notional"] / d["sell_qty"]
+        if avg_sell >= avg_buy:
+            continue
+        combined = d["realized"] + d["settlement"]
+        if d["max_buy"] >= high_cost_threshold:
+            high_cost_roundtrip_n += 1
+            high_cost_roundtrip_loss += combined
+        if d["is_up"] > 0.5:
+            up_settle_but_sold_lower_n += 1
+            up_settle_but_sold_lower_loss += combined
+
+    return {
+        "taker_sell_pct": taker_sell_pct,
+        "sell_fills": float(sell_fills),
+        "taker_sell_fills": float(taker_sell_fills),
+        "high_cost_roundtrip_loss": high_cost_roundtrip_loss,
+        "high_cost_roundtrip_n": float(high_cost_roundtrip_n),
+        "up_settle_but_sold_lower_loss": up_settle_but_sold_lower_loss,
+        "up_settle_but_sold_lower_n": float(up_settle_but_sold_lower_n),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Hourly attribution report from trade_journal.db")
     ap.add_argument("--db", default="./logs/trade_journal.db", help="SQLite DB path")
     ap.add_argument("--hours", type=int, default=24, help="Lookback hours")
+    ap.add_argument(
+        "--high-cost-threshold",
+        type=float,
+        default=0.80,
+        help="High-cost buy threshold for high_cost_roundtrip_loss KPI",
+    )
     args = ap.parse_args()
 
     db = Path(args.db)
@@ -36,6 +239,7 @@ def main() -> int:
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    cutoff_iso = _cutoff_iso_utc(args.hours)
 
     rows = cur.execute(
         """
@@ -50,7 +254,7 @@ def main() -> int:
             AVG(COALESCE(json_extract(payload_json,'$.directional_edge_usdc_submit'), NULL)) AS avg_directional_edge_usdc
           FROM order_events
           WHERE event_type='ORDER_FILLED'
-            AND ts >= datetime('now', ?)
+            AND ts >= ?
           GROUP BY h
         ),
         sett AS (
@@ -60,7 +264,7 @@ def main() -> int:
             SUM(COALESCE(json_extract(payload_json,'$.settlement_pnl_usdc'),0)) AS settlement_pnl_usdc
           FROM strategy_events
           WHERE event_type='MARKET_SETTLEMENT'
-            AND ts >= datetime('now', ?)
+            AND ts >= ?
           GROUP BY h
         ),
         exits AS (
@@ -69,7 +273,7 @@ def main() -> int:
             COUNT(*) AS taker_exits
           FROM order_events
           WHERE event_type='ORDER_TAKER_EXIT_SUBMIT'
-            AND ts >= datetime('now', ?)
+            AND ts >= ?
           GROUP BY h
         ),
         hs AS (
@@ -102,8 +306,9 @@ def main() -> int:
         LEFT JOIN exits e ON e.h = hs.h
         ORDER BY hs.h
         """,
-        (f"-{args.hours} hours", f"-{args.hours} hours", f"-{args.hours} hours"),
+        (cutoff_iso, cutoff_iso, cutoff_iso),
     ).fetchall()
+    kpis = _compute_monitor_kpis(cur, cutoff_iso=cutoff_iso, high_cost_threshold=float(args.high_cost_threshold))
 
     if not rows:
         print("No rows in selected window.")
@@ -115,6 +320,7 @@ def main() -> int:
     print("=" * 112)
     print(f"db: {db}")
     print(f"lookback_hours: {args.hours}")
+    print(f"cutoff_utc: {cutoff_iso}")
     print("")
     print(
         "hour_utc | fills | fill_realized | settlement | combined | fee_bps | taker_exits | avg_dir_edge_ps"
@@ -174,11 +380,36 @@ def main() -> int:
         notes.append("Many negative hours; enable/strengthen regime guard and BUY edge gate.")
 
     print("")
+    print("KPI Monitor:")
+    print(
+        f"- taker_sell_pct: {_fmt(float(kpis['taker_sell_pct']),2)}% "
+        f"(taker_sell_fills={int(kpis['taker_sell_fills'])}/{int(kpis['sell_fills'])})"
+    )
+    print(
+        f"- high_cost_roundtrip_loss: {_fmt(float(kpis['high_cost_roundtrip_loss']))} "
+        f"(markets={int(kpis['high_cost_roundtrip_n'])}, threshold>={float(args.high_cost_threshold):.2f})"
+    )
+    print(
+        f"- up_settle_but_sold_lower_loss: {_fmt(float(kpis['up_settle_but_sold_lower_loss']))} "
+        f"(markets={int(kpis['up_settle_but_sold_lower_n'])})"
+    )
+    print("")
     print("Suggestions:")
+    has_suggestion = False
     if notes:
         for n in notes:
             print(f"- {n}")
-    else:
+        has_suggestion = True
+    if float(kpis["taker_sell_pct"]) >= 20.0:
+        print("- Taker SELL ratio is high; tighten active-exit guards and prioritize passive unwind.")
+        has_suggestion = True
+    if float(kpis["high_cost_roundtrip_loss"]) < -1.0:
+        print("- High-cost roundtrip loss is material; strengthen sell cost floor and high-cost cooldown.")
+        has_suggestion = True
+    if float(kpis["up_settle_but_sold_lower_loss"]) < -1.0:
+        print("- UP-settled but sold-lower loss is material; reduce premature inventory unwinds.")
+        has_suggestion = True
+    if not has_suggestion:
         print("- No acute risk signal in this window.")
 
     conn.close()

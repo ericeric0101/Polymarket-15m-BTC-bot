@@ -23,6 +23,7 @@ import random
 import httpx
 import re
 import json
+import sqlite3
 import threading
 import uuid
 import subprocess
@@ -646,6 +647,9 @@ class IntegratedBTCStrategy(Strategy):
             "MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", "0"
         ).strip().lower() in ("1", "true", "yes", "on")
         self.maker_min_directional_edge_ps = Decimal(os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"))
+        self.maker_min_directional_edge_ps_conservative = Decimal(
+            os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS_CONSERVATIVE", "0.03")
+        )
         self.maker_min_expected_net_usdc = Decimal(os.getenv("MAKER_MIN_EXPECTED_NET_USDC", "0.0001"))
         self.maker_adverse_selection_buffer = Decimal(os.getenv("MAKER_ADVERSE_SELECTION_BUFFER", "0.0005"))
         self.maker_use_post_only = os.getenv("MAKER_POST_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -780,8 +784,47 @@ class IntegratedBTCStrategy(Strategy):
 
         self.regime_guard_enabled = os.getenv("REGIME_GUARD_ENABLED", "1").strip().lower() not in ("0", "false", "no")
         self.regime_guard_n_markets = max(2, int(os.getenv("REGIME_GUARD_N_MARKETS", "4")))
-        self.regime_guard_trigger_sum_pnl_usdc = Decimal(os.getenv("REGIME_GUARD_TRIGGER_SUM_PNL_USDC", "-3.0"))
+        self.regime_guard_trigger_sum_pnl_usdc = Decimal(os.getenv("REGIME_GUARD_TRIGGER_SUM_PNL_USDC", "-3.5"))
         self.regime_guard_cooldown_sec = max(60, int(os.getenv("REGIME_GUARD_COOLDOWN_SEC", "3600")))
+        self.regime_guard_min_negative_markets = max(
+            1,
+            min(
+                self.regime_guard_n_markets,
+                int(
+                    os.getenv(
+                        "REGIME_GUARD_MIN_NEGATIVE_MARKETS",
+                        str(max(1, self.regime_guard_n_markets - 1)),
+                    )
+                ),
+            ),
+        )
+        self.regime_guard_bootstrap_lookback_markets = max(
+            self.regime_guard_n_markets,
+            int(
+                os.getenv(
+                    "REGIME_GUARD_BOOTSTRAP_LOOKBACK_MARKETS",
+                    str(self.regime_guard_n_markets * 3),
+                )
+            ),
+        )
+        self.maker_sell_cost_protect_enabled = os.getenv(
+            "MAKER_SELL_COST_PROTECT_ENABLED", "1"
+        ).strip().lower() not in ("0", "false", "no")
+        self.maker_sell_cost_protect_fee_buffer_ps = Decimal(
+            os.getenv("MAKER_SELL_COST_PROTECT_FEE_BUFFER_PS", "0.005")
+        )
+        self.maker_sell_cost_protect_emergency_last_sec = max(
+            0, int(os.getenv("MAKER_SELL_COST_PROTECT_EMERGENCY_LAST_SEC", "60"))
+        )
+        self.maker_high_cost_exit_cooldown_enabled = os.getenv(
+            "MAKER_HIGH_COST_EXIT_COOLDOWN_ENABLED", "1"
+        ).strip().lower() not in ("0", "false", "no")
+        self.maker_high_cost_fill_threshold = Decimal(
+            os.getenv("MAKER_HIGH_COST_FILL_THRESHOLD", "0.75")
+        )
+        self.maker_high_cost_exit_cooldown_sec = max(
+            0, int(os.getenv("MAKER_HIGH_COST_EXIT_COOLDOWN_SEC", "180"))
+        )
         
         # Performance / Execution
         self.maker_cancel_max_retries = int(os.getenv("MAKER_CANCEL_MAX_RETRIES", "3"))
@@ -922,6 +965,8 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_last_eval_ts_by_inst: Dict[str, float] = {}
         self.taker_exit_reject_cooldown_until_by_inst: Dict[str, float] = {}
         self._taker_exit_skip_log_ts_by_key: Dict[str, float] = {}
+        self.high_cost_exit_cooldown_until_by_inst: Dict[str, float] = {}
+        self.high_cost_last_fill_price_by_inst: Dict[str, float] = {}
         self.market_cycle_realized_net_usdc = Decimal("0")
         self.recent_market_combined_pnls: deque[float] = deque(maxlen=self.regime_guard_n_markets)
         self.regime_guard_conservative_until_ts: float = 0.0
@@ -1086,6 +1131,135 @@ class IntegratedBTCStrategy(Strategy):
         if time_left_sec < float(self.hold_to_redeem_min_time_left_sec):
             return False
         return True
+
+    def _is_emergency_exit_window(self, time_left_sec: Optional[float]) -> bool:
+        if time_left_sec is None:
+            return False
+        if self.maker_sell_cost_protect_emergency_last_sec <= 0:
+            return False
+        return time_left_sec <= float(self.maker_sell_cost_protect_emergency_last_sec)
+
+    def _regime_guard_min_negative_markets(self) -> int:
+        return max(1, self.regime_guard_min_negative_markets)
+
+    def _regime_guard_should_trigger(self, window: List[float]) -> tuple[bool, float, int]:
+        if len(window) < self.regime_guard_n_markets:
+            return (False, 0.0, 0)
+        window_sum = float(sum(window))
+        neg_count = sum(1 for v in window if v < 0)
+        should = (
+            neg_count >= self._regime_guard_min_negative_markets()
+            and Decimal(str(window_sum)) <= self.regime_guard_trigger_sum_pnl_usdc
+        )
+        return (should, window_sum, neg_count)
+
+    def _append_cycle_and_maybe_trigger_regime_guard(
+        self,
+        cycle_combined_pnl: float,
+        slug: str,
+        source: str,
+    ) -> None:
+        if not self.regime_guard_enabled:
+            return
+        self.recent_market_combined_pnls.append(float(cycle_combined_pnl))
+        if len(self.recent_market_combined_pnls) < self.regime_guard_n_markets:
+            return
+        window = list(self.recent_market_combined_pnls)[-self.regime_guard_n_markets :]
+        should_trigger, window_sum, neg_count = self._regime_guard_should_trigger(window)
+        if not should_trigger:
+            return
+        until_ts = time.time() + float(self.regime_guard_cooldown_sec)
+        self.regime_guard_conservative_until_ts = max(self.regime_guard_conservative_until_ts, until_ts)
+        logger.warning(
+            "REGIME GUARD triggered: "
+            f"window={window} neg={neg_count}/{self.regime_guard_n_markets} "
+            f"sum={window_sum:.4f} <= trigger={float(self.regime_guard_trigger_sum_pnl_usdc):.4f}; "
+            f"raise BUY edge gate to {float(self.maker_min_directional_edge_ps_conservative):.4f} "
+            f"for {self.regime_guard_cooldown_sec}s"
+        )
+        self._db_strategy_event(
+            "REGIME_GUARD_TRIGGERED",
+            {
+                "source": source,
+                "slug": slug,
+                "window_combined_pnls": window,
+                "window_sum_pnl_usdc": window_sum,
+                "negative_markets": neg_count,
+                "min_negative_markets": self._regime_guard_min_negative_markets(),
+                "trigger_sum_pnl_usdc": float(self.regime_guard_trigger_sum_pnl_usdc),
+                "n_markets": self.regime_guard_n_markets,
+                "cooldown_sec": self.regime_guard_cooldown_sec,
+            },
+        )
+
+    def _bootstrap_regime_guard_window_from_db(self) -> None:
+        if not self.regime_guard_enabled or not self.trade_db:
+            return
+        db_path = getattr(self.trade_db, "db_path", "")
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM strategy_events
+                WHERE event_type='MARKET_CYCLE_PNL'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self.regime_guard_bootstrap_lookback_markets,),
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return
+            recovered: List[float] = []
+            for row in reversed(rows):
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    payload = {}
+                val = payload.get("cycle_combined_pnl_usdc")
+                if val is None:
+                    continue
+                recovered.append(float(val))
+            if not recovered:
+                return
+            self.recent_market_combined_pnls.clear()
+            for v in recovered[-self.regime_guard_n_markets :]:
+                self.recent_market_combined_pnls.append(float(v))
+            logger.info(
+                "Regime guard bootstrap: recovered recent combined window "
+                f"{list(self.recent_market_combined_pnls)}"
+            )
+            if len(self.recent_market_combined_pnls) >= self.regime_guard_n_markets:
+                window = list(self.recent_market_combined_pnls)[-self.regime_guard_n_markets :]
+                should_trigger, window_sum, neg_count = self._regime_guard_should_trigger(window)
+                if should_trigger:
+                    until_ts = time.time() + float(self.regime_guard_cooldown_sec)
+                    self.regime_guard_conservative_until_ts = max(
+                        self.regime_guard_conservative_until_ts,
+                        until_ts,
+                    )
+                    logger.warning(
+                        "Regime guard armed from bootstrap window: "
+                        f"neg={neg_count}/{self.regime_guard_n_markets} sum={window_sum:.4f}"
+                    )
+                    self._db_strategy_event(
+                        "REGIME_GUARD_BOOTSTRAP_TRIGGERED",
+                        {
+                            "window_combined_pnls": window,
+                            "window_sum_pnl_usdc": window_sum,
+                            "negative_markets": neg_count,
+                            "min_negative_markets": self._regime_guard_min_negative_markets(),
+                            "trigger_sum_pnl_usdc": float(self.regime_guard_trigger_sum_pnl_usdc),
+                            "n_markets": self.regime_guard_n_markets,
+                            "cooldown_sec": self.regime_guard_cooldown_sec,
+                        },
+                    )
+        except Exception as e:
+            logger.warning(f"Regime guard bootstrap failed: {e}")
 
     def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         if not self.trade_db:
@@ -1894,6 +2068,28 @@ class IntegratedBTCStrategy(Strategy):
                 fee_rate = Decimal("0")
 
             avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
+            emergency_window = self._is_emergency_exit_window(time_left_sec)
+            # After a high-cost BUY fill, avoid active exits below cost during cooldown.
+            if (
+                self.maker_high_cost_exit_cooldown_enabled
+                and self.maker_high_cost_exit_cooldown_sec > 0
+                and now_ts < high_cost_cooldown_until
+                and avg_entry > 0
+                and best_bid < avg_entry
+                and not emergency_window
+            ):
+                self._log_taker_exit_skip_throttled(
+                    inst_key=inst_key,
+                    reason_tag="high_cost_cooldown",
+                    message=(
+                        "Skip taker exit: high-cost cooldown active "
+                        f"(best_bid={float(best_bid):.4f} < avg_entry={float(avg_entry):.4f}, "
+                        f"cooldown_left={high_cost_cooldown_until - now_ts:.1f}s)"
+                    ),
+                    now_ts=now_ts,
+                )
+                continue
 
             # Hold-to-redeem (conditional): only skip taker exits when position is small
             # and there is sufficient time left to let settlement resolve.
@@ -2401,6 +2597,8 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_last_eval_ts_by_inst.clear()
         self.taker_exit_reject_cooldown_until_by_inst.clear()
         self._taker_exit_skip_log_ts_by_key.clear()
+        self.high_cost_exit_cooldown_until_by_inst.clear()
+        self.high_cost_last_fill_price_by_inst.clear()
         self._sell_reject_pause_until_by_inst.clear()
         self._conditional_balance_cache_by_token.clear()
         self.latest_quote_depth_by_inst.clear()
@@ -2879,7 +3077,7 @@ class IntegratedBTCStrategy(Strategy):
 
         # --- Balance Pre-check (non-simulation only) ---
         _balance_forced_sell_only = False
-        _regime_forced_sell_only = False
+        _regime_guard_active = False
         if not is_simulation:
             balance = self._refresh_balance_cache()
             if balance is not None:
@@ -2914,8 +3112,8 @@ class IntegratedBTCStrategy(Strategy):
                 self.regime_guard_conservative_until_ts = 0.0
                 self._db_strategy_event("REGIME_GUARD_RECOVERED", {"ts": now_guard_ts})
             elif now_guard_ts < self.regime_guard_conservative_until_ts:
-                _regime_forced_sell_only = True
-        _forced_sell_only = _balance_forced_sell_only or _regime_forced_sell_only
+                _regime_guard_active = True
+        _forced_sell_only = _balance_forced_sell_only
 
         # Check whether current inventory should be force-closed via taker orders.
         await self._maybe_taker_exit_positions(time.time(), is_simulation=is_simulation)
@@ -3113,7 +3311,8 @@ class IntegratedBTCStrategy(Strategy):
             ):
                 buy_tuple = side_plan.get("buy")
                 buy_edge_ps = buy_tuple[5] if (buy_tuple and len(buy_tuple) > 5) else None
-                if isinstance(buy_edge_ps, Decimal) and buy_edge_ps < self.maker_min_directional_edge_ps:
+                min_edge_gate = self.maker_min_directional_edge_ps_conservative if _regime_guard_active else self.maker_min_directional_edge_ps
+                if isinstance(buy_edge_ps, Decimal) and buy_edge_ps < min_edge_gate:
                     _set_side_should_quote("buy", False, "edge_gate_buy")
 
             # --- POST-FILL BUY COOLDOWN -----------------------------------------------
@@ -3245,12 +3444,7 @@ class IntegratedBTCStrategy(Strategy):
 
             # --- Balance-forced SELL-only mode ---
             if _forced_sell_only and "buy" in side_plan:
-                forced_reason = (
-                    "regime_guard_sell_only"
-                    if (_regime_forced_sell_only and not _balance_forced_sell_only)
-                    else "balance_forced_sell_only"
-                )
-                _set_side_should_quote("buy", False, forced_reason)
+                _set_side_should_quote("buy", False, "balance_forced_sell_only")
 
             for side, quote_data in side_plan.items():
                 limit_price = quote_data[0]
@@ -3297,6 +3491,39 @@ class IntegratedBTCStrategy(Strategy):
                                 f"sellable_below_min sellable={float(sellable_qty):.6f} "
                                 f"< min={float(self.maker_exchange_min_shares):.6f}"
                             )
+                    inv_state = self.live_inventory_cost.get(inst_key) if inst_key else None
+                    avg_entry = (
+                        Decimal(str(inv_state.get("avg_entry_price", "0")))
+                        if inv_state is not None
+                        else Decimal("0")
+                    )
+                    emergency_window = self._is_emergency_exit_window(time_left_sec_global)
+                    if (
+                        should_quote
+                        and self.maker_high_cost_exit_cooldown_enabled
+                        and self.maker_high_cost_exit_cooldown_sec > 0
+                        and now_ts < float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
+                        and avg_entry > 0
+                        and limit_price < avg_entry
+                        and not emergency_window
+                    ):
+                        should_quote = False
+                        diag_reason = (
+                            f"high_cost_exit_cooldown sell={float(limit_price):.4f} "
+                            f"< avg_entry={float(avg_entry):.4f}"
+                        )
+                    if (
+                        should_quote
+                        and self.maker_sell_cost_protect_enabled
+                        and avg_entry > 0
+                        and limit_price < (avg_entry + self.maker_sell_cost_protect_fee_buffer_ps)
+                        and not emergency_window
+                    ):
+                        should_quote = False
+                        diag_reason = (
+                            f"sell_cost_protect sell={float(limit_price):.4f} "
+                            f"< min={float(avg_entry + self.maker_sell_cost_protect_fee_buffer_ps):.4f}"
+                        )
                 if reduce_only_reason and side == "buy":
                     diag_reason = f"reduce_only: {reduce_only_reason}"
                 if reduce_only_tail_sell_block and side == "sell":
@@ -3304,11 +3531,7 @@ class IntegratedBTCStrategy(Strategy):
                         f"reduce_only_tail_guard: <= {self.maker_reduce_only_no_new_sell_last_sec}s"
                     )
                 if _forced_sell_only and side == "buy":
-                    diag_reason = (
-                        "regime_guard_sell_only"
-                        if (_regime_forced_sell_only and not _balance_forced_sell_only)
-                        else "balance_forced_sell_only"
-                    )
+                    diag_reason = "balance_forced_sell_only"
                 order_key = self._order_key_for(side, inst_id)
                 desired_quotes[order_key] = {
                     "side": side,
@@ -3863,6 +4086,7 @@ class IntegratedBTCStrategy(Strategy):
                 "test_mode": self.test_mode,
             },
         )
+        self._bootstrap_regime_guard_window_from_db()
         
         # Ensure we have sufficient history.
         if len(self.price_history) < 20:
@@ -4521,24 +4745,11 @@ class IntegratedBTCStrategy(Strategy):
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
                 cycle_fill_realized = float(self.market_cycle_realized_net_usdc)
-                if self.regime_guard_enabled:
-                    self.recent_market_combined_pnls.append(cycle_fill_realized)
-                    if len(self.recent_market_combined_pnls) >= self.regime_guard_n_markets:
-                        window = list(self.recent_market_combined_pnls)[-self.regime_guard_n_markets :]
-                        window_sum = float(sum(window))
-                        if all(v < 0 for v in window) and Decimal(str(window_sum)) <= self.regime_guard_trigger_sum_pnl_usdc:
-                            until_ts = time.time() + float(self.regime_guard_cooldown_sec)
-                            self.regime_guard_conservative_until_ts = max(self.regime_guard_conservative_until_ts, until_ts)
-                            self._db_strategy_event(
-                                "REGIME_GUARD_TRIGGERED",
-                                {
-                                    "window_combined_pnls": window,
-                                    "window_sum_pnl_usdc": window_sum,
-                                    "trigger_sum_pnl_usdc": float(self.regime_guard_trigger_sum_pnl_usdc),
-                                    "n_markets": self.regime_guard_n_markets,
-                                    "cooldown_sec": self.regime_guard_cooldown_sec,
-                                },
-                            )
+                self._append_cycle_and_maybe_trigger_regime_guard(
+                    cycle_combined_pnl=cycle_fill_realized,
+                    slug=self.current_market_slug or "",
+                    source="settlement_no_inventory",
+                )
                 self._db_strategy_event(
                     "MARKET_CYCLE_PNL",
                     {
@@ -4630,30 +4841,11 @@ class IntegratedBTCStrategy(Strategy):
             })
             cycle_fill_realized = float(self.market_cycle_realized_net_usdc)
             cycle_combined_pnl = cycle_fill_realized + settlement_pnl
-            if self.regime_guard_enabled:
-                self.recent_market_combined_pnls.append(cycle_combined_pnl)
-                if len(self.recent_market_combined_pnls) >= self.regime_guard_n_markets:
-                    window = list(self.recent_market_combined_pnls)[-self.regime_guard_n_markets :]
-                    window_sum = float(sum(window))
-                    if all(v < 0 for v in window) and Decimal(str(window_sum)) <= self.regime_guard_trigger_sum_pnl_usdc:
-                        until_ts = time.time() + float(self.regime_guard_cooldown_sec)
-                        self.regime_guard_conservative_until_ts = max(self.regime_guard_conservative_until_ts, until_ts)
-                        logger.warning(
-                            "REGIME GUARD triggered: "
-                            f"window={window} sum={window_sum:.4f} "
-                            f"<= trigger={float(self.regime_guard_trigger_sum_pnl_usdc):.4f}; "
-                            f"sell-only for {self.regime_guard_cooldown_sec}s"
-                        )
-                        self._db_strategy_event(
-                            "REGIME_GUARD_TRIGGERED",
-                            {
-                                "window_combined_pnls": window,
-                                "window_sum_pnl_usdc": window_sum,
-                                "trigger_sum_pnl_usdc": float(self.regime_guard_trigger_sum_pnl_usdc),
-                                "n_markets": self.regime_guard_n_markets,
-                                "cooldown_sec": self.regime_guard_cooldown_sec,
-                            },
-                        )
+            self._append_cycle_and_maybe_trigger_regime_guard(
+                cycle_combined_pnl=cycle_combined_pnl,
+                slug=slug,
+                source="settlement",
+            )
             self._db_strategy_event(
                 "MARKET_CYCLE_PNL",
                 {
@@ -5687,6 +5879,26 @@ class IntegratedBTCStrategy(Strategy):
                 fill_qty=fill_qty_dec,
                 commission=fill_commission_dec,
             )
+        if (
+            side_for_ledger == "buy"
+            and self.maker_high_cost_exit_cooldown_enabled
+            and self.maker_high_cost_exit_cooldown_sec > 0
+            and fill_price_dec >= self.maker_high_cost_fill_threshold
+        ):
+            inst_key = self._instrument_key(filled_inst)
+            if inst_key:
+                cooldown_until = time.time() + float(self.maker_high_cost_exit_cooldown_sec)
+                self.high_cost_exit_cooldown_until_by_inst[inst_key] = max(
+                    float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0)),
+                    cooldown_until,
+                )
+                self.high_cost_last_fill_price_by_inst[inst_key] = float(fill_price_dec)
+                logger.warning(
+                    "High-cost BUY fill cooldown armed: "
+                    f"inst={inst_key} fill={float(fill_price_dec):.4f} "
+                    f"threshold={float(self.maker_high_cost_fill_threshold):.4f} "
+                    f"cooldown={self.maker_high_cost_exit_cooldown_sec}s"
+                )
         self._clear_pending_taker_exit_for_order(filled_id)
 
         self.consecutive_denied_orders = 0
