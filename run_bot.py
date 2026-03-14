@@ -72,7 +72,7 @@ from bot.lifecycle import (
     collect_btc_market_candidates,
     determine_lifecycle_timer_action,
     evaluate_market_phase,
-    resolve_up_market_selection,
+    resolve_bi_side_market_selection,
     select_next_market_window,
 )
 from bot.ops import (
@@ -632,6 +632,12 @@ class MarketPhase(Enum):
     SETTLING = "SETTLING"         # Market has ended, all orders cancelled
 
 
+class ActiveSide(Enum):
+    UP = "UP"
+    DOWN = "DOWN"
+    NONE = "NONE"
+
+
 class IntegratedBTCStrategy(Strategy):
     """
     Integrated BTC Strategy combining:
@@ -758,6 +764,29 @@ class IntegratedBTCStrategy(Strategy):
         
         self.maker_momentum_filter_pct = Decimal(os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.06"))
         self.maker_momentum_window_ticks = int(os.getenv("MAKER_MOMENTUM_WINDOW_TICKS", "20"))
+        self.bi_side_enabled = os.getenv("BI_SIDE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+        self.bi_side_decision_mode = os.getenv("BI_SIDE_DECISION_MODE", "boundary_only").strip().lower()
+        self.bi_side_default_mode = str(os.getenv("BI_SIDE_DEFAULT_MODE", "NONE") or "NONE").strip().upper()
+        if self.bi_side_default_mode not in {ActiveSide.UP.value, ActiveSide.DOWN.value, ActiveSide.NONE.value}:
+            self.bi_side_default_mode = ActiveSide.NONE.value
+        self.bi_side_decision_grace_sec = max(0, int(os.getenv("BI_SIDE_DECISION_GRACE_SEC", "30")))
+        self.bi_side_lock_until_reduce_only = os.getenv("BI_SIDE_LOCK_UNTIL_REDUCE_ONLY", "1").strip().lower() not in ("0", "false", "no")
+        self.bi_side_allow_intramarket_flip = os.getenv("BI_SIDE_ALLOW_INTRAMARKET_FLIP", "0").strip().lower() in ("1", "true", "yes", "on")
+        self.bi_side_min_score_up = Decimal(str(os.getenv("BI_SIDE_MIN_SCORE_UP", "2")))
+        self.bi_side_max_score_down = Decimal(str(os.getenv("BI_SIDE_MAX_SCORE_DOWN", "-2")))
+        self.bi_side_mixed_low = Decimal(str(os.getenv("BI_SIDE_MIXED_LOW", "-1")))
+        self.bi_side_mixed_high = Decimal(str(os.getenv("BI_SIDE_MIXED_HIGH", "1")))
+        self.bi_side_strike_gap_pct = Decimal(str(os.getenv("BI_SIDE_STRIKE_GAP_PCT", "0.0015")))
+        self.bi_side_mom_window_ticks = max(2, int(os.getenv("BI_SIDE_MOM_WINDOW_TICKS", str(self.maker_momentum_window_ticks))))
+        self.bi_side_mom_pct = Decimal(str(os.getenv("BI_SIDE_MOM_PCT", "0.0025")))
+        self.bi_side_open_drift_pct = Decimal(str(os.getenv("BI_SIDE_OPEN_DRIFT_PCT", "0.0020")))
+        self.bi_side_regime_n_markets = max(2, int(os.getenv("BI_SIDE_REGIME_N_MARKETS", "4")))
+        self.bi_side_regime_sum_pnl_usdc = Decimal(str(os.getenv("BI_SIDE_REGIME_SUM_PNL_USDC", "-2.0")))
+        self.bi_side_regime_min_neg = max(1, int(os.getenv("BI_SIDE_REGIME_MIN_NEG", "3")))
+        self.bi_side_mixed_policy = str(os.getenv("BI_SIDE_MIXED_POLICY", "none") or "none").strip().lower()
+        self.bi_side_mixed_small_size_mult = Decimal(str(os.getenv("BI_SIDE_MIXED_SMALL_SIZE_MULT", "0.0")))
+        self.bi_side_down_size_mult = Decimal(str(os.getenv("BI_SIDE_DOWN_SIZE_MULT", "1.0")))
+        self.bi_side_min_time_left_sec = max(0, int(os.getenv("BI_SIDE_MIN_TIME_LEFT_SEC", "180")))
         self.maker_fair_pricer_mode = os.getenv("MAKER_FAIR_PRICER_MODE", "drift").strip().lower()
         if self.maker_fair_pricer_mode not in {"drift", "digital"}:
             self.maker_fair_pricer_mode = "drift"
@@ -1025,6 +1054,17 @@ class IntegratedBTCStrategy(Strategy):
         self.active_maker_orders: Dict[str, Any] = {}
         self.current_token_id: Optional[str] = None
         self.current_market_instruments: List[InstrumentId] = []
+        self.current_up_instrument_id: Optional[InstrumentId] = None
+        self.current_down_instrument_id: Optional[InstrumentId] = None
+        self.current_market_open_spot: Optional[Decimal] = None
+        self.active_side: ActiveSide = ActiveSide.UP if not self.bi_side_enabled else ActiveSide.NONE
+        self.active_side_locked: bool = False
+        self.side_decision_ts: float = 0.0
+        self.side_decision_score: Decimal = Decimal("0")
+        self.side_decision_reason: str = "startup"
+        self.side_decision_due_ts: float = 0.0
+        self.side_decision_done_for_market: bool = False
+        self.side_decision_inputs: Dict[str, Any] = {}
         self.last_observed_fee_rate_bps: Optional[int] = None
         clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com")
         fee_ttl = int(os.getenv("FEE_RATE_CACHE_TTL_SEC", "300"))
@@ -1108,6 +1148,7 @@ class IntegratedBTCStrategy(Strategy):
             f"mode={'maker' if self.maker_mode else 'signal'} "
             f"quote_sides={self.maker_quote_sides} "
             f"pricer={self.maker_fair_pricer_mode} "
+            f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -1155,6 +1196,233 @@ class IntegratedBTCStrategy(Strategy):
         if self.maker_sell_cost_protect_emergency_last_sec <= 0:
             return False
         return time_left_sec <= float(self.maker_sell_cost_protect_emergency_last_sec)
+
+    def _normalize_active_side(self, side: Any) -> ActiveSide:
+        txt = str(side or "").strip().upper()
+        if txt == ActiveSide.UP.value:
+            return ActiveSide.UP
+        if txt == ActiveSide.DOWN.value:
+            return ActiveSide.DOWN
+        return ActiveSide.NONE
+
+    def _primary_instrument_for_market(self) -> Optional[InstrumentId]:
+        return self.current_up_instrument_id or self.current_down_instrument_id or self.instrument_id
+
+    def _instrument_for_side(self, side: ActiveSide) -> Optional[InstrumentId]:
+        if side == ActiveSide.UP:
+            return self.current_up_instrument_id or self._primary_instrument_for_market()
+        if side == ActiveSide.DOWN:
+            return self.current_down_instrument_id
+        return None
+
+    def _sync_active_instrument(self) -> None:
+        target = self._instrument_for_side(self.active_side)
+        if target is None:
+            target = self._primary_instrument_for_market()
+        self.instrument_id = target
+        self.current_token_id = self._extract_token_id_from_instrument(str(target)) if target is not None else None
+
+    def _capture_market_open_spot(self) -> Optional[Decimal]:
+        spot = self.latest_external_spot or self.last_external_spot
+        if spot is not None and spot > 0:
+            return spot
+        if self._binance_ws_price is not None and self._binance_ws_price > 0:
+            return self._binance_ws_price
+        if self.external_spot_history:
+            _, hist_px = self.external_spot_history[-1]
+            if hist_px > 0:
+                return hist_px
+        return None
+
+    def _reset_side_decision_state(self) -> None:
+        self.active_side = ActiveSide.UP if not self.bi_side_enabled else self._normalize_active_side(self.bi_side_default_mode)
+        self.active_side_locked = False
+        self.side_decision_ts = 0.0
+        self.side_decision_score = Decimal("0")
+        self.side_decision_reason = "market_reset"
+        self.side_decision_due_ts = time.time() + float(self.bi_side_decision_grace_sec) if self.bi_side_enabled else 0.0
+        self.side_decision_done_for_market = not self.bi_side_enabled
+        self.side_decision_inputs = {}
+        self.current_market_open_spot = self._capture_market_open_spot()
+        self._sync_active_instrument()
+
+    def _effective_recent_cycle_window(self) -> List[float]:
+        window = list(self.recent_market_combined_pnls)[-self.bi_side_regime_n_markets :]
+        return [float(v) for v in window]
+
+    def _compute_side_decision(self, now_ts: float) -> tuple[ActiveSide, Decimal, str, Dict[str, Any]]:
+        inputs: Dict[str, Any] = {
+            "slug": self.current_market_slug or "",
+            "fair_up": None,
+            "fair_down": None,
+            "strike_signal": 0,
+            "momentum_signal": 0,
+            "open_drift_signal": 0,
+            "regime_signal": 0,
+            "gap_pct": None,
+            "mom_pct": None,
+            "open_drift_pct": None,
+            "recent_window_combined_pnls": self._effective_recent_cycle_window(),
+        }
+        if not self.bi_side_enabled:
+            return ActiveSide.UP, Decimal("999"), "bi_side_disabled", inputs
+
+        spot = self._capture_market_open_spot()
+        if spot is None or spot <= 0:
+            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
+        strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+        if strike_dec is None or strike_dec <= 0:
+            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
+        inputs["spot"] = float(spot)
+        inputs["strike"] = float(strike_dec)
+
+        gap_pct = (spot - strike_dec) / strike_dec if strike_dec > 0 else Decimal("0")
+        inputs["gap_pct"] = float(gap_pct)
+        strike_signal = 0
+        if gap_pct >= self.bi_side_strike_gap_pct:
+            strike_signal = 1
+        elif gap_pct <= -self.bi_side_strike_gap_pct:
+            strike_signal = -1
+        inputs["strike_signal"] = strike_signal
+
+        active_instrument = self._primary_instrument_for_market()
+        momentum_history = self._momentum_history_for_instrument(active_instrument)
+        mom_pct = Decimal("0")
+        momentum_signal = 0
+        if len(momentum_history) >= self.bi_side_mom_window_ticks:
+            recent_px = momentum_history[-1]
+            old_px = momentum_history[-self.bi_side_mom_window_ticks]
+            if old_px > 0:
+                mom_pct = (recent_px - old_px) / old_px
+                if mom_pct >= self.bi_side_mom_pct:
+                    momentum_signal = 1
+                elif mom_pct <= -self.bi_side_mom_pct:
+                    momentum_signal = -1
+        inputs["mom_pct"] = float(mom_pct)
+        inputs["momentum_signal"] = momentum_signal
+
+        open_spot = self.current_market_open_spot or spot
+        open_drift_pct = Decimal("0")
+        open_drift_signal = 0
+        if open_spot and open_spot > 0:
+            open_drift_pct = (spot - open_spot) / open_spot
+            if open_drift_pct >= self.bi_side_open_drift_pct:
+                open_drift_signal = 1
+            elif open_drift_pct <= -self.bi_side_open_drift_pct:
+                open_drift_signal = -1
+        inputs["market_open_spot"] = float(open_spot) if open_spot is not None else None
+        inputs["open_drift_pct"] = float(open_drift_pct)
+        inputs["open_drift_signal"] = open_drift_signal
+
+        regime_signal = 0
+        window = inputs["recent_window_combined_pnls"]
+        neg_count = sum(1 for v in window if v < 0)
+        window_sum = sum(window)
+        if (
+            len(window) >= self.bi_side_regime_n_markets
+            and neg_count >= self.bi_side_regime_min_neg
+            and Decimal(str(window_sum)) <= self.bi_side_regime_sum_pnl_usdc
+            and (strike_signal <= 0 or momentum_signal <= 0)
+        ):
+            regime_signal = -1
+        inputs["regime_signal"] = regime_signal
+        inputs["recent_window_sum_pnl_usdc"] = float(window_sum)
+        inputs["recent_window_negative_markets"] = neg_count
+
+        fair_up = None
+        fair_down = None
+        if self.maker_fair_pricer_mode == "digital":
+            end_ts = getattr(self, "current_market_end_timestamp", None)
+            time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
+            sigma = self.maker_digital_sigma_default
+            est_sigma = self._estimate_external_spot_sigma_annualized()
+            if est_sigma and est_sigma > 0:
+                sigma = est_sigma
+            sigma = sigma * self.maker_digital_vol_scale
+            sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
+            if self.maker_digital_sigma_time_decay_enabled and time_left_sec > 0:
+                ref = self.maker_digital_sigma_time_decay_ref_sec
+                decay = max(self.maker_digital_sigma_time_decay_min, min(1.0, time_left_sec / ref))
+                sigma = sigma * Decimal(str(round(decay, 4)))
+                sigma = max(self.maker_digital_sigma_floor, sigma)
+            fair_up = MakerEngine.digital_up_probability(
+                spot=float(spot),
+                strike=float(strike_dec),
+                sigma_annual=float(sigma),
+                time_left_sec=time_left_sec,
+            )
+            fair_down = Decimal("1.0") - fair_up
+        inputs["fair_up"] = float(fair_up) if fair_up is not None else None
+        inputs["fair_down"] = float(fair_down) if fair_down is not None else None
+
+        score = (
+            Decimal(str(strike_signal))
+            + Decimal(str(momentum_signal))
+            + Decimal(str(open_drift_signal))
+            + (Decimal("0.5") * Decimal(str(regime_signal)))
+        )
+        reason = (
+            f"strike={strike_signal} momentum={momentum_signal} "
+            f"open_drift={open_drift_signal} regime={regime_signal}"
+        )
+        if score >= self.bi_side_min_score_up:
+            return ActiveSide.UP, score, reason, inputs
+        if score <= self.bi_side_max_score_down and self.current_down_instrument_id is not None:
+            return ActiveSide.DOWN, score, reason, inputs
+        return ActiveSide.NONE, score, reason, inputs
+
+    def _maybe_finalize_side_decision(self, now_ts: float, phase: MarketPhase) -> None:
+        if not self.bi_side_enabled:
+            self.active_side = ActiveSide.UP
+            self.side_decision_done_for_market = True
+            self._sync_active_instrument()
+            return
+        if self.side_decision_done_for_market and (self.active_side_locked or self.bi_side_lock_until_reduce_only):
+            return
+        if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
+            return
+        time_left_sec = None
+        if self.current_market_end_timestamp is not None:
+            time_left_sec = float(self.current_market_end_timestamp - now_ts)
+            if time_left_sec < float(self.bi_side_min_time_left_sec):
+                return
+        if self.side_decision_due_ts > 0 and now_ts < self.side_decision_due_ts:
+            return
+        side, score, reason, inputs = self._compute_side_decision(now_ts)
+        if reason in {"spot_unavailable", "strike_unavailable"}:
+            payload = dict(inputs)
+            payload.update({"reason": reason, "decision_ts": now_ts})
+            self._db_strategy_event("SIDE_DECISION_SKIPPED", payload)
+            return
+        if self.side_decision_done_for_market and self.bi_side_lock_until_reduce_only and self.active_side_locked:
+            return
+        old_side = self.active_side
+        self.active_side = side
+        self.side_decision_score = score
+        self.side_decision_reason = reason
+        self.side_decision_ts = now_ts
+        self.side_decision_done_for_market = True
+        self.side_decision_inputs = inputs
+        if self.bi_side_lock_until_reduce_only and phase == MarketPhase.ACTIVE:
+            self.active_side_locked = True
+        self._sync_active_instrument()
+        event_name = "SIDE_MODE_CHANGED" if old_side != side else "SIDE_DECISION"
+        payload = dict(inputs)
+        payload.update(
+            {
+                "active_side": side.value,
+                "previous_side": old_side.value if old_side is not None else None,
+                "score": float(score),
+                "reason": reason,
+                "decision_ts": now_ts,
+            }
+        )
+        self._db_strategy_event(event_name, payload)
+        logger.info(
+            "Side decision: "
+            f"slug={self.current_market_slug or '-'} active_side={side.value} "
+            f"score={float(score):+.2f} reason={reason}"
+        )
 
     def _regime_guard_min_negative_markets(self) -> int:
         return self.regime_guard_policy.min_negative_markets()
@@ -1685,6 +1953,8 @@ class IntegratedBTCStrategy(Strategy):
             self.latest_external_spot = external
             self.external_spot_consecutive_failures = 0  # BUG-5 FIX: reset on success
             self._record_external_spot_observation(external)
+            if self.current_market_open_spot is None and self.current_market_slug:
+                self.current_market_open_spot = external
             
             strike = None
             sigma = self.maker_digital_sigma_default
@@ -1733,7 +2003,9 @@ class IntegratedBTCStrategy(Strategy):
                             f"sigma={float(sigma):.4f} t_left={time_left_sec:.1f}s "
                             f"token_outcome={outcome or 'unknown'} "
                             f"up_prob={float(up_prob):.4f} "
-                            f"fair_for_token={float(fair_for_token):.4f}"
+                            f"fair_down={float(Decimal('1.0') - up_prob):.4f} "
+                            f"fair_for_token={float(fair_for_token):.4f} "
+                            f"active_side={self.active_side.value}"
                         )
                         self._last_digital_pricer_log_ts = now_ts
             
@@ -2836,6 +3108,11 @@ class IntegratedBTCStrategy(Strategy):
         self.last_auto_tune_ts = now_ts
 
     def _maker_quote_instruments(self) -> List[InstrumentId]:
+        if self.bi_side_enabled:
+            active_inst = self._instrument_for_side(self.active_side)
+            if self.active_side == ActiveSide.NONE or active_inst is None:
+                return []
+            return [active_inst]
         if self.instrument_id is None:
             return []
         return [self.instrument_id]
@@ -2853,6 +3130,10 @@ class IntegratedBTCStrategy(Strategy):
         # --- Market Lifecycle Gate ---
         phase = self._update_market_phase()
         if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
+            self._cancel_active_maker_orders()
+            return
+        self._maybe_finalize_side_decision(time.time(), phase)
+        if self.bi_side_enabled and self.active_side == ActiveSide.NONE:
             self._cancel_active_maker_orders()
             return
 
@@ -2932,6 +3213,8 @@ class IntegratedBTCStrategy(Strategy):
 
         target_instruments = self._maker_quote_instruments()
         if not target_instruments:
+            if self.bi_side_enabled:
+                self._cancel_active_maker_orders()
             return
 
         # Refill Requote Token Bucket
@@ -3498,6 +3781,8 @@ class IntegratedBTCStrategy(Strategy):
                 "instrument_id": str(self.instrument_id) if self.instrument_id else None,
                 "selected_slug": self.selected_slug,
                 "test_mode": self.test_mode,
+                "bi_side_enabled": self.bi_side_enabled,
+                "active_side": self.active_side.value,
             },
         )
         self._bootstrap_regime_guard_window_from_db()
@@ -4081,6 +4366,7 @@ class IntegratedBTCStrategy(Strategy):
                     "MARKET_CYCLE_PNL",
                     {
                         "slug": self.current_market_slug or "",
+                        "active_side": self.active_side.value,
                         "cycle_fill_realized_usdc": cycle_fill_realized,
                         "cycle_settlement_pnl_usdc": 0.0,
                         "cycle_combined_pnl_usdc": cycle_fill_realized,
@@ -4141,11 +4427,13 @@ class IntegratedBTCStrategy(Strategy):
                 inventory_shares=inv,
                 live_inventory_cost=self.live_inventory_cost,
                 market_cycle_realized_net_usdc=self.market_cycle_realized_net_usdc,
+                active_side=self.active_side.value,
             )
 
             logger.info(
                 f"SETTLEMENT: slug={slug} spot={spot:.2f} strike={strike:.2f} "
-                f"outcome={settlement.outcome} inv={inv:.4f} redeem=${settlement.redeem_value:.4f} "
+                f"outcome={settlement.outcome} active_side={settlement.active_side} "
+                f"inv={inv:.4f} redeem=${settlement.redeem_value:.4f} "
                 f"cost=${settlement.inventory_cost:.4f} pnl={settlement.settlement_pnl:+.4f}"
             )
 
@@ -4154,6 +4442,7 @@ class IntegratedBTCStrategy(Strategy):
                 "spot": spot,
                 "strike": strike,
                 "outcome": settlement.outcome,
+                "active_side": settlement.active_side,
                 "inventory_shares": inv,
                 "redeem_per_share": settlement.redeem_per_share,
                 "redeem_value_usdc": settlement.redeem_value,
@@ -4169,6 +4458,7 @@ class IntegratedBTCStrategy(Strategy):
                 "MARKET_CYCLE_PNL",
                 {
                     "slug": slug,
+                    "active_side": settlement.active_side,
                     "cycle_fill_realized_usdc": settlement.cycle_fill_realized,
                     "cycle_settlement_pnl_usdc": settlement.settlement_pnl,
                     "cycle_combined_pnl_usdc": settlement.cycle_combined_pnl,
@@ -4431,7 +4721,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.error("NO BTC 15-MIN INSTRUMENTS FOUND!")
             return False
 
-        selection, selection_kind, current_count, future_count = resolve_up_market_selection(
+        selection, selection_kind, current_count, future_count = resolve_bi_side_market_selection(
             btc_instruments=btc_instruments,
             current_timestamp=current_timestamp,
             extract_outcome=self._extract_outcome_from_instrument,
@@ -4460,19 +4750,38 @@ class IntegratedBTCStrategy(Strategy):
         if self.current_market_slug and start_ts:
             self.market_start_ts_by_slug[self.current_market_slug] = int(start_ts)
         self.current_market_end_timestamp = selection.current_market_end_timestamp
+        self.current_up_instrument_id = self._normalize_instrument_id(
+            selection.up_instrument_id if selection.matched_up else selection.instrument_id
+        )
+        self.current_down_instrument_id = self._normalize_instrument_id(
+            selection.down_instrument_id if selection.matched_down else None
+        )
         if not selection.matched_up:
             logger.warning(
                 f"UP outcome instrument not found explicitly for slug={self.current_market_slug}; "
                 "falling back to selected primary instrument."
             )
+        if self.bi_side_enabled and not selection.matched_down:
+            logger.warning(
+                f"DOWN outcome instrument not found explicitly for slug={self.current_market_slug}; "
+                "falling back to selected primary instrument."
+            )
 
-        self.current_market_instruments = list(selection.current_market_instruments)
-        self.instrument_id = selection.instrument_id
-        self.current_token_id = self._extract_token_id_from_instrument(str(self.instrument_id))
+        seen_market_insts: List[InstrumentId] = []
+        for inst in (self.current_up_instrument_id, self.current_down_instrument_id):
+            if inst is not None and inst not in seen_market_insts:
+                seen_market_insts.append(inst)
+        self.current_market_instruments = seen_market_insts or [self._normalize_instrument_id(selection.instrument_id)]
+        self.instrument_id = self._normalize_instrument_id(selection.instrument_id)
+        self._reset_side_decision_state()
+        if self.bi_side_enabled and start_ts:
+            self.side_decision_due_ts = max(time.time(), float(start_ts) + float(self.bi_side_decision_grace_sec))
         logger.info(
             f"Selected market: slug={self.current_market_slug} "
             f"instruments={len(self.current_market_instruments)} "
-            f"primary={self.instrument_id}"
+            f"primary={self.instrument_id} "
+            f"up={self.current_up_instrument_id} down={self.current_down_instrument_id} "
+            f"active_side={self.active_side.value}"
         )
         if self.current_market_slug != previous_slug:
             self._log_strike_status(self.current_market_slug)
@@ -4554,24 +4863,20 @@ class IntegratedBTCStrategy(Strategy):
                 bid_decimal = max(Decimal("0.01"), mid_tmp - Decimal("0.005"))
                 ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
 
-            self.last_valid_quote_ts = time.time()
-            self.consecutive_invalid_quote_ticks = 0
-            self.latest_market_bid = bid_decimal
-            self.latest_market_ask = ask_decimal
-            self.latest_market_bid_ts = time.time()  # BUG-2 FIX: track freshness
-            self.latest_market_ask_ts = self.latest_market_bid_ts
             self.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
-            
-            # Calculate mid price
             mid_price = (bid_decimal + ask_decimal) / 2
-            
-            # Update price history
-            self.price_history.append(mid_price)
             self._append_real_mid_price(tick.instrument_id, mid_price)
-            
-            # Limit history size
-            if len(self.price_history) > self.max_history:
-                self.price_history.pop(0)
+            preferred_inst = self._instrument_for_side(self.active_side) or self._primary_instrument_for_market()
+            if preferred_inst is None or tick.instrument_id == preferred_inst:
+                self.last_valid_quote_ts = time.time()
+                self.consecutive_invalid_quote_ticks = 0
+                self.latest_market_bid = bid_decimal
+                self.latest_market_ask = ask_decimal
+                self.latest_market_bid_ts = time.time()  # BUG-2 FIX: track freshness
+                self.latest_market_ask_ts = self.latest_market_bid_ts
+                self.price_history.append(mid_price)
+                if len(self.price_history) > self.max_history:
+                    self.price_history.pop(0)
             if self.maker_mode:
                 self._start_maker_worker(bid_decimal, ask_decimal)
                 return
@@ -4983,6 +5288,7 @@ class IntegratedBTCStrategy(Strategy):
             {
                 "mode": "TEST_DRY_RUN" if self._is_dry_run_mode() else "LIVE",
                 "inventory_delta_shares": float(self.inventory_delta_shares),
+                "active_side": self.active_side.value,
             },
         )
         log_strategy_run_stop(

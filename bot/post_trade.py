@@ -18,6 +18,7 @@ class FillFollowupResult:
 @dataclass
 class SettlementSummary:
     outcome: str
+    active_side: str
     redeem_per_share: float
     redeem_value: float
     inventory_cost: float
@@ -135,9 +136,11 @@ def compute_settlement_summary(
     inventory_shares: float,
     live_inventory_cost: dict[str, dict[str, Any]],
     market_cycle_realized_net_usdc: Decimal,
+    active_side: str = "UP",
 ) -> SettlementSummary:
     outcome = "UP" if spot >= strike else "DOWN"
-    redeem_per_share = 1.0 if outcome == "UP" else 0.0
+    side_txt = str(active_side or "UP").strip().upper()
+    redeem_per_share = 1.0 if outcome == side_txt else 0.0
     redeem_value = inventory_shares * redeem_per_share
     inventory_cost = 0.0
     for state in live_inventory_cost.values():
@@ -150,6 +153,7 @@ def compute_settlement_summary(
     cycle_combined_pnl = cycle_fill_realized + settlement_pnl
     return SettlementSummary(
         outcome=outcome,
+        active_side=side_txt,
         redeem_per_share=redeem_per_share,
         redeem_value=redeem_value,
         inventory_cost=inventory_cost,

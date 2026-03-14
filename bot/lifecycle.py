@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 
-def select_primary_up_instrument(
+def select_market_outcome_instruments(
     btc_instruments: list[dict[str, Any]],
     current_market_slug: str,
     extract_outcome: Callable[[Any], str],
     fallback_instrument_id: Any,
-) -> tuple[Any, bool]:
+) -> tuple[Any, Any, bool, bool]:
+    up_instrument = None
+    down_instrument = None
     for item in btc_instruments:
         if str(item.get("slug") or "") != current_market_slug:
             continue
@@ -20,9 +22,16 @@ def select_primary_up_instrument(
         instrument_id = getattr(instrument, "id", None)
         if instrument_id is None:
             continue
-        if extract_outcome(instrument) == "up":
-            return instrument_id, True
-    return fallback_instrument_id, False
+        outcome = extract_outcome(instrument)
+        if outcome == "up" and up_instrument is None:
+            up_instrument = instrument_id
+        elif outcome == "down" and down_instrument is None:
+            down_instrument = instrument_id
+    matched_up = up_instrument is not None
+    matched_down = down_instrument is not None
+    if up_instrument is None:
+        up_instrument = fallback_instrument_id
+    return up_instrument, down_instrument, matched_up, matched_down
 
 
 def filter_alive_market_candidates(
@@ -62,7 +71,10 @@ class MarketSelection:
     current_market_end_timestamp: int | None
     current_market_instruments: list[Any]
     instrument_id: Any
+    up_instrument_id: Any
+    down_instrument_id: Any
     matched_up: bool
+    matched_down: bool
 
 
 @dataclass
@@ -123,7 +135,7 @@ def collect_btc_market_candidates(instruments: list[Any], startup_verbose: bool 
     return btc_instruments, current_timestamp
 
 
-def resolve_up_market_selection(
+def resolve_bi_side_market_selection(
     btc_instruments: list[dict[str, Any]],
     current_timestamp: int,
     extract_outcome: Callable[[Any], str],
@@ -141,19 +153,24 @@ def resolve_up_market_selection(
     current_market_slug = str(selected.get("slug") or "")
     start_ts = selected.get("market_timestamp")
     current_market_end_timestamp = (start_ts + 900) if start_ts else None
-    chosen_instrument, matched_up = select_primary_up_instrument(
+    up_instrument, down_instrument, matched_up, matched_down = select_market_outcome_instruments(
         btc_instruments=filtered,
         current_market_slug=current_market_slug,
         extract_outcome=extract_outcome,
         fallback_instrument_id=selected["instrument"].id,
     )
+    chosen_instrument = up_instrument or down_instrument or selected["instrument"].id
+    market_instruments = [inst for inst in [up_instrument, down_instrument] if inst is not None]
     selection = MarketSelection(
         selected_market=selected,
         current_market_slug=current_market_slug,
         current_market_end_timestamp=current_market_end_timestamp,
-        current_market_instruments=[chosen_instrument],
+        current_market_instruments=market_instruments or [chosen_instrument],
         instrument_id=chosen_instrument,
+        up_instrument_id=up_instrument,
+        down_instrument_id=down_instrument,
         matched_up=matched_up,
+        matched_down=matched_down,
     )
     return selection, selection_kind, len(current_markets), len(future_markets)
 
