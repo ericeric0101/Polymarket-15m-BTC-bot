@@ -125,7 +125,7 @@
 - expected_net 仍屬 quote-time proxy，不等於 realized PnL。
 - live inventory 成本帳僅在本策略內維護，若外部手動交易/跨程序交易，可能失真。
 - 尾盤流動性與訂單狀態延遲噪音大，應以保守參數減少最後 30~60 秒操作。
-- `both_buy` / `both` 等模式切換會改變資金占用型態，需配合 allowance 與 on-chain 可賣量管理。
+- `both` / `buy` 都是 UP-only 模式；差別只在是否允許掛出清 SELL。`both` 仍需配合 allowance 與 on-chain 可賣量管理。
 
 ## 13) 改版準則
 - 先保命再提 edge：
