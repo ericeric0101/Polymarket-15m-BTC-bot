@@ -142,6 +142,7 @@ from execution.rebate_model import CRYPTO_FEE_CURVE, bps_to_fee_rate
 from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.grafana_exporter import get_grafana_exporter
+from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
 from execution.maker_engine import MakerEngine, MakerEngineConfig
 from execution.exit_policy import ExitPolicy, ExitPolicyConfig, ExitStage
@@ -649,7 +650,14 @@ class IntegratedBTCStrategy(Strategy):
     - Pre-loaded price history for immediate trading
     """
     
-    def __init__(self, redis_client=None, enable_grafana=True, test_mode=False, selected_slug: Optional[str] = None):
+    def __init__(
+        self,
+        redis_client=None,
+        enable_grafana=True,
+        test_mode=False,
+        selected_slug: Optional[str] = None,
+        enable_terminal_dashboard: bool = False,
+    ):
         super().__init__()
         
         # Nautilus
@@ -666,6 +674,20 @@ class IntegratedBTCStrategy(Strategy):
             self.grafana_exporter = get_grafana_exporter()
         else:
             self.grafana_exporter = None
+        self.terminal_dashboard_enabled = enable_terminal_dashboard or (
+            os.getenv("TERMINAL_DASHBOARD", "0").strip().lower() in ("1", "true", "yes", "on")
+        )
+        self.terminal_dashboard_refresh_sec = max(
+            0.5, float(os.getenv("TERMINAL_DASHBOARD_REFRESH_SEC", "1"))
+        )
+        self.terminal_dashboard = (
+            TerminalDashboard(
+                title="BTC 15M Terminal Dashboard",
+                refresh_interval_sec=self.terminal_dashboard_refresh_sec,
+            )
+            if self.terminal_dashboard_enabled
+            else None
+        )
         
         # Price history for signal processing
         self.price_history = []
@@ -1120,6 +1142,8 @@ class IntegratedBTCStrategy(Strategy):
         self.next_market_start_ts: Optional[float] = None
         self._lifecycle_stop_event = threading.Event()
         self._lifecycle_thread: Optional[threading.Thread] = None
+        self._terminal_dashboard_stop_event = threading.Event()
+        self._terminal_dashboard_thread: Optional[threading.Thread] = None
         # --- Balance Pre-check ---
         self._cached_usdc_balance: Optional[Decimal] = None
         self._balance_last_check_ts: float = 0.0
@@ -1146,6 +1170,8 @@ class IntegratedBTCStrategy(Strategy):
         self.trade_db = TradeJournalDB(
             db_path=os.getenv("TRADE_DB_PATH", "./logs/trade_journal.db"),
         ) if self.trade_db_enabled else None
+        self._cycle_total_trades = 0
+        self._cycle_total_wins = 0
 
         if test_mode:
             logger.info("⚠️  TEST MODE ACTIVE - Trading every minute!")
@@ -1868,6 +1894,12 @@ class IntegratedBTCStrategy(Strategy):
                 f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
                 f"cum_pnl={self._live_cumulative_pnl:+.4f} win_rate={win_rate:.0f}%"
             )
+            if self.terminal_dashboard:
+                self.terminal_dashboard.record_position_closed(
+                    realized_pnl=realized_pnl,
+                    total_trades=self._live_total_trades,
+                    win_rate=win_rate,
+                )
         except Exception as e:
             logger.debug(f"Failed to push position metrics: {e}")
 
@@ -1879,6 +1911,34 @@ class IntegratedBTCStrategy(Strategy):
             self._prom_live_inventory.set(float(self.inventory_delta_shares))
         except Exception:
             pass
+
+    def _update_terminal_dashboard_snapshot(self) -> None:
+        if not self.terminal_dashboard:
+            return
+        try:
+            self.terminal_dashboard.update(
+                phase=self.market_phase.value,
+                slug=self.current_market_slug or self.selected_slug or "-",
+                active_side=self.active_side.value,
+                inventory_shares=float(self.inventory_delta_shares),
+                wallet_balance_usdc=(
+                    float(self._cached_usdc_balance) if self._cached_usdc_balance is not None else None
+                ),
+                active_orders=len(self.active_maker_orders),
+            )
+        except Exception as e:
+            logger.debug(f"Failed to update terminal dashboard snapshot: {e}")
+
+    def _start_terminal_dashboard_sync(self) -> None:
+        if not self.terminal_dashboard:
+            return
+        try:
+            self.terminal_dashboard.start()
+            while not self._terminal_dashboard_stop_event.wait(self.terminal_dashboard_refresh_sec):
+                self._refresh_balance_cache()
+                self._update_terminal_dashboard_snapshot()
+        except Exception as e:
+            logger.error(f"Failed to start terminal dashboard: {e}")
     
     def _is_dry_run_mode(self) -> bool:
         """
@@ -2454,6 +2514,8 @@ class IntegratedBTCStrategy(Strategy):
             gross = qty * (exit_px_effective - avg_entry)
             exit_fee_est = (qty * exit_px_effective) * fee_rate
             net_if_exit = gross - entry_fee_remaining - exit_fee_est
+            # Stop-loss must reflect actual adverse price movement, not only fee drag.
+            price_adverse = avg_entry > 0 and best_bid < avg_entry and gross < 0
 
             trigger = ""
             if net_if_exit >= self.taker_exit_min_net_usdc:
@@ -2461,6 +2523,7 @@ class IntegratedBTCStrategy(Strategy):
             elif (
                 not stop_loss_disabled_in_tail
                 and hold_sec >= max(0, self.taker_exit_min_hold_sec)
+                and price_adverse
                 and net_if_exit <= -abs(self.taker_exit_stop_loss_usdc)
             ):
                 trigger = "stop_loss"
@@ -4071,7 +4134,14 @@ class IntegratedBTCStrategy(Strategy):
         # Start Grafana if enabled
         if self.grafana_exporter:
             start_background_thread(self._start_grafana_sync, "grafana-sync")
-        
+        if self.terminal_dashboard:
+            self._terminal_dashboard_stop_event.clear()
+            self._terminal_dashboard_thread = start_background_thread(
+                self._start_terminal_dashboard_sync,
+                "terminal-dashboard",
+            )
+            self._update_terminal_dashboard_snapshot()
+
         logger.info(f"Strategy active. price_history_points={len(self.price_history)}")
         if len(self.price_history) >= 20:
             logger.info("Ready to trade at next interval.")
@@ -4602,6 +4672,7 @@ class IntegratedBTCStrategy(Strategy):
             for order_key, state in list(self.active_maker_orders.items()):
                 if str(state.get("side", "")) == "buy":
                     self._cancel_maker_order_side(order_key, reason="reduce_only")
+        self._update_terminal_dashboard_snapshot()
 
     def _record_market_settlement(self) -> None:
         """
@@ -4630,6 +4701,14 @@ class IntegratedBTCStrategy(Strategy):
                         "recent_window_size": len(self.recent_market_combined_pnls),
                     },
                 )
+                self._cycle_total_trades += 1
+                if cycle_fill_realized > 0:
+                    self._cycle_total_wins += 1
+                if self.terminal_dashboard:
+                    self.terminal_dashboard.record_cycle(
+                        slug=self.current_market_slug or "",
+                        pnl_usdc=cycle_fill_realized,
+                    )
                 self.market_cycle_realized_net_usdc = Decimal("0")
                 return
 
@@ -4722,7 +4801,16 @@ class IntegratedBTCStrategy(Strategy):
                     "recent_window_size": len(self.recent_market_combined_pnls),
                 },
             )
+            self._cycle_total_trades += 1
+            if settlement.cycle_combined_pnl > 0:
+                self._cycle_total_wins += 1
+            if self.terminal_dashboard:
+                self.terminal_dashboard.record_cycle(
+                    slug=slug,
+                    pnl_usdc=settlement.cycle_combined_pnl,
+                )
             self.market_cycle_realized_net_usdc = Decimal("0")
+            self._update_terminal_dashboard_snapshot()
         except Exception as e:
             logger.warning(f"Settlement recording failed: {e}")
 
@@ -4894,6 +4982,7 @@ class IntegratedBTCStrategy(Strategy):
                 self._prom_wallet_balance.set(float(self._cached_usdc_balance))
             except Exception:
                 pass
+            self._update_terminal_dashboard_snapshot()
         return self._cached_usdc_balance
 
     def _align_price_to_tick(self, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
@@ -5329,6 +5418,18 @@ class IntegratedBTCStrategy(Strategy):
             ),
         )
         self.rebate_reporter.flush_daily_report()
+        if self.terminal_dashboard:
+            side_norm = side_for_ledger or self._normalize_side_text(getattr(event, "order_side", ""))
+            self.terminal_dashboard.increment_fill(
+                is_maker_fill=is_maker_fill,
+                side=side_norm,
+                qty=float(getattr(event, "last_qty", 0.0) or 0.0),
+                price=float(getattr(event, "last_px", 0.0) or 0.0),
+                commission_usdc=float(fill_commission_dec),
+                client_order_id=filled_id,
+                is_taker_exit=filled_id.startswith("BTC-15M-TAKER-EXIT-"),
+            )
+        self._update_terminal_dashboard_snapshot()
 
         # --- Adverse Selection Protection: Post-fill buy cooldown ---
         fill_side_norm = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
@@ -5406,6 +5507,7 @@ class IntegratedBTCStrategy(Strategy):
         if cancel_result.should_skip:
             logger.debug(f"Skip duplicate cancel ack log for {canceled_id}")
             return
+        self._update_terminal_dashboard_snapshot()
         self._db_order_event(
             event_type="ORDER_CANCELED",
             client_order_id=canceled_id,
@@ -5559,6 +5661,7 @@ class IntegratedBTCStrategy(Strategy):
                 self._quote_watchdog_stop_event,
                 self._redeem_stop_event,
                 self._binance_ws_stop_event,
+                self._terminal_dashboard_stop_event,
             ],
             threads=[
                 self._lifecycle_thread,
@@ -5566,6 +5669,7 @@ class IntegratedBTCStrategy(Strategy):
                 self._quote_watchdog_thread,
                 self._redeem_thread,
                 self._binance_ws_thread,
+                self._terminal_dashboard_thread,
             ],
             join_timeout_sec=2.0,
         )
@@ -5597,9 +5701,19 @@ class IntegratedBTCStrategy(Strategy):
                 self.grafana_exporter.stop()
             except:
                 pass
+        if self.terminal_dashboard:
+            try:
+                self.terminal_dashboard.stop()
+            except Exception:
+                pass
 
 
-def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, test_mode: bool = False):
+def run_integrated_bot(
+    simulation: bool = True,
+    enable_grafana: bool = True,
+    test_mode: bool = False,
+    enable_terminal_dashboard: bool = False,
+):
     """Run the integrated BTC 15-min trading bot."""
     startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
     logger.info("Starting integrated Polymarket BTC 15-min trading bot.")
@@ -5625,6 +5739,7 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
         f"mode={'SIMULATION' if simulation else 'LIVE'} "
         f"redis={'on' if redis_client else 'off'} "
         f"grafana={'on' if enable_grafana else 'off'} "
+        f"terminal_dashboard={'on' if enable_terminal_dashboard else 'off'} "
         f"auto_rollover={'on' if auto_rollover_enabled else 'off'}({auto_rollover_sec}s)"
     )
     if startup_verbose:
@@ -5744,6 +5859,7 @@ def run_integrated_bot(simulation: bool = True, enable_grafana: bool = True, tes
             enable_grafana=enable_grafana,
             test_mode=test_mode,
             selected_slug=primary_slug,
+            enable_terminal_dashboard=enable_terminal_dashboard,
         )
 
         logger.info("Building Nautilus node...")
@@ -5873,6 +5989,11 @@ def main():
         help="Run in TEST MODE (trade every minute for faster testing)"
     )
     parser.add_argument(
+        "--terminal-dashboard",
+        action="store_true",
+        help="Show simplified Rich terminal dashboard"
+    )
+    parser.add_argument(
         "--preflight-only",
         action="store_true",
         help="Run safety checks only (no trading node startup)"
@@ -5883,6 +6004,7 @@ def main():
     simulation = not args.live
     enable_grafana = not args.no_grafana
     test_mode = args.test_mode
+    enable_terminal_dashboard = args.terminal_dashboard
 
     if not run_preflight_checks(simulation=simulation):
         print("Preflight check failed. Startup aborted.")
@@ -5902,7 +6024,8 @@ def main():
     run_integrated_bot(
         simulation=simulation,
         enable_grafana=enable_grafana,
-        test_mode=test_mode
+        test_mode=test_mode,
+        enable_terminal_dashboard=enable_terminal_dashboard,
     )
 
 
