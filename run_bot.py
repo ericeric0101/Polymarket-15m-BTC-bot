@@ -772,8 +772,8 @@ class IntegratedBTCStrategy(Strategy):
         self.bi_side_decision_grace_sec = max(0, int(os.getenv("BI_SIDE_DECISION_GRACE_SEC", "30")))
         self.bi_side_lock_until_reduce_only = os.getenv("BI_SIDE_LOCK_UNTIL_REDUCE_ONLY", "1").strip().lower() not in ("0", "false", "no")
         self.bi_side_allow_intramarket_flip = os.getenv("BI_SIDE_ALLOW_INTRAMARKET_FLIP", "0").strip().lower() in ("1", "true", "yes", "on")
-        self.bi_side_min_score_up = Decimal(str(os.getenv("BI_SIDE_MIN_SCORE_UP", "2")))
-        self.bi_side_max_score_down = Decimal(str(os.getenv("BI_SIDE_MAX_SCORE_DOWN", "-2")))
+        self.bi_side_min_score_up = Decimal(str(os.getenv("BI_SIDE_MIN_SCORE_UP", "1")))
+        self.bi_side_max_score_down = Decimal(str(os.getenv("BI_SIDE_MAX_SCORE_DOWN", "-1")))
         self.bi_side_mixed_low = Decimal(str(os.getenv("BI_SIDE_MIXED_LOW", "-1")))
         self.bi_side_mixed_high = Decimal(str(os.getenv("BI_SIDE_MIXED_HIGH", "1")))
         self.bi_side_strike_gap_pct = Decimal(str(os.getenv("BI_SIDE_STRIKE_GAP_PCT", "0.0015")))
@@ -787,6 +787,13 @@ class IntegratedBTCStrategy(Strategy):
         self.bi_side_mixed_small_size_mult = Decimal(str(os.getenv("BI_SIDE_MIXED_SMALL_SIZE_MULT", "0.0")))
         self.bi_side_down_size_mult = Decimal(str(os.getenv("BI_SIDE_DOWN_SIZE_MULT", "1.0")))
         self.bi_side_min_time_left_sec = max(0, int(os.getenv("BI_SIDE_MIN_TIME_LEFT_SEC", "180")))
+        self.bi_side_reeval_interval_sec = max(0.2, float(os.getenv("BI_SIDE_REEVAL_INTERVAL_SEC", "1.0")))
+        self.bi_side_decision_log_interval_sec = max(1.0, float(os.getenv("BI_SIDE_LOG_INTERVAL_SEC", "15.0")))
+        self.bi_side_flip_confirmations = max(1, int(os.getenv("BI_SIDE_FLIP_CONFIRMATIONS", "2")))
+        self.bi_side_flip_max_per_market = max(0, int(os.getenv("BI_SIDE_FLIP_MAX_PER_MARKET", "1")))
+        self.bi_side_flip_min_score_up = Decimal(str(os.getenv("BI_SIDE_FLIP_MIN_SCORE_UP", "2")))
+        self.bi_side_flip_max_score_down = Decimal(str(os.getenv("BI_SIDE_FLIP_MAX_SCORE_DOWN", "-2")))
+        self.bi_side_flip_min_fair = Decimal(str(os.getenv("BI_SIDE_FLIP_MIN_FAIR", "0.60")))
         self.maker_fair_pricer_mode = os.getenv("MAKER_FAIR_PRICER_MODE", "drift").strip().lower()
         if self.maker_fair_pricer_mode not in {"drift", "digital"}:
             self.maker_fair_pricer_mode = "drift"
@@ -952,6 +959,9 @@ class IntegratedBTCStrategy(Strategy):
         maker_config = MakerEngineConfig(
             maker_half_spread=self.maker_half_spread,
             maker_quote_size_usdc=self.maker_quote_size_usdc,
+            maker_min_shares=self.maker_min_shares,
+            maker_fixed_shares=self.maker_fixed_shares,
+            maker_max_order_usdc=self.maker_max_order_usdc,
             maker_adverse_selection_buffer=self.maker_adverse_selection_buffer,
             maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
             maker_quote_sides=self.maker_quote_sides,
@@ -1065,6 +1075,16 @@ class IntegratedBTCStrategy(Strategy):
         self.side_decision_due_ts: float = 0.0
         self.side_decision_done_for_market: bool = False
         self.side_decision_inputs: Dict[str, Any] = {}
+        self.side_flip_count: int = 0
+        self.side_pending_flip_side: ActiveSide = ActiveSide.NONE
+        self.side_pending_flip_count: int = 0
+        self._last_side_observation_signature: Optional[Tuple[str, str, str]] = None
+        self._side_decision_skip_log_ts_by_reason: Dict[str, float] = {}
+        self.side_decision_skip_log_interval_sec = max(
+            2.0, float(os.getenv("BI_SIDE_SKIP_LOG_INTERVAL_SEC", "10"))
+        )
+        self._last_side_decision_log_ts: float = 0.0
+        self._last_side_decision_log_signature: Optional[Tuple[str, str, str, str]] = None
         self.last_observed_fee_rate_bps: Optional[int] = None
         clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com")
         fee_ttl = int(os.getenv("FEE_RATE_CACHE_TTL_SEC", "300"))
@@ -1243,12 +1263,116 @@ class IntegratedBTCStrategy(Strategy):
         self.side_decision_due_ts = time.time() + float(self.bi_side_decision_grace_sec) if self.bi_side_enabled else 0.0
         self.side_decision_done_for_market = not self.bi_side_enabled
         self.side_decision_inputs = {}
+        self.side_flip_count = 0
+        self.side_pending_flip_side = ActiveSide.NONE
+        self.side_pending_flip_count = 0
+        self._last_side_observation_signature = None
+        self._last_side_decision_log_ts = 0.0
+        self._last_side_decision_log_signature = None
         self.current_market_open_spot = self._capture_market_open_spot()
         self._sync_active_instrument()
 
     def _effective_recent_cycle_window(self) -> List[float]:
         window = list(self.recent_market_combined_pnls)[-self.bi_side_regime_n_markets :]
         return [float(v) for v in window]
+
+    def _log_side_decision_skip_throttled(
+        self,
+        reason: str,
+        now_ts: float,
+        inputs: Dict[str, Any],
+        phase: MarketPhase,
+    ) -> None:
+        key = f"{self.current_market_slug or '-'}:{reason}"
+        last_ts = float(self._side_decision_skip_log_ts_by_reason.get(key, 0.0))
+        if now_ts - last_ts < float(self.side_decision_skip_log_interval_sec):
+            return
+        self._side_decision_skip_log_ts_by_reason[key] = now_ts
+
+        slug = str(self.current_market_slug or "")
+        strike_source = self.market_strike_source_by_slug.get(slug, "pending")
+        logger.info(
+            "Side decision skipped: "
+            f"slug={slug or '-'} reason={reason} phase={phase.value} "
+            f"due_in={max(0.0, self.side_decision_due_ts - now_ts):.1f}s "
+            f"spot={inputs.get('spot')} market_open_spot={inputs.get('market_open_spot')} "
+            f"strike={inputs.get('strike')} strike_source={strike_source} "
+            f"primary_inst={self._primary_instrument_for_market() or '-'} "
+            f"history_len={len(self.external_spot_history)}"
+        )
+
+    def _log_side_decision_result_throttled(
+        self,
+        side: ActiveSide,
+        score: Decimal,
+        reason: str,
+        locked: bool,
+        now_ts: float,
+    ) -> None:
+        locked_txt = "yes" if locked else "no"
+        side_signature = (side.value, locked_txt)
+        if (
+            side_signature == self._last_side_decision_log_signature
+            and (now_ts - self._last_side_decision_log_ts) < float(self.bi_side_decision_log_interval_sec)
+        ):
+            return
+        self._last_side_decision_log_signature = side_signature
+        self._last_side_decision_log_ts = now_ts
+        logger.info(
+            "Side decision: "
+            f"slug={self.current_market_slug or '-'} active_side={side.value} "
+            f"score={float(score):+.2f} reason={reason} "
+            f"locked={locked_txt}"
+        )
+
+    def _record_side_observation(
+        self,
+        side: ActiveSide,
+        score: Decimal,
+        reason: str,
+        inputs: Dict[str, Any],
+        now_ts: float,
+    ) -> None:
+        signature = (str(self.current_market_slug or ""), side.value, reason)
+        if signature == self._last_side_observation_signature:
+            return
+        self._last_side_observation_signature = signature
+        payload = dict(inputs)
+        payload.update(
+            {
+                "proposed_side": side.value,
+                "score": float(score),
+                "reason": reason,
+                "decision_ts": now_ts,
+                "observation_only": True,
+                "observation_remaining_sec": max(0.0, self.side_decision_due_ts - now_ts),
+            }
+        )
+        self._db_strategy_event("SIDE_DECISION_OBSERVATION", payload)
+
+    def _side_flip_requirements_met(
+        self,
+        side: ActiveSide,
+        score: Decimal,
+        inputs: Dict[str, Any],
+    ) -> bool:
+        if side == ActiveSide.UP:
+            fair_value = inputs.get("fair_up")
+            if score < self.bi_side_flip_min_score_up:
+                return False
+        elif side == ActiveSide.DOWN:
+            fair_value = inputs.get("fair_down")
+            if score > self.bi_side_flip_max_score_down:
+                return False
+        else:
+            return False
+        if fair_value is None:
+            return False
+        try:
+            fair_dec = Decimal(str(fair_value))
+        except Exception:
+            return False
+        return fair_dec >= self.bi_side_flip_min_fair
 
     def _compute_side_decision(self, now_ts: float) -> tuple[ActiveSide, Decimal, str, Dict[str, Any]]:
         inputs: Dict[str, Any] = {
@@ -1268,12 +1392,13 @@ class IntegratedBTCStrategy(Strategy):
             return ActiveSide.UP, Decimal("999"), "bi_side_disabled", inputs
 
         spot = self._capture_market_open_spot()
+        inputs["spot"] = float(spot) if spot is not None else None
+        inputs["market_open_spot"] = float(self.current_market_open_spot) if self.current_market_open_spot is not None else None
         if spot is None or spot <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
         strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
         if strike_dec is None or strike_dec <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
-        inputs["spot"] = float(spot)
         inputs["strike"] = float(strike_dec)
 
         gap_pct = (spot - strike_dec) / strike_dec if strike_dec > 0 else Decimal("0")
@@ -1371,13 +1496,18 @@ class IntegratedBTCStrategy(Strategy):
             return ActiveSide.DOWN, score, reason, inputs
         return ActiveSide.NONE, score, reason, inputs
 
-    def _maybe_finalize_side_decision(self, now_ts: float, phase: MarketPhase) -> None:
+    async def _maybe_finalize_side_decision(self, now_ts: float, phase: MarketPhase) -> None:
         if not self.bi_side_enabled:
             self.active_side = ActiveSide.UP
             self.side_decision_done_for_market = True
             self._sync_active_instrument()
             return
-        if self.side_decision_done_for_market and (self.active_side_locked or self.bi_side_lock_until_reduce_only):
+        can_attempt_flip = (
+            self.active_side_locked
+            and self.bi_side_allow_intramarket_flip
+            and self.side_flip_count < self.bi_side_flip_max_per_market
+        )
+        if self.active_side_locked and not can_attempt_flip:
             return
         if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
             return
@@ -1386,16 +1516,102 @@ class IntegratedBTCStrategy(Strategy):
             time_left_sec = float(self.current_market_end_timestamp - now_ts)
             if time_left_sec < float(self.bi_side_min_time_left_sec):
                 return
-        if self.side_decision_due_ts > 0 and now_ts < self.side_decision_due_ts:
+        if (
+            self.active_side == ActiveSide.NONE
+            and self.side_decision_ts > 0
+            and (now_ts - self.side_decision_ts) < float(self.bi_side_reeval_interval_sec)
+        ):
             return
+
+        slug = str(self.current_market_slug or "")
+        primary_inst = self._primary_instrument_for_market()
+        if slug and slug not in self.market_strike_cache_by_slug and primary_inst is not None:
+            warmed_strike = await self._get_market_strike_for_instrument(primary_inst)
+            strike_source = self.market_strike_source_by_slug.get(slug, "pending")
+            if warmed_strike is not None:
+                logger.info(
+                    "Side decision warmup: "
+                    f"slug={slug} strike={float(warmed_strike):.2f} "
+                    f"strike_source={strike_source} primary_inst={primary_inst}"
+                )
+            else:
+                self._log_side_decision_skip_throttled(
+                    reason="strike_warmup_pending",
+                    now_ts=now_ts,
+                    inputs={
+                        "spot": float(self.latest_external_spot) if self.latest_external_spot is not None else None,
+                        "market_open_spot": float(self.current_market_open_spot) if self.current_market_open_spot is not None else None,
+                        "strike": None,
+                    },
+                    phase=phase,
+                )
+
         side, score, reason, inputs = self._compute_side_decision(now_ts)
         if reason in {"spot_unavailable", "strike_unavailable"}:
+            self.side_decision_score = score
+            self.side_decision_reason = reason
+            self.side_decision_ts = now_ts
+            self.side_decision_inputs = dict(inputs)
             payload = dict(inputs)
             payload.update({"reason": reason, "decision_ts": now_ts})
             self._db_strategy_event("SIDE_DECISION_SKIPPED", payload)
+            self._log_side_decision_skip_throttled(reason=reason, now_ts=now_ts, inputs=inputs, phase=phase)
             return
-        if self.side_decision_done_for_market and self.bi_side_lock_until_reduce_only and self.active_side_locked:
+        if self.side_decision_due_ts > 0 and now_ts < self.side_decision_due_ts:
+            self.side_decision_score = score
+            self.side_decision_reason = reason
+            self.side_decision_ts = now_ts
+            self.side_decision_inputs = dict(inputs)
+            self._record_side_observation(side=side, score=score, reason=reason, inputs=inputs, now_ts=now_ts)
             return
+
+        if self.active_side_locked:
+            flip_ready = self._side_flip_requirements_met(side=side, score=score, inputs=inputs)
+            if side == ActiveSide.NONE or side == self.active_side or not flip_ready:
+                self.side_pending_flip_side = ActiveSide.NONE
+                self.side_pending_flip_count = 0
+                return
+            if not can_attempt_flip:
+                return
+            if side != self.side_pending_flip_side:
+                self.side_pending_flip_side = side
+                self.side_pending_flip_count = 1
+                return
+            self.side_pending_flip_count += 1
+            if self.side_pending_flip_count < self.bi_side_flip_confirmations:
+                return
+            old_side = self.active_side
+            self.active_side = side
+            self.side_decision_score = score
+            self.side_decision_reason = f"{reason} flip={self.side_flip_count + 1}"
+            self.side_decision_ts = now_ts
+            self.side_decision_done_for_market = True
+            self.side_decision_inputs = dict(inputs)
+            self.side_flip_count += 1
+            self.side_pending_flip_side = ActiveSide.NONE
+            self.side_pending_flip_count = 0
+            self._sync_active_instrument()
+            payload = dict(inputs)
+            payload.update(
+                {
+                    "active_side": side.value,
+                    "previous_side": old_side.value if old_side is not None else None,
+                    "score": float(score),
+                    "reason": self.side_decision_reason,
+                    "decision_ts": now_ts,
+                    "flip_count": self.side_flip_count,
+                }
+            )
+            self._db_strategy_event("SIDE_MODE_FLIPPED", payload)
+            self._log_side_decision_result_throttled(
+                side=side,
+                score=score,
+                reason=self.side_decision_reason,
+                locked=self.active_side_locked,
+                now_ts=now_ts,
+            )
+            return
+
         old_side = self.active_side
         self.active_side = side
         self.side_decision_score = score
@@ -1403,8 +1619,12 @@ class IntegratedBTCStrategy(Strategy):
         self.side_decision_ts = now_ts
         self.side_decision_done_for_market = True
         self.side_decision_inputs = inputs
-        if self.bi_side_lock_until_reduce_only and phase == MarketPhase.ACTIVE:
+        if self.bi_side_lock_until_reduce_only and phase == MarketPhase.ACTIVE and side != ActiveSide.NONE:
             self.active_side_locked = True
+            self.side_pending_flip_side = ActiveSide.NONE
+            self.side_pending_flip_count = 0
+        elif side == ActiveSide.NONE:
+            self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
         self._sync_active_instrument()
         event_name = "SIDE_MODE_CHANGED" if old_side != side else "SIDE_DECISION"
         payload = dict(inputs)
@@ -1418,10 +1638,12 @@ class IntegratedBTCStrategy(Strategy):
             }
         )
         self._db_strategy_event(event_name, payload)
-        logger.info(
-            "Side decision: "
-            f"slug={self.current_market_slug or '-'} active_side={side.value} "
-            f"score={float(score):+.2f} reason={reason}"
+        self._log_side_decision_result_throttled(
+            side=side,
+            score=score,
+            reason=reason,
+            locked=self.active_side_locked,
+            now_ts=now_ts,
         )
 
     def _regime_guard_min_negative_markets(self) -> int:
@@ -3132,7 +3354,7 @@ class IntegratedBTCStrategy(Strategy):
         if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
             self._cancel_active_maker_orders()
             return
-        self._maybe_finalize_side_decision(time.time(), phase)
+        await self._maybe_finalize_side_decision(time.time(), phase)
         if self.bi_side_enabled and self.active_side == ActiveSide.NONE:
             self._cancel_active_maker_orders()
             return
@@ -3560,7 +3782,7 @@ class IntegratedBTCStrategy(Strategy):
         precision = int(getattr(instrument, "size_precision", 6)) if instrument is not None else 6
         qty_dec = self._compute_maker_order_qty(limit_price, precision)
         projected_inventory = self._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
-        if abs(projected_inventory) > self.maker_max_inventory_shares:
+        if side == "buy" and projected_inventory > self.maker_max_inventory_shares:
             logger.warning(
                 "Skip maker quote: projected inventory would exceed max "
                 f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f}, "
@@ -3576,6 +3798,23 @@ class IntegratedBTCStrategy(Strategy):
                     "current_inventory": float(self.inventory_delta_shares),
                     "projected_inventory": float(projected_inventory),
                     "max_inventory": float(self.maker_max_inventory_shares),
+                },
+            )
+            return
+        if side == "sell" and projected_inventory < Decimal("0"):
+            logger.info(
+                "Skip maker quote: projected inventory would go negative "
+                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f})"
+            )
+            self._db_order_event(
+                event_type="ORDER_SKIP_SELLABLE_PROJECTED",
+                side=side.upper(),
+                price=float(limit_price),
+                qty=float(qty_dec),
+                reason="projected_inventory_below_zero",
+                payload={
+                    "current_inventory": float(self.inventory_delta_shares),
+                    "projected_inventory": float(projected_inventory),
                 },
             )
             return
@@ -4223,6 +4462,10 @@ class IntegratedBTCStrategy(Strategy):
         reasons: List[str] = []
         if self._stopping:
             reasons.append("stopping")
+        if self.market_phase == MarketPhase.WAITING:
+            reasons.append("phase_waiting")
+        elif self.market_phase == MarketPhase.SETTLING:
+            reasons.append("phase_settling")
         if not self.maker_mode:
             reasons.append("maker_mode_off")
         if self.maker_kill_switch:
@@ -4237,6 +4480,11 @@ class IntegratedBTCStrategy(Strategy):
             reasons.append("no_instrument")
         if now_ts < float(self.regime_guard_conservative_until_ts):
             reasons.append(f"regime_guard_{int(self.regime_guard_conservative_until_ts - now_ts)}s")
+        if self.bi_side_enabled:
+            if self.active_side == ActiveSide.NONE:
+                reasons.append("active_side_none")
+            elif self.active_side == ActiveSide.DOWN and self.current_down_instrument_id is None:
+                reasons.append("down_instrument_missing")
 
         bid_txt = f"{float(self.latest_market_bid):.4f}" if self.latest_market_bid is not None else "None"
         ask_txt = f"{float(self.latest_market_ask):.4f}" if self.latest_market_ask is not None else "None"
@@ -4244,6 +4492,10 @@ class IntegratedBTCStrategy(Strategy):
         active_orders = list(self.active_maker_orders.keys())
         tradable = "YES" if len(reasons) == 0 else "NO"
         reason_txt = "ok" if len(reasons) == 0 else ",".join(reasons)
+        side_score_txt = f"{float(self.side_decision_score):+.2f}" if self.bi_side_enabled else "n/a"
+        side_reason_txt = self.side_decision_reason if self.bi_side_enabled else "disabled"
+        side_locked_txt = "1" if self.active_side_locked else "0"
+        side_due_in = max(0.0, self.side_decision_due_ts - now_ts) if self.bi_side_enabled and self.side_decision_due_ts > 0 else 0.0
 
         logger.info(
             "STATUS "
@@ -4251,6 +4503,11 @@ class IntegratedBTCStrategy(Strategy):
             f"phase={self.market_phase.value} "
             f"slug={self.current_market_slug or '-'} "
             f"instrument={self.instrument_id or '-'} "
+            f"active_side={self.active_side.value} "
+            f"side_score={side_score_txt} "
+            f"side_locked={side_locked_txt} "
+            f"side_reason={side_reason_txt} "
+            f"side_due_in={side_due_in:.1f}s "
             f"bid={bid_txt} ask={ask_txt} "
             f"stale_for={stale_for:.1f}s invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
@@ -4745,6 +5002,15 @@ class IntegratedBTCStrategy(Strategy):
         
         previous_instrument = str(self.instrument_id) if self.instrument_id else None
         previous_slug = str(self.current_market_slug or "")
+        previous_active_side = self.active_side
+        previous_side_locked = self.active_side_locked
+        previous_side_reason = self.side_decision_reason
+        previous_side_score = self.side_decision_score
+        previous_side_ts = self.side_decision_ts
+        previous_side_inputs = dict(self.side_decision_inputs)
+        previous_side_flip_count = self.side_flip_count
+        previous_pending_flip_side = self.side_pending_flip_side
+        previous_pending_flip_count = self.side_pending_flip_count
         self.current_market_slug = selection.current_market_slug
         start_ts = selection.selected_market.get("market_timestamp")
         if self.current_market_slug and start_ts:
@@ -4773,9 +5039,32 @@ class IntegratedBTCStrategy(Strategy):
                 seen_market_insts.append(inst)
         self.current_market_instruments = seen_market_insts or [self._normalize_instrument_id(selection.instrument_id)]
         self.instrument_id = self._normalize_instrument_id(selection.instrument_id)
-        self._reset_side_decision_state()
-        if self.bi_side_enabled and start_ts:
-            self.side_decision_due_ts = max(time.time(), float(start_ts) + float(self.bi_side_decision_grace_sec))
+        preserve_side_state = bool(
+            self.bi_side_enabled
+            and previous_slug
+            and self.current_market_slug == previous_slug
+        )
+        if preserve_side_state:
+            self.active_side = previous_active_side
+            self.active_side_locked = previous_side_locked
+            self.side_decision_reason = previous_side_reason
+            self.side_decision_score = previous_side_score
+            self.side_decision_ts = previous_side_ts
+            self.side_decision_inputs = previous_side_inputs
+            self.side_flip_count = previous_side_flip_count
+            self.side_pending_flip_side = previous_pending_flip_side
+            self.side_pending_flip_count = previous_pending_flip_count
+            self.side_decision_done_for_market = previous_active_side != ActiveSide.NONE or previous_side_ts > 0
+            self._sync_active_instrument()
+            logger.info(
+                "Preserving side decision across same-market reload: "
+                f"slug={self.current_market_slug} active_side={self.active_side.value} "
+                f"locked={'yes' if self.active_side_locked else 'no'} reason={self.side_decision_reason}"
+            )
+        else:
+            self._reset_side_decision_state()
+            if self.bi_side_enabled and start_ts:
+                self.side_decision_due_ts = max(time.time(), float(start_ts) + float(self.bi_side_decision_grace_sec))
         logger.info(
             f"Selected market: slug={self.current_market_slug} "
             f"instruments={len(self.current_market_instruments)} "

@@ -19,6 +19,9 @@ class MakerEngineConfig:
         self,
         maker_half_spread: Decimal,
         maker_quote_size_usdc: Decimal,
+        maker_min_shares: Decimal,
+        maker_fixed_shares: Decimal,
+        maker_max_order_usdc: Decimal,
         maker_adverse_selection_buffer: Decimal,
         maker_min_expected_net_usdc: Decimal,
         maker_quote_sides: str,
@@ -42,6 +45,9 @@ class MakerEngineConfig:
     ):
         self.maker_half_spread = maker_half_spread
         self.maker_quote_size_usdc = maker_quote_size_usdc
+        self.maker_min_shares = maker_min_shares
+        self.maker_fixed_shares = maker_fixed_shares
+        self.maker_max_order_usdc = maker_max_order_usdc
         self.maker_adverse_selection_buffer = maker_adverse_selection_buffer
         self.maker_min_expected_net_usdc = maker_min_expected_net_usdc
         self.maker_quote_sides = maker_quote_sides
@@ -73,6 +79,32 @@ class MakerEngine:
 
     def __init__(self, config: MakerEngineConfig):
         self.config = config
+
+    def _compute_effective_quote_shares(self, quote_price: Decimal) -> Decimal:
+        """
+        Match the runtime maker order sizing logic closely enough that quote
+        economics are evaluated on the same exposure that would actually be
+        submitted.
+        """
+        if quote_price <= 0:
+            return Decimal("0")
+
+        min_qty = max(Decimal("0"), self.config.maker_min_shares)
+
+        if self.config.maker_fixed_shares > 0:
+            qty = max(self.config.maker_fixed_shares, min_qty)
+            if self.config.maker_max_order_usdc > 0:
+                max_shares_by_notional = self.config.maker_max_order_usdc / quote_price
+                if qty > max_shares_by_notional:
+                    qty = max(max_shares_by_notional, min_qty)
+            return max(Decimal("0"), qty)
+
+        quote_notional_usdc = self.config.maker_quote_size_usdc
+        if self.config.maker_max_order_usdc > 0:
+            quote_notional_usdc = min(quote_notional_usdc, self.config.maker_max_order_usdc)
+
+        token_qty = quote_notional_usdc / quote_price if quote_price > 0 else Decimal("0")
+        return max(Decimal("0"), max(token_qty, min_qty))
 
     @staticmethod
     def normal_cdf(x: float) -> float:
@@ -284,7 +316,7 @@ class MakerEngine:
         regime, spread_mult, size_mult, regime_reduce_only = self.determine_regime(recent_vol)
         
         effective_half_spread = self.config.maker_half_spread * spread_mult
-        effective_quote_size = self.config.maker_quote_size_usdc * size_mult
+        base_quote_size = self.config.maker_quote_size_usdc * size_mult
         
         skewed_fair = self.apply_inventory_skew(
             fair_price,
@@ -326,15 +358,20 @@ class MakerEngine:
         if quote_bid >= quote_ask:
             return {}
 
+        bid_quote_shares = self._compute_effective_quote_shares(quote_bid)
+        ask_quote_shares = self._compute_effective_quote_shares(quote_ask)
+        bid_quote_size = bid_quote_shares * quote_bid
+        ask_quote_size = ask_quote_shares * quote_ask
+
         bid_econ = estimate_quote_economics(
-            quote_size_usdc=effective_quote_size,
+            quote_size_usdc=bid_quote_size,
             probability=quote_bid,
             half_spread=(skewed_fair - quote_bid),
             adverse_selection_buffer=self.config.maker_adverse_selection_buffer,
             fee_rate_override=fee_rate,
         )
         ask_econ = estimate_quote_economics(
-            quote_size_usdc=effective_quote_size,
+            quote_size_usdc=ask_quote_size,
             probability=quote_ask,
             half_spread=(quote_ask - skewed_fair),
             adverse_selection_buffer=self.config.maker_adverse_selection_buffer,
@@ -346,7 +383,7 @@ class MakerEngine:
             side="buy",
             quote_price=quote_bid,
             quote_shares=bid_econ.shares,
-            effective_quote_size=effective_quote_size,
+            effective_quote_size=bid_quote_size,
             inst_bid=inst_bid,
             inst_ask=inst_ask,
             bid_depth=bid_depth,
@@ -359,7 +396,7 @@ class MakerEngine:
             side="sell",
             quote_price=quote_ask,
             quote_shares=ask_econ.shares,
-            effective_quote_size=effective_quote_size,
+            effective_quote_size=ask_quote_size,
             inst_bid=inst_bid,
             inst_ask=inst_ask,
             bid_depth=bid_depth,

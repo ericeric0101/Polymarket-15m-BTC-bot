@@ -65,8 +65,8 @@
 | `BI_SIDE_DECISION_GRACE_SEC` | `30` | 新 market 開始後先觀察 30 秒再定 side |
 | `BI_SIDE_LOCK_UNTIL_REDUCE_ONLY` | `1` | 一旦選 side，該 market 內鎖定到 reduce-only |
 | `BI_SIDE_ALLOW_INTRAMARKET_FLIP` | `0` | 第一版禁止 intramarket flip |
-| `BI_SIDE_MIN_SCORE_UP` | `2` | `score >= 2` 才做 `UP` |
-| `BI_SIDE_MAX_SCORE_DOWN` | `-2` | `score <= -2` 才做 `DOWN` |
+| `BI_SIDE_MIN_SCORE_UP` | `1` | `score >= 1` 才做 `UP` |
+| `BI_SIDE_MAX_SCORE_DOWN` | `-1` | `score <= -1` 才做 `DOWN` |
 | `BI_SIDE_MIXED_LOW` | `-1` | `-1 ~ +1` 視為 mixed |
 | `BI_SIDE_MIXED_HIGH` | `1` | `-1 ~ +1` 視為 mixed |
 | `BI_SIDE_STRIKE_GAP_PCT` | `0.0015` | `0.15%`，spot 相對 strike 的方向門檻 |
@@ -563,4 +563,3 @@ bi-side 後要依 `active_side` 改 payoff：
 - 單位風險的 realized PnL 改善
 - `TAKER_EXIT` 漏損下降
 - 在單邊下跌 regime 時，不再持續用 `UP` 逆勢接刀
-
