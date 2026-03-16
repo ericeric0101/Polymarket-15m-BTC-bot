@@ -68,6 +68,7 @@ from bot.execution_events import (
     reconcile_cancel_ack,
     reconcile_rejected_order,
 )
+from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.lifecycle import (
     collect_btc_market_candidates,
     determine_lifecycle_timer_action,
@@ -104,6 +105,7 @@ from bot.post_trade import (
     build_fill_order_event_payload,
     compute_settlement_summary,
 )
+from bot.models import ExitDecisionType, MarketSnapshot, PositionState, SignalDecision
 from bot.wallet_ops import (
     ensure_balance_clob_client,
     fetch_conditional_balance,
@@ -197,6 +199,34 @@ def _build_btc_15m_slug_candidates(lookback: int = 1, lookahead: int = 4) -> Lis
         if ts > 0:
             slugs.append(f"btc-updown-15m-{ts}")
     return slugs
+
+
+def detect_runtime_git_revision(repo_root: Path) -> str:
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if head.returncode != 0:
+            return "unknown"
+        commit = head.stdout.strip() or "unknown"
+        dirty = subprocess.run(
+            ["git", "diff", "--quiet", "--exit-code"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if dirty.returncode == 1:
+            return f"{commit}-dirty"
+        return commit
+    except Exception:
+        return "unknown"
 
 
 async def _discover_existing_btc_15m_slugs(candidates: List[str]) -> List[str]:
@@ -863,6 +893,32 @@ class IntegratedBTCStrategy(Strategy):
             0,
             int(os.getenv("TAKER_EXIT_DISABLE_STOP_LOSS_LAST_SEC", "45")),
         )
+        self.taker_exit_stop_loss_confirmations = max(
+            1,
+            int(os.getenv("TAKER_EXIT_STOP_LOSS_CONFIRMATIONS", "2")),
+        )
+        self.exit_conviction_band_min_price = Decimal(
+            os.getenv("EXIT_CONVICTION_BAND_MIN_PRICE", "0.60")
+        )
+        self.exit_hold_band_min_price = Decimal(
+            os.getenv("EXIT_HOLD_BAND_MIN_PRICE", "0.68")
+        )
+        self.exit_conviction_band_min_score_abs = Decimal(
+            os.getenv("EXIT_CONVICTION_BAND_MIN_SCORE_ABS", "1")
+        )
+        self.exit_hold_band_min_score_abs = Decimal(
+            os.getenv("EXIT_HOLD_BAND_MIN_SCORE_ABS", "1")
+        )
+        self.exit_conviction_stop_loss_multiplier = Decimal(
+            os.getenv("EXIT_CONVICTION_STOP_LOSS_MULTIPLIER", "1.75")
+        )
+        self.exit_conviction_extra_confirmations = max(
+            0,
+            int(os.getenv("EXIT_CONVICTION_EXTRA_CONFIRMATIONS", "1")),
+        )
+        self.exit_hold_band_requires_locked = os.getenv(
+            "EXIT_HOLD_BAND_REQUIRES_LOCKED", "1"
+        ).strip().lower() not in ("0", "false", "no")
         
         # Hold-to-redeem: if avg buy cost >= threshold, hold position to settlement
         self.hold_to_redeem_cost_threshold = Decimal(
@@ -888,6 +944,22 @@ class IntegratedBTCStrategy(Strategy):
                 max_inventory_shares=self.hold_to_redeem_max_inventory_shares,
             )
         )
+        self.exit_policy_engine = ExitPolicyEngine(
+            ExitEngineConfig(
+                min_hold_sec=self.taker_exit_min_hold_sec,
+                stop_loss_usdc=self.taker_exit_stop_loss_usdc,
+                stop_loss_confirmations=self.taker_exit_stop_loss_confirmations,
+                conviction_band_min_price=self.exit_conviction_band_min_price,
+                hold_band_min_price=max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold),
+                conviction_band_min_score_abs=self.exit_conviction_band_min_score_abs,
+                hold_band_min_score_abs=self.exit_hold_band_min_score_abs,
+                conviction_stop_loss_multiplier=self.exit_conviction_stop_loss_multiplier,
+                conviction_extra_confirmations=self.exit_conviction_extra_confirmations,
+                hold_band_requires_locked=self.exit_hold_band_requires_locked,
+            ),
+            hold_to_redeem_policy=self.hold_to_redeem_policy,
+        )
+        self.runtime_git_revision = detect_runtime_git_revision(project_root)
 
         self.regime_guard_enabled = os.getenv("REGIME_GUARD_ENABLED", "1").strip().lower() not in ("0", "false", "no")
         self.regime_guard_n_markets = max(2, int(os.getenv("REGIME_GUARD_N_MARKETS", "4")))
@@ -1059,6 +1131,7 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_tail_attempted_by_inst: Dict[str, float] = {}
         self.taker_exit_last_eval_ts_by_inst: Dict[str, float] = {}
         self.taker_exit_reject_cooldown_until_by_inst: Dict[str, float] = {}
+        self.taker_exit_stop_loss_hits_by_inst: Dict[str, int] = {}
         self._taker_exit_skip_log_ts_by_key: Dict[str, float] = {}
         self.high_cost_exit_cooldown_until_by_inst: Dict[str, float] = {}
         self.high_cost_last_fill_price_by_inst: Dict[str, float] = {}
@@ -2489,75 +2562,143 @@ class IntegratedBTCStrategy(Strategy):
                 )
                 continue
 
-            # Hold-to-redeem (conditional): only skip taker exits when position is small
-            # and there is sufficient time left to let settlement resolve.
-            if self._should_prefer_hold_to_redeem(
-                avg_entry=avg_entry,
-                inventory_shares=qty,
-                time_left_sec=time_left_sec,
-            ):
-                if not getattr(self, "_logged_hold_redeem_te", False) or now_ts - getattr(self, "_last_hold_redeem_te_log", 0) > 60:
-                    logger.info(
-                        f"Hold-to-redeem: skipping taker exit. "
-                        f"avg_entry={float(avg_entry):.2f} >= threshold={float(self.hold_to_redeem_cost_threshold):.2f}, "
-                        f"qty={float(qty):.4f}, stage={exit_stage.value}"
-                    )
-                    self._logged_hold_redeem_te = True
-                    self._last_hold_redeem_te_log = now_ts
-                continue
-
             entry_fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
             opened_ts = float(state.get("opened_ts", 0.0))
             hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
             slip = max(Decimal("0"), self.taker_exit_slippage_buffer_pct)
-            exit_px_effective = best_bid * (Decimal("1") - slip)
-            gross = qty * (exit_px_effective - avg_entry)
-            exit_fee_est = (qty * exit_px_effective) * fee_rate
-            net_if_exit = gross - entry_fee_remaining - exit_fee_est
-            # Stop-loss must reflect actual adverse price movement, not only fee drag.
-            price_adverse = avg_entry > 0 and best_bid < avg_entry and gross < 0
+            snapshot = MarketSnapshot(
+                instrument_id=inst_key,
+                phase=self.market_phase,
+                time_left_sec=time_left_sec,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                fee_rate=fee_rate,
+                spread=spread,
+                spread_pct=spread_pct,
+                slippage_buffer_pct=slip,
+                exit_stage=exit_stage,
+                in_reduce_only_tail=in_reduce_only_tail,
+                stop_loss_disabled_in_tail=stop_loss_disabled_in_tail,
+            )
+            position = PositionState(
+                instrument_id=inst_key,
+                qty=qty,
+                sellable_qty=self._get_effective_sellable_qty(instrument_id=inst_id),
+                avg_entry_price=avg_entry,
+                entry_fee_remaining=entry_fee_remaining,
+                hold_sec=hold_sec,
+                stop_loss_confirm_hits=int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)),
+            )
+            signal_decision = SignalDecision(
+                active_side=self.active_side.value,
+                score=self.side_decision_score,
+                locked=self.active_side_locked,
+                reason=self.side_decision_reason,
+                matches_position=(self._instrument_for_side(self.active_side) == inst_id),
+            )
+            exit_decision = self.exit_policy_engine.evaluate(snapshot, position, signal_decision)
+            net_if_exit = exit_decision.net_if_exit
 
-            trigger = ""
-            if net_if_exit >= self.taker_exit_min_net_usdc:
-                trigger = "take_profit"
-            elif (
-                not stop_loss_disabled_in_tail
-                and hold_sec >= max(0, self.taker_exit_min_hold_sec)
-                and price_adverse
-                and net_if_exit <= -abs(self.taker_exit_stop_loss_usdc)
-            ):
-                trigger = "stop_loss"
-            elif self.taker_exit_max_hold_sec > 0 and hold_sec >= self.taker_exit_max_hold_sec:
-                trigger = "max_hold"
-            if not trigger:
+            if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
+                self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                hold_reason_tag = "hold_band" if exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND else "hold_to_redeem"
+                self._record_exit_policy_decision_throttled(
+                    inst_key=inst_key,
+                    reason_tag=hold_reason_tag,
+                    now_ts=now_ts,
+                    payload={
+                        "slug": self.current_market_slug or "",
+                        "instrument_id": inst_key,
+                        "decision_type": exit_decision.decision_type.value,
+                        "reason": exit_decision.reason,
+                        "band": exit_decision.metadata.get("band", "neutral"),
+                        "signal_score": exit_decision.metadata.get("signal_score", str(self.side_decision_score)),
+                        "signal_locked": exit_decision.metadata.get("signal_locked", "0"),
+                        "signal_matches_position": exit_decision.metadata.get("signal_matches_position", "0"),
+                        "avg_entry": float(avg_entry),
+                        "qty": float(qty),
+                        "sellable_qty": float(position.sellable_qty),
+                        "time_left_sec": time_left_sec,
+                        "exit_stage": exit_stage.value,
+                        "best_bid": float(best_bid),
+                        "best_ask": float(best_ask),
+                        "gross_if_exit": float(exit_decision.gross_if_exit),
+                        "net_if_exit": float(exit_decision.net_if_exit),
+                        "exit_fee_est": float(exit_decision.exit_fee_est),
+                        "confirm_hits": int(exit_decision.confirm_hits),
+                        "required_confirmations": int(exit_decision.metadata.get("required_confirmations", self.taker_exit_stop_loss_confirmations)),
+                    },
+                )
+                if not getattr(self, "_logged_hold_redeem_te", False) or now_ts - getattr(self, "_last_hold_redeem_te_log", 0) > 60:
+                    if exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND:
+                        logger.info(
+                            "Hold band: skipping taker stop-loss. "
+                            f"band={exit_decision.metadata.get('band', 'neutral')} "
+                            f"best_bid={float(best_bid):.4f} avg_entry={float(avg_entry):.4f} "
+                            f"score={exit_decision.metadata.get('signal_score', str(self.side_decision_score))} "
+                            f"stage={exit_stage.value}"
+                        )
+                    else:
+                        logger.info(
+                            f"Hold-to-redeem: skipping taker exit. "
+                            f"avg_entry={float(avg_entry):.2f} >= threshold={float(self.hold_to_redeem_cost_threshold):.2f}, "
+                            f"qty={float(qty):.4f}, stage={exit_stage.value}"
+                        )
+                    self._logged_hold_redeem_te = True
+                    self._last_hold_redeem_te_log = now_ts
                 continue
-            if self.taker_exit_only_on_profit and trigger not in {"stop_loss", "max_hold"} and net_if_exit < self.taker_exit_min_net_usdc:
-                continue
-            # Execution policy: only allow non-stop-loss taker exits near close/taker stage.
-            if trigger in {"take_profit", "max_hold"} and exit_stage != ExitStage.TAKER:
+
+            if exit_decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION:
+                self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
+                self._record_exit_policy_decision_throttled(
+                    inst_key=inst_key,
+                    reason_tag="stop_loss_confirming",
+                    now_ts=now_ts,
+                    payload={
+                        "slug": self.current_market_slug or "",
+                        "instrument_id": inst_key,
+                        "decision_type": exit_decision.decision_type.value,
+                        "reason": exit_decision.reason,
+                        "band": exit_decision.metadata.get("band", "neutral"),
+                        "signal_score": exit_decision.metadata.get("signal_score", str(self.side_decision_score)),
+                        "signal_locked": exit_decision.metadata.get("signal_locked", "0"),
+                        "signal_matches_position": exit_decision.metadata.get("signal_matches_position", "0"),
+                        "avg_entry": float(avg_entry),
+                        "qty": float(qty),
+                        "sellable_qty": float(position.sellable_qty),
+                        "time_left_sec": time_left_sec,
+                        "exit_stage": exit_stage.value,
+                        "best_bid": float(best_bid),
+                        "best_ask": float(best_ask),
+                        "gross_if_exit": float(exit_decision.gross_if_exit),
+                        "net_if_exit": float(exit_decision.net_if_exit),
+                        "exit_fee_est": float(exit_decision.exit_fee_est),
+                        "confirm_hits": int(exit_decision.confirm_hits),
+                        "required_confirmations": int(exit_decision.metadata.get("required_confirmations", self.taker_exit_stop_loss_confirmations)),
+                        "stop_loss_threshold": exit_decision.metadata.get("stop_loss_threshold", str(self.taker_exit_stop_loss_usdc)),
+                    },
+                )
                 self._log_taker_exit_skip_throttled(
                     inst_key=inst_key,
-                    reason_tag="exit_policy_stage",
+                    reason_tag="stop_loss_confirming",
                     message=(
-                        f"Skip taker exit ({trigger}): stage={exit_stage.value} "
-                        f"time_left={time_left_sec if time_left_sec is not None else -1:.1f}s"
+                        "Skip taker exit: stop-loss pending confirmation "
+                        f"({exit_decision.confirm_hits}/{exit_decision.metadata.get('required_confirmations', self.taker_exit_stop_loss_confirmations)}) "
+                        f"band={exit_decision.metadata.get('band', 'neutral')} "
+                        f"best_bid={float(best_bid):.4f} avg_entry={float(avg_entry):.4f} "
+                        f"est_net={float(net_if_exit):+.4f}"
                     ),
                     now_ts=now_ts,
                 )
                 continue
+
+            if exit_decision.decision_type != ExitDecisionType.TAKER_STOP_LOSS:
+                self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                continue
+            self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
+            trigger = "stop_loss"
 
             # Avoid paying taker costs into a wide spread unless it's an emergency path.
-            if trigger == "take_profit" and spread_pct > self.taker_exit_max_spread_pct:
-                self._log_taker_exit_skip_throttled(
-                    inst_key=inst_key,
-                    reason_tag="spread_guard_take_profit",
-                    message=(
-                        "Skip taker exit (take_profit): "
-                        f"spread_pct={float(spread_pct):.4f} > max={float(self.taker_exit_max_spread_pct):.4f}"
-                    ),
-                    now_ts=now_ts,
-                )
-                continue
             if (
                 trigger == "stop_loss"
                 and spread_pct > self.taker_exit_stop_loss_max_spread_pct
@@ -2573,14 +2714,6 @@ class IntegratedBTCStrategy(Strategy):
                     now_ts=now_ts,
                 )
                 continue
-            if (
-                trigger == "max_hold"
-                and time_left_sec is not None
-                and self.taker_exit_max_hold_near_close_sec > 0
-                and time_left_sec > float(self.taker_exit_max_hold_near_close_sec)
-            ):
-                continue
-
             # If a fresh SELL maker quote is already working, let it try first before forced taker exit.
             sell_key = self._order_key_for("sell", inst_id)
             active_sell = self.active_maker_orders.get(sell_key)
@@ -2603,7 +2736,7 @@ class IntegratedBTCStrategy(Strategy):
                     )
                     continue
 
-            sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
+            sellable_qty = position.sellable_qty
             qty_to_exit = min(qty, sellable_qty)
             if qty_to_exit + Decimal("0.000001") < self.maker_exchange_min_shares:
                 continue
@@ -2614,8 +2747,28 @@ class IntegratedBTCStrategy(Strategy):
                 est_net_if_exit=net_if_exit,
                 best_bid=best_bid,
                 fee_rate=fee_rate,
+                decision_payload={
+                    "slug": self.current_market_slug or "",
+                    "decision_type": exit_decision.decision_type.value,
+                    "decision_reason": exit_decision.reason,
+                    "band": exit_decision.metadata.get("band", "neutral"),
+                    "signal_score": exit_decision.metadata.get("signal_score", str(self.side_decision_score)),
+                    "signal_locked": exit_decision.metadata.get("signal_locked", "0"),
+                    "signal_matches_position": exit_decision.metadata.get("signal_matches_position", "0"),
+                    "avg_entry": float(avg_entry),
+                    "time_left_sec": time_left_sec,
+                    "exit_stage": exit_stage.value,
+                    "gross_if_exit": float(exit_decision.gross_if_exit),
+                    "exit_fee_est": float(exit_decision.exit_fee_est),
+                    "exit_px_effective": float(exit_decision.exit_px_effective),
+                    "confirm_hits": int(exit_decision.confirm_hits),
+                    "required_confirmations": int(exit_decision.metadata.get("required_confirmations", self.taker_exit_stop_loss_confirmations)),
+                    "stop_loss_threshold": exit_decision.metadata.get("stop_loss_threshold", str(self.taker_exit_stop_loss_usdc)),
+                    "sellable_qty": float(sellable_qty),
+                },
             )
             if ok:
+                self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
                 self.last_taker_exit_ts_by_inst[inst_key] = now_ts
                 if in_reduce_only_tail:
                     self.taker_exit_tail_attempted_by_inst[inst_key] = now_ts
@@ -2628,6 +2781,7 @@ class IntegratedBTCStrategy(Strategy):
         est_net_if_exit: Decimal,
         best_bid: Decimal,
         fee_rate: Decimal,
+        decision_payload: Optional[Dict[str, Any]] = None,
     ) -> bool:
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
@@ -2673,9 +2827,13 @@ class IntegratedBTCStrategy(Strategy):
             reason=reason,
             expected_net_usdc=float(est_net_if_exit),
             payload={
+                "reason": reason,
+                "est_net_if_exit": float(est_net_if_exit),
                 "instrument_id": inst_key,
+                "fee_rate": float(fee_rate),
                 "fee_rate_decimal": float(fee_rate),
                 "best_bid": float(best_bid),
+                **(decision_payload or {}),
             },
         )
         return True
@@ -2696,6 +2854,20 @@ class IntegratedBTCStrategy(Strategy):
             return
         self._taker_exit_skip_log_ts_by_key[key] = now_ts
         logger.info(message)
+
+    def _record_exit_policy_decision_throttled(
+        self,
+        inst_key: str,
+        reason_tag: str,
+        now_ts: float,
+        payload: Dict[str, Any],
+    ) -> None:
+        key = f"{inst_key}:{reason_tag}:db"
+        last_ts = float(self._taker_exit_skip_log_ts_by_key.get(key, 0.0))
+        if now_ts - last_ts < float(self.taker_exit_skip_log_interval_sec):
+            return
+        self._taker_exit_skip_log_ts_by_key[key] = now_ts
+        self._db_strategy_event("EXIT_POLICY_DECISION", payload)
 
     @staticmethod
     def _extract_token_id_from_instrument(instrument_id: str) -> Optional[str]:
@@ -2997,6 +3169,7 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_tail_attempted_by_inst.clear()
         self.taker_exit_last_eval_ts_by_inst.clear()
         self.taker_exit_reject_cooldown_until_by_inst.clear()
+        self.taker_exit_stop_loss_hits_by_inst.clear()
         self._taker_exit_skip_log_ts_by_key.clear()
         self.high_cost_exit_cooldown_until_by_inst.clear()
         self.high_cost_last_fill_price_by_inst.clear()
@@ -4085,6 +4258,19 @@ class IntegratedBTCStrategy(Strategy):
                 "test_mode": self.test_mode,
                 "bi_side_enabled": self.bi_side_enabled,
                 "active_side": self.active_side.value,
+                "git_revision": self.runtime_git_revision,
+                "maker_fixed_shares": float(self.maker_fixed_shares),
+                "maker_max_order_usdc": float(self.maker_max_order_usdc),
+                "taker_exit_eval_interval_sec": float(self.taker_exit_eval_interval_sec),
+                "taker_exit_stop_loss_confirmations": int(self.taker_exit_stop_loss_confirmations),
+                "taker_exit_stop_loss_usdc": float(self.taker_exit_stop_loss_usdc),
+                "exit_conviction_band_min_price": float(self.exit_conviction_band_min_price),
+                "exit_hold_band_min_price": float(max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold)),
+                "exit_conviction_band_min_score_abs": float(self.exit_conviction_band_min_score_abs),
+                "exit_hold_band_min_score_abs": float(self.exit_hold_band_min_score_abs),
+                "exit_conviction_stop_loss_multiplier": float(self.exit_conviction_stop_loss_multiplier),
+                "exit_conviction_extra_confirmations": int(self.exit_conviction_extra_confirmations),
+                "exit_hold_band_requires_locked": self.exit_hold_band_requires_locked,
             },
         )
         self._bootstrap_regime_guard_window_from_db()
