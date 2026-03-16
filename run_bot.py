@@ -897,6 +897,10 @@ class IntegratedBTCStrategy(Strategy):
             1,
             int(os.getenv("TAKER_EXIT_STOP_LOSS_CONFIRMATIONS", "2")),
         )
+        self.stop_loss_reentry_cooldown_sec = max(
+            0,
+            int(os.getenv("STOP_LOSS_REENTRY_COOLDOWN_SEC", "180")),
+        )
         self.exit_conviction_band_min_price = Decimal(
             os.getenv("EXIT_CONVICTION_BAND_MIN_PRICE", "0.60")
         )
@@ -1128,10 +1132,13 @@ class IntegratedBTCStrategy(Strategy):
         self.live_inventory_cost: Dict[str, Dict[str, Any]] = {}
         self.last_taker_exit_ts_by_inst: Dict[str, float] = {}
         self.pending_taker_exit_by_inst: Dict[str, str] = {}
+        self.taker_exit_reason_by_client_order_id: Dict[str, str] = {}
         self.taker_exit_tail_attempted_by_inst: Dict[str, float] = {}
         self.taker_exit_last_eval_ts_by_inst: Dict[str, float] = {}
         self.taker_exit_reject_cooldown_until_by_inst: Dict[str, float] = {}
         self.taker_exit_stop_loss_hits_by_inst: Dict[str, int] = {}
+        self.stop_loss_reentry_pause_until_by_inst: Dict[str, float] = {}
+        self.side_stop_loss_penalty_until_by_market_side: Dict[str, float] = {}
         self._taker_exit_skip_log_ts_by_key: Dict[str, float] = {}
         self.high_cost_exit_cooldown_until_by_inst: Dict[str, float] = {}
         self.high_cost_last_fill_price_by_inst: Dict[str, float] = {}
@@ -1333,6 +1340,16 @@ class IntegratedBTCStrategy(Strategy):
         if side == ActiveSide.DOWN:
             return self.current_down_instrument_id
         return None
+
+    def _side_for_instrument_id(self, instrument_id: Optional[Any]) -> ActiveSide:
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return ActiveSide.NONE
+        if self.current_up_instrument_id is not None and inst == self.current_up_instrument_id:
+            return ActiveSide.UP
+        if self.current_down_instrument_id is not None and inst == self.current_down_instrument_id:
+            return ActiveSide.DOWN
+        return ActiveSide.NONE
 
     def _sync_active_instrument(self) -> None:
         target = self._instrument_for_side(self.active_side)
@@ -1589,10 +1606,23 @@ class IntegratedBTCStrategy(Strategy):
             f"strike={strike_signal} momentum={momentum_signal} "
             f"open_drift={open_drift_signal} regime={regime_signal}"
         )
+        proposed_side = ActiveSide.NONE
         if score >= self.bi_side_min_score_up:
-            return ActiveSide.UP, score, reason, inputs
-        if score <= self.bi_side_max_score_down and self.current_down_instrument_id is not None:
-            return ActiveSide.DOWN, score, reason, inputs
+            proposed_side = ActiveSide.UP
+        elif score <= self.bi_side_max_score_down and self.current_down_instrument_id is not None:
+            proposed_side = ActiveSide.DOWN
+
+        if proposed_side != ActiveSide.NONE and self.current_market_slug:
+            penalty_key = f"{self.current_market_slug}:{proposed_side.value}"
+            penalty_until = float(self.side_stop_loss_penalty_until_by_market_side.get(penalty_key, 0.0))
+            if now_ts < penalty_until:
+                inputs["side_penalty_side"] = proposed_side.value
+                inputs["side_penalty_until_ts"] = penalty_until
+                inputs["side_penalty_remaining_sec"] = max(0.0, penalty_until - now_ts)
+                return ActiveSide.NONE, score, f"{reason} side_penalty={proposed_side.value.lower()}", inputs
+
+        if proposed_side != ActiveSide.NONE:
+            return proposed_side, score, reason, inputs
         return ActiveSide.NONE, score, reason, inputs
 
     async def _maybe_finalize_side_decision(self, now_ts: float, phase: MarketPhase) -> None:
@@ -2811,6 +2841,7 @@ class IntegratedBTCStrategy(Strategy):
         self.submit_order(order)
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
+        self.taker_exit_reason_by_client_order_id[str(coid)] = reason
         logger.warning(
             "TAKER EXIT submit: "
             f"reason={reason} inst={inst_key} qty={float(qty_dec):.6f} "
@@ -2842,6 +2873,7 @@ class IntegratedBTCStrategy(Strategy):
         target = str(client_order_id or "")
         if not target:
             return
+        self.taker_exit_reason_by_client_order_id.pop(target, None)
         for inst_key, coid in list(self.pending_taker_exit_by_inst.items()):
             if coid == target:
                 self.pending_taker_exit_by_inst.pop(inst_key, None)
@@ -3170,6 +3202,9 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_last_eval_ts_by_inst.clear()
         self.taker_exit_reject_cooldown_until_by_inst.clear()
         self.taker_exit_stop_loss_hits_by_inst.clear()
+        self.stop_loss_reentry_pause_until_by_inst.clear()
+        self.side_stop_loss_penalty_until_by_market_side.clear()
+        self.taker_exit_reason_by_client_order_id.clear()
         self._taker_exit_skip_log_ts_by_key.clear()
         self.high_cost_exit_cooldown_until_by_inst.clear()
         self.high_cost_last_fill_price_by_inst.clear()
@@ -4017,46 +4052,31 @@ class IntegratedBTCStrategy(Strategy):
 
         precision = int(getattr(instrument, "size_precision", 6)) if instrument is not None else 6
         qty_dec = self._compute_maker_order_qty(limit_price, precision)
-        projected_inventory = self._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
-        if side == "buy" and projected_inventory > self.maker_max_inventory_shares:
-            logger.warning(
-                "Skip maker quote: projected inventory would exceed max "
-                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f}, "
-                f"max={float(self.maker_max_inventory_shares):.6f})"
-            )
-            self._db_order_event(
-                event_type="ORDER_SKIP_INVENTORY_CAP",
-                side=side.upper(),
-                price=float(limit_price),
-                qty=float(qty_dec),
-                reason="projected_inventory_exceeds_max",
-                payload={
-                    "current_inventory": float(self.inventory_delta_shares),
-                    "projected_inventory": float(projected_inventory),
-                    "max_inventory": float(self.maker_max_inventory_shares),
-                },
-            )
-            return
-        if side == "sell" and projected_inventory < Decimal("0"):
-            logger.info(
-                "Skip maker quote: projected inventory would go negative "
-                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f})"
-            )
-            self._db_order_event(
-                event_type="ORDER_SKIP_SELLABLE_PROJECTED",
-                side=side.upper(),
-                price=float(limit_price),
-                qty=float(qty_dec),
-                reason="projected_inventory_below_zero",
-                payload={
-                    "current_inventory": float(self.inventory_delta_shares),
-                    "projected_inventory": float(projected_inventory),
-                },
-            )
-            return
+        if side == "buy":
+            inst_key = self._instrument_key(instrument_id)
+            reentry_pause_until = float(self.stop_loss_reentry_pause_until_by_inst.get(inst_key, 0.0))
+            if time.time() < reentry_pause_until:
+                cooldown_left = reentry_pause_until - time.time()
+                logger.info(
+                    "Skip maker BUY quote: stop-loss re-entry cooldown active "
+                    f"(inst={inst_key}, cooldown_left={cooldown_left:.1f}s)"
+                )
+                self._db_order_event(
+                    event_type="ORDER_SKIP_REENTRY_COOLDOWN",
+                    side=side.upper(),
+                    price=float(limit_price),
+                    qty=float(qty_dec),
+                    status="SKIPPED",
+                    reason="stop_loss_reentry_cooldown",
+                    payload={
+                        "instrument_id": str(instrument_id),
+                        "cooldown_left_sec": cooldown_left,
+                    },
+                )
+                return
 
         # Live-only guard: prevent SELL submissions when we don't actually hold enough tokens.
-        # If sellable is less than requested, REDUCE the qty to sellable amount instead of skipping.
+        # If sellable is less than requested, REDUCE the qty to sellable amount before projected checks.
         if side == "sell" and not self._is_dry_run_mode():
             sellable_qty = self._get_effective_sellable_qty(instrument_id=instrument_id)
             adjusted_qty, sellable_guard_reason = apply_sellable_inventory_guard(
@@ -4094,6 +4114,44 @@ class IntegratedBTCStrategy(Strategy):
                 )
             else:
                 qty_dec = adjusted_qty
+
+        projected_inventory = self._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
+        if side == "buy" and projected_inventory > self.maker_max_inventory_shares:
+            logger.warning(
+                "Skip maker quote: projected inventory would exceed max "
+                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f}, "
+                f"max={float(self.maker_max_inventory_shares):.6f})"
+            )
+            self._db_order_event(
+                event_type="ORDER_SKIP_INVENTORY_CAP",
+                side=side.upper(),
+                price=float(limit_price),
+                qty=float(qty_dec),
+                reason="projected_inventory_exceeds_max",
+                payload={
+                    "current_inventory": float(self.inventory_delta_shares),
+                    "projected_inventory": float(projected_inventory),
+                    "max_inventory": float(self.maker_max_inventory_shares),
+                },
+            )
+            return
+        if side == "sell" and projected_inventory < Decimal("0"):
+            logger.info(
+                "Skip maker quote: projected inventory would go negative "
+                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f})"
+            )
+            self._db_order_event(
+                event_type="ORDER_SKIP_SELLABLE_PROJECTED",
+                side=side.upper(),
+                price=float(limit_price),
+                qty=float(qty_dec),
+                reason="projected_inventory_below_zero",
+                payload={
+                    "current_inventory": float(self.inventory_delta_shares),
+                    "projected_inventory": float(projected_inventory),
+                },
+            )
+            return
 
         if self._is_dry_run_mode():
             self._db_order_event(
@@ -4264,6 +4322,7 @@ class IntegratedBTCStrategy(Strategy):
                 "taker_exit_eval_interval_sec": float(self.taker_exit_eval_interval_sec),
                 "taker_exit_stop_loss_confirmations": int(self.taker_exit_stop_loss_confirmations),
                 "taker_exit_stop_loss_usdc": float(self.taker_exit_stop_loss_usdc),
+                "stop_loss_reentry_cooldown_sec": int(self.stop_loss_reentry_cooldown_sec),
                 "exit_conviction_band_min_price": float(self.exit_conviction_band_min_price),
                 "exit_hold_band_min_price": float(max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold)),
                 "exit_conviction_band_min_score_abs": float(self.exit_conviction_band_min_score_abs),
@@ -5512,6 +5571,7 @@ class IntegratedBTCStrategy(Strategy):
         fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
         fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
         raw_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
+        taker_exit_reason = self.taker_exit_reason_by_client_order_id.get(filled_id)
         liquidity_side_raw = getattr(event, "liquidity_side", "")
         is_maker_fill = self._is_maker_fill_liquidity(liquidity_side_raw)
         # Normalize maker economics: maker fills are treated as zero-fee for strategy PnL/DB.
@@ -5555,6 +5615,49 @@ class IntegratedBTCStrategy(Strategy):
                     f"cooldown={self.maker_high_cost_exit_cooldown_sec}s"
                 )
         self._clear_pending_taker_exit_for_order(filled_id)
+        if taker_exit_reason == "stop_loss" and self.stop_loss_reentry_cooldown_sec > 0:
+            inst_key = self._instrument_key(filled_inst)
+            if inst_key:
+                pause_until = time.time() + float(self.stop_loss_reentry_cooldown_sec)
+                self.stop_loss_reentry_pause_until_by_inst[inst_key] = max(
+                    float(self.stop_loss_reentry_pause_until_by_inst.get(inst_key, 0.0)),
+                    pause_until,
+                )
+                logger.warning(
+                    "Stop-loss re-entry cooldown armed: "
+                    f"inst={inst_key} cooldown={self.stop_loss_reentry_cooldown_sec}s"
+                )
+            penalty_side = self._side_for_instrument_id(filled_inst)
+            if self.current_market_slug and penalty_side != ActiveSide.NONE:
+                penalty_until = time.time() + float(self.stop_loss_reentry_cooldown_sec)
+                penalty_key = f"{self.current_market_slug}:{penalty_side.value}"
+                self.side_stop_loss_penalty_until_by_market_side[penalty_key] = max(
+                    float(self.side_stop_loss_penalty_until_by_market_side.get(penalty_key, 0.0)),
+                    penalty_until,
+                )
+                payload = {
+                    "slug": self.current_market_slug,
+                    "penalized_side": penalty_side.value,
+                    "penalty_until_ts": penalty_until,
+                    "penalty_remaining_sec": float(self.stop_loss_reentry_cooldown_sec),
+                    "instrument_id": str(filled_inst) if filled_inst else None,
+                    "client_order_id": filled_id,
+                }
+                self._db_strategy_event("SIDE_STOP_LOSS_PENALIZED", payload)
+                if penalty_side == self.active_side:
+                    self.active_side = ActiveSide.NONE
+                    self.active_side_locked = False
+                    self.side_pending_flip_side = ActiveSide.NONE
+                    self.side_pending_flip_count = 0
+                    self.side_decision_due_ts = time.time()
+                    self.side_decision_reason = f"stop_loss_penalty:{penalty_side.value.lower()}"
+                    self._sync_active_instrument()
+                    self._cancel_maker_order_side(side="buy", instrument_id=filled_inst, reason="stop_loss_penalty")
+                    logger.warning(
+                        "Side penalized after stop-loss: "
+                        f"slug={self.current_market_slug} side={penalty_side.value} "
+                        f"cooldown={self.stop_loss_reentry_cooldown_sec}s"
+                    )
 
         self.consecutive_denied_orders = 0
         self.last_quote_update_ts = 0.0
