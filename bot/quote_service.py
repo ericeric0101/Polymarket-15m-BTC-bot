@@ -254,7 +254,7 @@ def violates_final_crossing_guard(
     if side == "buy" and limit_price >= best_ask:
         logger_warning_fn(f"Skip crossing BUY quote {float(limit_price):.4f} >= ask {float(best_ask):.4f}")
         return True
-    if side == "sell" and limit_price <= best_bid and maker_use_post_only and maker_post_only_strict:
+    if side == "sell" and limit_price <= best_bid:
         logger_warning_fn(f"Skip crossing SELL quote {float(limit_price):.4f} <= bid {float(best_bid):.4f}")
         return True
     return False

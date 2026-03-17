@@ -4196,9 +4196,8 @@ class IntegratedBTCStrategy(Strategy):
         if order is None:
             return
 
-        # Final guard: Asymmetric Taker execution
-        # Entry (BUY): Always refuse crossing quote to preserve Maker edge.
-        # Exit (SELL): Allow crossing (Taker) to guarantee escape, unless strict post-only is on.
+        # Final guard: maker quotes must remain non-crossing on both sides.
+        # Emergency/tail taker exits use a separate market-order path.
         quote = self._get_quote_for_instrument(instrument_id)
         if violates_final_crossing_guard(
             side=side,
