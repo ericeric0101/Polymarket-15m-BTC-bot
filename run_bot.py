@@ -751,6 +751,21 @@ class IntegratedBTCStrategy(Strategy):
             os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS_CONSERVATIVE", "0.03")
         )
         self.maker_min_expected_net_usdc = Decimal(os.getenv("MAKER_MIN_EXPECTED_NET_USDC", "0.0001"))
+        self.maker_reload_inventory_threshold_shares = Decimal(
+            os.getenv(
+                "MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES",
+                str(self.maker_fixed_shares if self.maker_fixed_shares > 0 else self.maker_min_shares),
+            )
+        )
+        self.maker_reload_min_expected_net_multiplier = Decimal(
+            os.getenv("MAKER_RELOAD_MIN_EXPECTED_NET_MULTIPLIER", "2.0")
+        )
+        self.maker_reload_min_directional_edge_ps = Decimal(
+            os.getenv(
+                "MAKER_RELOAD_MIN_DIRECTIONAL_EDGE_PS",
+                str(self.maker_min_directional_edge_ps_conservative),
+            )
+        )
         self.maker_adverse_selection_buffer = Decimal(os.getenv("MAKER_ADVERSE_SELECTION_BUFFER", "0.0005"))
         self.maker_use_post_only = os.getenv("MAKER_POST_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
         self.maker_post_only_strict = os.getenv("MAKER_POST_ONLY_STRICT", "1").strip().lower() not in ("0", "false", "no")
@@ -876,6 +891,10 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_wait_for_sell_quote_sec = max(
             0,
             int(os.getenv("TAKER_EXIT_WAIT_FOR_SELL_QUOTE_SEC", "20")),
+        )
+        self.market_stop_loss_max_per_market = max(
+            0,
+            int(os.getenv("MARKET_STOP_LOSS_MAX_PER_MARKET", "2")),
         )
         self.taker_exit_max_hold_near_close_sec = max(
             0,
@@ -1139,6 +1158,7 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_stop_loss_hits_by_inst: Dict[str, int] = {}
         self.stop_loss_reentry_pause_until_by_inst: Dict[str, float] = {}
         self.side_stop_loss_penalty_until_by_market_side: Dict[str, float] = {}
+        self.market_stop_loss_count_by_slug: Dict[str, int] = {}
         self._taker_exit_skip_log_ts_by_key: Dict[str, float] = {}
         self.high_cost_exit_cooldown_until_by_inst: Dict[str, float] = {}
         self.high_cost_last_fill_price_by_inst: Dict[str, float] = {}
@@ -3204,6 +3224,7 @@ class IntegratedBTCStrategy(Strategy):
         self.taker_exit_stop_loss_hits_by_inst.clear()
         self.stop_loss_reentry_pause_until_by_inst.clear()
         self.side_stop_loss_penalty_until_by_market_side.clear()
+        self.market_stop_loss_count_by_slug.clear()
         self.taker_exit_reason_by_client_order_id.clear()
         self._taker_exit_skip_log_ts_by_key.clear()
         self.high_cost_exit_cooldown_until_by_inst.clear()
@@ -3881,6 +3902,39 @@ class IntegratedBTCStrategy(Strategy):
             for side, quote_data in side_plan.items():
                 order_key = self._order_key_for(side, inst_id)
                 inst_key = self._instrument_key(inst_id)
+                current_slug = str(self.current_market_slug or "")
+                market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
+                if (
+                    side == "buy"
+                    and current_slug
+                    and self.market_stop_loss_max_per_market > 0
+                    and market_stop_loss_count >= self.market_stop_loss_max_per_market
+                ):
+                    self._db_order_event(
+                        event_type="ORDER_SKIP_MARKET_STOP_LOSS_LIMIT",
+                        side=side.upper(),
+                        status="SKIPPED",
+                        reason="market_stop_loss_limit",
+                        payload={
+                            "slug": current_slug,
+                            "instrument_id": str(inst_id),
+                            "market_stop_loss_count": market_stop_loss_count,
+                            "market_stop_loss_max_per_market": self.market_stop_loss_max_per_market,
+                        },
+                    )
+                    continue
+                if inst_key in self.pending_taker_exit_by_inst:
+                    self._db_order_event(
+                        event_type="ORDER_SKIP_PENDING_TAKER_EXIT",
+                        side=side.upper(),
+                        status="SKIPPED",
+                        reason="pending_taker_exit",
+                        payload={
+                            "instrument_id": str(inst_id),
+                            "pending_taker_exit_client_order_id": self.pending_taker_exit_by_inst.get(inst_key),
+                        },
+                    )
+                    continue
                 sell_pause_until = float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0))
                 sellable_qty = None
                 if side == "sell" and not self._is_dry_run_mode():
@@ -3891,6 +3945,22 @@ class IntegratedBTCStrategy(Strategy):
                     if inv_state is not None
                     else Decimal("0")
                 )
+                current_inst_inventory_qty = (
+                    Decimal(str(inv_state.get("qty", "0")))
+                    if inv_state is not None
+                    else Decimal("0")
+                )
+                min_expected_net_usdc = self.maker_min_expected_net_usdc
+                if (
+                    side == "buy"
+                    and self.maker_reload_min_expected_net_multiplier > Decimal("1")
+                    and current_inst_inventory_qty + Decimal("0.000001")
+                    >= self.maker_reload_inventory_threshold_shares
+                ):
+                    min_expected_net_usdc = (
+                        self.maker_min_expected_net_usdc
+                        * self.maker_reload_min_expected_net_multiplier
+                    )
                 desired_entry = build_desired_quote_entry(
                     order_key=order_key,
                     side=side,
@@ -3901,7 +3971,7 @@ class IntegratedBTCStrategy(Strategy):
                     reduce_only_tail_sell_block=reduce_only_tail_sell_block,
                     reduce_only_no_new_sell_last_sec=self.maker_reduce_only_no_new_sell_last_sec,
                     forced_sell_only=_forced_sell_only,
-                    min_expected_net_usdc=self.maker_min_expected_net_usdc,
+                    min_expected_net_usdc=min_expected_net_usdc,
                     now_ts=now_ts,
                     sell_pause_until=sell_pause_until,
                     is_dry_run_mode=self._is_dry_run_mode(),
@@ -3916,6 +3986,24 @@ class IntegratedBTCStrategy(Strategy):
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                 )
                 desired_entry["dynamic_fee_rate"] = quote_ctx.dynamic_fee_rate
+                desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
+                if (
+                    side == "buy"
+                    and current_inst_inventory_qty + Decimal("0.000001")
+                    >= self.maker_reload_inventory_threshold_shares
+                ):
+                    directional_edge_ps = desired_entry.get("directional_edge_ps")
+                    required_reload_edge = self.maker_reload_min_directional_edge_ps
+                    desired_entry["reload_min_directional_edge_ps"] = required_reload_edge
+                    if (
+                        isinstance(directional_edge_ps, Decimal)
+                        and directional_edge_ps < required_reload_edge
+                    ):
+                        desired_entry["should_quote"] = False
+                        desired_entry["diag_reason"] = (
+                            f"reload_edge_gate directional_edge_ps={float(directional_edge_ps):.6f} "
+                            f"< min={float(required_reload_edge):.6f}"
+                        )
                 desired_quotes[order_key] = desired_entry
 
         reconcile_unwanted_quotes(
@@ -4318,9 +4406,14 @@ class IntegratedBTCStrategy(Strategy):
                 "git_revision": self.runtime_git_revision,
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
+                "maker_reload_inventory_threshold_shares": float(self.maker_reload_inventory_threshold_shares),
+                "maker_reload_min_expected_net_multiplier": float(self.maker_reload_min_expected_net_multiplier),
+                "maker_reload_min_directional_edge_ps": float(self.maker_reload_min_directional_edge_ps),
                 "taker_exit_eval_interval_sec": float(self.taker_exit_eval_interval_sec),
                 "taker_exit_stop_loss_confirmations": int(self.taker_exit_stop_loss_confirmations),
                 "taker_exit_stop_loss_usdc": float(self.taker_exit_stop_loss_usdc),
+                "taker_exit_wait_for_sell_quote_sec": float(self.taker_exit_wait_for_sell_quote_sec),
+                "market_stop_loss_max_per_market": int(self.market_stop_loss_max_per_market),
                 "stop_loss_reentry_cooldown_sec": int(self.stop_loss_reentry_cooldown_sec),
                 "exit_conviction_band_min_price": float(self.exit_conviction_band_min_price),
                 "exit_hold_band_min_price": float(max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold)),
@@ -4794,6 +4887,16 @@ class IntegratedBTCStrategy(Strategy):
             reasons.append("no_instrument")
         if now_ts < float(self.regime_guard_conservative_until_ts):
             reasons.append(f"regime_guard_{int(self.regime_guard_conservative_until_ts - now_ts)}s")
+        current_slug = str(self.current_market_slug or "")
+        market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
+        if (
+            current_slug
+            and self.market_stop_loss_max_per_market > 0
+            and market_stop_loss_count >= self.market_stop_loss_max_per_market
+        ):
+            reasons.append(
+                f"market_stop_loss_limit_{market_stop_loss_count}/{self.market_stop_loss_max_per_market}"
+            )
         if self.bi_side_enabled:
             if self.active_side == ActiveSide.NONE:
                 reasons.append("active_side_none")
@@ -5626,6 +5729,38 @@ class IntegratedBTCStrategy(Strategy):
                     "Stop-loss re-entry cooldown armed: "
                     f"inst={inst_key} cooldown={self.stop_loss_reentry_cooldown_sec}s"
                 )
+            current_slug = str(self.current_market_slug or "")
+            if current_slug:
+                new_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0)) + 1
+                self.market_stop_loss_count_by_slug[current_slug] = new_count
+                self._db_strategy_event(
+                    "MARKET_STOP_LOSS_COUNT_UPDATED",
+                    {
+                        "slug": current_slug,
+                        "count": new_count,
+                        "max_per_market": int(self.market_stop_loss_max_per_market),
+                        "instrument_id": str(filled_inst) if filled_inst else None,
+                        "client_order_id": filled_id,
+                    },
+                )
+                if (
+                    self.market_stop_loss_max_per_market > 0
+                    and new_count >= self.market_stop_loss_max_per_market
+                ):
+                    self._db_strategy_event(
+                        "MARKET_STOP_LOSS_LIMIT_REACHED",
+                        {
+                            "slug": current_slug,
+                            "count": new_count,
+                            "max_per_market": int(self.market_stop_loss_max_per_market),
+                            "instrument_id": str(filled_inst) if filled_inst else None,
+                            "client_order_id": filled_id,
+                        },
+                    )
+                    logger.warning(
+                        "Market stop-loss limit reached: "
+                        f"slug={current_slug} count={new_count}/{self.market_stop_loss_max_per_market}"
+                    )
             penalty_side = self._side_for_instrument_id(filled_inst)
             if self.current_market_slug and penalty_side != ActiveSide.NONE:
                 penalty_until = time.time() + float(self.stop_loss_reentry_cooldown_sec)
