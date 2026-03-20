@@ -766,6 +766,9 @@ class IntegratedBTCStrategy(Strategy):
                 str(self.maker_min_directional_edge_ps_conservative),
             )
         )
+        self.directional_entry_min_score_abs = Decimal(
+            os.getenv("DIRECTIONAL_ENTRY_MIN_SCORE_ABS", "2")
+        )
         self.maker_adverse_selection_buffer = Decimal(os.getenv("MAKER_ADVERSE_SELECTION_BUFFER", "0.0005"))
         self.maker_use_post_only = os.getenv("MAKER_POST_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
         self.maker_post_only_strict = os.getenv("MAKER_POST_ONLY_STRICT", "1").strip().lower() not in ("0", "false", "no")
@@ -896,6 +899,10 @@ class IntegratedBTCStrategy(Strategy):
             0,
             int(os.getenv("MARKET_STOP_LOSS_MAX_PER_MARKET", "2")),
         )
+        self.market_max_buy_events_per_market = max(
+            0,
+            int(os.getenv("MARKET_MAX_BUY_EVENTS_PER_MARKET", "2")),
+        )
         self.taker_exit_max_hold_near_close_sec = max(
             0,
             int(os.getenv("TAKER_EXIT_MAX_HOLD_NEAR_CLOSE_SEC", "90")),
@@ -939,6 +946,12 @@ class IntegratedBTCStrategy(Strategy):
             0,
             int(os.getenv("EXIT_CONVICTION_EXTRA_CONFIRMATIONS", "1")),
         )
+        self.exit_stop_loss_requires_thesis_weakening = os.getenv(
+            "EXIT_STOP_LOSS_REQUIRES_THESIS_WEAKENING", "1"
+        ).strip().lower() not in ("0", "false", "no")
+        self.exit_stop_loss_thesis_min_score_abs = Decimal(
+            os.getenv("EXIT_STOP_LOSS_THESIS_MIN_SCORE_ABS", "1")
+        )
         self.exit_hold_band_requires_locked = os.getenv(
             "EXIT_HOLD_BAND_REQUIRES_LOCKED", "1"
         ).strip().lower() not in ("0", "false", "no")
@@ -972,6 +985,8 @@ class IntegratedBTCStrategy(Strategy):
                 min_hold_sec=self.taker_exit_min_hold_sec,
                 stop_loss_usdc=self.taker_exit_stop_loss_usdc,
                 stop_loss_confirmations=self.taker_exit_stop_loss_confirmations,
+                stop_loss_requires_thesis_weakening=self.exit_stop_loss_requires_thesis_weakening,
+                stop_loss_thesis_min_score_abs=self.exit_stop_loss_thesis_min_score_abs,
                 conviction_band_min_price=self.exit_conviction_band_min_price,
                 hold_band_min_price=max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold),
                 conviction_band_min_score_abs=self.exit_conviction_band_min_score_abs,
@@ -1159,6 +1174,7 @@ class IntegratedBTCStrategy(Strategy):
         self.stop_loss_reentry_pause_until_by_inst: Dict[str, float] = {}
         self.side_stop_loss_penalty_until_by_market_side: Dict[str, float] = {}
         self.market_stop_loss_count_by_slug: Dict[str, int] = {}
+        self.market_buy_count_by_slug: Dict[str, int] = {}
         self._taker_exit_skip_log_ts_by_key: Dict[str, float] = {}
         self.high_cost_exit_cooldown_until_by_inst: Dict[str, float] = {}
         self.high_cost_last_fill_price_by_inst: Dict[str, float] = {}
@@ -3225,6 +3241,7 @@ class IntegratedBTCStrategy(Strategy):
         self.stop_loss_reentry_pause_until_by_inst.clear()
         self.side_stop_loss_penalty_until_by_market_side.clear()
         self.market_stop_loss_count_by_slug.clear()
+        self.market_buy_count_by_slug.clear()
         self.taker_exit_reason_by_client_order_id.clear()
         self._taker_exit_skip_log_ts_by_key.clear()
         self.high_cost_exit_cooldown_until_by_inst.clear()
@@ -3904,6 +3921,7 @@ class IntegratedBTCStrategy(Strategy):
                 inst_key = self._instrument_key(inst_id)
                 current_slug = str(self.current_market_slug or "")
                 market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
+                market_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0))
                 if (
                     side == "buy"
                     and current_slug
@@ -3920,6 +3938,25 @@ class IntegratedBTCStrategy(Strategy):
                             "instrument_id": str(inst_id),
                             "market_stop_loss_count": market_stop_loss_count,
                             "market_stop_loss_max_per_market": self.market_stop_loss_max_per_market,
+                        },
+                    )
+                    continue
+                if (
+                    side == "buy"
+                    and current_slug
+                    and self.market_max_buy_events_per_market > 0
+                    and market_buy_count >= self.market_max_buy_events_per_market
+                ):
+                    self._db_order_event(
+                        event_type="ORDER_SKIP_MARKET_BUY_LIMIT",
+                        side=side.upper(),
+                        status="SKIPPED",
+                        reason="market_buy_limit",
+                        payload={
+                            "slug": current_slug,
+                            "instrument_id": str(inst_id),
+                            "market_buy_count": market_buy_count,
+                            "market_max_buy_events_per_market": self.market_max_buy_events_per_market,
                         },
                     )
                     continue
@@ -3951,6 +3988,23 @@ class IntegratedBTCStrategy(Strategy):
                     else Decimal("0")
                 )
                 min_expected_net_usdc = self.maker_min_expected_net_usdc
+                if (
+                    side == "buy"
+                    and abs(self.side_decision_score) < self.directional_entry_min_score_abs
+                ):
+                    self._db_order_event(
+                        event_type="ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
+                        side=side.upper(),
+                        status="SKIPPED",
+                        reason="directional_entry_gate",
+                        payload={
+                            "slug": current_slug,
+                            "instrument_id": str(inst_id),
+                            "side_score": float(self.side_decision_score),
+                            "required_score_abs": float(self.directional_entry_min_score_abs),
+                        },
+                    )
+                    continue
                 if (
                     side == "buy"
                     and self.maker_reload_min_expected_net_multiplier > Decimal("1")
@@ -4406,6 +4460,7 @@ class IntegratedBTCStrategy(Strategy):
                 "git_revision": self.runtime_git_revision,
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
+                "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),
                 "maker_reload_inventory_threshold_shares": float(self.maker_reload_inventory_threshold_shares),
                 "maker_reload_min_expected_net_multiplier": float(self.maker_reload_min_expected_net_multiplier),
                 "maker_reload_min_directional_edge_ps": float(self.maker_reload_min_directional_edge_ps),
@@ -4414,7 +4469,10 @@ class IntegratedBTCStrategy(Strategy):
                 "taker_exit_stop_loss_usdc": float(self.taker_exit_stop_loss_usdc),
                 "taker_exit_wait_for_sell_quote_sec": float(self.taker_exit_wait_for_sell_quote_sec),
                 "market_stop_loss_max_per_market": int(self.market_stop_loss_max_per_market),
+                "market_max_buy_events_per_market": int(self.market_max_buy_events_per_market),
                 "stop_loss_reentry_cooldown_sec": int(self.stop_loss_reentry_cooldown_sec),
+                "exit_stop_loss_requires_thesis_weakening": self.exit_stop_loss_requires_thesis_weakening,
+                "exit_stop_loss_thesis_min_score_abs": float(self.exit_stop_loss_thesis_min_score_abs),
                 "exit_conviction_band_min_price": float(self.exit_conviction_band_min_price),
                 "exit_hold_band_min_price": float(max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold)),
                 "exit_conviction_band_min_score_abs": float(self.exit_conviction_band_min_score_abs),
@@ -5792,6 +5850,21 @@ class IntegratedBTCStrategy(Strategy):
                         f"slug={self.current_market_slug} side={penalty_side.value} "
                         f"cooldown={self.stop_loss_reentry_cooldown_sec}s"
                     )
+        current_slug = str(self.current_market_slug or "")
+        if side_for_ledger == "buy" and current_slug:
+            new_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0)) + 1
+            self.market_buy_count_by_slug[current_slug] = new_buy_count
+            self._db_strategy_event(
+                "MARKET_BUY_COUNT_UPDATED",
+                {
+                    "slug": current_slug,
+                    "count": new_buy_count,
+                    "max_per_market": int(self.market_max_buy_events_per_market),
+                    "instrument_id": str(filled_inst) if filled_inst else None,
+                    "client_order_id": filled_id,
+                    "liquidity_side": str(liquidity_side_raw or ""),
+                },
+            )
 
         self.consecutive_denied_orders = 0
         self.last_quote_update_ts = 0.0
