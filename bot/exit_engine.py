@@ -21,6 +21,8 @@ class ExitEngineConfig:
     conviction_stop_loss_multiplier: Decimal
     conviction_extra_confirmations: int
     hold_band_requires_locked: bool
+    hold_to_redeem_min_score_abs: Decimal
+    hold_to_redeem_max_time_left_sec: int
 
 
 class ExitPolicyEngine:
@@ -56,10 +58,22 @@ class ExitPolicyEngine:
             abs(signal.score) < self.config.stop_loss_thesis_min_score_abs
         )
 
-        if self.hold_to_redeem_policy.should_hold(
+        hold_to_redeem_time_ok = (
+            snapshot.time_left_sec is not None
+            and snapshot.time_left_sec <= float(self.config.hold_to_redeem_max_time_left_sec)
+        )
+        hold_to_redeem_signal_ok = (
+            signal.matches_position
+            and abs(signal.score) >= self.config.hold_to_redeem_min_score_abs
+        )
+        if (
+            self.hold_to_redeem_policy.should_hold(
             avg_entry=position.avg_entry_price,
             inventory_shares=position.qty,
             time_left_sec=snapshot.time_left_sec,
+            )
+            and hold_to_redeem_time_ok
+            and hold_to_redeem_signal_ok
         ):
             return ExitDecision(
                 decision_type=ExitDecisionType.HOLD_TO_REDEEM,

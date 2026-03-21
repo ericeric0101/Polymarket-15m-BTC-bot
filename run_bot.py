@@ -767,7 +767,7 @@ class IntegratedBTCStrategy(Strategy):
             )
         )
         self.directional_entry_min_score_abs = Decimal(
-            os.getenv("DIRECTIONAL_ENTRY_MIN_SCORE_ABS", "2")
+            os.getenv("DIRECTIONAL_ENTRY_MIN_SCORE_ABS", "1")
         )
         self.maker_adverse_selection_buffer = Decimal(os.getenv("MAKER_ADVERSE_SELECTION_BUFFER", "0.0005"))
         self.maker_use_post_only = os.getenv("MAKER_POST_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -967,6 +967,13 @@ class IntegratedBTCStrategy(Strategy):
         self.hold_to_redeem_max_inventory_shares = Decimal(
             os.getenv("MAKER_HOLD_TO_REDEEM_MAX_INVENTORY_SHARES", "2.0")
         )
+        self.hold_to_redeem_min_score_abs = Decimal(
+            os.getenv("MAKER_HOLD_TO_REDEEM_MIN_SCORE_ABS", "2.0")
+        )
+        self.hold_to_redeem_max_time_left_sec = max(
+            0,
+            int(os.getenv("MAKER_HOLD_TO_REDEEM_MAX_TIME_LEFT_SEC", "300")),
+        )
         self.exit_policy = ExitPolicy(
             ExitPolicyConfig(
                 aggressive_stage_sec=max(30, int(os.getenv("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", "180"))),
@@ -994,6 +1001,8 @@ class IntegratedBTCStrategy(Strategy):
                 conviction_stop_loss_multiplier=self.exit_conviction_stop_loss_multiplier,
                 conviction_extra_confirmations=self.exit_conviction_extra_confirmations,
                 hold_band_requires_locked=self.exit_hold_band_requires_locked,
+                hold_to_redeem_min_score_abs=self.hold_to_redeem_min_score_abs,
+                hold_to_redeem_max_time_left_sec=self.hold_to_redeem_max_time_left_sec,
             ),
             hold_to_redeem_policy=self.hold_to_redeem_policy,
         )
@@ -4461,6 +4470,8 @@ class IntegratedBTCStrategy(Strategy):
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),
+                "maker_hold_to_redeem_min_score_abs": float(self.hold_to_redeem_min_score_abs),
+                "maker_hold_to_redeem_max_time_left_sec": int(self.hold_to_redeem_max_time_left_sec),
                 "maker_reload_inventory_threshold_shares": float(self.maker_reload_inventory_threshold_shares),
                 "maker_reload_min_expected_net_multiplier": float(self.maker_reload_min_expected_net_multiplier),
                 "maker_reload_min_directional_edge_ps": float(self.maker_reload_min_directional_edge_ps),
