@@ -850,6 +850,9 @@ class IntegratedBTCStrategy(Strategy):
         self.bi_side_mom_window_ticks = max(2, int(os.getenv("BI_SIDE_MOM_WINDOW_TICKS", str(self.maker_momentum_window_ticks))))
         self.bi_side_mom_pct = Decimal(str(os.getenv("BI_SIDE_MOM_PCT", "0.0025")))
         self.bi_side_open_drift_pct = Decimal(str(os.getenv("BI_SIDE_OPEN_DRIFT_PCT", "0.0020")))
+        self.bi_side_require_confirming_signal = os.getenv(
+            "BI_SIDE_REQUIRE_CONFIRMING_SIGNAL", "1"
+        ).strip().lower() not in ("0", "false", "no")
         self.bi_side_regime_n_markets = max(2, int(os.getenv("BI_SIDE_REGIME_N_MARKETS", "4")))
         self.bi_side_regime_sum_pnl_usdc = Decimal(str(os.getenv("BI_SIDE_REGIME_SUM_PNL_USDC", "-2.0")))
         self.bi_side_regime_min_neg = max(1, int(os.getenv("BI_SIDE_REGIME_MIN_NEG", "3")))
@@ -1665,6 +1668,17 @@ class IntegratedBTCStrategy(Strategy):
                 inputs["side_penalty_until_ts"] = penalty_until
                 inputs["side_penalty_remaining_sec"] = max(0.0, penalty_until - now_ts)
                 return ActiveSide.NONE, score, f"{reason} side_penalty={proposed_side.value.lower()}", inputs
+
+        if proposed_side != ActiveSide.NONE and self.bi_side_require_confirming_signal:
+            proposed_sign = 1 if proposed_side == ActiveSide.UP else -1
+            has_confirming_signal = (
+                strike_signal == proposed_sign
+                or open_drift_signal == proposed_sign
+            )
+            inputs["requires_confirming_signal"] = True
+            inputs["has_confirming_signal"] = has_confirming_signal
+            if momentum_signal == proposed_sign and not has_confirming_signal:
+                return ActiveSide.NONE, score, f"{reason} second_signal_required", inputs
 
         if proposed_side != ActiveSide.NONE:
             return proposed_side, score, reason, inputs
@@ -4467,6 +4481,7 @@ class IntegratedBTCStrategy(Strategy):
                 "bi_side_enabled": self.bi_side_enabled,
                 "active_side": self.active_side.value,
                 "git_revision": self.runtime_git_revision,
+                "bi_side_require_confirming_signal": self.bi_side_require_confirming_signal,
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),

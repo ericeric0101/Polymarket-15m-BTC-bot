@@ -145,8 +145,26 @@ class MakerEngine:
     ) -> Decimal:
         """
         Calculates fair price based on external spot price.
-        pricer_mode can be 'digital' or 'drift'. 
+        pricer_mode can be 'digital' or 'drift'.
         If 'digital' but strike is missing, falls back to 'drift'.
+
+        Drift Fallback Design
+        ---------------------
+        When strike is unavailable we estimate the "fairness signal" from the
+        rate-of-change of the external spot.  The challenge is converting an
+        equity-world percentage move into a probability shift for a binary event.
+
+        Old approach (removed): drift * 8.0  — arbitrary, routinely saturated
+        the ±5% clamp on any meaningful BTC tick, yielding no information.
+
+        New approach:
+          shift = drift × (0.5 / sigma_effective)
+        Rationale: think of the drift as a z-score expressed in σ-per-period units.
+        Dividing by 2σ maps a 1-σ spot move to roughly a 0.5 / 2 = 0.25 probability
+        shift, which is an upper bound consistent with binary option deltas near ATM.
+        Clamp is tightened to ±0.03 so a single noisy tick cannot pin fair at an
+        extreme.  This keeps the fallback informative without being
+        overconfident.
         """
         fair = market_mid
         if pricer_mode == "digital" and strike is not None:
@@ -159,7 +177,7 @@ class MakerEngine:
             fair_up = max(Decimal("0.01"), min(Decimal("0.99"), up_prob))
             fair_down = Decimal("1.0") - fair_up
             fair_down = max(Decimal("0.01"), min(Decimal("0.99"), fair_down))
-            
+
             if outcome == "up":
                 fair = fair_up
             elif outcome == "down":
@@ -167,12 +185,21 @@ class MakerEngine:
             else:
                 fair = market_mid
         else:
-            # Drift / Fallback
+            # Drift / Fallback (strike unavailable)
+            # ------------------------------------
+            # Principled multiplier: scale drift by 0.5/sigma so that a
+            # 1-sigma spot move maps to at most a ~0.25 probability shift.
+            # Clamp to ±0.03 (was ±0.05) to reduce single-tick saturation.
             if last_external_spot > 0:
                 drift = (external_spot - last_external_spot) / last_external_spot
-                shift = Decimal(str(max(-0.05, min(0.05, float(drift) * 8.0))))
+                sigma_effective = max(0.20, float(sigma))  # floor matches MAKER_DIGITAL_SIGMA_FLOOR
+                # Principled multiplier replaces magic '8.0'
+                drift_multiplier = 0.5 / sigma_effective  # ≈ 2.5 at σ=0.20, ≈ 0.83 at σ=0.60
+                raw_shift = float(drift) * drift_multiplier
+                clamped_shift = max(-0.03, min(0.03, raw_shift))  # tighter clamp (was ±0.05)
+                shift = Decimal(str(clamped_shift))
                 fair = market_mid + shift
-                
+
         return max(Decimal("0.01"), min(Decimal("0.99"), fair))
 
     def apply_inventory_skew(
