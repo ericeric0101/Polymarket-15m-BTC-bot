@@ -1,0 +1,576 @@
+"""
+bot/side_decision.py – SideDecisionMixin
+
+Extracted from run_bot.py (L1421-L1949).
+All 12 side-decision + regime-guard methods live here as a Mixin.
+IntegratedBTCStrategy inherits this mixin so all self.* references remain valid.
+
+NOTE: MarketPhase and ActiveSide were extracted to bot/enums.py together with this
+refactoring so that both run_bot.py and this module can import them safely.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from decimal import Decimal
+from typing import Any, Dict, List
+
+from loguru import logger
+
+from bot.enums import ActiveSide, MarketPhase
+from execution.maker_engine import MakerEngine
+
+
+class SideDecisionMixin:
+    """Mixin providing side-decision and regime-guard logic for IntegratedBTCStrategy."""
+
+    # ------------------------------------------------------------------
+    # State helpers
+    # ------------------------------------------------------------------
+
+    def _reset_side_decision_state(self) -> None:
+        self.active_side = ActiveSide.UP if not self.bi_side_enabled else self._normalize_active_side(self.bi_side_default_mode)
+        self.active_side_locked = False
+        self.side_decision_ts = 0.0
+        self.side_decision_score = Decimal("0")
+        self.side_decision_reason = "market_reset"
+        self.side_decision_due_ts = time.time() + float(self.bi_side_decision_grace_sec) if self.bi_side_enabled else 0.0
+        self.side_decision_done_for_market = not self.bi_side_enabled
+        self.side_decision_inputs = {}
+        self.side_flip_count = 0
+        self.side_pending_flip_side = ActiveSide.NONE
+        self.side_pending_flip_count = 0
+        self._last_side_observation_signature = None
+        self._last_side_decision_log_ts = 0.0
+        self._last_side_decision_log_signature = None
+        self.current_market_open_spot = self._capture_market_open_spot()
+        self._sync_active_instrument()
+
+    def _effective_recent_cycle_window(self) -> List[float]:
+        window = list(self.recent_market_combined_pnls)[-self.bi_side_regime_n_markets :]
+        return [float(v) for v in window]
+
+    # ------------------------------------------------------------------
+    # Logging helpers
+    # ------------------------------------------------------------------
+
+    def _log_side_decision_skip_throttled(
+        self,
+        reason: str,
+        now_ts: float,
+        inputs: Dict[str, Any],
+        phase: Any,  # MarketPhase – defined in run_bot.py
+    ) -> None:
+        key = f"{self.current_market_slug or '-'}:{reason}"
+        last_ts = float(self._side_decision_skip_log_ts_by_reason.get(key, 0.0))
+        if now_ts - last_ts < float(self.side_decision_skip_log_interval_sec):
+            return
+        self._side_decision_skip_log_ts_by_reason[key] = now_ts
+
+        slug = str(self.current_market_slug or "")
+        strike_source = self.market_strike_source_by_slug.get(slug, "pending")
+        logger.info(
+            "Side decision skipped: "
+            f"slug={slug or '-'} reason={reason} phase={phase.value} "
+            f"due_in={max(0.0, self.side_decision_due_ts - now_ts):.1f}s "
+            f"spot={inputs.get('spot')} market_open_spot={inputs.get('market_open_spot')} "
+            f"strike={inputs.get('strike')} strike_source={strike_source} "
+            f"primary_inst={self._primary_instrument_for_market() or '-'} "
+            f"history_len={len(self.external_spot_history)}"
+        )
+
+    def _log_side_decision_result_throttled(
+        self,
+        side: ActiveSide,
+        score: Decimal,
+        reason: str,
+        locked: bool,
+        now_ts: float,
+    ) -> None:
+        locked_txt = "yes" if locked else "no"
+        side_signature = (side.value, locked_txt)
+        if (
+            side_signature == self._last_side_decision_log_signature
+            and (now_ts - self._last_side_decision_log_ts) < float(self.bi_side_decision_log_interval_sec)
+        ):
+            return
+        self._last_side_decision_log_signature = side_signature
+        self._last_side_decision_log_ts = now_ts
+        logger.info(
+            "Side decision: "
+            f"slug={self.current_market_slug or '-'} active_side={side.value} "
+            f"score={float(score):+.2f} reason={reason} "
+            f"locked={locked_txt}"
+        )
+
+    def _record_side_observation(
+        self,
+        side: ActiveSide,
+        score: Decimal,
+        reason: str,
+        inputs: Dict[str, Any],
+        now_ts: float,
+    ) -> None:
+        signature = (str(self.current_market_slug or ""), side.value, reason)
+        if signature == self._last_side_observation_signature:
+            return
+        self._last_side_observation_signature = signature
+        payload = dict(inputs)
+        payload.update(
+            {
+                "proposed_side": side.value,
+                "score": float(score),
+                "reason": reason,
+                "decision_ts": now_ts,
+                "observation_only": True,
+                "observation_remaining_sec": max(0.0, self.side_decision_due_ts - now_ts),
+            }
+        )
+        self._db_strategy_event("SIDE_DECISION_OBSERVATION", payload)
+
+    # ------------------------------------------------------------------
+    # Flip helper
+    # ------------------------------------------------------------------
+
+    def _side_flip_requirements_met(
+        self,
+        side: ActiveSide,
+        score: Decimal,
+        inputs: Dict[str, Any],
+    ) -> bool:
+        if side == ActiveSide.UP:
+            fair_value = inputs.get("fair_up")
+            if score < self.bi_side_flip_min_score_up:
+                return False
+        elif side == ActiveSide.DOWN:
+            fair_value = inputs.get("fair_down")
+            if score > self.bi_side_flip_max_score_down:
+                return False
+        else:
+            return False
+        if fair_value is None:
+            return False
+        try:
+            fair_dec = Decimal(str(fair_value))
+        except Exception:
+            return False
+        return fair_dec >= self.bi_side_flip_min_fair
+
+    # ------------------------------------------------------------------
+    # Core decision logic
+    # ------------------------------------------------------------------
+
+    def _compute_side_decision(self, now_ts: float) -> tuple[ActiveSide, Decimal, str, Dict[str, Any]]:
+        inputs: Dict[str, Any] = {
+            "slug": self.current_market_slug or "",
+            "fair_up": None,
+            "fair_down": None,
+            "strike_signal": 0,
+            "momentum_signal": 0,
+            "open_drift_signal": 0,
+            "regime_signal": 0,
+            "gap_pct": None,
+            "mom_pct": None,
+            "open_drift_pct": None,
+            "recent_window_combined_pnls": self._effective_recent_cycle_window(),
+        }
+        if not self.bi_side_enabled:
+            return ActiveSide.UP, Decimal("999"), "bi_side_disabled", inputs
+
+        spot = self._capture_market_open_spot()
+        inputs["spot"] = float(spot) if spot is not None else None
+        inputs["market_open_spot"] = float(self.current_market_open_spot) if self.current_market_open_spot is not None else None
+        if spot is None or spot <= 0:
+            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
+        strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+        if strike_dec is None or strike_dec <= 0:
+            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
+        inputs["strike"] = float(strike_dec)
+
+        gap_pct = (spot - strike_dec) / strike_dec if strike_dec > 0 else Decimal("0")
+        inputs["gap_pct"] = float(gap_pct)
+        strike_signal = 0
+        if gap_pct >= self.bi_side_strike_gap_pct:
+            strike_signal = 1
+        elif gap_pct <= -self.bi_side_strike_gap_pct:
+            strike_signal = -1
+        inputs["strike_signal"] = strike_signal
+
+        active_instrument = self._primary_instrument_for_market()
+        momentum_history = self._momentum_history_for_instrument(active_instrument)
+        mom_pct = Decimal("0")
+        momentum_signal = 0
+        if len(momentum_history) >= self.bi_side_mom_window_ticks:
+            recent_px = momentum_history[-1]
+            old_px = momentum_history[-self.bi_side_mom_window_ticks]
+            if old_px > 0:
+                mom_pct = (recent_px - old_px) / old_px
+                if mom_pct >= self.bi_side_mom_pct:
+                    momentum_signal = 1
+                elif mom_pct <= -self.bi_side_mom_pct:
+                    momentum_signal = -1
+        inputs["mom_pct"] = float(mom_pct)
+        inputs["momentum_signal"] = momentum_signal
+
+        open_spot = self.current_market_open_spot or spot
+        open_drift_pct = Decimal("0")
+        open_drift_signal = 0
+        if open_spot and open_spot > 0:
+            open_drift_pct = (spot - open_spot) / open_spot
+            if open_drift_pct >= self.bi_side_open_drift_pct:
+                open_drift_signal = 1
+            elif open_drift_pct <= -self.bi_side_open_drift_pct:
+                open_drift_signal = -1
+        inputs["market_open_spot"] = float(open_spot) if open_spot is not None else None
+        inputs["open_drift_pct"] = float(open_drift_pct)
+        inputs["open_drift_signal"] = open_drift_signal
+
+        regime_signal = 0
+        window = inputs["recent_window_combined_pnls"]
+        neg_count = sum(1 for v in window if v < 0)
+        window_sum = sum(window)
+        if (
+            len(window) >= self.bi_side_regime_n_markets
+            and neg_count >= self.bi_side_regime_min_neg
+            and Decimal(str(window_sum)) <= self.bi_side_regime_sum_pnl_usdc
+            and (strike_signal <= 0 or momentum_signal <= 0)
+        ):
+            regime_signal = -1
+        inputs["regime_signal"] = regime_signal
+        inputs["recent_window_sum_pnl_usdc"] = float(window_sum)
+        inputs["recent_window_negative_markets"] = neg_count
+
+        fair_up = None
+        fair_down = None
+        if self.maker_fair_pricer_mode == "digital":
+            end_ts = getattr(self, "current_market_end_timestamp", None)
+            time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
+            sigma = self.maker_digital_sigma_default
+            est_sigma = self._estimate_external_spot_sigma_annualized()
+            if est_sigma and est_sigma > 0:
+                sigma = est_sigma
+            sigma = sigma * self.maker_digital_vol_scale
+            sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
+            if self.maker_digital_sigma_time_decay_enabled and time_left_sec > 0:
+                ref = self.maker_digital_sigma_time_decay_ref_sec
+                decay = max(self.maker_digital_sigma_time_decay_min, min(1.0, time_left_sec / ref))
+                sigma = sigma * Decimal(str(round(decay, 4)))
+                sigma = max(self.maker_digital_sigma_floor, sigma)
+            fair_up = MakerEngine.digital_up_probability(
+                spot=float(spot),
+                strike=float(strike_dec),
+                sigma_annual=float(sigma),
+                time_left_sec=time_left_sec,
+            )
+            fair_down = Decimal("1.0") - fair_up
+        inputs["fair_up"] = float(fair_up) if fair_up is not None else None
+        inputs["fair_down"] = float(fair_down) if fair_down is not None else None
+
+        score = (
+            Decimal(str(strike_signal))
+            + Decimal(str(momentum_signal))
+            + Decimal(str(open_drift_signal))
+            + (Decimal("0.5") * Decimal(str(regime_signal)))
+        )
+        reason = (
+            f"strike={strike_signal} momentum={momentum_signal} "
+            f"open_drift={open_drift_signal} regime={regime_signal}"
+        )
+        proposed_side = ActiveSide.NONE
+        if score >= self.bi_side_min_score_up:
+            proposed_side = ActiveSide.UP
+        elif score <= self.bi_side_max_score_down and self.current_down_instrument_id is not None:
+            proposed_side = ActiveSide.DOWN
+
+        if proposed_side != ActiveSide.NONE and self.current_market_slug:
+            penalty_key = f"{self.current_market_slug}:{proposed_side.value}"
+            penalty_until = float(self.side_stop_loss_penalty_until_by_market_side.get(penalty_key, 0.0))
+            if now_ts < penalty_until:
+                inputs["side_penalty_side"] = proposed_side.value
+                inputs["side_penalty_until_ts"] = penalty_until
+                inputs["side_penalty_remaining_sec"] = max(0.0, penalty_until - now_ts)
+                return ActiveSide.NONE, score, f"{reason} side_penalty={proposed_side.value.lower()}", inputs
+
+        if proposed_side != ActiveSide.NONE and self.bi_side_require_confirming_signal:
+            proposed_sign = 1 if proposed_side == ActiveSide.UP else -1
+            has_confirming_signal = (
+                strike_signal == proposed_sign
+                or open_drift_signal == proposed_sign
+            )
+            inputs["requires_confirming_signal"] = True
+            inputs["has_confirming_signal"] = has_confirming_signal
+            if momentum_signal == proposed_sign and not has_confirming_signal:
+                return ActiveSide.NONE, score, f"{reason} second_signal_required", inputs
+
+        if proposed_side != ActiveSide.NONE:
+            return proposed_side, score, reason, inputs
+        return ActiveSide.NONE, score, reason, inputs
+
+    async def _maybe_finalize_side_decision(self, now_ts: float, phase: Any) -> None:  # phase: MarketPhase
+        if not self.bi_side_enabled:
+            self.active_side = ActiveSide.UP
+            self.side_decision_done_for_market = True
+            self._sync_active_instrument()
+            return
+        can_attempt_flip = (
+            self.active_side_locked
+            and self.bi_side_allow_intramarket_flip
+            and self.side_flip_count < self.bi_side_flip_max_per_market
+        )
+        if self.active_side_locked and not can_attempt_flip:
+            return
+        if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
+            return
+        time_left_sec = None
+        if self.current_market_end_timestamp is not None:
+            time_left_sec = float(self.current_market_end_timestamp - now_ts)
+            if time_left_sec < float(self.bi_side_min_time_left_sec):
+                return
+        if (
+            self.active_side == ActiveSide.NONE
+            and self.side_decision_ts > 0
+            and (now_ts - self.side_decision_ts) < float(self.bi_side_reeval_interval_sec)
+        ):
+            return
+
+        slug = str(self.current_market_slug or "")
+        primary_inst = self._primary_instrument_for_market()
+        if slug and slug not in self.market_strike_cache_by_slug and primary_inst is not None:
+            warmed_strike = await self._get_market_strike_for_instrument(primary_inst)
+            strike_source = self.market_strike_source_by_slug.get(slug, "pending")
+            if warmed_strike is not None:
+                logger.info(
+                    "Side decision warmup: "
+                    f"slug={slug} strike={float(warmed_strike):.2f} "
+                    f"strike_source={strike_source} primary_inst={primary_inst}"
+                )
+            else:
+                self._log_side_decision_skip_throttled(
+                    reason="strike_warmup_pending",
+                    now_ts=now_ts,
+                    inputs={
+                        "spot": float(self.latest_external_spot) if self.latest_external_spot is not None else None,
+                        "market_open_spot": float(self.current_market_open_spot) if self.current_market_open_spot is not None else None,
+                        "strike": None,
+                    },
+                    phase=phase,
+                )
+
+        side, score, reason, inputs = self._compute_side_decision(now_ts)
+        if reason in {"spot_unavailable", "strike_unavailable"}:
+            self.side_decision_score = score
+            self.side_decision_reason = reason
+            self.side_decision_ts = now_ts
+            self.side_decision_inputs = dict(inputs)
+            payload = dict(inputs)
+            payload.update({"reason": reason, "decision_ts": now_ts})
+            self._db_strategy_event("SIDE_DECISION_SKIPPED", payload)
+            self._log_side_decision_skip_throttled(reason=reason, now_ts=now_ts, inputs=inputs, phase=phase)
+            return
+        if self.side_decision_due_ts > 0 and now_ts < self.side_decision_due_ts:
+            self.side_decision_score = score
+            self.side_decision_reason = reason
+            self.side_decision_ts = now_ts
+            self.side_decision_inputs = dict(inputs)
+            self._record_side_observation(side=side, score=score, reason=reason, inputs=inputs, now_ts=now_ts)
+            return
+
+        if self.active_side_locked:
+            flip_ready = self._side_flip_requirements_met(side=side, score=score, inputs=inputs)
+            if side == ActiveSide.NONE or side == self.active_side or not flip_ready:
+                self.side_pending_flip_side = ActiveSide.NONE
+                self.side_pending_flip_count = 0
+                return
+            if not can_attempt_flip:
+                return
+            if side != self.side_pending_flip_side:
+                self.side_pending_flip_side = side
+                self.side_pending_flip_count = 1
+                return
+            self.side_pending_flip_count += 1
+            if self.side_pending_flip_count < self.bi_side_flip_confirmations:
+                return
+            old_side = self.active_side
+            self.active_side = side
+            self.side_decision_score = score
+            self.side_decision_reason = f"{reason} flip={self.side_flip_count + 1}"
+            self.side_decision_ts = now_ts
+            self.side_decision_done_for_market = True
+            self.side_decision_inputs = dict(inputs)
+            self.side_flip_count += 1
+            self.side_pending_flip_side = ActiveSide.NONE
+            self.side_pending_flip_count = 0
+            self._sync_active_instrument()
+            payload = dict(inputs)
+            payload.update(
+                {
+                    "active_side": side.value,
+                    "previous_side": old_side.value if old_side is not None else None,
+                    "score": float(score),
+                    "reason": self.side_decision_reason,
+                    "decision_ts": now_ts,
+                    "flip_count": self.side_flip_count,
+                }
+            )
+            self._db_strategy_event("SIDE_MODE_FLIPPED", payload)
+            self._log_side_decision_result_throttled(
+                side=side,
+                score=score,
+                reason=self.side_decision_reason,
+                locked=self.active_side_locked,
+                now_ts=now_ts,
+            )
+            return
+
+        old_side = self.active_side
+        self.active_side = side
+        self.side_decision_score = score
+        self.side_decision_reason = reason
+        self.side_decision_ts = now_ts
+        self.side_decision_done_for_market = True
+        self.side_decision_inputs = inputs
+        if self.bi_side_lock_until_reduce_only and phase == MarketPhase.ACTIVE and side != ActiveSide.NONE:
+            self.active_side_locked = True
+            self.side_pending_flip_side = ActiveSide.NONE
+            self.side_pending_flip_count = 0
+        elif side == ActiveSide.NONE:
+            self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
+        self._sync_active_instrument()
+        event_name = "SIDE_MODE_CHANGED" if old_side != side else "SIDE_DECISION"
+        payload = dict(inputs)
+        payload.update(
+            {
+                "active_side": side.value,
+                "previous_side": old_side.value if old_side is not None else None,
+                "score": float(score),
+                "reason": reason,
+                "decision_ts": now_ts,
+            }
+        )
+        self._db_strategy_event(event_name, payload)
+        self._log_side_decision_result_throttled(
+            side=side,
+            score=score,
+            reason=reason,
+            locked=self.active_side_locked,
+            now_ts=now_ts,
+        )
+
+    # ------------------------------------------------------------------
+    # Regime guard
+    # ------------------------------------------------------------------
+
+    def _regime_guard_min_negative_markets(self) -> int:
+        return self.regime_guard_policy.min_negative_markets()
+
+    def _regime_guard_should_trigger(self, window: List[float]) -> tuple[bool, float, int]:
+        return self.regime_guard_policy.should_trigger(window)
+
+    def _append_cycle_and_maybe_trigger_regime_guard(
+        self,
+        cycle_combined_pnl: float,
+        slug: str,
+        source: str,
+    ) -> None:
+        if not self.regime_guard_enabled:
+            return
+        self.recent_market_combined_pnls.append(float(cycle_combined_pnl))
+        if len(self.recent_market_combined_pnls) < self.regime_guard_n_markets:
+            return
+        window = list(self.recent_market_combined_pnls)[-self.regime_guard_n_markets :]
+        should_trigger, window_sum, neg_count = self._regime_guard_should_trigger(window)
+        if not should_trigger:
+            return
+        until_ts = time.time() + float(self.regime_guard_cooldown_sec)
+        self.regime_guard_conservative_until_ts = max(self.regime_guard_conservative_until_ts, until_ts)
+        logger.warning(
+            "REGIME GUARD triggered: "
+            f"window={window} neg={neg_count}/{self.regime_guard_n_markets} "
+            f"sum={window_sum:.4f} <= trigger={float(self.regime_guard_trigger_sum_pnl_usdc):.4f}; "
+            f"raise BUY edge gate to {float(self.maker_min_directional_edge_ps_conservative):.4f} "
+            f"for {self.regime_guard_cooldown_sec}s"
+        )
+        self._db_strategy_event(
+            "REGIME_GUARD_TRIGGERED",
+            {
+                "source": source,
+                "slug": slug,
+                "window_combined_pnls": window,
+                "window_sum_pnl_usdc": window_sum,
+                "negative_markets": neg_count,
+                "min_negative_markets": self._regime_guard_min_negative_markets(),
+                "trigger_sum_pnl_usdc": float(self.regime_guard_trigger_sum_pnl_usdc),
+                "n_markets": self.regime_guard_n_markets,
+                "cooldown_sec": self.regime_guard_cooldown_sec,
+            },
+        )
+
+    def _bootstrap_regime_guard_window_from_db(self) -> None:
+        if not self.regime_guard_enabled or not self.trade_db:
+            return
+        db_path = getattr(self.trade_db, "db_path", "")
+        if not db_path:
+            return
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT payload_json
+                FROM strategy_events
+                WHERE event_type='MARKET_CYCLE_PNL'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self.regime_guard_bootstrap_lookback_markets,),
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return
+            recovered: List[float] = []
+            for row in reversed(rows):
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    payload = {}
+                val = payload.get("cycle_combined_pnl_usdc")
+                if val is None:
+                    continue
+                recovered.append(float(val))
+            if not recovered:
+                return
+            self.recent_market_combined_pnls.clear()
+            for v in recovered[-self.regime_guard_n_markets :]:
+                self.recent_market_combined_pnls.append(float(v))
+            logger.info(
+                "Regime guard bootstrap: recovered recent combined window "
+                f"{list(self.recent_market_combined_pnls)}"
+            )
+            if len(self.recent_market_combined_pnls) >= self.regime_guard_n_markets:
+                window = list(self.recent_market_combined_pnls)[-self.regime_guard_n_markets :]
+                should_trigger, window_sum, neg_count = self._regime_guard_should_trigger(window)
+                if should_trigger:
+                    until_ts = time.time() + float(self.regime_guard_cooldown_sec)
+                    self.regime_guard_conservative_until_ts = max(
+                        self.regime_guard_conservative_until_ts,
+                        until_ts,
+                    )
+                    logger.warning(
+                        "Regime guard armed from bootstrap window: "
+                        f"neg={neg_count}/{self.regime_guard_n_markets} sum={window_sum:.4f}"
+                    )
+                    self._db_strategy_event(
+                        "REGIME_GUARD_BOOTSTRAP_TRIGGERED",
+                        {
+                            "window_combined_pnls": window,
+                            "window_sum_pnl_usdc": window_sum,
+                            "negative_markets": neg_count,
+                            "min_negative_markets": self._regime_guard_min_negative_markets(),
+                            "trigger_sum_pnl_usdc": float(self.regime_guard_trigger_sum_pnl_usdc),
+                            "n_markets": self.regime_guard_n_markets,
+                            "cooldown_sec": self.regime_guard_cooldown_sec,
+                        },
+                    )
+        except Exception as e:
+            logger.warning(f"Regime guard bootstrap failed: {e}")

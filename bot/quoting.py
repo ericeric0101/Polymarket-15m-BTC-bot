@@ -208,8 +208,13 @@ def apply_quote_plan_guards(
             momentum_buy_blocked = True
             set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "momentum_buy_block")
         if momentum_trend_pct >= momentum_filter_pct and "sell" in side_plan:
-            momentum_sell_blocked = True
-            set_side_should_quote(side_plan, side_disable_reason_by_side, "sell", False, "momentum_sell_block")
+            # Only block SELL when there is no existing inventory to exit.
+            # If the bot holds shares (inventory_delta_shares > 0), this SELL is
+            # reduce-only (exiting a position), and should NOT be blocked by
+            # momentum — blocking it traps the bot in a losing position until settlement.
+            if inventory_delta_shares <= 0:
+                momentum_sell_blocked = True
+                set_side_should_quote(side_plan, side_disable_reason_by_side, "sell", False, "momentum_sell_block")
 
     reduce_only = compute_reduce_only_decision(
         phase_value=phase_value,
