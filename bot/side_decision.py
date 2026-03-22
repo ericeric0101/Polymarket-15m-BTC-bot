@@ -44,7 +44,9 @@ class SideDecisionMixin:
         self._last_side_observation_signature = None
         self._last_side_decision_log_ts = 0.0
         self._last_side_decision_log_signature = None
-        self.current_market_open_spot = self._capture_market_open_spot()
+        # Reset the per-market open anchor and let the first post-rollover external
+        # spot observation lock it exactly once for open-drift calculations.
+        self.current_market_open_spot = None
         self._sync_active_instrument()
 
     def _effective_recent_cycle_window(self) -> List[float]:
@@ -213,8 +215,8 @@ class SideDecisionMixin:
         inputs["mom_pct"] = float(mom_pct)
         inputs["momentum_signal"] = momentum_signal
 
-        open_spot = self.current_market_open_spot or spot
-        open_drift_pct = Decimal("0")
+        open_spot = self.current_market_open_spot
+        open_drift_pct = None
         open_drift_signal = 0
         if open_spot and open_spot > 0:
             open_drift_pct = (spot - open_spot) / open_spot
@@ -223,7 +225,7 @@ class SideDecisionMixin:
             elif open_drift_pct <= -self.bi_side_open_drift_pct:
                 open_drift_signal = -1
         inputs["market_open_spot"] = float(open_spot) if open_spot is not None else None
-        inputs["open_drift_pct"] = float(open_drift_pct)
+        inputs["open_drift_pct"] = float(open_drift_pct) if open_drift_pct is not None else None
         inputs["open_drift_signal"] = open_drift_signal
 
         regime_signal = 0

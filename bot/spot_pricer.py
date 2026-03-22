@@ -19,10 +19,13 @@ from loguru import logger
 from bot.market_data import (
     estimate_external_spot_sigma_annualized,
     extract_market_start_ts_from_slug,
+    extract_strike_from_question,
     fetch_coinbase_spot_sync,
     record_external_spot_observation,
     resolve_opening_strike_from_history,
     fetch_binance_open_price_sync,
+    fetch_gamma_market_by_slug,
+    extract_price_to_beat_from_market_payload,
 )
 from execution.maker_engine import MakerEngine
 
@@ -203,6 +206,68 @@ class SpotPricerMixin:
         )
 
     # ------------------------------------------------------------------
+    # Strike extraction helpers
+    # ------------------------------------------------------------------
+
+    def _extract_strike_from_question(self, question_text: str) -> Optional[Decimal]:
+        return extract_strike_from_question(question_text, self.latest_external_spot)
+
+    async def _maybe_validate_strike_with_gamma(self, slug: str, local_strike: Decimal) -> None:
+        now_ts = time.time()
+        last_validate = float(self.market_strike_last_gamma_validate_ts_by_slug.get(slug, 0.0))
+        if now_ts - last_validate < float(self.market_strike_gamma_validate_interval_sec):
+            return
+        self.market_strike_last_gamma_validate_ts_by_slug[slug] = now_ts
+        try:
+            market = await fetch_gamma_market_by_slug(slug)
+        except Exception:
+            return
+        if not isinstance(market, dict):
+            return
+        gamma_ptb = extract_price_to_beat_from_market_payload(market)
+        if gamma_ptb is None:
+            return
+        diff_abs = abs(gamma_ptb - local_strike)
+        if diff_abs <= self.market_strike_gamma_warn_abs_usd:
+            return
+        last_warn = float(self.market_strike_last_gamma_warn_ts_by_slug.get(slug, 0.0))
+        if now_ts - last_warn < float(self.market_strike_gamma_mismatch_warn_interval_sec):
+            return
+        self.market_strike_last_gamma_warn_ts_by_slug[slug] = now_ts
+        logger.warning(
+            f"Strike validation mismatch for {slug}: "
+            f"local={float(local_strike):.2f} gamma_priceToBeat={float(gamma_ptb):.2f} "
+            f"diff=${float(diff_abs):.2f}. Keeping local opening strike."
+        )
+
+    async def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return None
+        instrument = self.cache.instrument(inst)
+        if instrument is None:
+            return None
+        slug = self._extract_market_slug_from_instrument(instrument)
+        if not slug:
+            slug = str(self.current_market_slug or "")
+
+        if slug and slug in self.market_strike_cache_by_slug:
+            cached = self.market_strike_cache_by_slug[slug]
+            await self._maybe_validate_strike_with_gamma(slug, cached)
+            return cached
+
+        info = getattr(instrument, "info", None) or {}
+        if not isinstance(info, dict):
+            info = {}
+        question = str(info.get("question", "") or "")
+        strike = self._extract_strike_from_question(question)
+        if strike is not None and slug:
+            self.market_strike_cache_by_slug[slug] = strike
+            self.market_strike_source_by_slug[slug] = "parsed"
+            logger.info(f"✓ Locked opening strike for {slug} via question parsing: ${strike:,.2f}")
+        return strike
+
+    # ------------------------------------------------------------------
     # Fair probability
     # ------------------------------------------------------------------
 
@@ -222,6 +287,7 @@ class SpotPricerMixin:
             self._record_external_spot_observation(external)
             if self.current_market_open_spot is None and self.current_market_slug:
                 self.current_market_open_spot = external
+                logger.info(f"✓ Locked current_market_open_spot for {self.current_market_slug}: ${external:,.2f}")
 
             strike = None
             sigma = self.maker_digital_sigma_default

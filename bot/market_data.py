@@ -1,8 +1,7 @@
-from __future__ import annotations
-
+import os
 from decimal import Decimal
 import math
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 import httpx
 import re
@@ -196,3 +195,37 @@ def estimate_external_spot_sigma_annualized(
     if not math.isfinite(sigma_annual) or sigma_annual <= 0:
         return None
     return Decimal(str(sigma_annual))
+
+
+async def fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
+    """
+    Attempt to fetch full event which contains eventMetadata.priceToBeat.
+    Async implementation for use in strategical decision paths.
+    """
+    api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
+    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{api_base}/events", params={"slug": slug})
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 0:
+                    event = data[0]
+                    # Expose priceToBeat inside the first market for legacy compatibility if available
+                    event_meta = event.get("eventMetadata", {}) or {}
+                    if not isinstance(event_meta, dict):
+                        event_meta = {}
+                    if not event_meta and isinstance(event.get("event_metadata"), dict):
+                        event_meta = event.get("event_metadata") or {}
+
+                    markets = event.get("markets", [])
+                    if isinstance(markets, list) and len(markets) > 0:
+                        market = markets[0]
+                        if event_meta:
+                            # Merge event metadata into market for easier extraction
+                            market["eventMetadata"] = event_meta
+                        return market
+    except Exception:
+        pass
+    return None
