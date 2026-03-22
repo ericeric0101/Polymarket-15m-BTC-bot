@@ -137,10 +137,14 @@ def compute_settlement_summary(
     live_inventory_cost: dict[str, dict[str, Any]],
     market_cycle_realized_net_usdc: Decimal,
     active_side: str = "UP",
+    inventory_side: str | None = None,
 ) -> SettlementSummary:
     outcome = "UP" if spot >= strike else "DOWN"
     side_txt = str(active_side or "UP").strip().upper()
-    redeem_per_share = 1.0 if outcome == side_txt else 0.0
+    # Use the actual token side the inventory belongs to (if provided),
+    # rather than active_side which may have flipped mid-market.
+    effective_side = str(inventory_side or "").strip().upper() or side_txt
+    redeem_per_share = 1.0 if outcome == effective_side else 0.0
     redeem_value = inventory_shares * redeem_per_share
     inventory_cost = 0.0
     for state in live_inventory_cost.values():

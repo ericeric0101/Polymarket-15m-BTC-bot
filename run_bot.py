@@ -3863,6 +3863,17 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 })
                 return
 
+            # Determine the actual token side the inventory belongs to,
+            # which may differ from active_side if a side flip occurred.
+            _inventory_side = None
+            for inv_key, inv_state in self.live_inventory_cost.items():
+                inv_qty = float(inv_state.get("qty", 0))
+                if inv_qty > 0.001:
+                    detected = self._side_for_instrument_id(inv_key)
+                    if detected != ActiveSide.NONE:
+                        _inventory_side = detected.value
+                        break
+
             settlement = compute_settlement_summary(
                 spot=spot,
                 strike=strike,
@@ -3870,11 +3881,13 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 live_inventory_cost=self.live_inventory_cost,
                 market_cycle_realized_net_usdc=self.market_cycle_realized_net_usdc,
                 active_side=self.active_side.value,
+                inventory_side=_inventory_side,
             )
 
             logger.info(
                 f"SETTLEMENT: slug={slug} spot={spot:.2f} strike={strike:.2f} "
                 f"outcome={settlement.outcome} active_side={settlement.active_side} "
+                f"inventory_side={_inventory_side or settlement.active_side} "
                 f"inv={inv:.4f} redeem=${settlement.redeem_value:.4f} "
                 f"cost=${settlement.inventory_cost:.4f} pnl={settlement.settlement_pnl:+.4f}"
             )
@@ -3885,6 +3898,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 "strike": strike,
                 "outcome": settlement.outcome,
                 "active_side": settlement.active_side,
+                "inventory_side": _inventory_side or settlement.active_side,
                 "inventory_shares": inv,
                 "redeem_per_share": settlement.redeem_per_share,
                 "redeem_value_usdc": settlement.redeem_value,
