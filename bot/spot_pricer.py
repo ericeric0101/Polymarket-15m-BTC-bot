@@ -251,11 +251,13 @@ class SpotPricerMixin:
         if not slug:
             slug = str(self.current_market_slug or "")
 
+        # 1) Cache hit — fastest path
         if slug and slug in self.market_strike_cache_by_slug:
             cached = self.market_strike_cache_by_slug[slug]
             await self._maybe_validate_strike_with_gamma(slug, cached)
             return cached
 
+        # 2) Try parsing from instrument question text
         info = getattr(instrument, "info", None) or {}
         if not isinstance(info, dict):
             info = {}
@@ -265,6 +267,53 @@ class SpotPricerMixin:
             self.market_strike_cache_by_slug[slug] = strike
             self.market_strike_source_by_slug[slug] = "parsed"
             logger.info(f"✓ Locked opening strike for {slug} via question parsing: ${strike:,.2f}")
+            return strike
+
+        # If no slug, can't do history/REST lookups
+        if not slug:
+            return strike
+
+        # 3) Try resolving from external spot history near market open
+        start_ts = self.market_start_ts_by_slug.get(slug)
+        if start_ts is None:
+            parsed_start = extract_market_start_ts_from_slug(slug)
+            if parsed_start is not None:
+                start_ts = parsed_start
+                self.market_start_ts_by_slug[slug] = parsed_start
+        if start_ts is None:
+            return strike
+
+        anchor = self._resolve_opening_strike_from_history(start_ts)
+        if anchor is not None:
+            anchor_ts, anchor_px = anchor
+            self.market_strike_cache_by_slug[slug] = anchor_px
+            self.market_strike_source_by_slug[slug] = "spot_history_open"
+            logger.info(
+                f"[STRIKE] Locked opening strike from spot history: "
+                f"${float(anchor_px):.2f} for slug={slug} "
+                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
+            )
+            await self._maybe_validate_strike_with_gamma(slug, anchor_px)
+            return anchor_px
+
+        # 4) Binance REST backfill as last resort
+        import asyncio as _asyncio
+        now_ts = time.time()
+        last_try = float(self.market_strike_rest_last_try_ts_by_slug.get(slug, 0.0))
+        if now_ts >= float(start_ts) and (now_ts - last_try) >= float(self.market_strike_rest_retry_sec):
+            self.market_strike_rest_last_try_ts_by_slug[slug] = now_ts
+            backfilled = await _asyncio.to_thread(self._fetch_binance_open_price_sync, start_ts)
+            if backfilled is not None:
+                self.market_strike_cache_by_slug[slug] = backfilled
+                self.market_strike_source_by_slug[slug] = "binance_rest_open"
+                logger.info(
+                    f"[STRIKE] Locked opening strike from Binance REST backfill: "
+                    f"${float(backfilled):.2f} for slug={slug}"
+                )
+                await self._maybe_validate_strike_with_gamma(slug, backfilled)
+                return backfilled
+
+        logger.debug(f"[STRIKE] Opening strike pending for slug={slug}; fallback={strike}")
         return strike
 
     # ------------------------------------------------------------------

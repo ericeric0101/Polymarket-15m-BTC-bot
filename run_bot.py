@@ -1903,16 +1903,33 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self._cancel_active_maker_orders()
         logger.error(f"MAKER KILL SWITCH ACTIVATED: {reason}")
 
-    def _reset_maker_state_for_new_market(self, prev_instrument_id: Optional[str], new_instrument_id: Optional[str]) -> None:
+    def _reset_maker_state_for_new_market(
+        self,
+        prev_instrument_id: Optional[str],
+        new_instrument_id: Optional[str],
+        *,
+        previous_slug: str = "",
+        current_slug: str = "",
+    ) -> None:
         """
         Per-market maker state reset.
         Inventory and kill-switch are strategy-local controls and should not carry across 15m markets.
+        When the slug is unchanged (same-market rollover / side flip), preserve inventory
+        tracking so SELL quotes are not incorrectly blocked.
         """
         if prev_instrument_id == new_instrument_id:
             return
+        same_slug = bool(previous_slug and current_slug and previous_slug == current_slug)
         self._cancel_active_maker_orders()
-        self.inventory_delta_shares = Decimal("0")
-        self.live_inventory_cost.clear()
+        if same_slug:
+            logger.info(
+                f"Same-slug rollover: preserving inventory_delta_shares="
+                f"{float(self.inventory_delta_shares):.6f} and live_inventory_cost "
+                f"(slug={current_slug}, inst {prev_instrument_id} -> {new_instrument_id})"
+            )
+        else:
+            self.inventory_delta_shares = Decimal("0")
+            self.live_inventory_cost.clear()
         self.market_cycle_realized_net_usdc = Decimal("0")
         self.pending_taker_exit_by_inst.clear()
         self.taker_exit_tail_attempted_by_inst.clear()
@@ -1935,7 +1952,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             self.maker_kill_switch = False
             logger.warning("Maker kill switch auto-reset on market rollover.")
         self.last_quote_update_ts = 0.0
-        logger.info(f"Reset maker per-market state: {prev_instrument_id} -> {new_instrument_id}")
+        logger.info(f"Reset maker per-market state: {prev_instrument_id} -> {new_instrument_id} (same_slug={same_slug})")
 
     def _project_inventory_after_fill(self, side: str, qty: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
         inst_id = instrument_id if instrument_id is not None else self.instrument_id
@@ -4252,7 +4269,11 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         )
         if self.current_market_slug != previous_slug:
             self._log_strike_status(self.current_market_slug)
-        self._reset_maker_state_for_new_market(previous_instrument, str(self.instrument_id))
+        self._reset_maker_state_for_new_market(
+            previous_instrument, str(self.instrument_id),
+            previous_slug=previous_slug,
+            current_slug=str(self.current_market_slug or ""),
+        )
         for inst_id in self.current_market_instruments:
             self.subscribe_quote_ticks(inst_id)
         return True
@@ -5022,7 +5043,7 @@ def run_integrated_bot(
             environment="live",
             trader_id="BTC-15MIN-INTEGRATED-001",
             logging=LoggingConfig(
-                log_level="INFO",
+                log_level=os.getenv("NAUTILUS_LOG_LEVEL", "ERROR"),
                 log_directory="./logs/nautilus",
             ),
             data_engine=LiveDataEngineConfig(qsize=6000),
@@ -5207,7 +5228,6 @@ def main():
         test_mode=test_mode,
         enable_terminal_dashboard=enable_terminal_dashboard,
     )
-
 
 if __name__ == "__main__":
     main()
