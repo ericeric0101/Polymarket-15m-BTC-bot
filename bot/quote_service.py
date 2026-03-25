@@ -376,6 +376,8 @@ def build_desired_quote_entry(
     high_cost_exit_cooldown_until: float,
     maker_sell_cost_protect_enabled: bool,
     maker_sell_cost_protect_fee_buffer_ps: Decimal,
+    maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
+    thesis_weakened: bool = False,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -419,6 +421,8 @@ def build_desired_quote_entry(
                     f"sellable_below_min sellable={float(sellable_qty):.6f} "
                     f"< min={float(maker_exchange_min_shares):.6f}"
                 )
+        # Allow loss-selling when: emergency window OR thesis weakened (signal flipped).
+        allow_loss_sell = emergency_window or thesis_weakened
         if (
             should_quote
             and high_cost_exit_cooldown_enabled
@@ -426,7 +430,7 @@ def build_desired_quote_entry(
             and now_ts < high_cost_exit_cooldown_until
             and avg_entry > 0
             and limit_price < avg_entry
-            and not emergency_window
+            and not allow_loss_sell
         ):
             should_quote = False
             diag_reason = (
@@ -438,12 +442,29 @@ def build_desired_quote_entry(
             and maker_sell_cost_protect_enabled
             and avg_entry > 0
             and limit_price < (avg_entry + maker_sell_cost_protect_fee_buffer_ps)
-            and not emergency_window
+            and not allow_loss_sell
         ):
             should_quote = False
             diag_reason = (
                 f"sell_cost_protect sell={float(limit_price):.4f} "
                 f"< min={float(avg_entry + maker_sell_cost_protect_fee_buffer_ps):.4f}"
+            )
+        # Minimum profit floor — block sells that are technically above cost but
+        # yield too little profit to justify using a buy quota slot.
+        if (
+            should_quote
+            and maker_sell_min_profit_floor_ps > 0
+            and avg_entry > 0
+            and limit_price < (avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps)
+            and not allow_loss_sell
+        ):
+            should_quote = False
+            min_sell = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
+            diag_reason = (
+                f"min_profit_floor sell={float(limit_price):.4f} "
+                f"< min={float(min_sell):.4f} "
+                f"(entry={float(avg_entry):.4f}+fee={float(maker_sell_cost_protect_fee_buffer_ps):.4f}"
+                f"+floor={float(maker_sell_min_profit_floor_ps):.4f})"
             )
 
     if reduce_only_reason and side == "buy":
@@ -498,6 +519,8 @@ def should_requote_existing_order(
     target_version: int,
     now_ts: float,
     maker_requote_min_age_sec: float,
+    side: str = "",
+    maker_requote_min_age_sec_sell: float = 0,
 ) -> bool:
     if not current:
         return False
@@ -507,6 +530,10 @@ def should_requote_existing_order(
     if current_target_version >= target_version:
         return False
     created_ts = float(current.get("created_ts", 0.0))
-    if maker_requote_min_age_sec > 0 and created_ts > 0 and (now_ts - created_ts) < maker_requote_min_age_sec:
+    # Use sell-specific min age if this is a sell order and one is configured.
+    effective_min_age = maker_requote_min_age_sec
+    if side.lower() == "sell" and maker_requote_min_age_sec_sell > 0:
+        effective_min_age = maker_requote_min_age_sec_sell
+    if effective_min_age > 0 and created_ts > 0 and (now_ts - created_ts) < effective_min_age:
         return False
     return True

@@ -227,7 +227,8 @@ def run_auto_redeem_script(
             check=False,
         )
         elapsed = time.time() - started_ts
-        stdout_tail = "\n".join((proc.stdout or "").strip().splitlines()[-8:])
+        stdout_full = (proc.stdout or "").strip()
+        stdout_tail = "\n".join(stdout_full.splitlines()[-8:])
         stderr_tail = "\n".join((proc.stderr or "").strip().splitlines()[-4:])
         logger_info_fn(
             f"Auto redeem run done: reason={reason} rc={proc.returncode} elapsed={elapsed:.1f}s "
@@ -237,6 +238,42 @@ def run_auto_redeem_script(
             logger_info_fn(f"Auto redeem output (tail):\n{stdout_tail}")
         if stderr_tail:
             logger_warning_fn(f"Auto redeem stderr (tail):\n{stderr_tail}")
+
+        # Parse stdout for individual redeem results and total redeemable size.
+        redeem_results: list[dict[str, Any]] = []
+        selected_total_size = 0.0
+        redeemable_count_raw = 0
+        for line in stdout_full.splitlines():
+            line_s = line.strip()
+            # Parse: redeemPositions condition=0x... tx=0x... status=1
+            if line_s.startswith("redeemPositions "):
+                parts: dict[str, str] = {}
+                for token in line_s.split():
+                    if "=" in token:
+                        k, v = token.split("=", 1)
+                        parts[k] = v
+                result = {
+                    "condition_id": parts.get("condition", ""),
+                    "tx_hash": parts.get("tx", ""),
+                    "status": int(parts.get("status", "0")),
+                }
+                redeem_results.append(result)
+                db_strategy_event_fn("REDEEM_EXECUTED", result)
+            # Parse: Selected total redeemable size: 1.234567
+            if "Selected total redeemable size:" in line_s:
+                try:
+                    selected_total_size = float(line_s.split(":")[-1].strip())
+                except ValueError:
+                    pass
+            # Parse: redeemable=3
+            if "redeemable=" in line_s and "positions_total=" in line_s:
+                try:
+                    for token in line_s.split():
+                        if token.startswith("redeemable="):
+                            redeemable_count_raw = int(token.split("=")[1])
+                except (ValueError, IndexError):
+                    pass
+
         db_strategy_event_fn(
             "AUTO_REDEEM_RUN",
             {
@@ -244,10 +281,24 @@ def run_auto_redeem_script(
                 "return_code": proc.returncode,
                 "elapsed_sec": elapsed,
                 "apply": auto_redeem_apply,
+                "redeems_executed": len(redeem_results),
+                "redeems_succeeded": sum(1 for r in redeem_results if r.get("status") == 1),
+                "redeemable_positions_found": redeemable_count_raw,
+                "selected_total_size": selected_total_size,
             },
         )
     except subprocess.TimeoutExpired:
         logger_warning_fn(f"Auto redeem timeout after {auto_redeem_timeout_sec}s (reason={reason})")
+        db_strategy_event_fn(
+            "AUTO_REDEEM_RUN",
+            {
+                "reason": reason,
+                "return_code": -1,
+                "elapsed_sec": auto_redeem_timeout_sec,
+                "apply": auto_redeem_apply,
+                "error": "timeout",
+            },
+        )
 
 
 def adjust_inventory_after_merge(

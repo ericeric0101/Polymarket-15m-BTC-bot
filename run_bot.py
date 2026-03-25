@@ -978,6 +978,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.maker_sell_cost_protect_fee_buffer_ps = Decimal(
             os.getenv("MAKER_SELL_COST_PROTECT_FEE_BUFFER_PS", "0.005")
         )
+        self.maker_sell_min_profit_floor_ps = Decimal(
+            os.getenv("MAKER_SELL_MIN_PROFIT_FLOOR_PS", "0")
+        )
         self.maker_sell_cost_protect_emergency_last_sec = max(
             0, int(os.getenv("MAKER_SELL_COST_PROTECT_EMERGENCY_LAST_SEC", "60"))
         )
@@ -1005,6 +1008,10 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.maker_requote_min_age_sec = max(
             0.0,
             float(os.getenv("MAKER_REQUOTE_MIN_AGE_SEC", "6")),
+        )
+        self.maker_requote_min_age_sec_sell = max(
+            0.0,
+            float(os.getenv("MAKER_REQUOTE_MIN_AGE_SEC_SELL", "0")),
         )
         self.maker_early_sell_only_sec = max(
             0,
@@ -2713,6 +2720,22 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                         self.maker_min_expected_net_usdc
                         * self.maker_reload_min_expected_net_multiplier
                     )
+                # Determine if the directional thesis has weakened against our position.
+                # If score flips or drops to zero while holding inventory, allow loss-selling.
+                _thesis_weakened = False
+                if (
+                    side == "sell"
+                    and self.inventory_delta_shares > 0
+                    and self.bi_side_enabled
+                ):
+                    score = float(self.side_decision_score)
+                    if self.active_side == ActiveSide.UP and score < 0:
+                        _thesis_weakened = True
+                    elif self.active_side == ActiveSide.DOWN and score > 0:
+                        _thesis_weakened = True
+                    elif self.active_side != ActiveSide.NONE and abs(score) < 0.5:
+                        _thesis_weakened = True
+
                 desired_entry = build_desired_quote_entry(
                     order_key=order_key,
                     side=side,
@@ -2736,9 +2759,37 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                     high_cost_exit_cooldown_until=float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0)),
                     maker_sell_cost_protect_enabled=self.maker_sell_cost_protect_enabled,
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
+                    maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                    thesis_weakened=_thesis_weakened,
                 )
                 desired_entry["dynamic_fee_rate"] = quote_ctx.dynamic_fee_rate
                 desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
+
+                # FIX: Protect profitable existing sell orders from being canceled.
+                # When sell_cost_protect or high_cost_exit_cooldown blocks the NEW
+                # calculated price, check whether the EXISTING order on the book is
+                # already profitable. If so, keep the existing order alive instead of
+                # canceling it and losing a good fill opportunity.
+                if (
+                    side == "sell"
+                    and not desired_entry.get("should_quote", False)
+                ):
+                    diag = str(desired_entry.get("diag_reason", ""))
+                    if "sell_cost_protect" in diag or "high_cost_exit_cooldown" in diag or "min_profit_floor" in diag:
+                        existing_state = self.active_maker_orders.get(order_key)
+                        if existing_state is not None:
+                            existing_price = Decimal(str(existing_state.get("price", 0)))
+                            cost_floor = avg_entry + self.maker_sell_cost_protect_fee_buffer_ps + self.maker_sell_min_profit_floor_ps
+                            if existing_price >= cost_floor:
+                                # Existing order is profitable — keep it alive.
+                                desired_entry["should_quote"] = True
+                                desired_entry["price"] = existing_price
+                                desired_entry["diag_reason"] = (
+                                    f"sell_preserved existing={float(existing_price):.4f} "
+                                    f">= floor={float(cost_floor):.4f} "
+                                    f"(new_blocked: {diag})"
+                                )
+
                 if (
                     side == "buy"
                     and current_inst_inventory_qty + Decimal("0.000001")
@@ -2804,6 +2855,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 target_version=target_version,
                 now_ts=now_ts,
                 maker_requote_min_age_sec=float(self.maker_requote_min_age_sec),
+                side=side,
+                maker_requote_min_age_sec_sell=float(self.maker_requote_min_age_sec_sell),
             ):
                 # Token Bucket guard against cancel storms
                 if self.requote_bucket_tokens < 1.0:
