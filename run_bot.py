@@ -1964,6 +1964,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
     def _project_inventory_after_fill(self, side: str, qty: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
         inst_id = instrument_id if instrument_id is not None else self.instrument_id
         projected = self.inventory_delta_shares
+        if side.lower() == "sell":
+            projected = self._get_confirmed_inventory_qty_for_instrument(inst_id)
         
         # Calculate in-flight volume for the SAME side
         target_side_str = "BUY" if side.lower() == "buy" else "SELL"
@@ -1988,6 +1990,24 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         if side.lower() == "buy":
             return projected + in_flight_qty + qty
         return projected - in_flight_qty - qty
+
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id: Optional[Any] = None) -> Decimal:
+        """
+        Return the strategy's confirmed inventory for a specific instrument.
+
+        This is derived from the bot's internal fill ledger (`live_inventory_cost`),
+        not from external position/balance caches, so SELL quoting cannot race ahead
+        of a locally confirmed BUY fill.
+        """
+        inst = instrument_id if instrument_id is not None else self.instrument_id
+        inst_key = self._instrument_key(inst)
+        if not inst_key:
+            return Decimal("0")
+        state = self.live_inventory_cost.get(inst_key)
+        if not state:
+            return Decimal("0")
+        qty = Decimal(str(state.get("qty", "0")))
+        return max(Decimal("0"), qty)
 
     def _get_sellable_qty_for_current_instrument(self, instrument_id: Optional[Any] = None) -> Decimal:
         """
@@ -2037,17 +2057,22 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         Conservative sellable qty:
         min(cache open positions, on-chain conditional balance with safety buffer).
         """
+        confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
+        if confirmed_qty <= 0:
+            return Decimal("0")
         local_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
         inst_txt = str(instrument_id or "")
         token_id = self._extract_token_id_from_instrument(inst_txt)
         onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
         if onchain_qty is None:
-            return local_qty
+            return min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
         safe_onchain = onchain_qty * (Decimal("1") - self.conditional_balance_safety_buffer_pct)
         safe_onchain = max(Decimal("0"), safe_onchain)
+        candidates = [confirmed_qty]
         if local_qty > 0:
-            return min(local_qty, safe_onchain)
-        return safe_onchain
+            candidates.append(local_qty)
+        candidates.append(safe_onchain)
+        return min(candidates)
 
     def _compute_maker_order_qty(self, limit_price: Decimal, precision: int) -> Decimal:
         """
@@ -2679,6 +2704,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                     continue
                 sell_pause_until = float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0))
                 sellable_qty = None
+                confirmed_inventory_qty = Decimal("0")
+                if side == "sell":
+                    confirmed_inventory_qty = self._get_confirmed_inventory_qty_for_instrument(inst_id)
                 if side == "sell" and not self._is_dry_run_mode():
                     sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
                 inv_state = self.live_inventory_cost.get(inst_key) if inst_key else None
@@ -2764,6 +2792,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 )
                 desired_entry["dynamic_fee_rate"] = quote_ctx.dynamic_fee_rate
                 desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
+                if side == "sell" and confirmed_inventory_qty <= 0:
+                    desired_entry["should_quote"] = False
+                    desired_entry["diag_reason"] = "confirmed_inventory_zero"
 
                 # FIX: Protect profitable existing sell orders from being canceled.
                 # When sell_cost_protect or high_cost_exit_cooldown blocks the NEW
@@ -2972,6 +3003,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         # If sellable is less than requested, REDUCE the qty to sellable amount before projected checks.
         if side == "sell" and not self._is_dry_run_mode():
             sellable_qty = self._get_effective_sellable_qty(instrument_id=instrument_id)
+            confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
             adjusted_qty, sellable_guard_reason = apply_sellable_inventory_guard(
                 qty_dec=qty_dec,
                 precision=precision,
@@ -2988,7 +3020,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                         logger.info(
                             "NO_QUOTE diagnostic: "
                             f"inst={inst_key} side=sell reason=no_sellable_inventory "
-                            f"sellable={float(sellable_qty):.6f} inventory={float(self.inventory_delta_shares):.6f}"
+                            f"sellable={float(sellable_qty):.6f} confirmed={float(confirmed_qty):.6f} "
+                            f"inventory={float(self.inventory_delta_shares):.6f}"
                         )
                     else:
                         logger.info(
@@ -3029,9 +3062,11 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             )
             return
         if side == "sell" and projected_inventory < Decimal("0"):
+            confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
             logger.info(
                 "Skip maker quote: projected inventory would go negative "
-                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f})"
+                f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f}, "
+                f"confirmed={float(confirmed_qty):.6f}, global={float(self.inventory_delta_shares):.6f})"
             )
             self._db_order_event(
                 event_type="ORDER_SKIP_SELLABLE_PROJECTED",
@@ -3040,7 +3075,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 qty=float(qty_dec),
                 reason="projected_inventory_below_zero",
                 payload={
-                    "current_inventory": float(self.inventory_delta_shares),
+                    "current_inventory": float(confirmed_qty),
+                    "global_inventory": float(self.inventory_delta_shares),
                     "projected_inventory": float(projected_inventory),
                 },
             )
