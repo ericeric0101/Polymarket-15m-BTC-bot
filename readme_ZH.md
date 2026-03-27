@@ -350,6 +350,117 @@ venv/bin/python scripts/hourly_attribution_report.py
 venv/bin/python scripts/mirrored_down_report.py
 ```
 
+### Pure Signal Probe（只觀測、不下單）
+
+若你想驗證「`spot / priceToBeat / time_left / orderbook` 是否真的存在可交易錯價」，可以使用：
+
+- [scripts/pure_signal_probe.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/pure_signal_probe.py)
+
+這支腳本不會下單，只會：
+
+- 找目前 BTC 15 分鐘市場
+- 取得 strike（優先讀 `priceToBeat`，失敗時會 fallback 到 question parsing / 開盤 spot history / Binance REST 開盤價回填）
+- 抓 BTC spot
+- 透過 Nautilus Polymarket data client 訂閱 quote ticks，使用和 `run_bot.py` 同源的 bid/ask
+- 估算短期波動率
+- 計算 `fair_up / fair_down`
+- 讀取 `UP / DOWN` orderbook 最佳價
+- 計算理論 edge
+- 寫入 SQLite DB，供之後和真實成交資料比對
+
+常用指令：
+
+```bash
+./venv/bin/python scripts/pure_signal_probe.py --duration-sec 1800 --interval-sec 2
+```
+
+意思：
+
+- `--duration-sec 1800`：執行 1800 秒，也就是 30 分鐘
+- `--interval-sec 2`：每 2 秒記錄一次 market snapshot
+
+若你只想先跑 5 分鐘：
+
+```bash
+./venv/bin/python scripts/pure_signal_probe.py --duration-sec 300 --interval-sec 2
+```
+
+若你不想和主 bot 共用同一個 DB，建議改寫到獨立資料庫：
+
+```bash
+./venv/bin/python scripts/pure_signal_probe.py --db ./logs/pure_probe.db --duration-sec 1800 --interval-sec 2
+```
+
+若你想在 terminal 看到低頻摘要，可加上 `--verbose`：
+
+```bash
+./venv/bin/python scripts/pure_signal_probe.py --db ./logs/pure_probe.db --duration-sec 1800 --interval-sec 2 --verbose --verbose-every-sec 30
+```
+
+意思：
+
+- `--verbose`：開啟輕量摘要輸出
+- `--verbose-every-sec 30`：每 30 秒最多印一行，不會每 2 秒洗版
+
+若你想確認 probe 是否真的有持續寫入 DB，可開另一個 terminal 執行：
+
+```bash
+sqlite3 logs/pure_probe.db "select count(*) from strategy_events;"
+sqlite3 logs/pure_probe.db "select id, ts, event_type, substr(payload_json,1,220) from strategy_events order by id desc limit 8;"
+```
+
+若你想把 probe 資料庫整個重置，直接刪除：
+
+```bash
+rm -f logs/pure_probe.db logs/pure_probe.db-wal logs/pure_probe.db-shm
+```
+
+說明：
+
+- 這支 probe 可以和 `python run_bot.py` 同時在不同 terminal 執行
+- 它不會下單，但會額外打市場資料 API
+- 若擔心和主 bot 的 journal 混在一起，優先使用 `--db ./logs/pure_probe.db`
+- 所有時間參數都以「秒」為單位
+
+### Pure Probe Report（候選訊號驗證報表）
+
+當 `pure_signal_probe.py` 跑了一段時間後，可以用下面指令把 `pure_probe.db` 的候選訊號，和主 bot `trade_journal.db` 裡的 `MARKET_SETTLEMENT` 結果對起來：
+
+```bash
+./venv/bin/python scripts/pure_probe_report.py --probe-db ./logs/pure_probe.db --trade-db ./logs/trade_journal.db --hours 12
+```
+
+這份報表會輸出：
+
+- `candidate_rows`：候選訊號總筆數
+- `candidate_markets`：有候選訊號的市場數
+- `settled_candidate_markets`：已經能對到結算結果的市場數
+- `all_candidates`：若每一筆 candidate 都在 `ask` 成交並抱到結算，理論損益如何
+- `first_per_market`：每個市場只取第一筆 candidate 的理論結果
+- `best_edge_per_market`：每個市場只取 edge 最大那筆 candidate 的理論結果
+- `last_per_market`：每個市場只取最後一筆 candidate 的理論結果
+
+如果 `settled_candidate_markets` 很少，代表樣本還不夠，先讓 probe 繼續跑久一點再看報表。
+
+若你想更接近實際策略，可以加上：
+
+```bash
+./venv/bin/python scripts/pure_probe_report.py \
+  --probe-db ./logs/pure_probe.db \
+  --trade-db ./logs/trade_journal.db \
+  --run-id pure_probe_1774565788_47f89221 \
+  --selection last \
+  --persistence-sec 10 \
+  --hours 24
+```
+
+重點參數：
+
+- `--run-id`：只分析某一次 probe run，避免不同輪資料混在一起
+- `--selection {all,first,best,last}`：每市場只保留哪一筆訊號
+- `--persistence-sec 10`：candidate 需要在 snapshot 中連續成立至少 10 秒才算有效
+- `--segment-gap-sec`：兩筆 snapshot 間隔多大以內，仍視為同一段 candidate streak
+
 ---
 
 ## 實盤注意事項
