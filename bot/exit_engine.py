@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from bot.models import ExitDecision, ExitDecisionType, MarketSnapshot, PositionState, SignalDecision
-from bot.risk_policy import HoldToRedeemPolicy
 
 
 @dataclass(frozen=True)
@@ -21,14 +20,11 @@ class ExitEngineConfig:
     conviction_stop_loss_multiplier: Decimal
     conviction_extra_confirmations: int
     hold_band_requires_locked: bool
-    hold_to_redeem_min_score_abs: Decimal
-    hold_to_redeem_max_time_left_sec: int
 
 
 class ExitPolicyEngine:
-    def __init__(self, config: ExitEngineConfig, hold_to_redeem_policy: HoldToRedeemPolicy) -> None:
+    def __init__(self, config: ExitEngineConfig, **kwargs) -> None:
         self.config = config
-        self.hold_to_redeem_policy = hold_to_redeem_policy
 
     def _classify_band(self, snapshot: MarketSnapshot, signal: SignalDecision) -> str:
         score_abs = abs(signal.score)
@@ -57,33 +53,6 @@ class ExitPolicyEngine:
         thesis_weakened = (not signal.matches_position) or (
             abs(signal.score) < self.config.stop_loss_thesis_min_score_abs
         )
-
-        hold_to_redeem_time_ok = (
-            snapshot.time_left_sec is not None
-            and snapshot.time_left_sec <= float(self.config.hold_to_redeem_max_time_left_sec)
-        )
-        hold_to_redeem_signal_ok = (
-            signal.matches_position
-            and abs(signal.score) >= self.config.hold_to_redeem_min_score_abs
-        )
-        if (
-            self.hold_to_redeem_policy.should_hold(
-            avg_entry=position.avg_entry_price,
-            inventory_shares=position.qty,
-            time_left_sec=snapshot.time_left_sec,
-            )
-            and hold_to_redeem_time_ok
-            and hold_to_redeem_signal_ok
-        ):
-            return ExitDecision(
-                decision_type=ExitDecisionType.HOLD_TO_REDEEM,
-                reason="hold_to_redeem_preferred",
-                net_if_exit=net_if_exit,
-                gross_if_exit=gross_if_exit,
-                exit_fee_est=exit_fee_est,
-                exit_px_effective=exit_px_effective,
-                metadata=base_metadata,
-            )
 
         if band == "hold":
             return ExitDecision(

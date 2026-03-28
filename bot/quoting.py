@@ -36,7 +36,6 @@ class QuotePlanGuardOutcome:
     side_disable_reason_by_side: dict[str, str]
     reduce_only: ReduceOnlyDecision
     buy_cooldown_remaining: Optional[float]
-    hold_to_redeem_avg_entry: Optional[Decimal]
     momentum_trend_pct: Optional[Decimal]
     momentum_buy_blocked: bool
     momentum_sell_blocked: bool
@@ -137,9 +136,6 @@ def apply_quote_plan_guards(
     min_directional_edge_ps_conservative: Decimal,
     now_ts: float,
     buy_cooldown_until_ts: float,
-    hold_to_redeem_cost_threshold: Decimal,
-    max_avg_entry: Decimal,
-    prefer_hold_to_redeem: bool,
     momentum_filter_pct: Decimal,
     momentum_window_ticks: int,
     momentum_history: list[Decimal],
@@ -150,6 +146,8 @@ def apply_quote_plan_guards(
     min_minutes_to_close: float,
     reduce_only_no_new_sell_last_sec: int,
     forced_sell_only: bool,
+    active_side: str = "",
+    min_directional_edge_ps_down: Optional[Decimal] = None,
 ) -> QuotePlanGuardOutcome:
     side_disable_reason_by_side: dict[str, str] = initial_side_disable_reasons(quote_mode)
 
@@ -166,7 +164,13 @@ def apply_quote_plan_guards(
     if directional_edge_gate_enabled and "buy" in side_plan and phase_value == "ACTIVE":
         buy_tuple = side_plan.get("buy")
         buy_edge_ps = buy_tuple[5] if (buy_tuple and len(buy_tuple) > 5) else None
-        min_edge_gate = min_directional_edge_ps_conservative if regime_guard_active else min_directional_edge_ps
+        # Use side-specific edge threshold: DOWN side can have a higher bar
+        if min_directional_edge_ps_down is not None and active_side.upper() == "DOWN":
+            min_edge_gate = min_directional_edge_ps_down
+        elif regime_guard_active:
+            min_edge_gate = min_directional_edge_ps_conservative
+        else:
+            min_edge_gate = min_directional_edge_ps
         if isinstance(buy_edge_ps, Decimal) and buy_edge_ps < min_edge_gate:
             set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "edge_gate_buy")
 
@@ -181,21 +185,6 @@ def apply_quote_plan_guards(
             f"post_fill_buy_cooldown_{buy_cooldown_remaining:.0f}s",
         )
 
-    hold_to_redeem_avg_entry: Optional[Decimal] = None
-    if (
-        "sell" in side_plan
-        and hold_to_redeem_cost_threshold > 0
-        and inventory_delta_shares > 0
-        and prefer_hold_to_redeem
-    ):
-        hold_to_redeem_avg_entry = max_avg_entry
-        set_side_should_quote(
-            side_plan,
-            side_disable_reason_by_side,
-            "sell",
-            False,
-            f"hold_to_redeem_avg_entry_{float(max_avg_entry):.2f}",
-        )
 
     momentum_trend_pct: Optional[Decimal] = None
     momentum_buy_blocked = False
@@ -251,7 +240,6 @@ def apply_quote_plan_guards(
         side_disable_reason_by_side=side_disable_reason_by_side,
         reduce_only=reduce_only,
         buy_cooldown_remaining=buy_cooldown_remaining,
-        hold_to_redeem_avg_entry=hold_to_redeem_avg_entry,
         momentum_trend_pct=momentum_trend_pct,
         momentum_buy_blocked=momentum_buy_blocked,
         momentum_sell_blocked=momentum_sell_blocked,

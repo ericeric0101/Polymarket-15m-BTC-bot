@@ -138,8 +138,6 @@ from bot.quote_service import (
 from bot.risk_policy import (
     FillCooldownConfig,
     FillCooldownPolicy,
-    HoldToRedeemConfig,
-    HoldToRedeemPolicy,
     RegimeGuardConfig,
     RegimeGuardPolicy,
 )
@@ -683,6 +681,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             "MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", "0"
         ).strip().lower() in ("1", "true", "yes", "on")
         self.maker_min_directional_edge_ps = Decimal(os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"))
+        self.maker_min_directional_edge_ps_down = Decimal(
+            os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS_DOWN", os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"))
+        )
         self.maker_min_directional_edge_ps_conservative = Decimal(
             os.getenv("MAKER_MIN_DIRECTIONAL_EDGE_PS_CONSERVATIVE", "0.03")
         )
@@ -895,35 +896,33 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             "EXIT_HOLD_BAND_REQUIRES_LOCKED", "1"
         ).strip().lower() not in ("0", "false", "no")
         
-        # Hold-to-redeem: if avg buy cost >= threshold, hold position to settlement
-        self.hold_to_redeem_cost_threshold = Decimal(
-            os.getenv("MAKER_HOLD_TO_REDEEM_COST_THRESHOLD", "0.65")
+        # Maker-style urgent exit: place maker SELL at best_bid when thesis weakens
+        self.maker_urgent_exit_enabled = os.getenv(
+            "MAKER_URGENT_EXIT_ENABLED", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.maker_urgent_exit_min_loss_usdc = Decimal(
+            os.getenv("MAKER_URGENT_EXIT_MIN_LOSS_USDC", "0.10")
         )
-        self.hold_to_redeem_min_time_left_sec = max(
-            0,
-            int(os.getenv("MAKER_HOLD_TO_REDEEM_MIN_TIME_LEFT_SEC", "180")),
+        self.maker_urgent_exit_ttl_sec = max(
+            5, int(os.getenv("MAKER_URGENT_EXIT_TTL_SEC", "15"))
         )
-        self.hold_to_redeem_max_inventory_shares = Decimal(
-            os.getenv("MAKER_HOLD_TO_REDEEM_MAX_INVENTORY_SHARES", "2.0")
+        self.maker_urgent_exit_cooldown_sec = max(
+            1, int(os.getenv("MAKER_URGENT_EXIT_COOLDOWN_SEC", "5"))
         )
-        self.hold_to_redeem_min_score_abs = Decimal(
-            os.getenv("MAKER_HOLD_TO_REDEEM_MIN_SCORE_ABS", "2.0")
+        self.maker_urgent_exit_min_confirmations = max(
+            1, int(os.getenv("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS", "3"))
         )
-        self.hold_to_redeem_max_time_left_sec = max(
-            0,
-            int(os.getenv("MAKER_HOLD_TO_REDEEM_MAX_TIME_LEFT_SEC", "300")),
+        # Implied sigma: derive σ from market mid to improve fair price
+        self.maker_implied_sigma_enabled = os.getenv(
+            "MAKER_DIGITAL_IMPLIED_SIGMA_ENABLED", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.maker_implied_sigma_weight = Decimal(
+            os.getenv("MAKER_DIGITAL_IMPLIED_SIGMA_WEIGHT", "0.50")
         )
         self.exit_policy = ExitPolicy(
             ExitPolicyConfig(
                 aggressive_stage_sec=max(30, int(os.getenv("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", "180"))),
                 taker_stage_sec=max(15, int(os.getenv("EXIT_POLICY_TAKER_STAGE_SEC", "75"))),
-            )
-        )
-        self.hold_to_redeem_policy = HoldToRedeemPolicy(
-            HoldToRedeemConfig(
-                cost_threshold=self.hold_to_redeem_cost_threshold,
-                min_time_left_sec=self.hold_to_redeem_min_time_left_sec,
-                max_inventory_shares=self.hold_to_redeem_max_inventory_shares,
             )
         )
         self.exit_policy_engine = ExitPolicyEngine(
@@ -934,16 +933,13 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 stop_loss_requires_thesis_weakening=self.exit_stop_loss_requires_thesis_weakening,
                 stop_loss_thesis_min_score_abs=self.exit_stop_loss_thesis_min_score_abs,
                 conviction_band_min_price=self.exit_conviction_band_min_price,
-                hold_band_min_price=max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold),
+                hold_band_min_price=self.exit_hold_band_min_price,
                 conviction_band_min_score_abs=self.exit_conviction_band_min_score_abs,
                 hold_band_min_score_abs=self.exit_hold_band_min_score_abs,
                 conviction_stop_loss_multiplier=self.exit_conviction_stop_loss_multiplier,
                 conviction_extra_confirmations=self.exit_conviction_extra_confirmations,
                 hold_band_requires_locked=self.exit_hold_band_requires_locked,
-                hold_to_redeem_min_score_abs=self.hold_to_redeem_min_score_abs,
-                hold_to_redeem_max_time_left_sec=self.hold_to_redeem_max_time_left_sec,
             ),
-            hold_to_redeem_policy=self.hold_to_redeem_policy,
         )
         self.runtime_git_revision = detect_runtime_git_revision(project_root)
 
@@ -1295,17 +1291,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
     def _max_inventory_avg_entry(self) -> Decimal:
         return InventoryLedger.max_avg_entry(self.live_inventory_cost)
 
-    def _should_prefer_hold_to_redeem(
-        self,
-        avg_entry: Decimal,
-        inventory_shares: Decimal,
-        time_left_sec: Optional[float],
-    ) -> bool:
-        return self.hold_to_redeem_policy.should_hold(
-            avg_entry=avg_entry,
-            inventory_shares=inventory_shares,
-            time_left_sec=time_left_sec,
-        )
+
 
     def _is_emergency_exit_window(self, time_left_sec: Optional[float]) -> bool:
         if time_left_sec is None:
@@ -2440,6 +2426,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
 
         # Check whether current inventory should be force-closed via taker orders.
         await self._maybe_taker_exit_positions(time.time(), is_simulation=self._is_dry_run_mode())
+        # Maker-style urgent exit: thesis weakened → place SELL at best_bid (zero taker fee)
+        await self._maybe_maker_urgent_exit(time.time())
 
         now_ts = time.time()
         if now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
@@ -2451,9 +2439,15 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         # Cancel stale quotes by TTL before computing new target quotes.
         for order_key, state in list(self.active_maker_orders.items()):
             created_ts = float(state.get("created_ts", 0.0))
-            if created_ts <= 0 or (now_ts - created_ts) >= self.maker_order_ttl_sec:
+            # Urgent exit orders use their own (shorter) TTL
+            if state.get("is_urgent_exit"):
+                ttl = float(state.get("urgent_exit_ttl", self.maker_order_ttl_sec))
+            else:
+                ttl = self.maker_order_ttl_sec
+            if created_ts <= 0 or (now_ts - created_ts) >= ttl:
                 side = str(state.get("side", "") or "")
-                logger.info(f"Maker order [{side}] exceeded TTL={self.maker_order_ttl_sec}s, cancel and requote.")
+                is_urgent = " (urgent_exit)" if state.get("is_urgent_exit") else ""
+                logger.info(f"Maker order [{side}]{is_urgent} exceeded TTL={ttl}s, cancel and requote.")
                 self._cancel_maker_order_side(order_key, reason="ttl")
 
         if abs(self.inventory_delta_shares) > self.maker_max_inventory_shares:
@@ -2538,16 +2532,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 continue
 
             momentum_history = self._momentum_history_for_instrument(inst_id)
-            max_avg_entry = self._max_inventory_avg_entry()
-            hold_pref = self._should_prefer_hold_to_redeem(
-                avg_entry=max_avg_entry,
-                inventory_shares=self.inventory_delta_shares,
-                time_left_sec=time_left_sec_global,
-            ) if (
-                "sell" in side_plan
-                and self.hold_to_redeem_cost_threshold > 0
-                and self.inventory_delta_shares > 0
-            ) else False
             guard_outcome = apply_quote_plan_guards(
                 side_plan=side_plan,
                 quote_mode=self.maker_quote_sides,
@@ -2561,9 +2545,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 min_directional_edge_ps_conservative=self.maker_min_directional_edge_ps_conservative,
                 now_ts=now_ts,
                 buy_cooldown_until_ts=float(self.buy_cooldown_until_ts),
-                hold_to_redeem_cost_threshold=self.hold_to_redeem_cost_threshold,
-                max_avg_entry=max_avg_entry,
-                prefer_hold_to_redeem=hold_pref,
                 momentum_filter_pct=self.maker_momentum_filter_pct,
                 momentum_window_ticks=self.maker_momentum_window_ticks,
                 momentum_history=momentum_history,
@@ -2574,6 +2555,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 min_minutes_to_close=self.maker_min_minutes_to_close,
                 reduce_only_no_new_sell_last_sec=self.maker_reduce_only_no_new_sell_last_sec,
                 forced_sell_only=_forced_sell_only,
+                active_side=self.active_side.value,
+                min_directional_edge_ps_down=self.maker_min_directional_edge_ps_down,
             )
             side_disable_reason_by_side = guard_outcome.side_disable_reason_by_side
             reduce_only_reason = guard_outcome.reduce_only.reason
@@ -2590,16 +2573,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 self._logged_buy_cd = False
                 logger.info("Post-fill buy cooldown cleared.")
 
-            if guard_outcome.hold_to_redeem_avg_entry is not None:
-                if not getattr(self, "_logged_hold_redeem_q", False) or time.time() - getattr(self, "_last_hold_redeem_q_log", 0) > 60:
-                    logger.info(
-                        f"Hold-to-redeem: blocking SELL quotes. "
-                        f"avg_entry={float(guard_outcome.hold_to_redeem_avg_entry):.2f} >= {float(self.hold_to_redeem_cost_threshold):.2f}, "
-                        f"inv={float(self.inventory_delta_shares):.4f}, "
-                        f"time_left_sec={time_left_sec_global if time_left_sec_global is not None else -1:.1f}"
-                    )
-                    self._logged_hold_redeem_q = True
-                    self._last_hold_redeem_q_log = time.time()
+
 
             if guard_outcome.momentum_buy_blocked and guard_outcome.momentum_trend_pct is not None:
                 if not getattr(self, "_logged_mom_buy", False) or time.time() - getattr(self, "_last_mom_ts", 0) > 30:
@@ -3249,8 +3223,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),
-                "maker_hold_to_redeem_min_score_abs": float(self.hold_to_redeem_min_score_abs),
-                "maker_hold_to_redeem_max_time_left_sec": int(self.hold_to_redeem_max_time_left_sec),
+                "maker_urgent_exit_enabled": self.maker_urgent_exit_enabled,
+                "maker_min_directional_edge_ps_down": float(self.maker_min_directional_edge_ps_down),
                 "maker_reload_inventory_threshold_shares": float(self.maker_reload_inventory_threshold_shares),
                 "maker_reload_min_expected_net_multiplier": float(self.maker_reload_min_expected_net_multiplier),
                 "maker_reload_min_directional_edge_ps": float(self.maker_reload_min_directional_edge_ps),
@@ -3264,7 +3238,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 "exit_stop_loss_requires_thesis_weakening": self.exit_stop_loss_requires_thesis_weakening,
                 "exit_stop_loss_thesis_min_score_abs": float(self.exit_stop_loss_thesis_min_score_abs),
                 "exit_conviction_band_min_price": float(self.exit_conviction_band_min_price),
-                "exit_hold_band_min_price": float(max(self.exit_hold_band_min_price, self.hold_to_redeem_cost_threshold)),
+                "exit_hold_band_min_price": float(self.exit_hold_band_min_price),
                 "exit_conviction_band_min_score_abs": float(self.exit_conviction_band_min_score_abs),
                 "exit_hold_band_min_score_abs": float(self.exit_hold_band_min_score_abs),
                 "exit_conviction_stop_loss_multiplier": float(self.exit_conviction_stop_loss_multiplier),

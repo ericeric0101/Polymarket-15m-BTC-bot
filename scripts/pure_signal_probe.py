@@ -503,6 +503,10 @@ class ProbeConfig:
     sigma_ceiling: Decimal
     sigma_min_points: int
     sigma_window_points: int
+    paper_trade: bool
+    paper_persistence_sec: float
+    paper_settle_grace_sec: float
+    paper_entry_qty: float
 
 
 class PureSignalProbe:
@@ -522,6 +526,10 @@ class PureSignalProbe:
         self.strike_source_by_slug: Dict[str, str] = {}
         self.stop_requested = False
         self._shutdown_started = False
+        self.latest_snapshot_by_slug: Dict[str, Dict[str, Any]] = {}
+        self.candidate_streaks: Dict[str, Dict[str, Any]] = {}
+        self.paper_positions_by_slug: Dict[str, Dict[str, Any]] = {}
+        self.paper_settled_slugs: set[str] = set()
 
     def _build_data_node(self) -> None:
         auth = resolve_polymarket_auth()
@@ -875,6 +883,175 @@ class PureSignalProbe:
             f"edge={payload.get('candidate_edge')}"
         )
 
+    def _update_candidate_streak(self, payload: Dict[str, Any]) -> None:
+        slug = str(payload.get("slug") or "")
+        if not slug:
+            return
+        side = payload.get("candidate_side")
+        now_ts = time.time()
+        if not side:
+            self.candidate_streaks.pop(slug, None)
+            return
+
+        streak = self.candidate_streaks.get(slug)
+        if streak and streak.get("side") == side:
+            streak["last_seen_ts"] = now_ts
+            streak["last_payload"] = dict(payload)
+            return
+
+        self.candidate_streaks[slug] = {
+            "side": side,
+            "start_ts": now_ts,
+            "last_seen_ts": now_ts,
+            "last_payload": dict(payload),
+        }
+
+    def _candidate_matured_payload(self, slug: str) -> Optional[Dict[str, Any]]:
+        streak = self.candidate_streaks.get(slug)
+        if not streak:
+            return None
+        if (float(streak["last_seen_ts"]) - float(streak["start_ts"])) < self.cfg.paper_persistence_sec:
+            return None
+        payload = dict(streak.get("last_payload") or {})
+        if not payload:
+            return None
+        return payload
+
+    def _maybe_open_paper_trade(self, payload: Dict[str, Any]) -> None:
+        if not self.cfg.paper_trade:
+            return
+        slug = str(payload.get("slug") or "")
+        if not slug or slug in self.paper_positions_by_slug or slug in self.paper_settled_slugs:
+            return
+
+        matured = self._candidate_matured_payload(slug)
+        if not matured:
+            return
+
+        side = str(matured.get("candidate_side") or "")
+        if side not in {"BUY_UP", "BUY_DOWN"}:
+            return
+        entry_price = matured.get("ask_up") if side == "BUY_UP" else matured.get("ask_down")
+        if entry_price is None:
+            return
+        entry_price = float(entry_price)
+        if entry_price <= 0:
+            return
+
+        paper_id = f"paper_{slug}"
+        paper_payload = {
+            "paper_id": paper_id,
+            "slug": slug,
+            "side": side,
+            "entry_price": entry_price,
+            "entry_qty": float(self.cfg.paper_entry_qty),
+            "entry_ts": _utc_now().isoformat(),
+            "candidate_edge": matured.get("candidate_edge"),
+            "fair_up": matured.get("fair_up"),
+            "fair_down": matured.get("fair_down"),
+            "spot": matured.get("spot"),
+            "strike": matured.get("strike"),
+            "market_end_ts": matured.get("market_end_ts"),
+            "time_left_sec": matured.get("time_left_sec"),
+            "paper_persistence_sec": self.cfg.paper_persistence_sec,
+            "mode": "paper_trade",
+        }
+        self.paper_positions_by_slug[slug] = paper_payload
+        self.db.log_strategy_event(self.run_id, "PAPER_TRADE_ENTRY", paper_payload)
+        self.db.log_order_event(
+            run_id=self.run_id,
+            event_type="PAPER_ENTRY",
+            client_order_id=paper_id,
+            side=side,
+            price=entry_price,
+            qty=float(self.cfg.paper_entry_qty),
+            status="filled",
+            reason="paper_trade",
+            instrument_id=matured.get("up_instrument_id") if side == "BUY_UP" else matured.get("down_instrument_id"),
+            token_id=matured.get("up_token_id") if side == "BUY_UP" else matured.get("down_token_id"),
+            expected_net_usdc=_safe_float(Decimal(str(matured.get("candidate_edge")))) if matured.get("candidate_edge") is not None else None,
+            payload=paper_payload,
+        )
+        logger.info(
+            f"PAPER entry slug={slug} side={side} px={entry_price:.4f} "
+            f"edge={float(matured.get('candidate_edge') or 0.0):.4f} "
+            f"t_left={float(matured.get('time_left_sec') or 0.0):.1f}s"
+        )
+
+    def _maybe_settle_paper_trades(self, force: bool = False) -> None:
+        if not self.cfg.paper_trade:
+            return
+        now_ts = time.time()
+        to_settle: List[str] = []
+        for slug, position in self.paper_positions_by_slug.items():
+            snapshot = self.latest_snapshot_by_slug.get(slug)
+            if not snapshot:
+                continue
+            market_end_ts = snapshot.get("market_end_ts") or position.get("market_end_ts")
+            if market_end_ts is None:
+                continue
+            try:
+                market_end_ts = float(market_end_ts)
+            except Exception:
+                continue
+            if force or now_ts >= (market_end_ts + self.cfg.paper_settle_grace_sec):
+                to_settle.append(slug)
+
+        for slug in to_settle:
+            self._settle_paper_trade(slug)
+
+    def _settle_paper_trade(self, slug: str) -> None:
+        position = self.paper_positions_by_slug.get(slug)
+        snapshot = self.latest_snapshot_by_slug.get(slug)
+        if not position or not snapshot:
+            return
+
+        spot = snapshot.get("spot")
+        strike = snapshot.get("strike")
+        if spot is None or strike is None:
+            return
+        spot_f = float(spot)
+        strike_f = float(strike)
+        outcome = "UP" if spot_f > strike_f else "DOWN"
+        side = str(position.get("side") or "")
+        entry_price = float(position.get("entry_price") or 0.0)
+        won = (side == "BUY_UP" and outcome == "UP") or (side == "BUY_DOWN" and outcome == "DOWN")
+        exit_price = 1.0 if won else 0.0
+        pnl = exit_price - entry_price
+        settle_payload = {
+            **position,
+            "exit_ts": _utc_now().isoformat(),
+            "settlement_spot": spot_f,
+            "settlement_strike": strike_f,
+            "settlement_outcome": outcome,
+            "exit_price": exit_price,
+            "realized_pnl": pnl,
+            "won": won,
+        }
+        self.db.log_strategy_event(self.run_id, "PAPER_TRADE_SETTLEMENT", settle_payload)
+        self.db.log_order_event(
+            run_id=self.run_id,
+            event_type="PAPER_SETTLEMENT",
+            client_order_id=str(position.get("paper_id") or f"paper_{slug}"),
+            side=side,
+            price=exit_price,
+            qty=float(position.get("entry_qty") or self.cfg.paper_entry_qty),
+            status="filled",
+            reason=outcome,
+            instrument_id=None,
+            token_id=None,
+            expected_net_usdc=pnl,
+            commission_usdc=0.0,
+            payload=settle_payload,
+        )
+        logger.info(
+            f"PAPER settlement slug={slug} side={side} outcome={outcome} "
+            f"entry={entry_price:.4f} exit={exit_price:.4f} pnl={pnl:+.4f}"
+        )
+        self.paper_settled_slugs.add(slug)
+        self.paper_positions_by_slug.pop(slug, None)
+        self.candidate_streaks.pop(slug, None)
+
     def run(self) -> int:
         started_at = time.time()
         self._build_data_node()
@@ -890,6 +1067,9 @@ class PureSignalProbe:
                 "min_entry_sec": self.cfg.min_entry_sec,
                 "reduce_only_sec": self.cfg.reduce_only_sec,
                 "force_flat_sec": self.cfg.force_flat_sec,
+                "paper_trade": self.cfg.paper_trade,
+                "paper_persistence_sec": self.cfg.paper_persistence_sec,
+                "paper_settle_grace_sec": self.cfg.paper_settle_grace_sec,
             },
         )
         logger.info(f"Pure signal probe started run_id={self.run_id}")
@@ -936,11 +1116,16 @@ class PureSignalProbe:
 
             sigma = self._estimate_sigma()
             payload = self._snapshot_payload(market=market, slug=slug, spot=spot, sigma=sigma)
+            self.latest_snapshot_by_slug[slug] = dict(payload)
             self.db.log_strategy_event(self.run_id, "PURE_SIGNAL_SNAPSHOT", payload)
             self._log_verbose_snapshot(payload)
+            self._update_candidate_streak(payload)
             self._log_candidate(payload)
+            self._maybe_open_paper_trade(payload)
+            self._maybe_settle_paper_trades()
             time.sleep(self.cfg.interval_sec)
 
+        self._maybe_settle_paper_trades(force=True)
         self._shutdown_node()
         self.db.log_run_stop(self.run_id, notes={"stopped_at": _utc_now().isoformat()})
         logger.info(f"Pure signal probe stopped run_id={self.run_id}")
@@ -965,6 +1150,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--sigma-ceiling", type=float, default=1.20, help="Maximum annualized sigma")
     ap.add_argument("--sigma-min-points", type=int, default=20, help="Minimum spot points before realized sigma is trusted")
     ap.add_argument("--sigma-window-points", type=int, default=120, help="Spot history window for realized sigma")
+    ap.add_argument("--paper-trade", action="store_true", help="Enable one-paper-trade-per-market simulated entries")
+    ap.add_argument("--paper-persistence-sec", type=float, default=10.0, help="Candidate must persist this many seconds before paper entry")
+    ap.add_argument("--paper-settle-grace-sec", type=float, default=5.0, help="Wait this many seconds after market end before paper settlement")
+    ap.add_argument("--paper-entry-qty", type=float, default=1.0, help="Simulated entry quantity for paper mode")
     return ap
 
 
@@ -987,6 +1176,10 @@ def main() -> int:
         sigma_ceiling=Decimal(str(args.sigma_ceiling)),
         sigma_min_points=max(2, int(args.sigma_min_points)),
         sigma_window_points=max(5, int(args.sigma_window_points)),
+        paper_trade=bool(args.paper_trade),
+        paper_persistence_sec=max(0.0, float(args.paper_persistence_sec)),
+        paper_settle_grace_sec=max(0.0, float(args.paper_settle_grace_sec)),
+        paper_entry_qty=max(0.0, float(args.paper_entry_qty)),
     )
     probe = PureSignalProbe(cfg)
     signal_hits = {"count": 0}

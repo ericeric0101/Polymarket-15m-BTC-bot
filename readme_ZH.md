@@ -402,6 +402,32 @@ venv/bin/python scripts/mirrored_down_report.py
 - `--verbose`：開啟輕量摘要輸出
 - `--verbose-every-sec 30`：每 30 秒最多印一行，不會每 2 秒洗版
 
+若你想開啟「只模擬、不下真單」的 paper trade 模式：
+
+```bash
+./venv/bin/python scripts/pure_signal_probe.py \
+  --db ./logs/pure_probe.db \
+  --duration-sec 21600 \
+  --interval-sec 2 \
+  --verbose --verbose-every-sec 60 \
+  --paper-trade \
+  --paper-persistence-sec 10
+```
+
+這個模式會：
+
+- 每個市場最多記錄一筆 paper entry
+- candidate 需要連續成立至少 `--paper-persistence-sec` 秒才會進場
+- 不會送出真實訂單
+- 會把模擬進場與模擬結算寫進 DB
+
+相關 event type：
+
+- `PAPER_TRADE_ENTRY`
+- `PAPER_TRADE_SETTLEMENT`
+- `PAPER_ENTRY`
+- `PAPER_SETTLEMENT`
+
 若你想確認 probe 是否真的有持續寫入 DB，可開另一個 terminal 執行：
 
 ```bash
@@ -439,6 +465,7 @@ rm -f logs/pure_probe.db logs/pure_probe.db-wal logs/pure_probe.db-shm
 - `first_per_market`：每個市場只取第一筆 candidate 的理論結果
 - `best_edge_per_market`：每個市場只取 edge 最大那筆 candidate 的理論結果
 - `last_per_market`：每個市場只取最後一筆 candidate 的理論結果
+- `paper_all`：若 probe 開了 `--paper-trade`，則顯示模擬進場/結算的實際 paper 結果
 
 如果 `settled_candidate_markets` 很少，代表樣本還不夠，先讓 probe 繼續跑久一點再看報表。
 
@@ -457,9 +484,18 @@ rm -f logs/pure_probe.db logs/pure_probe.db-wal logs/pure_probe.db-shm
 重點參數：
 
 - `--run-id`：只分析某一次 probe run，避免不同輪資料混在一起
+- `--report-kind {all,candidate,paper}`：只看 candidate 驗證、只看 paper trade，或兩者都看
 - `--selection {all,first,best,last}`：每市場只保留哪一筆訊號
 - `--persistence-sec 10`：candidate 需要在 snapshot 中連續成立至少 10 秒才算有效
 - `--segment-gap-sec`：兩筆 snapshot 間隔多大以內，仍視為同一段 candidate streak
+
+新版報表還會額外分解：
+
+- `BUY_UP` / `BUY_DOWN`
+- `edge` 分桶
+- `time_left_sec` 分桶
+
+用來觀察哪一種候選訊號更接近可上線條件。
 
 ---
 

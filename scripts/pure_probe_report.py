@@ -93,6 +93,58 @@ class EvalRow:
     time_left_sec: float
 
 
+def _load_paper_settlements(
+    db_path: Path,
+    cutoff: Optional[datetime],
+    run_id: Optional[str],
+) -> List[EvalRow]:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    where = ["event_type='PAPER_TRADE_SETTLEMENT'"]
+    params: List[object] = []
+    if run_id:
+        where.append("run_id = ?")
+        params.append(run_id)
+    rows = conn.execute(
+        f"""
+        SELECT ts, payload_json
+        FROM strategy_events
+        WHERE {' AND '.join(where)}
+        ORDER BY ts
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+
+    out: List[EvalRow] = []
+    for row in rows:
+        ts = _parse_ts(str(row["ts"]))
+        if cutoff and ts < cutoff:
+            continue
+        payload = json.loads(row["payload_json"] or "{}")
+        side = str(payload.get("side") or "")
+        slug = str(payload.get("slug") or "")
+        if not slug or side not in {"BUY_UP", "BUY_DOWN"}:
+            continue
+        entry_price = payload.get("entry_price")
+        realized_pnl = payload.get("realized_pnl")
+        if entry_price is None or realized_pnl is None:
+            continue
+        out.append(
+            EvalRow(
+                slug=slug,
+                ts=ts,
+                side=side,
+                edge=_safe_float(payload.get("candidate_edge")),
+                entry_price=float(entry_price),
+                outcome=str(payload.get("settlement_outcome") or ""),
+                pnl=float(realized_pnl),
+                time_left_sec=_safe_float(payload.get("time_left_sec")),
+            )
+        )
+    return out
+
+
 def _pick_one_per_market(candidates: List[Candidate], mode: str) -> List[Candidate]:
     if mode == "all":
         return candidates
@@ -332,12 +384,81 @@ def _summarize(name: str, rows: List[EvalRow]) -> None:
     print(f"  wins={wins} losses={losses}")
 
 
+def _print_group_summary(title: str, groups: Dict[str, List[EvalRow]]) -> None:
+    non_empty = {k: v for k, v in groups.items() if v}
+    if not non_empty:
+        print(f"{title}: no settled rows")
+        return
+    print(title)
+    for key, rows in non_empty.items():
+        wins = sum(1 for r in rows if r.pnl > 0)
+        total = sum(r.pnl for r in rows)
+        avg_edge = sum(r.edge for r in rows) / len(rows)
+        avg_t = sum(r.time_left_sec for r in rows) / len(rows)
+        print(
+            f"  {key}: count={len(rows)} win_rate={wins/len(rows):.2%} "
+            f"total_pnl={total:.6f} avg_pnl={total/len(rows):.6f} "
+            f"avg_edge={avg_edge:.6f} avg_t_left={avg_t:.1f}s"
+        )
+
+
+def _bucket_edge(edge: float) -> str:
+    if edge < 0.04:
+        return "<0.04"
+    if edge < 0.06:
+        return "0.04-0.06"
+    if edge < 0.08:
+        return "0.06-0.08"
+    if edge < 0.10:
+        return "0.08-0.10"
+    return ">=0.10"
+
+
+def _bucket_time_left(time_left_sec: float) -> str:
+    if time_left_sec < 120:
+        return "<120s"
+    if time_left_sec < 300:
+        return "120-300s"
+    if time_left_sec < 600:
+        return "300-600s"
+    return ">=600s"
+
+
+def _group_by_side(rows: List[EvalRow]) -> Dict[str, List[EvalRow]]:
+    groups: Dict[str, List[EvalRow]] = defaultdict(list)
+    for row in rows:
+        groups[row.side].append(row)
+    return dict(groups)
+
+
+def _group_by_edge_bucket(rows: List[EvalRow]) -> Dict[str, List[EvalRow]]:
+    groups: Dict[str, List[EvalRow]] = defaultdict(list)
+    for row in rows:
+        groups[_bucket_edge(row.edge)].append(row)
+    ordered = ["<0.04", "0.04-0.06", "0.06-0.08", "0.08-0.10", ">=0.10"]
+    return {key: groups.get(key, []) for key in ordered}
+
+
+def _group_by_time_bucket(rows: List[EvalRow]) -> Dict[str, List[EvalRow]]:
+    groups: Dict[str, List[EvalRow]] = defaultdict(list)
+    for row in rows:
+        groups[_bucket_time_left(row.time_left_sec)].append(row)
+    ordered = ["<120s", "120-300s", "300-600s", ">=600s"]
+    return {key: groups.get(key, []) for key in ordered}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Report pure probe candidate quality against settlement outcomes")
     ap.add_argument("--probe-db", default="./logs/pure_probe.db", help="SQLite DB path for pure probe")
     ap.add_argument("--trade-db", default="./logs/trade_journal.db", help="SQLite DB path for main bot journal")
     ap.add_argument("--hours", type=int, default=24, help="Lookback hours; <=0 means all rows")
     ap.add_argument("--run-id", default=None, help="Optional pure probe run_id filter")
+    ap.add_argument(
+        "--report-kind",
+        choices=["all", "candidate", "paper"],
+        default="all",
+        help="Which sections to print",
+    )
     ap.add_argument(
         "--selection",
         choices=["all", "first", "best", "last"],
@@ -387,69 +508,117 @@ def main() -> int:
     print(f"trade_db: {trade_db}")
     print(f"lookback_hours: {args.hours if args.hours > 0 else 'ALL'}")
     print(f"run_id: {args.run_id or 'ALL'}")
+    print(f"report_kind: {args.report_kind}")
     print(f"selection: {args.selection}")
     print(f"persistence_sec: {args.persistence_sec:.1f}")
     if cutoff:
         print(f"cutoff_utc: {cutoff.isoformat()}")
-    print()
-    print(f"candidate_rows: {len(candidates)}")
-    print(f"candidate_markets: {len(by_slug)}")
-    print(f"settled_candidate_markets: {settled_market_count}")
-    print(f"unsettled_candidate_markets: {unresolved_market_count}")
+    if args.report_kind in {"all", "candidate"}:
+        print()
+        print(f"candidate_rows: {len(candidates)}")
+        print(f"candidate_markets: {len(by_slug)}")
+        print(f"settled_candidate_markets: {settled_market_count}")
+        print(f"unsettled_candidate_markets: {unresolved_market_count}")
 
-    settled_candidates = _evaluate(candidates, settlements)
-    print(f"settled_candidate_rows: {len(settled_candidates)}")
-    print()
+        settled_candidates = _evaluate(candidates, settlements)
+        print(f"settled_candidate_rows: {len(settled_candidates)}")
+        print()
 
-    first_rows = _evaluate([sorted(rows, key=lambda x: x.ts)[0] for rows in by_slug.values()], settlements)
-    best_edge_rows = _evaluate([max(rows, key=lambda x: x.edge) for rows in by_slug.values()], settlements)
-    last_rows = _evaluate([sorted(rows, key=lambda x: x.ts)[-1] for rows in by_slug.values()], settlements)
+        first_rows = _evaluate([sorted(rows, key=lambda x: x.ts)[0] for rows in by_slug.values()], settlements)
+        best_edge_rows = _evaluate([max(rows, key=lambda x: x.edge) for rows in by_slug.values()], settlements)
+        last_rows = _evaluate([sorted(rows, key=lambda x: x.ts)[-1] for rows in by_slug.values()], settlements)
 
-    _summarize("all_candidates", settled_candidates)
-    _summarize("first_per_market", first_rows)
-    _summarize("best_edge_per_market", best_edge_rows)
-    _summarize("last_per_market", last_rows)
+        _summarize("all_candidates", settled_candidates)
+        _summarize("first_per_market", first_rows)
+        _summarize("best_edge_per_market", best_edge_rows)
+        _summarize("last_per_market", last_rows)
 
-    focused_candidates = _pick_one_per_market(candidates, args.selection)
-    focused_rows = _evaluate(focused_candidates, settlements)
-    print()
-    _summarize(f"focused_{args.selection}", focused_rows)
-
-    if args.persistence_sec > 0:
-        persistent_candidates = _persistent_candidates(
-            snapshots=candidate_snapshots,
-            persistence_sec=float(args.persistence_sec),
-            max_gap_sec=float(args.segment_gap_sec),
+        focused_candidates = _pick_one_per_market(candidates, args.selection)
+        focused_rows = _evaluate(focused_candidates, settlements)
+        print()
+        _summarize(f"focused_{args.selection}", focused_rows)
+        print()
+        _print_group_summary(
+            f"[focused_{args.selection} by side]",
+            _group_by_side(focused_rows),
         )
-        persistent_rows = _evaluate(persistent_candidates, settlements)
-        persistent_focused = _evaluate(_pick_one_per_market(persistent_candidates, args.selection), settlements)
-        print()
-        print(f"persistent_candidate_rows: {len(persistent_candidates)}")
-        print(f"persistent_candidate_markets: {len({c.slug for c in persistent_candidates})}")
-        _summarize("persistent_all", persistent_rows)
-        _summarize(f"persistent_{args.selection}", persistent_focused)
+        _print_group_summary(
+            f"[focused_{args.selection} by edge bucket]",
+            _group_by_edge_bucket(focused_rows),
+        )
+        _print_group_summary(
+            f"[focused_{args.selection} by time-left bucket]",
+            _group_by_time_bucket(focused_rows),
+        )
 
-    if settled_candidates:
-        print()
-        print("[Recent settled candidate rows]")
-        for row in sorted(settled_candidates, key=lambda x: x.ts)[-args.show :]:
-            print(
-                f"{row.ts.isoformat()} {row.slug} {row.side} "
-                f"entry={_fmt(row.entry_price,4)} outcome={row.outcome} "
-                f"pnl={_fmt(row.pnl,4)} edge={_fmt(row.edge,4)} "
-                f"t_left={_fmt(row.time_left_sec,1)}s"
+        if args.persistence_sec > 0:
+            persistent_candidates = _persistent_candidates(
+                snapshots=candidate_snapshots,
+                persistence_sec=float(args.persistence_sec),
+                max_gap_sec=float(args.segment_gap_sec),
+            )
+            persistent_rows = _evaluate(persistent_candidates, settlements)
+            persistent_focused = _evaluate(_pick_one_per_market(persistent_candidates, args.selection), settlements)
+            print()
+            print(f"persistent_candidate_rows: {len(persistent_candidates)}")
+            print(f"persistent_candidate_markets: {len({c.slug for c in persistent_candidates})}")
+            _summarize("persistent_all", persistent_rows)
+            _summarize(f"persistent_{args.selection}", persistent_focused)
+            print()
+            _print_group_summary(
+                f"[persistent_{args.selection} by side]",
+                _group_by_side(persistent_focused),
+            )
+            _print_group_summary(
+                f"[persistent_{args.selection} by edge bucket]",
+                _group_by_edge_bucket(persistent_focused),
+            )
+            _print_group_summary(
+                f"[persistent_{args.selection} by time-left bucket]",
+                _group_by_time_bucket(persistent_focused),
             )
 
-    if unresolved_market_count:
+        if settled_candidates:
+            print()
+            print("[Recent settled candidate rows]")
+            for row in sorted(settled_candidates, key=lambda x: x.ts)[-args.show :]:
+                print(
+                    f"{row.ts.isoformat()} {row.slug} {row.side} "
+                    f"entry={_fmt(row.entry_price,4)} outcome={row.outcome} "
+                    f"pnl={_fmt(row.pnl,4)} edge={_fmt(row.edge,4)} "
+                    f"t_left={_fmt(row.time_left_sec,1)}s"
+                )
+
+        if unresolved_market_count:
+            print()
+            print("[Unsettled candidate markets]")
+            for slug in sorted(slug for slug in by_slug if slug not in settlements)[: args.show]:
+                rows = by_slug[slug]
+                print(
+                    f"{slug} candidate_rows={len(rows)} "
+                    f"first_ts={min(r.ts for r in rows).isoformat()} "
+                    f"last_ts={max(r.ts for r in rows).isoformat()}"
+                )
+
+    if args.report_kind in {"all", "paper"}:
+        paper_rows = _load_paper_settlements(probe_db, cutoff, args.run_id)
         print()
-        print("[Unsettled candidate markets]")
-        for slug in sorted(slug for slug in by_slug if slug not in settlements)[: args.show]:
-            rows = by_slug[slug]
-            print(
-                f"{slug} candidate_rows={len(rows)} "
-                f"first_ts={min(r.ts for r in rows).isoformat()} "
-                f"last_ts={max(r.ts for r in rows).isoformat()}"
-            )
+        print(f"paper_settlement_rows: {len(paper_rows)}")
+        print(f"paper_settlement_markets: {len({r.slug for r in paper_rows})}")
+        _summarize("paper_all", paper_rows)
+        _print_group_summary("[paper by side]", _group_by_side(paper_rows))
+        _print_group_summary("[paper by edge bucket]", _group_by_edge_bucket(paper_rows))
+        _print_group_summary("[paper by time-left bucket]", _group_by_time_bucket(paper_rows))
+        if paper_rows:
+            print()
+            print("[Recent paper settlements]")
+            for row in sorted(paper_rows, key=lambda x: x.ts)[-args.show :]:
+                print(
+                    f"{row.ts.isoformat()} {row.slug} {row.side} "
+                    f"entry={_fmt(row.entry_price,4)} outcome={row.outcome} "
+                    f"pnl={_fmt(row.pnl,4)} edge={_fmt(row.edge,4)} "
+                    f"t_left={_fmt(row.time_left_sec,1)}s"
+                )
 
     return 0
 

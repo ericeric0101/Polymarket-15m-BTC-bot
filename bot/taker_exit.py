@@ -45,7 +45,25 @@ class TakerExitMixin:
             and self.taker_exit_disable_stop_loss_last_sec > 0
             and time_left_sec <= float(self.taker_exit_disable_stop_loss_last_sec)
         )
-        target_instruments = self._maker_quote_instruments()
+        target_instruments = list(self._maker_quote_instruments())
+        seen_instruments = {self._instrument_key(inst_id) for inst_id in target_instruments}
+        # Critical: active_side can flip away from the actual held instrument.
+        # When that happens we still need to evaluate exits on the off-side inventory,
+        # otherwise a wrong-side position can survive all the way to settlement.
+        for inv_inst_key, inv_state in list(self.live_inventory_cost.items()):
+            try:
+                inv_qty = Decimal(str(inv_state.get("qty", "0")))
+            except Exception:
+                inv_qty = Decimal("0")
+            if inv_qty <= 0:
+                continue
+            if inv_inst_key in seen_instruments:
+                continue
+            inv_inst = self._normalize_instrument_id(inv_inst_key)
+            if inv_inst is None:
+                continue
+            target_instruments.append(inv_inst)
+            seen_instruments.add(inv_inst_key)
         for inst_id in target_instruments:
             inst_key = self._instrument_key(inst_id)
             if not inst_key:
@@ -147,6 +165,12 @@ class TakerExitMixin:
             )
             exit_decision = self.exit_policy_engine.evaluate(snapshot, position, signal_decision)
             net_if_exit = exit_decision.net_if_exit
+            force_offside_near_close = (
+                not signal_decision.matches_position
+                and time_left_sec is not None
+                and self.taker_exit_max_hold_near_close_sec > 0
+                and time_left_sec <= float(self.taker_exit_max_hold_near_close_sec)
+            )
 
             if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
                 self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
@@ -179,20 +203,13 @@ class TakerExitMixin:
                     },
                 )
                 if not getattr(self, "_logged_hold_redeem_te", False) or now_ts - getattr(self, "_last_hold_redeem_te_log", 0) > 60:
-                    if exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND:
-                        logger.info(
-                            "Hold band: skipping taker stop-loss. "
-                            f"band={exit_decision.metadata.get('band', 'neutral')} "
-                            f"best_bid={float(best_bid):.4f} avg_entry={float(avg_entry):.4f} "
-                            f"score={exit_decision.metadata.get('signal_score', str(self.side_decision_score))} "
-                            f"stage={exit_stage.value}"
-                        )
-                    else:
-                        logger.info(
-                            f"Hold-to-redeem: skipping taker exit. "
-                            f"avg_entry={float(avg_entry):.2f} >= threshold={float(self.hold_to_redeem_cost_threshold):.2f}, "
-                            f"qty={float(qty):.4f}, stage={exit_stage.value}"
-                        )
+                    logger.info(
+                        "Hold band: skipping taker stop-loss. "
+                        f"band={exit_decision.metadata.get('band', 'neutral')} "
+                        f"best_bid={float(best_bid):.4f} avg_entry={float(avg_entry):.4f} "
+                        f"score={exit_decision.metadata.get('signal_score', str(self.side_decision_score))} "
+                        f"stage={exit_stage.value}"
+                    )
                     self._logged_hold_redeem_te = True
                     self._last_hold_redeem_te_log = now_ts
                 continue
@@ -241,11 +258,11 @@ class TakerExitMixin:
                 )
                 continue
 
-            if exit_decision.decision_type != ExitDecisionType.TAKER_STOP_LOSS:
+            if not force_offside_near_close and exit_decision.decision_type != ExitDecisionType.TAKER_STOP_LOSS:
                 self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
                 continue
             self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
-            trigger = "stop_loss"
+            trigger = "offside_near_close" if force_offside_near_close else "stop_loss"
 
             # Avoid paying taker costs into a wide spread unless it's an emergency path.
             if (
@@ -270,7 +287,8 @@ class TakerExitMixin:
                 created_ts = float(active_sell.get("created_ts", 0.0))
                 pending_cancel = bool(active_sell.get("pending_cancel"))
                 if (
-                    not pending_cancel
+                    trigger == "stop_loss"
+                    and not pending_cancel
                     and created_ts > 0
                     and (now_ts - created_ts) < float(self.taker_exit_wait_for_sell_quote_sec)
                 ):
@@ -300,6 +318,7 @@ class TakerExitMixin:
                     "slug": self.current_market_slug or "",
                     "decision_type": exit_decision.decision_type.value,
                     "decision_reason": exit_decision.reason,
+                    "forced_offside_near_close": "1" if force_offside_near_close else "0",
                     "band": exit_decision.metadata.get("band", "neutral"),
                     "signal_score": exit_decision.metadata.get("signal_score", str(self.side_decision_score)),
                     "signal_locked": exit_decision.metadata.get("signal_locked", "0"),
@@ -419,3 +438,243 @@ class TakerExitMixin:
             return
         self._taker_exit_skip_log_ts_by_key[key] = now_ts
         self._db_strategy_event("EXIT_POLICY_DECISION", payload)
+
+    # ------------------------------------------------------------------
+    # Maker-Style Urgent Exit
+    # ------------------------------------------------------------------
+    # When thesis weakens (signal flips or score drops), place a SELL limit
+    # order at best_bid + 1 tick (ask side, true maker) to exit wrong-side
+    # inventory. Price selection (above best_bid) ensures maker execution.
+    #
+    # NOT a taker order — sits on the ask side of the book waiting for
+    # a buyer to cross. Zero taker fee by design.
+    # Crossing guard: if price would match bids, order is skipped.
+    #
+    # TTL: urgent exits use MAKER_URGENT_EXIT_TTL_SEC (default 15s),
+    # managed by the existing active_maker_orders TTL cleanup loop.
+    # ------------------------------------------------------------------
+
+    async def _maybe_maker_urgent_exit(self, now_ts: float) -> None:
+        """Evaluate and execute maker-style urgent exit for wrong-side positions."""
+        if not getattr(self, "maker_urgent_exit_enabled", False):
+            return
+        # NOTE: intentionally NOT gated on taker_exit_enabled —
+        # this is a maker mechanism, independent of taker exit config.
+
+        # Cooldown check
+        last_urgent_ts = getattr(self, "_maker_urgent_exit_last_ts", 0.0)
+        cooldown = getattr(self, "maker_urgent_exit_cooldown_sec", 5)
+        if now_ts - last_urgent_ts < cooldown:
+            return
+
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        time_left_sec = (end_ts - now_ts) if end_ts is not None else None
+
+        # Don't do urgent exit in the last 45s (let taker exit handle emergency)
+        if time_left_sec is not None and time_left_sec <= 45:
+            return
+
+        target_instruments = list(self._maker_quote_instruments())
+        # Also check off-side inventory instruments
+        seen = {self._instrument_key(inst_id) for inst_id in target_instruments}
+        for inv_inst_key, inv_state in list(self.live_inventory_cost.items()):
+            try:
+                inv_qty = Decimal(str(inv_state.get("qty", "0")))
+            except Exception:
+                inv_qty = Decimal("0")
+            if inv_qty <= 0:
+                continue
+            if inv_inst_key in seen:
+                continue
+            inv_inst = self._normalize_instrument_id(inv_inst_key)
+            if inv_inst is None:
+                continue
+            target_instruments.append(inv_inst)
+            seen.add(inv_inst_key)
+
+        for inst_id in target_instruments:
+            inst_key = self._instrument_key(inst_id)
+            if not inst_key:
+                continue
+
+            state = self.live_inventory_cost.get(inst_key)
+            if not state:
+                continue
+            qty = Decimal(str(state.get("qty", "0")))
+            if qty <= 0:
+                continue
+
+            # Check if thesis has weakened for this position
+            matches_position = (self._instrument_for_side(self.active_side) == inst_id)
+            thesis_weakened = (not matches_position) or (
+                abs(self.side_decision_score) < getattr(self, "exit_stop_loss_thesis_min_score_abs", Decimal("1"))
+            )
+
+            # Confirmation mechanism: require consecutive thesis-weakened cycles
+            # to filter out signal noise (avoid "false kills")
+            if not hasattr(self, "_urgent_exit_confirm_hits"):
+                self._urgent_exit_confirm_hits: dict[str, int] = {}
+            if thesis_weakened:
+                self._urgent_exit_confirm_hits[inst_key] = self._urgent_exit_confirm_hits.get(inst_key, 0) + 1
+            else:
+                self._urgent_exit_confirm_hits[inst_key] = 0
+                continue
+
+            min_confirms = getattr(self, "maker_urgent_exit_min_confirmations", 3)
+            if self._urgent_exit_confirm_hits[inst_key] < min_confirms:
+                continue
+
+            # Check unrealized loss
+            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            quote = self._get_quote_for_instrument(inst_id)
+            if quote is None:
+                continue
+            best_bid, best_ask = quote
+            if best_bid <= 0:
+                continue
+
+            unrealized_loss_ps = avg_entry - best_bid
+            min_loss = getattr(self, "maker_urgent_exit_min_loss_usdc", Decimal("0.10"))
+            unrealized_loss_total = unrealized_loss_ps * qty
+            if unrealized_loss_total < min_loss:
+                continue
+
+            # Skip if there's already a pending taker exit
+            if inst_key in self.pending_taker_exit_by_inst:
+                continue
+
+            # Check if an active sell order already covers this exit
+            sell_key = self._order_key_for("sell", inst_id)
+            active_sell = self.active_maker_orders.get(sell_key)
+            if active_sell:
+                existing_price = Decimal(str(active_sell.get("price", "0")))
+                if existing_price <= best_ask:
+                    continue  # Already quoting at ask or better
+                # Stale sell is too far from market — cancel it and wait for
+                # exchange ack before placing new order (next cycle).
+                logger.info(
+                    f"Urgent exit: cancelling stale SELL at {float(existing_price):.4f} "
+                    f"(best_ask={float(best_ask):.4f}), will place new order next cycle"
+                )
+                self._cancel_maker_order_side("sell", reason="urgent_exit_replace", instrument_id=inst_id)
+                # Also cancel BUY now so capital is freed by next cycle
+                self._cancel_maker_order_side("buy", reason="urgent_exit", instrument_id=inst_id)
+                continue  # Wait for cancel reconcile before sending new order
+
+            # Cancel active BUY to free up capital for the urgent SELL
+            self._cancel_maker_order_side("buy", reason="urgent_exit", instrument_id=inst_id)
+
+            # Compute exit qty
+            sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
+            qty_to_exit = min(qty, sellable_qty)
+            if qty_to_exit + Decimal("0.000001") < self.maker_exchange_min_shares:
+                continue
+
+            instrument = self.cache.instrument(self._normalize_instrument_id(inst_id))
+            if instrument is None:
+                continue
+            precision = int(getattr(instrument, "size_precision", 6))
+            min_lot = Decimal(str(10 ** (-precision)))
+            qty_dec = max(min_lot, qty_to_exit).quantize(min_lot, rounding=ROUND_FLOOR)
+            if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
+                continue
+
+            from nautilus_trader.model.objects import Price
+            price_precision = int(getattr(instrument, "price_precision", 2))
+            tick = Decimal(str(10 ** (-price_precision)))
+
+            # True maker price: best_bid + 1 tick
+            # Sits on the ASK side of the book. A buyer must cross to fill this.
+            urgent_sell_price = best_bid + tick
+            # If best_bid + tick >= best_ask, join existing ask
+            if best_ask > 0 and urgent_sell_price >= best_ask:
+                urgent_sell_price = best_ask
+
+            # FIX #2: Crossing guard — if our price would still match bids,
+            # skip this cycle. We do NOT fallback to taker.
+            # (Nautilus does not support post_only; we rely on price selection.)
+            if urgent_sell_price <= best_bid:
+                logger.debug(
+                    f"Urgent exit: skipping, sell_price={float(urgent_sell_price):.4f} "
+                    f"would cross best_bid={float(best_bid):.4f}"
+                )
+                continue
+
+            # FIX #3: Use maker_urgent_exit_ttl_sec (not maker_order_ttl_sec)
+            urgent_ttl = getattr(self, "maker_urgent_exit_ttl_sec", 15)
+
+            coid = ClientOrderId(f"BTC-15M-URGENT-EXIT-{int(time.time() * 1000)}")
+            order_kwargs = {
+                "instrument_id": self._normalize_instrument_id(inst_id),
+                "order_side": OrderSide.SELL,
+                "quantity": Quantity(float(qty_dec), precision=precision),
+                "price": Price(float(urgent_sell_price), precision=price_precision),
+                "client_order_id": coid,
+                "time_in_force": TimeInForce.GTC,
+            }
+
+            try:
+                order = self.order_factory.limit(**order_kwargs)
+            except Exception as e:
+                logger.warning(f"Urgent exit limit order creation failed: {e}")
+                continue
+
+            self.submit_order(order)
+            self._maker_urgent_exit_last_ts = now_ts
+
+            # Track via active_maker_orders for lifecycle management.
+            # `urgent_exit_ttl` is stored so the TTL cleanup can use a
+            # shorter expiry for urgent exits vs normal maker orders.
+            self.active_maker_orders[sell_key] = {
+                "order": order,
+                "econ": None,
+                "directional_snapshot": {},
+                "price": urgent_sell_price,
+                "side": "sell",
+                "instrument_id": inst_id,
+                "token_id": None,
+                "quantity": qty_dec,
+                "created_ts": now_ts,
+                "target_version": 0,
+                "is_urgent_exit": True,
+                "urgent_exit_ttl": urgent_ttl,
+            }
+
+            logger.warning(
+                "MAKER URGENT EXIT submit: "
+                f"inst={inst_key} qty={float(qty_dec):.6f} "
+                f"price={float(urgent_sell_price):.4f} (bid={float(best_bid):.4f}+tick) "
+                f"avg_entry={float(avg_entry):.4f} "
+                f"unrealized_loss={float(unrealized_loss_total):+.4f} "
+                f"score={float(self.side_decision_score):.2f} "
+                f"matches_position={matches_position} "
+                f"confirms={self._urgent_exit_confirm_hits[inst_key]} "
+                f"ttl={urgent_ttl}s"
+            )
+            self._db_order_event(
+                event_type="ORDER_MAKER_URGENT_EXIT_SUBMIT",
+                client_order_id=str(coid),
+                side="SELL",
+                price=float(urgent_sell_price),
+                qty=float(qty_dec),
+                status="SUBMITTED",
+                reason="urgent_maker_exit",
+                expected_net_usdc=float(-unrealized_loss_total),
+                payload={
+                    "reason": "urgent_maker_exit",
+                    "instrument_id": inst_key,
+                    "avg_entry": float(avg_entry),
+                    "best_bid": float(best_bid),
+                    "best_ask": float(best_ask),
+                    "urgent_sell_price": float(urgent_sell_price),
+                    "unrealized_loss_ps": float(unrealized_loss_ps),
+                    "unrealized_loss_total": float(unrealized_loss_total),
+                    "signal_score": float(self.side_decision_score),
+                    "matches_position": "1" if matches_position else "0",
+                    "time_left_sec": time_left_sec,
+                    "confirmations": self._urgent_exit_confirm_hits[inst_key],
+                    "ttl_sec": urgent_ttl,
+                },
+            )
+            break  # Only one urgent exit per cycle
+

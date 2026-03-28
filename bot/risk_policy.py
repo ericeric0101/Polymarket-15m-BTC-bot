@@ -2,30 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
-
-
-@dataclass
-class HoldToRedeemConfig:
-    cost_threshold: Decimal
-    min_time_left_sec: int
-    max_inventory_shares: Decimal
-
-
-class HoldToRedeemPolicy:
-    def __init__(self, config: HoldToRedeemConfig) -> None:
-        self.config = config
-
-    def should_hold(self, avg_entry: Decimal, inventory_shares: Decimal, time_left_sec: Optional[float]) -> bool:
-        if self.config.cost_threshold <= 0:
-            return False
-        if avg_entry < self.config.cost_threshold:
-            return False
-        if inventory_shares <= 0 or inventory_shares > self.config.max_inventory_shares:
-            return False
-        if time_left_sec is None:
-            return False
-        return time_left_sec >= float(self.config.min_time_left_sec)
 
 
 @dataclass

@@ -363,6 +363,34 @@ class SpotPricerMixin:
                 instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
                 outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
 
+                # Implied sigma: derive σ from market mid price (DIAGNOSTIC ONLY)
+                # Computed and logged to compare with realized sigma, but NOT
+                # blended into fair price — that would create circular calibration
+                # (market price → implied σ → fair ≈ market price → no edge).
+                implied_sigma_used = None
+                if (
+                    getattr(self, "maker_implied_sigma_enabled", False)
+                    and strike is not None
+                    and time_left_sec > 30
+                    and float(market_mid) > 0.05
+                    and float(market_mid) < 0.95
+                ):
+                    imp_sigma = MakerEngine.implied_sigma_from_market_mid(
+                        market_mid=float(market_mid),
+                        spot=float(external),
+                        strike=float(strike),
+                        time_left_sec=time_left_sec,
+                        outcome=outcome or "up",
+                    )
+                    if imp_sigma is not None and imp_sigma > 0:
+                        implied_sigma_used = imp_sigma
+                        # Guardrail only: prevent realized sigma from being
+                        # absurdly lower than what the market implies (floor at 60% of implied)
+                        sigma_floor_from_implied = imp_sigma * Decimal("0.6")
+                        if sigma < sigma_floor_from_implied:
+                            sigma = max(sigma, sigma_floor_from_implied)
+                            sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
+
                 if strike is None:
                     if time.time() - self._last_strike_fallback_log_ts >= self.strike_fallback_log_interval_sec:
                         logger.debug("Digital pricer fallback: strike unavailable, using drift mode.")
@@ -379,10 +407,11 @@ class SpotPricerMixin:
                         fair_for_token = up_prob
                         if outcome == "down":
                             fair_for_token = Decimal("1.0") - up_prob
+                        imp_str = f" implied_σ={float(implied_sigma_used):.4f}" if implied_sigma_used else ""
                         logger.info(
                             "Digital pricer inputs: "
                             f"spot={float(external):.2f} strike={float(strike):.2f} "
-                            f"sigma={float(sigma):.4f} t_left={time_left_sec:.1f}s "
+                            f"sigma={float(sigma):.4f}{imp_str} t_left={time_left_sec:.1f}s "
                             f"token_outcome={outcome or 'unknown'} "
                             f"up_prob={float(up_prob):.4f} "
                             f"fair_down={float(Decimal('1.0') - up_prob):.4f} "

@@ -133,6 +133,54 @@ class MakerEngine:
         return Decimal(str(p))
 
     @staticmethod
+    def implied_sigma_from_market_mid(
+        market_mid: float,
+        spot: float,
+        strike: float,
+        time_left_sec: float,
+        outcome: str = "up",
+        max_iter: int = 20,
+        tol: float = 1e-4,
+    ) -> Optional[Decimal]:
+        """
+        Solve for the implied sigma that makes digital_up_probability match market_mid.
+        Uses bisection method (robust for bounded problems).
+        Returns None if inputs are degenerate or solution doesn't converge.
+        """
+        if spot <= 0 or strike <= 0 or time_left_sec <= 1.0:
+            return None
+        target = market_mid
+        if outcome == "down":
+            target = 1.0 - market_mid
+        if target <= 0.01 or target >= 0.99:
+            return None
+
+        lo, hi = 0.05, 5.0
+        for _ in range(max_iter):
+            mid_sigma = (lo + hi) / 2.0
+            p = float(MakerEngine.digital_up_probability(spot, strike, mid_sigma, time_left_sec))
+            if abs(p - target) < tol:
+                return Decimal(str(round(mid_sigma, 4)))
+            # Higher sigma → probability closer to 0.5
+            # If current p > target, we need higher sigma to push p toward 0.5
+            # If current p < target, we need lower sigma
+            if spot >= strike:
+                # p > 0.5 region: higher sigma → lower p
+                if p > target:
+                    lo = mid_sigma
+                else:
+                    hi = mid_sigma
+            else:
+                # p < 0.5 region: higher sigma → higher p
+                if p < target:
+                    lo = mid_sigma
+                else:
+                    hi = mid_sigma
+        # Return best estimate even if not fully converged
+        final = (lo + hi) / 2.0
+        return Decimal(str(round(final, 4)))
+
+    @staticmethod
     def calculate_fair_price(
         market_mid: Decimal,
         external_spot: float,
