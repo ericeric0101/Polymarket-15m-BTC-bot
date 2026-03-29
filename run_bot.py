@@ -23,7 +23,6 @@ import random
 import httpx
 import re
 import json
-import sqlite3
 import threading
 import uuid
 import subprocess
@@ -73,18 +72,20 @@ from bot.enums import ActiveSide, MarketPhase
 from bot.side_decision import SideDecisionMixin
 from bot.spot_pricer import SpotPricerMixin
 from bot.taker_exit import TakerExitMixin
+from bot.fill_ledger import FillLedgerMixin
+from bot.order_runtime import OrderRuntimeMixin
+from bot.pricing_runtime import PricingRuntimeMixin
+from bot.recovery import StrategyRecoveryMixin
+from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
     collect_btc_market_candidates,
-    determine_lifecycle_timer_action,
     evaluate_market_phase,
     resolve_bi_side_market_selection,
-    select_next_market_window,
 )
 from bot.ops import (
     adjust_inventory_after_merge,
     dedupe_price_history,
     extend_synthetic_history,
-    handle_waiting_phase_search,
     handle_quote_watchdog_recovery,
     log_strategy_run_start,
     log_strategy_run_stop,
@@ -106,16 +107,9 @@ from bot.market_data import (
     fetch_gamma_market_by_slug,
 )
 from bot.post_trade import (
-    apply_fill_followup,
     build_fill_order_event_payload,
-    compute_settlement_summary,
 )
 from bot.models import ExitDecisionType, MarketSnapshot, PositionState, SignalDecision
-from bot.wallet_ops import (
-    ensure_balance_clob_client,
-    fetch_conditional_balance,
-    refresh_collateral_balance,
-)
 from bot.quoting import (
     apply_quote_plan_guards,
     normalize_quote_mode,
@@ -143,7 +137,7 @@ from bot.risk_policy import (
 )
 from execution.fee_rate_client import FeeRateClient
 from execution.parameter_tuner import ParameterTuner
-from execution.rebate_model import CRYPTO_FEE_CURVE, bps_to_fee_rate
+from execution.rebate_model import CRYPTO_FEE_CURVE
 from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.grafana_exporter import get_grafana_exporter
@@ -603,7 +597,17 @@ def init_redis():
         return None
 
 
-class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, Strategy):
+class IntegratedBTCStrategy(
+    SideDecisionMixin,
+    SpotPricerMixin,
+    TakerExitMixin,
+    FillLedgerMixin,
+    OrderRuntimeMixin,
+    PricingRuntimeMixin,
+    StrategyRecoveryMixin,
+    StrategyLifecycleMixin,
+    Strategy,
+):
     """
     Integrated BTC Strategy combining:
     - Nautilus trading framework
@@ -1532,6 +1536,10 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
     @staticmethod
     def _extract_price_to_beat_from_market_payload(market: Dict[str, Any]) -> Optional[Decimal]:
         return extract_price_to_beat_from_market_payload(market)
+
+    @staticmethod
+    def _resolve_btc_15m_market_slugs() -> List[str]:
+        return resolve_btc_15m_market_slugs()
             
         return fair
 
@@ -1588,188 +1596,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         txt = str(liquidity_side or "").strip().upper()
         return txt in {"MAKER", "1"}
 
-    def _update_live_inventory_cost_from_fill(
-        self,
-        instrument_id: Any,
-        side: str,
-        fill_price: Decimal,
-        fill_qty: Decimal,
-        commission: Decimal,
-    ) -> Optional[Decimal]:
-        inst_key = self._instrument_key(instrument_id)
-        side_norm = self._normalize_side_text(side)
-        pre_state = self.live_inventory_cost.get(inst_key, {}) if inst_key else {}
-        pre_qty = Decimal(str(pre_state.get("qty", "0")))
-        pre_avg_entry = Decimal(str(pre_state.get("avg_entry_price", "0")))
-        realized_net = InventoryLedger.update_from_fill(
-            live_inventory_cost=self.live_inventory_cost,
-            instrument_key=inst_key,
-            side=side_norm,
-            fill_price=fill_price,
-            fill_qty=fill_qty,
-            commission=commission,
-            now_ts=time.time(),
-        )
-        if realized_net is None or side_norm != "sell":
-            return realized_net
-        state = self.live_inventory_cost.get(inst_key, {})
-        sell_qty = min(fill_qty, pre_qty)
-        logger.info(
-            f"Inventory realized[{inst_key[:18]}..]: sold={float(sell_qty):.6f} "
-            f"entry={float(pre_avg_entry):.4f} exit={float(fill_price):.4f} "
-            f"net_pnl={float(realized_net):+.4f} remaining={float(state['qty']):.6f}"
-        )
-        return realized_net
-
-    def _rebuild_inventory_state_from_db(
-        self,
-        instrument_id: Any,
-        target_qty: Decimal,
-        lookback_hours: int = 72,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Rebuild per-instrument inventory ledger from ORDER_FILLED history.
-        Used only on startup rehydrate when the strategy restarted mid-market.
-        """
-        inst = self._normalize_instrument_id(instrument_id)
-        inst_key = self._instrument_key(inst)
-        if inst is None or not inst_key or target_qty <= 0:
-            return None
-        if not self.trade_db:
-            return None
-        db_path = getattr(self.trade_db, "db_path", "")
-        if not db_path:
-            return None
-
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, lookback_hours))).isoformat()
-        ledger: Dict[str, Dict[str, Any]] = {}
-        first_fill_ts: float = 0.0
-        try:
-            conn = sqlite3.connect(str(db_path), timeout=5)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
-                SELECT ts, side, price, qty, commission_usdc
-                FROM order_events
-                WHERE event_type='ORDER_FILLED'
-                  AND instrument_id=?
-                  AND ts >= ?
-                ORDER BY id
-                """,
-                (inst_key, cutoff),
-            ).fetchall()
-            conn.close()
-        except Exception as e:
-            logger.warning(f"Inventory rehydrate DB replay failed for {inst_key}: {e}")
-            return None
-
-        for row in rows:
-            side_norm = self._normalize_side_text(row["side"])
-            fill_price = Decimal(str(row["price"] or 0))
-            fill_qty = Decimal(str(row["qty"] or 0))
-            commission = Decimal(str(row["commission_usdc"] or 0))
-            if not side_norm or fill_price <= 0 or fill_qty <= 0:
-                continue
-            if first_fill_ts <= 0:
-                try:
-                    first_fill_ts = datetime.fromisoformat(str(row["ts"])).timestamp()
-                except Exception:
-                    first_fill_ts = time.time()
-            InventoryLedger.update_from_fill(
-                live_inventory_cost=ledger,
-                instrument_key=inst_key,
-                side=side_norm,
-                fill_price=fill_price,
-                fill_qty=fill_qty,
-                commission=commission,
-                now_ts=first_fill_ts or time.time(),
-            )
-
-        state = ledger.get(inst_key)
-        if not state:
-            return None
-
-        replay_qty = Decimal(str(state.get("qty", "0")))
-        if replay_qty <= 0:
-            return None
-
-        # Trust current open-position qty from cache, but keep replayed cost basis.
-        if replay_qty != target_qty:
-            fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
-            scaled_fee = fee_remaining
-            if replay_qty > 0 and fee_remaining > 0:
-                scaled_fee = fee_remaining * (target_qty / replay_qty)
-            state["qty"] = target_qty
-            state["entry_fee_remaining"] = max(Decimal("0"), scaled_fee)
-        if float(state.get("opened_ts", 0.0)) <= 0:
-            state["opened_ts"] = first_fill_ts or time.time()
-        return state
-
-    def _rehydrate_inventory_state_on_startup(self) -> None:
-        """
-        On same-market restarts, recover local inventory tracking from cache positions
-        and recent fill history so exit logic can continue managing existing holdings.
-        """
-        if self.live_inventory_cost or self.inventory_delta_shares > 0:
-            return
-
-        restore_targets: List[InstrumentId] = []
-        for inst in self.current_market_instruments or []:
-            norm = self._normalize_instrument_id(inst)
-            if norm is not None and norm not in restore_targets:
-                restore_targets.append(norm)
-        if self.instrument_id is not None:
-            norm = self._normalize_instrument_id(self.instrument_id)
-            if norm is not None and norm not in restore_targets:
-                restore_targets.append(norm)
-        if not restore_targets:
-            return
-
-        restored_total = Decimal("0")
-        restored_items: List[Dict[str, Any]] = []
-        for inst in restore_targets:
-            open_qty = self._get_sellable_qty_for_current_instrument(instrument_id=inst)
-            if open_qty <= 0:
-                continue
-            state = self._rebuild_inventory_state_from_db(inst, target_qty=open_qty)
-            if state is None:
-                state = {
-                    "qty": open_qty,
-                    "avg_entry_price": Decimal("0"),
-                    "entry_fee_remaining": Decimal("0"),
-                    "opened_ts": time.time(),
-                }
-                logger.warning(
-                    f"Inventory rehydrate fallback: restored qty without cost basis "
-                    f"inst={self._instrument_key(inst)} qty={float(open_qty):.6f}"
-                )
-            self.live_inventory_cost[self._instrument_key(inst)] = state
-            restored_total += Decimal(str(state.get("qty", "0")))
-            restored_items.append(
-                {
-                    "instrument_id": self._instrument_key(inst),
-                    "qty": float(Decimal(str(state.get("qty", "0")))),
-                    "avg_entry_price": float(Decimal(str(state.get("avg_entry_price", "0")))),
-                }
-            )
-
-        if restored_total > 0:
-            self.inventory_delta_shares = restored_total
-            self._startup_rehydrated_inventory_force_sell_only = True
-            logger.warning(
-                "Startup inventory rehydrated: "
-                f"slug={self.current_market_slug or ''} restored_qty={float(restored_total):.6f} "
-                f"legs={len(restored_items)}"
-            )
-            self._db_strategy_event(
-                "STARTUP_INVENTORY_REHYDRATED",
-                {
-                    "slug": self.current_market_slug or "",
-                    "restored_total_qty": float(restored_total),
-                    "legs": restored_items,
-                },
-            )
-
     @staticmethod
     def _extract_token_id_from_instrument(instrument_id: str) -> Optional[str]:
         """
@@ -1814,10 +1640,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         return ""
 
     @staticmethod
-    def _order_key_for(side: str, instrument_id: Any) -> str:
-        return f"{side}:{instrument_id}"
-
-    @staticmethod
     def _normalize_instrument_id(instrument_id: Any) -> Optional[InstrumentId]:
         if instrument_id is None:
             return None
@@ -1827,40 +1649,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             return InstrumentId.from_str(str(instrument_id))
         except Exception:
             return None
-
-    def _active_order_keys(self, side: Optional[str] = None, instrument_id: Optional[Any] = None) -> List[str]:
-        keys: List[str] = []
-        target_inst = str(instrument_id) if instrument_id is not None else None
-        for key, state in self.active_maker_orders.items():
-            state_side = str(state.get("side", "") or "")
-            state_inst = str(state.get("instrument_id", "") or "")
-            if side is not None and state_side != side:
-                continue
-            if target_inst is not None and state_inst != target_inst:
-                continue
-            keys.append(key)
-        return keys
-
-    def _get_quote_for_instrument(self, instrument_id: Any) -> Optional[Tuple[Decimal, Decimal]]:
-        inst = self._normalize_instrument_id(instrument_id)
-        if inst is None:
-            return None
-        quote = self.cache.quote_tick(inst)
-        if quote is None:
-            return None
-        bid_decimal = quote.bid_price.as_decimal() if quote.bid_price is not None else None
-        ask_decimal = quote.ask_price.as_decimal() if quote.ask_price is not None else None
-        if bid_decimal is None and ask_decimal is not None:
-            bid_decimal = max(Decimal("0.01"), ask_decimal - Decimal("0.01"))
-        if ask_decimal is None and bid_decimal is not None:
-            ask_decimal = min(Decimal("0.99"), bid_decimal + Decimal("0.01"))
-        if bid_decimal is None or ask_decimal is None:
-            return None
-        if bid_decimal > ask_decimal:
-            mid_tmp = (bid_decimal + ask_decimal) / 2
-            bid_decimal = max(Decimal("0.01"), mid_tmp - Decimal("0.005"))
-            ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
-        return bid_decimal, ask_decimal
 
     def _append_real_mid_price(self, instrument_id: Any, mid_price: Decimal) -> None:
         inst_key = str(instrument_id) if instrument_id is not None else ""
@@ -1873,186 +1661,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         history.append(mid_price)
         if len(history) > self.max_real_history:
             history.pop(0)
-
-    def _momentum_history_for_instrument(self, instrument_id: Any) -> List[Decimal]:
-        inst_key = str(instrument_id) if instrument_id is not None else ""
-        if inst_key:
-            per_inst = self.real_price_history_by_inst.get(inst_key)
-            if per_inst:
-                return per_inst
-        return self.real_price_history
-
-    def _get_total_sellable_qty(self, instrument_ids: Optional[List[Any]] = None) -> Decimal:
-        ids = instrument_ids or []
-        if not ids and self.instrument_id is not None:
-            ids = [self.instrument_id]
-        total = Decimal("0")
-        seen: set[str] = set()
-        for inst_id in ids:
-            key = str(inst_id)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            total += self._get_sellable_qty_for_current_instrument(instrument_id=inst_id)
-        return total
-
-    def _infer_market_fee_rate_default(self) -> Decimal:
-        """
-        Infer fee-curve parameter by market type when /fee-rate is unavailable.
-        """
-        default_rate = self.maker_fee_rate_default_decimal
-        try:
-            instrument = self.cache.instrument(self.instrument_id) if self.instrument_id else None
-            info = getattr(instrument, "info", None) or {}
-            if not isinstance(info, dict):
-                return default_rate
-
-            gamma_original = info.get("_gamma_original")
-            fee_type = ""
-            if isinstance(gamma_original, dict):
-                fee_type = str(gamma_original.get("feeType", "")).strip().lower()
-
-            text = f"{str(info.get('market_slug', '')).lower()} {str(info.get('question', '')).lower()} {fee_type}"
-            if "crypto_15" in fee_type or "crypto_5" in fee_type or "btc-updown" in text:
-                return Decimal("0.25")
-            if "ncaab" in text or "serie a" in text or "serie_a" in text:
-                return Decimal("0.0175")
-        except Exception:
-            pass
-        return default_rate
-
-    async def _get_dynamic_fee_rate(self, token_id: Optional[str] = None) -> Optional[Decimal]:
-        """
-        Fetch dynamic fee rate from CLOB /fee-rate endpoint using current token_id.
-        """
-        token = token_id or self.current_token_id
-        if not token:
-            return None
-        now_ts = time.time()
-        local_cached = self._fee_rate_local_cache_by_token.get(token)
-        if local_cached is not None:
-            cached_ts = float(local_cached.get("ts", 0.0))
-            cached_rate = local_cached.get("fee_rate")
-            if (
-                isinstance(cached_rate, Decimal)
-                and cached_rate > 0
-                and cached_ts > 0
-                and (now_ts - cached_ts) < self.fee_rate_fetch_interval_sec
-            ):
-                return cached_rate
-
-        fee_rate = await self.fee_rate_client.get_fee_rate_decimal(token)
-        source = "clob_fee_rate"
-        if fee_rate is None or fee_rate <= 0:
-            fee_rate = self._infer_market_fee_rate_default()
-            source = "market_type_default"
-            if (fee_rate is None or fee_rate <= 0) and self.maker_fee_rate_legacy_bps_default > 0:
-                fee_rate = bps_to_fee_rate(self.maker_fee_rate_legacy_bps_default)
-                source = "legacy_bps_default"
-        if fee_rate is None or fee_rate <= 0:
-            return None
-        self._fee_rate_local_cache_by_token[token] = {"fee_rate": fee_rate, "ts": now_ts}
-        fee_bps_value = int((fee_rate * Decimal("10000")).quantize(Decimal("1")))
-        prev_state = self._last_fee_log_state_by_token.get(token, {})
-        prev_ts = float(prev_state.get("ts", 0.0))
-        prev_bps = int(prev_state.get("bps", -1))
-        prev_source = str(prev_state.get("source", ""))
-        should_log = (
-            prev_ts <= 0
-            or (now_ts - prev_ts) >= self.fee_log_interval_sec
-            or prev_bps != fee_bps_value
-            or prev_source != source
-        )
-        if should_log:
-            logger.debug(
-                f"Using fee rate source={source} bps={fee_bps_value} "
-                f"decimal={float(fee_rate):.6f} token={token}"
-            )
-            self._last_fee_log_state_by_token[token] = {
-                "ts": now_ts,
-                "bps": fee_bps_value,
-                "source": source,
-            }
-        if source != "clob_fee_rate":
-            health = self.fee_rate_client.get_health_snapshot()
-            last_reason = str(health.get("last_error_reason", ""))
-            last_status = int(health.get("last_status_code", 0) or 0)
-            last_excerpt = str(health.get("last_response_excerpt", ""))
-            if last_reason or last_status:
-                logger.debug(
-                    "fee-rate fallback diagnostics: "
-                    f"reason={last_reason} status={last_status} excerpt={last_excerpt}"
-                )
-        return fee_rate
-
-    @staticmethod
-    def _parse_orderbook_levels(raw_levels: Any, limit: int) -> List[Tuple[Decimal, Decimal]]:
-        levels: List[Tuple[Decimal, Decimal]] = []
-        if not isinstance(raw_levels, list):
-            return levels
-        for lv in raw_levels:
-            if len(levels) >= limit:
-                break
-            px: Optional[Decimal] = None
-            qty: Optional[Decimal] = None
-            try:
-                if isinstance(lv, dict):
-                    px = Decimal(str(lv.get("price")))
-                    qty = Decimal(str(lv.get("size") if lv.get("size") is not None else lv.get("quantity")))
-                elif isinstance(lv, (list, tuple)) and len(lv) >= 2:
-                    px = Decimal(str(lv[0]))
-                    qty = Decimal(str(lv[1]))
-            except Exception:
-                continue
-            if px is None or qty is None:
-                continue
-            if px <= 0 or qty <= 0:
-                continue
-            levels.append((px, qty))
-        return levels
-
-    async def _get_orderbook_levels_for_token(
-        self,
-        token_id: Optional[str],
-    ) -> Tuple[Optional[List[Tuple[Decimal, Decimal]]], Optional[List[Tuple[Decimal, Decimal]]]]:
-        token = str(token_id or "").strip()
-        if not token:
-            return None, None
-        now_ts = time.time()
-        cached = self.orderbook_levels_cache_by_token.get(token)
-        if cached is not None:
-            cached_ts = float(cached.get("ts", 0.0))
-            if cached_ts > 0 and (now_ts - cached_ts) < self.orderbook_fetch_interval_sec:
-                return cached.get("bids"), cached.get("asks")
-
-        client = getattr(self, "_balance_clob_client", None)
-        if client is None:
-            client = ensure_balance_clob_client(
-                current_client=None,
-                logger_info_fn=logger.info,
-                logger_warning_fn=logger.warning,
-            )
-            if client is not None:
-                self._balance_clob_client = client
-        if client is None:
-            return None, None
-
-        try:
-            raw = await asyncio.to_thread(client.get_order_book, token)
-            
-            # Robust extraction for both dict and object responses from py_clob_client
-            raw_bids = raw.get("bids") if isinstance(raw, dict) else getattr(raw, "bids", None)
-            raw_asks = raw.get("asks") if isinstance(raw, dict) else getattr(raw, "asks", None)
-            
-            bids = self._parse_orderbook_levels(raw_bids, self.orderbook_levels_limit)
-            asks = self._parse_orderbook_levels(raw_asks, self.orderbook_levels_limit)
-            self.orderbook_levels_cache_by_token[token] = {"ts": now_ts, "bids": bids, "asks": asks}
-            return bids, asks
-        except Exception as e:
-            logger.debug(f"Orderbook level fetch failed for token={token}: {e}")
-            if cached is not None:
-                return cached.get("bids"), cached.get("asks")
-            return None, None
 
     def _activate_maker_kill_switch(self, reason: str) -> None:
         self.maker_kill_switch = True
@@ -2141,355 +1749,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         if side.lower() == "buy":
             return projected + in_flight_qty + qty
         return projected - in_flight_qty - qty
-
-    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id: Optional[Any] = None) -> Decimal:
-        """
-        Return the strategy's confirmed inventory for a specific instrument.
-
-        This is derived from the bot's internal fill ledger (`live_inventory_cost`),
-        not from external position/balance caches, so SELL quoting cannot race ahead
-        of a locally confirmed BUY fill.
-        """
-        inst = instrument_id if instrument_id is not None else self.instrument_id
-        inst_key = self._instrument_key(inst)
-        if not inst_key:
-            return Decimal("0")
-        state = self.live_inventory_cost.get(inst_key)
-        if not state:
-            return Decimal("0")
-        qty = Decimal(str(state.get("qty", "0")))
-        return max(Decimal("0"), qty)
-
-    def _get_sellable_qty_for_current_instrument(self, instrument_id: Optional[Any] = None) -> Decimal:
-        """
-        Get sellable token quantity from cache open positions for current instrument.
-        """
-        inst = instrument_id if instrument_id is not None else self.instrument_id
-        inst = self._normalize_instrument_id(inst)
-        if inst is None:
-            return Decimal("0")
-        total = Decimal("0")
-        try:
-            positions = self.cache.positions_open(instrument_id=inst)
-            for pos in positions or []:
-                signed = Decimal(str(getattr(pos, "signed_qty", 0.0) or 0.0))
-                if signed > 0:
-                    total += signed
-        except Exception as e:
-            logger.debug(f"Could not read sellable qty from cache positions: {e}")
-        return total
-
-    def _get_conditional_balance_for_token(self, token_id: Optional[str], force_refresh: bool = False) -> Optional[Decimal]:
-        """
-        Query CONDITIONAL token balance from CLOB and cache for a short interval.
-        Returns shares (Decimal) or None if unavailable.
-        """
-        token = str(token_id or "").strip()
-        if not token:
-            return None
-        cached = self._conditional_balance_cache_by_token.get(token)
-        if not hasattr(self, "_balance_clob_client") or self._balance_clob_client is None:
-            self._balance_last_check_ts = 0.0
-            self._refresh_balance_cache()
-        self._balance_clob_client, balance_shares, cache_entry = fetch_conditional_balance(
-            token=token,
-            current_client=getattr(self, "_balance_clob_client", None),
-            cached_entry=cached,
-            conditional_balance_check_interval_sec=float(self.conditional_balance_check_interval_sec),
-            force_refresh=force_refresh,
-            logger_debug_fn=logger.debug,
-        )
-        if cache_entry is not None:
-            self._conditional_balance_cache_by_token[token] = cache_entry
-        return balance_shares
-
-    def _get_effective_sellable_qty(self, instrument_id: Optional[Any]) -> Decimal:
-        """
-        Conservative sellable qty:
-        min(cache open positions, on-chain conditional balance with safety buffer).
-        """
-        confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
-        if confirmed_qty <= 0:
-            return Decimal("0")
-        local_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
-        inst_txt = str(instrument_id or "")
-        token_id = self._extract_token_id_from_instrument(inst_txt)
-        onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
-        if onchain_qty is None:
-            return min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
-        safe_onchain = onchain_qty * (Decimal("1") - self.conditional_balance_safety_buffer_pct)
-        safe_onchain = max(Decimal("0"), safe_onchain)
-        candidates = [confirmed_qty]
-        if local_qty > 0:
-            candidates.append(local_qty)
-        candidates.append(safe_onchain)
-        return min(candidates)
-
-    def _compute_maker_order_qty(self, limit_price: Decimal, precision: int) -> Decimal:
-        """
-        Compute order quantity for maker quote.
-        Priority:
-        1) Fixed shares (MAKER_FIXED_SHARES > 0),
-        2) USDC notional / price with min shares floor.
-        """
-        min_lot = Decimal(str(10 ** (-precision)))
-        min_qty = max(min_lot, self.maker_min_shares)
-        if self.maker_fixed_shares > 0:
-            qty = max(self.maker_fixed_shares, min_qty)
-            # BUG-3 FIX: enforce notional cap even for fixed shares
-            if limit_price > 0 and self.maker_max_order_usdc > 0:
-                max_shares_by_notional = self.maker_max_order_usdc / limit_price
-                if qty > max_shares_by_notional:
-                    qty = max(max_shares_by_notional, min_qty)
-            return qty
-
-        quote_notional_usdc = min(self.maker_quote_size_usdc, self.maker_max_order_usdc)
-        if quote_notional_usdc < self.maker_quote_size_usdc:
-            logger.warning(
-                f"Maker quote notional capped by MAKER_MAX_ORDER_USDC: "
-                f"{float(self.maker_quote_size_usdc):.4f} -> {float(quote_notional_usdc):.4f}"
-            )
-
-        token_qty = Decimal("0")
-        if limit_price > 0:
-            token_qty = quote_notional_usdc / limit_price
-        token_qty = max(token_qty, min_qty)
-        return token_qty
-
-    def _compute_recent_volatility(self) -> Optional[Decimal]:
-        """
-        Compute volatility from REAL quote history only.
-        Uses clipped returns + max(rolling_std, ewma_std).
-        """
-        min_quotes = max(2, self.maker_vol_warmup_quotes)
-        if len(self.real_price_history) < min_quotes:
-            return None
-
-        window = max(5, self.maker_vol_rolling_window)
-        recent = self.real_price_history[-(window + 1):]
-        clip = float(abs(self.maker_vol_return_clip))
-        returns: List[float] = []
-        for i in range(1, len(recent)):
-            prev = float(recent[i - 1])
-            cur = float(recent[i])
-            if prev <= 0:
-                continue
-            r = (cur - prev) / prev
-            r = max(-clip, min(clip, r))
-            returns.append(r)
-        if len(returns) < 2:
-            return None
-
-        # Rolling standard deviation (population) on the clipped returns.
-        roll = returns[-window:]
-        mean_r = sum(roll) / len(roll)
-        var = sum((r - mean_r) ** 2 for r in roll) / len(roll)
-        rolling_std = math.sqrt(max(0.0, var))
-
-        # EWMA standard deviation on clipped returns.
-        alpha = max(0.01, min(0.99, self.maker_vol_ewma_alpha))
-        ewma_var = roll[0] ** 2
-        for r in roll[1:]:
-            ewma_var = alpha * (r ** 2) + (1.0 - alpha) * ewma_var
-        ewma_std = math.sqrt(max(0.0, ewma_var))
-
-        return Decimal(str(max(rolling_std, ewma_std)))
-
-    # _apply_inventory_skew removed (managed by MakerEngine)
-    def _cancel_active_maker_orders(self) -> None:
-        for order_key in list(self.active_maker_orders.keys()):
-            self._cancel_maker_order_side(order_key, reason="risk")
-
-    def _cancel_maker_order_side(self, side: str, reason: str = "risk", instrument_id: Optional[Any] = None) -> None:
-        # Backward compatible:
-        # - if `side` is an exact order key, cancel that key
-        # - else treat `side` as logical side filter (buy/sell)
-        target_keys: List[str] = []
-        if side in self.active_maker_orders and instrument_id is None:
-            target_keys = [side]
-        else:
-            target_keys = self._active_order_keys(side=side, instrument_id=instrument_id)
-        for order_key in target_keys:
-            self._cancel_maker_order_key(order_key, reason=reason)
-
-    def _cancel_maker_order_key(self, order_key: str, reason: str = "risk") -> None:
-        state = self.active_maker_orders.get(order_key)
-        if not state:
-            return
-        side = str(state.get("side", "") or "")
-        order = state.get("order")
-        now_ts = time.time()
-        if state.get("pending_cancel"):
-            last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
-            if last_cancel_ts > 0 and (now_ts - last_cancel_ts) < self.maker_cancel_cooldown_sec:
-                logger.debug(f"Skip duplicate cancel [{side}] within cooldown")
-                return
-        if order is None:
-            # The order might just be missing a venue ID or dropped from cache temporarily.
-            # Don't pop it! Mark it pending_cancel to be cleaned up by the reconcile loop.
-            state["pending_cancel"] = True
-            state["last_cancel_ts"] = now_ts
-            state["cancel_reason"] = reason
-            return
-        try:
-            status_text = str(getattr(order, "status", "")).upper()
-            if any(flag in status_text for flag in ("REJECTED", "FILLED", "CANCELED", "CANCELLED")):
-                logger.debug(f"Skip cancel [{side}] because order state is terminal: {status_text}")
-                # Keep local tracking until fill/cancel event handlers reconcile inventory/state.
-                state["pending_cancel"] = True
-                state["last_cancel_ts"] = now_ts
-                state["cancel_reason"] = reason
-            else:
-                self.cancel_order(order)
-                state["pending_cancel"] = True
-                state["last_cancel_ts"] = now_ts
-                state["cancel_retries"] = int(state.get("cancel_retries", 0))
-                state["cancel_reason"] = reason
-                logger.info(f"Cancelled maker order [{side}] {order.client_order_id}")
-        except Exception as e:
-            logger.debug(f"Failed to cancel maker order [{side}]: {e}")
-        self.rebate_reporter.record_cancel(reason)
-
-    def _is_order_ttl_expired(self, order_key: str, now_ts: float) -> bool:
-        state = self.active_maker_orders.get(order_key)
-        if not state:
-            return False
-        created_ts = float(state.get("created_ts", 0.0))
-        if created_ts <= 0:
-            return True
-        return (now_ts - created_ts) >= self.maker_order_ttl_sec
-
-    def _cleanup_stale_pending_cancels(self, now_ts: float) -> None:
-        for order_key, state in list(self.active_maker_orders.items()):
-            side = str(state.get("side", "") or "")
-            if not state.get("pending_cancel"):
-                continue
-            last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
-            if last_cancel_ts <= 0:
-                continue
-            if (now_ts - last_cancel_ts) >= self.maker_cancel_ack_timeout_sec:
-                order = state.get("order")
-                coid = str(order.client_order_id) if order else "unknown"
-                is_open = self._is_order_still_open_in_cache(coid)
-                retries = int(state.get("cancel_retries", 0))
-                if is_open is False:
-                    logger.info(f"Cancel reconciled for [{side}] {coid}; removing local pending-cancel state.")
-                    self._db_order_event(
-                        event_type="ORDER_CANCEL_RECONCILED",
-                        client_order_id=coid,
-                        side=side.upper(),
-                        status="CANCELED_RECONCILED",
-                    )
-                    self.active_maker_orders.pop(order_key, None)
-                    continue
-
-                if is_open is None:
-                    unknown_retries = int(state.get("reconcile_unknown_retries", 0)) + 1
-                    state["reconcile_unknown_retries"] = unknown_retries
-                    
-                    if unknown_retries > self.maker_cancel_max_retries * 2:  # Give it a bit more leeway then drop
-                        logger.error(f"Cancel reconcile unknown for [{side}] {coid} exceeded max retries. Triggering Maker Kill Switch.")
-                        self._db_order_event(
-                            event_type="ORDER_CANCEL_RECONCILE_UNKNOWN_KILL",
-                            client_order_id=coid,
-                            side=side.upper(),
-                            status="KILL_SWITCH_UNKNOWN",
-                            reason="max_unknown_retries",
-                        )
-                        self._activate_maker_kill_switch(f"Order {coid} state unknown after {unknown_retries} retries")
-                        continue
-
-                    state["last_cancel_ts"] = now_ts
-                    pause_sec = max(1, min(self.maker_error_pause_sec, self.maker_cancel_ack_timeout_sec))
-                    self.quote_pause_until_ts = max(self.quote_pause_until_ts, now_ts + pause_sec)
-                    logger.warning(
-                        f"Cancel reconcile unknown for [{side}] {coid}; "
-                        f"keeping pending-cancel state and retrying later "
-                        f"(unknown_count={unknown_retries}, pause={pause_sec}s)."
-                    )
-                    self._db_order_event(
-                        event_type="ORDER_CANCEL_RECONCILE_UNKNOWN",
-                        client_order_id=coid,
-                        side=side.upper(),
-                        status="PENDING_CANCEL_UNKNOWN",
-                        reason="cache_unknown",
-                        payload={"unknown_count": unknown_retries},
-                    )
-                    continue
-
-                if retries < self.maker_cancel_max_retries and order is not None:
-                    try:
-                        self.cancel_order(order)
-                        state["last_cancel_ts"] = now_ts
-                        state["cancel_retries"] = retries + 1
-                        logger.warning(
-                            f"Pending-cancel timeout for [{side}] {coid}; "
-                            f"reconcile suggests still open (or unknown), retry cancel "
-                            f"{state['cancel_retries']}/{self.maker_cancel_max_retries}."
-                        )
-                        self._db_order_event(
-                            event_type="ORDER_CANCEL_RETRY",
-                            client_order_id=coid,
-                            side=side.upper(),
-                            status="PENDING_CANCEL_RETRY",
-                            reason=f"timeout_reconcile_open={is_open}",
-                            payload={"retry": state["cancel_retries"]},
-                        )
-                    except Exception as e:
-                        logger.warning(f"Cancel retry failed for [{side}] {coid}: {e}")
-                    continue
-
-                logger.error(
-                    f"Cancel reconciliation failed for [{side}] {coid} after "
-                    f"{retries} retries; activating maker kill switch."
-                )
-                self._db_order_event(
-                    event_type="ORDER_CANCEL_RECONCILE_FAILED",
-                    client_order_id=coid,
-                    side=side.upper(),
-                    status="PENDING_CANCEL_GIVE_UP",
-                    reason=f"open_after_retries={retries}",
-                )
-                self._activate_maker_kill_switch(
-                    f"Cancel reconcile failed for {coid} after {retries} retries"
-                )
-
-    def _is_order_still_open_in_cache(self, client_order_id: str) -> Optional[bool]:
-        """
-        Try to reconcile local pending-cancel state against Nautilus cache.
-        Returns:
-        - True: order still appears open/live
-        - False: order not found among open/live orders
-        - None: could not determine
-        """
-        try:
-            open_orders = []
-            if hasattr(self.cache, "orders_open"):
-                oo = self.cache.orders_open()
-                if oo:
-                    open_orders.extend(list(oo))
-            elif hasattr(self.cache, "orders"):
-                oo = self.cache.orders()
-                if oo:
-                    open_orders.extend(list(oo))
-
-            # Empty cache can be a transient sync gap; treat as unknown, not closed.
-            if len(open_orders) == 0:
-                return None
-
-            target = str(client_order_id)
-            for o in open_orders:
-                coid = str(getattr(o, "client_order_id", "") or "")
-                if coid != target:
-                    continue
-                status_text = str(getattr(o, "status", "")).upper()
-                if any(flag in status_text for flag in ("FILLED", "REJECTED", "CANCELED", "CANCELLED", "EXPIRED")):
-                    return False
-                return True
-            return False
-        except Exception as e:
-            logger.debug(f"Open-order cache reconciliation failed for {client_order_id}: {e}")
-            return None
 
     # Simulation logic extracted to execution/sim_adapter.py
 
@@ -2897,13 +2156,24 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                         * self.maker_reload_min_expected_net_multiplier
                     )
                 # Determine if the directional thesis has weakened against our position.
-                # If score flips or drops to zero while holding inventory, allow loss-selling.
+                # Loss-selling should be allowed more aggressively when we are confirmed
+                # offside against a locked side decision, even if cost-protect would
+                # normally block the new SELL price.
                 _thesis_weakened = False
+                _offside_confirmed = False
                 if (
                     side == "sell"
                     and self.inventory_delta_shares > 0
                     and self.bi_side_enabled
                 ):
+                    target_active_inst = self._instrument_for_side(self.active_side)
+                    if (
+                        self.active_side_locked
+                        and self.active_side != ActiveSide.NONE
+                        and target_active_inst is not None
+                        and target_active_inst != inst_id
+                    ):
+                        _offside_confirmed = True
                     score = float(self.side_decision_score)
                     if self.active_side == ActiveSide.UP and score < 0:
                         _thesis_weakened = True
@@ -2937,6 +2207,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                     thesis_weakened=_thesis_weakened,
+                    offside_confirmed=_offside_confirmed,
                 )
                 desired_entry["dynamic_fee_rate"] = quote_ctx.dynamic_fee_rate
                 desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
@@ -3608,45 +2879,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
 
         threading.Thread(target=_runner, daemon=True).start()
 
-    def _refresh_balance_cache_sync(self) -> Optional[Decimal]:
-        self._balance_clob_client = ensure_balance_clob_client(
-            current_client=getattr(self, "_balance_clob_client", None),
-            logger_info_fn=logger.info,
-            logger_warning_fn=logger.warning,
-        )
-        self._balance_clob_client, refreshed_balance = refresh_collateral_balance(
-            current_client=self._balance_clob_client,
-            cached_balance=self._cached_usdc_balance,
-            logger_info_fn=logger.info,
-            logger_warning_fn=logger.warning,
-            logger_debug_fn=logger.debug,
-        )
-        if refreshed_balance is not None:
-            self._cached_usdc_balance = refreshed_balance
-            self._balance_last_check_ts = time.time()
-            try:
-                if not hasattr(self, '_prom_wallet_balance'):
-                    from prometheus_client import Gauge
-                    self._prom_wallet_balance = Gauge(
-                        'trading_wallet_balance_usdc',
-                        'Real on-chain wallet USDC balance'
-                    )
-                self._prom_wallet_balance.set(float(self._cached_usdc_balance))
-            except Exception:
-                pass
-            self._update_terminal_dashboard_snapshot()
-        return self._cached_usdc_balance
-
-    def _start_balance_refresh_timer(self) -> None:
-        interval = max(5.0, float(self.balance_check_interval_sec))
-        while not self._balance_stop_event.wait(interval):
-            if self._stopping:
-                return
-            try:
-                self._refresh_balance_cache_sync()
-            except Exception as exc:
-                logger.debug(f"Background balance refresh failed: {exc}")
-
     def _start_auto_redeem_timer(self) -> None:
         """
         Periodic auto redeem timer (default every 15 minutes).
@@ -4021,364 +3253,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             self._transition_market_phase(MarketPhase(decision.next_phase_value), now_ts)
 
         return self.market_phase
-
-    def _transition_market_phase(self, new_phase: MarketPhase, now_ts: float) -> None:
-        """Log and record a market phase transition."""
-        old_phase = self.market_phase
-        self.market_phase = new_phase
-
-        end_ts = getattr(self, "current_market_end_timestamp", None)
-        time_left = (end_ts - now_ts) if end_ts else None
-
-        logger.warning(
-            f"MARKET PHASE: {old_phase.value} → {new_phase.value} "
-            f"slug={self.current_market_slug or '-'} "
-            f"time_left={time_left / 60:.1f}m" if time_left is not None else
-            f"MARKET PHASE: {old_phase.value} → {new_phase.value} "
-            f"slug={self.current_market_slug or '-'} "
-            f"time_left=N/A"
-        )
-        self._db_strategy_event(
-            "MARKET_PHASE_CHANGE",
-            {
-                "from": old_phase.value,
-                "to": new_phase.value,
-                "slug": self.current_market_slug,
-                "time_left_sec": time_left,
-            },
-        )
-
-        # Actions on transition
-        if new_phase == MarketPhase.SETTLING:
-            self._cancel_active_maker_orders()
-            self._record_market_settlement()
-            logger.info("Settling: all maker orders cancelled. Waiting for grace period.")
-        elif new_phase == MarketPhase.WAITING:
-            self._cancel_active_maker_orders()
-            # Clear stale market end timestamp so we don't re-enter SETTLING.
-            self.current_market_end_timestamp = None
-            logger.info("Waiting: proactively searching for next market.")
-        elif new_phase == MarketPhase.REDUCE_ONLY:
-            # Cancel buy-side orders immediately.
-            for order_key, state in list(self.active_maker_orders.items()):
-                if str(state.get("side", "")) == "buy":
-                    self._cancel_maker_order_side(order_key, reason="reduce_only")
-        self._update_terminal_dashboard_snapshot()
-
-    def _record_market_settlement(self) -> None:
-        """
-        Record settlement outcome for PnL tracking when market ends.
-        Uses BTC spot vs strike to determine UP/DOWN and calculates
-        redeem value for any inventory held at settlement.
-        """
-        try:
-            inv = float(self.inventory_delta_shares)
-            if inv < 0.001:
-                logger.info("Settlement: no inventory to settle.")
-                cycle_fill_realized = float(self.market_cycle_realized_net_usdc)
-                self._append_cycle_and_maybe_trigger_regime_guard(
-                    cycle_combined_pnl=cycle_fill_realized,
-                    slug=self.current_market_slug or "",
-                    source="settlement_no_inventory",
-                )
-                self._db_strategy_event(
-                    "MARKET_CYCLE_PNL",
-                    {
-                        "slug": self.current_market_slug or "",
-                        "active_side": self.active_side.value,
-                        "cycle_fill_realized_usdc": cycle_fill_realized,
-                        "cycle_settlement_pnl_usdc": 0.0,
-                        "cycle_combined_pnl_usdc": cycle_fill_realized,
-                        "recent_window_size": len(self.recent_market_combined_pnls),
-                    },
-                )
-                self._cycle_total_trades += 1
-                if cycle_fill_realized > 0:
-                    self._cycle_total_wins += 1
-                if self.terminal_dashboard:
-                    self.terminal_dashboard.record_cycle(
-                        slug=self.current_market_slug or "",
-                        pnl_usdc=cycle_fill_realized,
-                    )
-                self.market_cycle_realized_net_usdc = Decimal("0")
-                return
-
-            # Get BTC spot price from external feed (do NOT use contract 0..1 quote history).
-            # Priority: latest external spot -> last external spot -> fresh Binance WS tick.
-            spot = 0.0
-            if self.latest_external_spot is not None and self.latest_external_spot > 0:
-                spot = float(self.latest_external_spot)
-            elif self.last_external_spot is not None and self.last_external_spot > 0:
-                spot = float(self.last_external_spot)
-            elif self._binance_ws_price is not None and self._binance_ws_price > 0:
-                ws_age = time.time() - float(self._binance_ws_price_ts or 0.0)
-                if ws_age <= 60.0:
-                    spot = float(self._binance_ws_price)
-            if spot <= 0 and self.external_spot_history:
-                _, hist_px = self.external_spot_history[-1]
-                if hist_px > 0:
-                    spot = float(hist_px)
-
-            # Get strike from cache
-            slug = self.current_market_slug or ""
-            strike = 0.0
-            if slug and slug in self.market_strike_cache_by_slug:
-                strike = float(self.market_strike_cache_by_slug[slug])
-
-            if spot <= 0 or strike <= 0:
-                logger.warning(
-                    f"Settlement: cannot determine outcome. spot={spot} strike={strike} "
-                    f"inv={inv} slug={slug}"
-                )
-                return
-
-            # Guard against scale mismatch (e.g. spot=0.5 contract price vs strike=67,000 BTC spot).
-            if spot < 1000 and strike > 1000:
-                logger.warning(
-                    f"Settlement: invalid spot/strike scale mismatch. "
-                    f"spot={spot:.6f} strike={strike:.2f} inv={inv} slug={slug}. "
-                    "Skipping settlement PnL to avoid false outcome."
-                )
-                self._db_strategy_event("MARKET_SETTLEMENT_INVALID_DATA", {
-                    "slug": slug,
-                    "spot": spot,
-                    "strike": strike,
-                    "inventory_shares": inv,
-                    "reason": "spot_strike_scale_mismatch",
-                })
-                return
-
-            # Determine the actual token side the inventory belongs to,
-            # which may differ from active_side if a side flip occurred.
-            _inventory_side = None
-            for inv_key, inv_state in self.live_inventory_cost.items():
-                inv_qty = float(inv_state.get("qty", 0))
-                if inv_qty > 0.001:
-                    detected = self._side_for_instrument_id(inv_key)
-                    if detected != ActiveSide.NONE:
-                        _inventory_side = detected.value
-                        break
-
-            settlement = compute_settlement_summary(
-                spot=spot,
-                strike=strike,
-                inventory_shares=inv,
-                live_inventory_cost=self.live_inventory_cost,
-                market_cycle_realized_net_usdc=self.market_cycle_realized_net_usdc,
-                active_side=self.active_side.value,
-                inventory_side=_inventory_side,
-            )
-
-            logger.info(
-                f"SETTLEMENT: slug={slug} spot={spot:.2f} strike={strike:.2f} "
-                f"outcome={settlement.outcome} active_side={settlement.active_side} "
-                f"inventory_side={_inventory_side or settlement.active_side} "
-                f"inv={inv:.4f} redeem=${settlement.redeem_value:.4f} "
-                f"cost=${settlement.inventory_cost:.4f} pnl={settlement.settlement_pnl:+.4f}"
-            )
-
-            self._db_strategy_event("MARKET_SETTLEMENT", {
-                "slug": slug,
-                "spot": spot,
-                "strike": strike,
-                "outcome": settlement.outcome,
-                "active_side": settlement.active_side,
-                "inventory_side": _inventory_side or settlement.active_side,
-                "inventory_shares": inv,
-                "redeem_per_share": settlement.redeem_per_share,
-                "redeem_value_usdc": settlement.redeem_value,
-                "inventory_cost_usdc": settlement.inventory_cost,
-                "settlement_pnl_usdc": settlement.settlement_pnl,
-            })
-            self._append_cycle_and_maybe_trigger_regime_guard(
-                cycle_combined_pnl=settlement.cycle_combined_pnl,
-                slug=slug,
-                source="settlement",
-            )
-            self._db_strategy_event(
-                "MARKET_CYCLE_PNL",
-                {
-                    "slug": slug,
-                    "active_side": settlement.active_side,
-                    "cycle_fill_realized_usdc": settlement.cycle_fill_realized,
-                    "cycle_settlement_pnl_usdc": settlement.settlement_pnl,
-                    "cycle_combined_pnl_usdc": settlement.cycle_combined_pnl,
-                    "recent_window_size": len(self.recent_market_combined_pnls),
-                },
-            )
-            self._cycle_total_trades += 1
-            if settlement.cycle_combined_pnl > 0:
-                self._cycle_total_wins += 1
-            if self.terminal_dashboard:
-                self.terminal_dashboard.record_cycle(
-                    slug=slug,
-                    pnl_usdc=settlement.cycle_combined_pnl,
-                )
-            self.market_cycle_realized_net_usdc = Decimal("0")
-            self._update_terminal_dashboard_snapshot()
-        except Exception as e:
-            logger.warning(f"Settlement recording failed: {e}")
-
-    # ------------------------------------------------------------------
-    # Proactive Next-Market Detection
-    # ------------------------------------------------------------------
-
-    def _search_next_market(self) -> bool:
-        """
-        Proactively search for the next BTC 15-min market.
-        Updates self.next_market_slug and self.next_market_start_ts.
-        If a viable market is found, switches to it.
-
-        Returns True if a new market was found and activated.
-        """
-        try:
-            btc_slugs = resolve_btc_15m_market_slugs()
-            if not btc_slugs:
-                logger.debug("Next market search: no slugs found")
-                self.next_market_slug = None
-                self.next_market_start_ts = None
-                return False
-
-            now_ts = time.time()
-            best_slug, best_start_ts = select_next_market_window(
-                btc_slugs=btc_slugs,
-                now_ts=now_ts,
-            )
-
-            if best_slug:
-                self.next_market_slug = best_slug
-                self.next_market_start_ts = best_start_ts
-                time_until = best_start_ts - now_ts if best_start_ts else 0
-                logger.info(
-                    f"Next market found: {best_slug} "
-                    f"(starts in {time_until / 60:.1f}m)"
-                )
-
-                # Try to switch to this market
-                previous_slug = self.current_market_slug
-                if self._find_btc_instrument():
-                    if self.current_market_slug != previous_slug:
-                        logger.info(
-                            f"Switched to new market: {previous_slug} → {self.current_market_slug}"
-                        )
-                        if self.auto_redeem_enabled and self.auto_redeem_on_rollover and previous_slug:
-                            self._schedule_auto_redeem(
-                                reason=f"lifecycle_rollover:{previous_slug}->{self.current_market_slug}"
-                            )
-                    return True
-            else:
-                self.next_market_slug = None
-                self.next_market_start_ts = None
-                logger.debug("Next market search: no future markets found")
-
-        except Exception as e:
-            logger.warning(f"Next market search failed: {e}")
-
-        return False
-
-    # ------------------------------------------------------------------
-    # Smart Market Lifecycle Timer (replaces fixed 12-min reload)
-    # ------------------------------------------------------------------
-
-    def _start_market_lifecycle_timer(self) -> None:
-        """
-        Market-aware timer that replaces the fixed 12-minute reload.
-        Sleeps intelligently based on market end time and transitions
-        the lifecycle state machine.
-        """
-        while not self._lifecycle_stop_event.is_set():
-            if self._stopping:
-                return
-
-            now_ts = time.time()
-            phase = self._update_market_phase()
-            end_ts = getattr(self, "current_market_end_timestamp", None)
-            action = determine_lifecycle_timer_action(
-                phase_value=phase.value,
-                now_ts=now_ts,
-                end_ts=end_ts,
-                min_minutes_to_close=float(self.maker_min_minutes_to_close),
-                settling_grace_sec=float(self.market_settling_grace_sec),
-                market_settling_since_ts=float(self._market_settling_since_ts),
-            )
-
-            if action.should_reload_instrument:
-                self._lifecycle_stop_event.wait(action.wait_sec or 0.0)
-                try:
-                    if not self._find_btc_instrument():
-                        logger.warning("Lifecycle timer: no BTC instrument found")
-                except Exception as e:
-                    logger.error(f"Lifecycle timer reload failed: {e}")
-                continue
-
-            if action.wait_sec is not None and not action.should_search_next:
-                self._lifecycle_stop_event.wait(action.wait_sec)
-                continue
-
-            if action.should_search_next:
-                max_waiting_misses = int(os.getenv("MARKET_WAITING_MAX_MISSES", "3"))
-
-                def _request_rollover() -> None:
-                    self._waiting_miss_count = 0
-                    self._stopping = True
-                    self._rollover_requested_flag = True
-                    try:
-                        import nautilus_trader  # noqa: F811
-                        if hasattr(self, '_trader') and hasattr(self._trader, 'node'):
-                            self._trader.node.stop()
-                        else:
-                            raise SystemExit("rollover_needed")
-                    except SystemExit:
-                        raise
-                    except Exception:
-                        pass
-
-                self._waiting_miss_count = handle_waiting_phase_search(
-                    search_next_market_fn=self._search_next_market,
-                    update_market_phase_fn=self._update_market_phase,
-                    schedule_auto_redeem_fn=self._schedule_auto_redeem if self.auto_redeem_enabled else None,
-                    next_market_slug=self.next_market_slug,
-                    market_next_poll_sec=float(self.market_next_poll_sec),
-                    waiting_miss_count=getattr(self, "_waiting_miss_count", 0),
-                    max_waiting_misses=max_waiting_misses,
-                    lifecycle_wait_fn=self._lifecycle_stop_event.wait,
-                    logger_info_fn=logger.info,
-                    logger_warning_fn=logger.warning,
-                    request_rollover_fn=_request_rollover,
-                )
-                if self._stopping and self._rollover_requested_flag:
-                    return
-
-    # ------------------------------------------------------------------
-    # Balance Pre-check
-    # ------------------------------------------------------------------
-
-    def _refresh_balance_cache(self) -> Optional[Decimal]:
-        """
-        Return cached USDC balance.
-        If the cache is stale, request a background refresh without blocking
-        the quote / risk hot path.
-        """
-        now_ts = time.time()
-        if now_ts - self._balance_last_check_ts < self.balance_check_interval_sec:
-            return self._cached_usdc_balance
-        if not self._balance_refresh_inflight and self._balance_refresh_lock.acquire(blocking=False):
-            self._balance_refresh_inflight = True
-            try:
-                def _runner() -> None:
-                    try:
-                        self._refresh_balance_cache_sync()
-                    except Exception as exc:
-                        logger.debug(f"Deferred balance refresh failed: {exc}")
-                    finally:
-                        self._balance_refresh_inflight = False
-                        self._balance_refresh_lock.release()
-
-                threading.Thread(target=_runner, daemon=True).start()
-            except Exception:
-                self._balance_refresh_inflight = False
-                self._balance_refresh_lock.release()
-        return self._cached_usdc_balance
 
     def _align_price_to_tick(self, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
         """
@@ -4845,41 +3719,22 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                         f"cooldown={self.stop_loss_reentry_cooldown_sec}s"
                     )
         current_slug = str(self.current_market_slug or "")
-        if side_for_ledger == "buy" and current_slug:
-            counted_ids = self.market_buy_counted_order_ids_by_slug.setdefault(current_slug, set())
-            if filled_id and filled_id not in counted_ids:
-                counted_ids.add(filled_id)
-                new_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0)) + 1
-                self.market_buy_count_by_slug[current_slug] = new_buy_count
-                self._db_strategy_event(
-                    "MARKET_BUY_COUNT_UPDATED",
-                    {
-                        "slug": current_slug,
-                        "count": new_buy_count,
-                        "max_per_market": int(self.market_max_buy_events_per_market),
-                        "instrument_id": str(filled_inst) if filled_inst else None,
-                        "client_order_id": filled_id,
-                        "liquidity_side": str(liquidity_side_raw or ""),
-                    },
-                )
+        self._record_market_buy_count_if_needed(
+            side_for_ledger=str(side_for_ledger or ""),
+            current_slug=current_slug,
+            filled_id=filled_id,
+            filled_inst=filled_inst,
+            liquidity_side_raw=liquidity_side_raw,
+        )
 
         self.consecutive_denied_orders = 0
         self.last_quote_update_ts = 0.0
 
-        # Learn effective fee bps from real fills to keep economics aligned with venue reality.
-        try:
-            notional = Decimal(str(float(event.last_qty))) * Decimal(str(float(event.last_px)))
-            commission = fill_commission_dec
-            if notional > 0 and commission >= 0:
-                observed_bps = int(round(float((commission / notional) * Decimal("10000"))))
-                if observed_bps > 0:
-                    self.last_observed_fee_rate_bps = observed_bps
-                    logger.info(
-                        f"Observed effective fee rate from fill: {observed_bps} bps "
-                        f"(commission={float(commission):.6f}, notional={float(notional):.6f})"
-                    )
-        except Exception as e:
-            logger.debug(f"Could not derive observed fee bps from fill: {e}")
+        self._record_observed_fee_rate_from_fill(
+            fill_qty_dec=fill_qty_dec,
+            fill_price_dec=fill_price_dec,
+            fill_commission_dec=fill_commission_dec,
+        )
 
         self.rebate_reporter.record_fill(
             econ=filled_econ,
@@ -4924,34 +3779,11 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             )
         self._update_terminal_dashboard_snapshot()
 
-        # --- Adverse Selection Protection: Post-fill buy cooldown ---
         fill_side_norm = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
-        followup = apply_fill_followup(
+        self._apply_post_fill_followup(
             fill_side_norm=fill_side_norm,
-            post_fill_buy_cooldown_sec=float(self.post_fill_buy_cooldown_sec),
-            buy_cooldown_until_ts=float(self.buy_cooldown_until_ts),
-            fill_cooldown_policy=self.fill_cooldown_policy,
             realized_net_usdc=realized_net_usdc,
-            market_cycle_realized_net_usdc=self.market_cycle_realized_net_usdc,
-            recent_fill_pnl_results=self.recent_fill_pnl_results,
-            quote_pause_until_ts=float(self.quote_pause_until_ts),
-            now_ts=time.time(),
         )
-        self.buy_cooldown_until_ts = followup.buy_cooldown_until_ts
-        self.market_cycle_realized_net_usdc = followup.market_cycle_realized_net_usdc
-        self.recent_fill_pnl_results = followup.recent_fill_pnl_results
-        self.quote_pause_until_ts = followup.quote_pause_until_ts
-        if fill_side_norm == "buy" and self.post_fill_buy_cooldown_sec > 0:
-            logger.info(
-                f"Post-fill buy cooldown activated: {self.post_fill_buy_cooldown_sec}s "
-                f"(no new BUY orders until cooldown expires)"
-            )
-
-        if followup.triggered_loss_pause:
-            logger.warning(
-                f"Consecutive loss pause activated: {self.max_consecutive_losses} consecutive losses "
-                f"(total={followup.total_loss:.4f} USDC). Pausing all quoting for {self.loss_pause_sec}s."
-            )
 
         # Immediately replenish missing side after fill when maker mode is active.
         if (

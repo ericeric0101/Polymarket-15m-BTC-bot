@@ -1,6 +1,10 @@
 """
 Learning Engine
 Learns from trading performance to optimize strategy weights
+
+Legacy note:
+This module depends on the older `core.strategy_brain` fusion stack and is not part
+of the current BTC 15-minute live maker trading path.
 """
 import asyncio
 from decimal import Decimal

@@ -565,6 +565,12 @@ Polymarket-BTC-15-Minute-Trading-Bot-main/
 
 ## 測試與檢查
 
+先講清楚：
+
+- 目前真正的 live trading 主路徑是 [`run_bot.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py)、[`bot/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot)、[`execution/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/execution)、[`monitoring/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/monitoring) 與 Binance / Coinbase data source
+- [`core/ingestion/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/ingestion)、[`core/nautilus_core/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/nautilus_core)、[`core/strategy_brain/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/strategy_brain) 目前屬於 legacy / sidecar 區域，不應直接當作現行交易核心
+- 詳細分類見 [`LEGACY_PATCH_STATUS.md`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/LEGACY_PATCH_STATUS.md)
+
 ### 語法檢查
 
 ```bash
@@ -572,7 +578,7 @@ python3 -m py_compile run_bot.py
 python3 -m py_compile scripts/live_dashboard.py
 ```
 
-### 模組測試腳本
+### Legacy 模組測試腳本
 
 ```bash
 python data_sources/test.py
@@ -581,6 +587,27 @@ python core/strategy_brain/test_strategy.py
 python core/nautilus_core/test_nautilus.py
 python execution/test_execution.py
 ```
+
+這些檔案目前比較接近：
+
+- 舊實驗腳本
+- 模組驗證腳本
+- CLI / 手動檢查工具
+
+它們**不是**目前可信的 pytest 自動化測試套件。  
+repo 根目錄的 [`pytest.ini`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/pytest.ini) 已刻意把這些 legacy script-style 測試排除在 pytest 收集之外，避免誤把它們當成正式回歸測試。
+
+### Runtime patch 注意事項
+
+目前 [`run_bot.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py) 啟動時會自動套用本地 patch。以下腳本會修改 `venv/site-packages`，因此屬於 runtime-critical：
+
+- [`scripts/patch_nautilus_polymarket_drop_log.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_drop_log.py)
+- [`scripts/patch_nautilus_polymarket_ticksize_log.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_ticksize_log.py)
+- [`scripts/patch_nautilus_polymarket_trade_log.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_trade_log.py)
+- [`scripts/patch_nautilus_polymarket_execution.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_execution.py)
+- [`scripts/patch_py_clob_http_helpers.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_py_clob_http_helpers.py)
+
+這些 patch 在現況下不能隨便刪，否則可能直接改變交易行為。
 
 ---
 

@@ -7,6 +7,9 @@ Maker-mode risk controls (inventory caps, projected inventory, balance checks) a
 implemented directly in IntegratedBTCStrategy._quote_maker_orders / _submit_maker_quote.
 This engine is only referenced by the legacy directional trading path (_make_trading_decision).
 Consider removing or refactoring into a maker-aware risk layer in a future release.
+
+Treat this module as legacy / sidecar until the live path explicitly routes risk
+decisions through it again.
 """
 from decimal import Decimal
 from datetime import datetime

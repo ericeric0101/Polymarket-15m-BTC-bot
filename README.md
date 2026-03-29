@@ -280,15 +280,16 @@ polymarket-btc-15m-bot/
 │   ├── grafana.ini              # Grafana server config (optional)
 │   └── import_dashboard.py      # Script to import dashboard automatically
 │
-├── scripts/                     # Development & testing utilities
-│   ├── test_data_sources.py
-│   ├── test_ingestion.py
-│   ├── test_nautilus.py
-│   ├── test_strategy.py
-│   └── test_execution.py
+├── scripts/                     # Development, reporting, patch, and probe utilities
+│   ├── pure_signal_probe.py
+│   ├── pure_probe_report.py
+│   ├── pnl_reconcile_report.py
+│   └── patch_*.py
 │
 ├── .env.example                 # Template for environment variables
 ├── .gitignore
+├── LEGACY_PATCH_STATUS.md       # Live path vs legacy path vs runtime patch inventory
+├── pytest.ini                   # Pytest collection guardrails (legacy script tests excluded)
 ├── redis_control.py             # Switch trading mode (sim/live/test)
 ├── requirements.txt             # Python dependencies
 ├── run_bot.py                   # Main bot entry point
@@ -296,16 +297,36 @@ polymarket-btc-15m-bot/
 └── README.md                    # This file
 ```
 Testing
-Run tests for each phase independently:
 
-# Test individual phases
+This repo currently has two different categories of "tests":
+
+- live-path checks for the current bot
+- legacy script-style test files left from older architecture experiments
+
+The current live trading path is documented in [`LEGACY_PATCH_STATUS.md`](LEGACY_PATCH_STATUS.md). In particular:
+
+- `run_bot.py`, `bot/`, `execution/`, `monitoring/`, and the Binance/Coinbase data sources are current production path
+- `core/ingestion/`, `core/nautilus_core/`, and `core/strategy_brain/` are legacy / sidecar areas and should not be treated as the active trading core
+
+Pytest collection is intentionally constrained by `pytest.ini` so these legacy script-style files are not treated as a real automated test suite.
+
+Current recommended checks:
+
+```bash
+python -m py_compile run_bot.py
+python -m py_compile bot/*.py
+python -m py_compile execution/*.py
+python -m py_compile monitoring/*.py
 ```
-python scripts/test_data_sources.py
-python scripts/test_ingestion.py
-python scripts/test_nautilus.py
-python scripts/test_strategy.py
-python scripts/test_execution.py
-```
+
+Important note on runtime patches:
+
+- `run_bot.py` auto-applies local compatibility patches on startup
+- several scripts under `scripts/patch_*.py` modify `venv/site-packages`
+- these are runtime-critical in the current setup
+
+Read [`LEGACY_PATCH_STATUS.md`](LEGACY_PATCH_STATUS.md) before cleaning up `core/` or patch scripts.
+
 🤝 Contributing
 Contributions are welcome! Here's how you can help:
 

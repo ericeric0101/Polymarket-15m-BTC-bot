@@ -378,6 +378,7 @@ def build_desired_quote_entry(
     maker_sell_cost_protect_fee_buffer_ps: Decimal,
     maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
     thesis_weakened: bool = False,
+    offside_confirmed: bool = False,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -421,8 +422,11 @@ def build_desired_quote_entry(
                     f"sellable_below_min sellable={float(sellable_qty):.6f} "
                     f"< min={float(maker_exchange_min_shares):.6f}"
                 )
-        # Allow loss-selling when: emergency window OR thesis weakened (signal flipped).
-        allow_loss_sell = emergency_window or thesis_weakened
+        # Allow loss-selling when:
+        # 1) emergency window near expiry,
+        # 2) thesis weakened,
+        # 3) inventory is confirmed offside against a locked side decision.
+        allow_loss_sell = emergency_window or thesis_weakened or offside_confirmed
         if (
             should_quote
             and high_cost_exit_cooldown_enabled
