@@ -404,6 +404,9 @@ class SideDecisionMixin:
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
             self._sync_active_instrument()
+            if self.active_side_locked and side != ActiveSide.NONE:
+                self._force_quote_refresh_once = True
+                self._force_quote_refresh_reason = f"locked_flip:{old_side.value}->{side.value}"
             payload = dict(inputs)
             payload.update(
                 {
@@ -436,6 +439,9 @@ class SideDecisionMixin:
             self.active_side_locked = True
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
+            if old_side != side:
+                self._force_quote_refresh_once = True
+                self._force_quote_refresh_reason = f"locked_entry:{old_side.value}->{side.value}"
         elif side == ActiveSide.NONE:
             self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
         self._sync_active_instrument()

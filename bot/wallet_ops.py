@@ -76,8 +76,15 @@ def refresh_collateral_balance(
         if result and isinstance(result, dict):
             balance_val = result.get("balance")
             if balance_val is not None:
-                cached_balance = Decimal(str(balance_val)) / Decimal("1000000")
-                logger_info_fn(f"Balance cache updated: {float(cached_balance):.4f} USDC")
+                new_balance = Decimal(str(balance_val)) / Decimal("1000000")
+                if cached_balance is None:
+                    logger_info_fn(f"Balance cache updated: {float(new_balance):.4f} USDC")
+                elif new_balance != cached_balance:
+                    logger_info_fn(
+                        "Balance cache updated: "
+                        f"{float(cached_balance):.4f} -> {float(new_balance):.4f} USDC"
+                    )
+                cached_balance = new_balance
     except Exception as exc:
         logger_debug_fn(f"Balance cache refresh failed: {exc}")
     return client, cached_balance

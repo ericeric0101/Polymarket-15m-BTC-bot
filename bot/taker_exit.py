@@ -548,6 +548,13 @@ class TakerExitMixin:
             active_sell = self.active_maker_orders.get(sell_key)
             if active_sell:
                 existing_price = Decimal(str(active_sell.get("price", "0")))
+                existing_created_ts = float(active_sell.get("created_ts", 0.0))
+                existing_age_sec = max(0.0, now_ts - existing_created_ts) if existing_created_ts > 0 else 0.0
+                if active_sell.get("is_urgent_exit"):
+                    urgent_ttl = float(active_sell.get("urgent_exit_ttl", getattr(self, "maker_urgent_exit_ttl_sec", 15)))
+                    replace_grace_sec = max(5.0, urgent_ttl * 0.5)
+                    if existing_age_sec < replace_grace_sec:
+                        continue
                 if existing_price <= best_ask:
                     continue  # Already quoting at ask or better
                 # Stale sell is too far from market — cancel it and wait for

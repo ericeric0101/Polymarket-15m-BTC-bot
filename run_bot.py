@@ -1014,7 +1014,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             int(os.getenv("MAKER_EARLY_SELL_ONLY_SEC", "120")),
         )
         self.quote_healthcheck_interval_sec = int(os.getenv("QUOTE_HEALTHCHECK_INTERVAL_SEC", "10"))
-        self.strategy_status_interval_sec = max(10, int(os.getenv("STRATEGY_STATUS_INTERVAL_SEC", "30")))
+        self.strategy_status_interval_sec = max(15, int(os.getenv("STRATEGY_STATUS_INTERVAL_SEC", "60")))
         self.quote_stale_sec = int(os.getenv("QUOTE_STALE_SEC", "30"))
         self.quote_invalid_tick_reload_threshold = int(os.getenv("QUOTE_INVALID_TICK_RELOAD_THRESHOLD", "80"))
         self.quote_reload_cooldown_sec = int(os.getenv("QUOTE_RELOAD_COOLDOWN_SEC", "60"))
@@ -1096,7 +1096,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.market_strike_last_gamma_validate_ts_by_slug: Dict[str, float] = {}
         self.market_strike_last_gamma_warn_ts_by_slug: Dict[str, float] = {}
         self._last_strike_slug_log_ts = 0.0
-        self.no_quote_diag_interval_sec = max(10, int(os.getenv("NO_QUOTE_DIAG_INTERVAL_SEC", "30")))
+        self.no_quote_diag_interval_sec = max(15, int(os.getenv("NO_QUOTE_DIAG_INTERVAL_SEC", "60")))
         self._last_no_quote_diag_ts_by_inst: Dict[str, float] = {}
         self._last_sellable_skip_log_ts_by_inst: Dict[str, float] = {}
         self.maker_gate_block_grace_sec = max(0, int(os.getenv("MAKER_GATE_BLOCK_GRACE_SEC", "4")))
@@ -1126,6 +1126,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.side_stop_loss_penalty_until_by_market_side: Dict[str, float] = {}
         self.market_stop_loss_count_by_slug: Dict[str, int] = {}
         self.market_buy_count_by_slug: Dict[str, int] = {}
+        self.market_buy_counted_order_ids_by_slug: Dict[str, Set[str]] = {}
         self._taker_exit_skip_log_ts_by_key: Dict[str, float] = {}
         self.high_cost_exit_cooldown_until_by_inst: Dict[str, float] = {}
         self.high_cost_last_fill_price_by_inst: Dict[str, float] = {}
@@ -1165,6 +1166,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.side_decision_due_ts: float = 0.0
         self.side_decision_done_for_market: bool = False
         self.side_decision_inputs: Dict[str, Any] = {}
+        self._force_quote_refresh_once: bool = False
+        self._force_quote_refresh_reason: str = ""
         self.side_flip_count: int = 0
         self.side_pending_flip_side: ActiveSide = ActiveSide.NONE
         self.side_pending_flip_count: int = 0
@@ -1200,6 +1203,10 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self._redeem_thread: Optional[threading.Thread] = None
         self._redeem_job_lock = threading.Lock()
         self._last_redeem_run_ts = 0.0
+        self._balance_stop_event = threading.Event()
+        self._balance_thread: Optional[threading.Thread] = None
+        self._balance_refresh_lock = threading.Lock()
+        self._balance_refresh_inflight = False
         self.current_market_slug: Optional[str] = None
         # --- Market Lifecycle State Machine ---
         self.market_phase = MarketPhase.WAITING
@@ -1215,6 +1222,8 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         # --- Balance Pre-check ---
         self._cached_usdc_balance: Optional[Decimal] = None
         self._balance_last_check_ts: float = 0.0
+        self._last_balance_log_ts: float = 0.0
+        self._last_logged_balance_value: Optional[Decimal] = None
         self.balance_check_interval_sec = max(10, int(os.getenv("MAKER_BALANCE_CHECK_INTERVAL_SEC", "30")))
         self.conditional_balance_check_interval_sec = max(
             2, int(os.getenv("CONDITIONAL_BALANCE_CHECK_INTERVAL_SEC", "8"))
@@ -2018,9 +2027,13 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
 
         client = getattr(self, "_balance_clob_client", None)
         if client is None:
-            # Try lazy init from existing balance refresh path.
-            self._refresh_balance_cache()
-            client = getattr(self, "_balance_clob_client", None)
+            client = ensure_balance_clob_client(
+                current_client=None,
+                logger_info_fn=logger.info,
+                logger_warning_fn=logger.warning,
+            )
+            if client is not None:
+                self._balance_clob_client = client
         if client is None:
             return None, None
 
@@ -2084,6 +2097,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.side_stop_loss_penalty_until_by_market_side.clear()
         self.market_stop_loss_count_by_slug.clear()
         self.market_buy_count_by_slug.clear()
+        self.market_buy_counted_order_ids_by_slug.clear()
         self.taker_exit_reason_by_client_order_id.clear()
         self._taker_exit_skip_log_ts_by_key.clear()
         self.high_cost_exit_cooldown_until_by_inst.clear()
@@ -2584,8 +2598,16 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         await self._maybe_maker_urgent_exit(time.time())
 
         now_ts = time.time()
-        if now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
+        force_quote_refresh_once = bool(getattr(self, "_force_quote_refresh_once", False))
+        if not force_quote_refresh_once and now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
             return
+        if force_quote_refresh_once:
+            logger.info(
+                "Fast requote triggered after locked side change: "
+                f"reason={getattr(self, '_force_quote_refresh_reason', 'locked_side_change')}"
+            )
+            self._force_quote_refresh_once = False
+            self._force_quote_refresh_reason = ""
         self.last_quote_update_ts = now_ts
         self._maybe_auto_tune(now_ts)
         self._cleanup_stale_pending_cancels(now_ts)
@@ -2738,7 +2760,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                     self._last_mom_ts = time.time()
             elif "buy" in side_plan and getattr(self, "_logged_mom_buy", False):
                 self._logged_mom_buy = False
-                logger.info("Trend Protection: BUY blocking cleared.")
 
             if guard_outcome.momentum_sell_blocked and guard_outcome.momentum_trend_pct is not None:
                 if not getattr(self, "_logged_mom_sell", False) or time.time() - getattr(self, "_last_mom_ts_s", 0) > 30:
@@ -2749,7 +2770,6 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                     self._last_mom_ts_s = time.time()
             elif "sell" in side_plan and getattr(self, "_logged_mom_sell", False):
                 self._logged_mom_sell = False
-                logger.info("Trend Protection: SELL blocking cleared.")
 
             if reduce_only_reason:
                 if "buy" in side_plan:
@@ -3446,6 +3466,12 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             self._redeem_stop_event.clear()
             self._redeem_thread = start_background_thread(self._start_auto_redeem_timer, "auto-redeem")
             self._schedule_auto_redeem(reason="startup")
+        self._balance_stop_event.clear()
+        self._balance_thread = start_background_thread(self._start_balance_refresh_timer, "balance-refresh")
+        try:
+            self._refresh_balance_cache_sync()
+        except Exception as e:
+            logger.debug(f"Initial balance refresh failed: {e}")
         
         # Start Grafana if enabled
         if self.grafana_exporter:
@@ -3581,6 +3607,45 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 self._redeem_job_lock.release()
 
         threading.Thread(target=_runner, daemon=True).start()
+
+    def _refresh_balance_cache_sync(self) -> Optional[Decimal]:
+        self._balance_clob_client = ensure_balance_clob_client(
+            current_client=getattr(self, "_balance_clob_client", None),
+            logger_info_fn=logger.info,
+            logger_warning_fn=logger.warning,
+        )
+        self._balance_clob_client, refreshed_balance = refresh_collateral_balance(
+            current_client=self._balance_clob_client,
+            cached_balance=self._cached_usdc_balance,
+            logger_info_fn=logger.info,
+            logger_warning_fn=logger.warning,
+            logger_debug_fn=logger.debug,
+        )
+        if refreshed_balance is not None:
+            self._cached_usdc_balance = refreshed_balance
+            self._balance_last_check_ts = time.time()
+            try:
+                if not hasattr(self, '_prom_wallet_balance'):
+                    from prometheus_client import Gauge
+                    self._prom_wallet_balance = Gauge(
+                        'trading_wallet_balance_usdc',
+                        'Real on-chain wallet USDC balance'
+                    )
+                self._prom_wallet_balance.set(float(self._cached_usdc_balance))
+            except Exception:
+                pass
+            self._update_terminal_dashboard_snapshot()
+        return self._cached_usdc_balance
+
+    def _start_balance_refresh_timer(self) -> None:
+        interval = max(5.0, float(self.balance_check_interval_sec))
+        while not self._balance_stop_event.wait(interval):
+            if self._stopping:
+                return
+            try:
+                self._refresh_balance_cache_sync()
+            except Exception as exc:
+                logger.debug(f"Background balance refresh failed: {exc}")
 
     def _start_auto_redeem_timer(self) -> None:
         """
@@ -4290,39 +4355,29 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
 
     def _refresh_balance_cache(self) -> Optional[Decimal]:
         """
-        Refresh cached USDC balance from CLOB API (get_balance_allowance).
-        Only queries if interval has elapsed.
-        Returns the cached balance.
+        Return cached USDC balance.
+        If the cache is stale, request a background refresh without blocking
+        the quote / risk hot path.
         """
         now_ts = time.time()
         if now_ts - self._balance_last_check_ts < self.balance_check_interval_sec:
             return self._cached_usdc_balance
-
-        self._balance_last_check_ts = now_ts
-        self._balance_clob_client = ensure_balance_clob_client(
-            current_client=getattr(self, "_balance_clob_client", None),
-            logger_info_fn=logger.info,
-            logger_warning_fn=logger.warning,
-        )
-        self._balance_clob_client, self._cached_usdc_balance = refresh_collateral_balance(
-            current_client=self._balance_clob_client,
-            cached_balance=self._cached_usdc_balance,
-            logger_info_fn=logger.info,
-            logger_warning_fn=logger.warning,
-            logger_debug_fn=logger.debug,
-        )
-        if self._cached_usdc_balance is not None:
+        if not self._balance_refresh_inflight and self._balance_refresh_lock.acquire(blocking=False):
+            self._balance_refresh_inflight = True
             try:
-                if not hasattr(self, '_prom_wallet_balance'):
-                    from prometheus_client import Gauge
-                    self._prom_wallet_balance = Gauge(
-                        'trading_wallet_balance_usdc',
-                        'Real on-chain wallet USDC balance'
-                    )
-                self._prom_wallet_balance.set(float(self._cached_usdc_balance))
+                def _runner() -> None:
+                    try:
+                        self._refresh_balance_cache_sync()
+                    except Exception as exc:
+                        logger.debug(f"Deferred balance refresh failed: {exc}")
+                    finally:
+                        self._balance_refresh_inflight = False
+                        self._balance_refresh_lock.release()
+
+                threading.Thread(target=_runner, daemon=True).start()
             except Exception:
-                pass
-            self._update_terminal_dashboard_snapshot()
+                self._balance_refresh_inflight = False
+                self._balance_refresh_lock.release()
         return self._cached_usdc_balance
 
     def _align_price_to_tick(self, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
@@ -4791,19 +4846,22 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                     )
         current_slug = str(self.current_market_slug or "")
         if side_for_ledger == "buy" and current_slug:
-            new_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0)) + 1
-            self.market_buy_count_by_slug[current_slug] = new_buy_count
-            self._db_strategy_event(
-                "MARKET_BUY_COUNT_UPDATED",
-                {
-                    "slug": current_slug,
-                    "count": new_buy_count,
-                    "max_per_market": int(self.market_max_buy_events_per_market),
-                    "instrument_id": str(filled_inst) if filled_inst else None,
-                    "client_order_id": filled_id,
-                    "liquidity_side": str(liquidity_side_raw or ""),
-                },
-            )
+            counted_ids = self.market_buy_counted_order_ids_by_slug.setdefault(current_slug, set())
+            if filled_id and filled_id not in counted_ids:
+                counted_ids.add(filled_id)
+                new_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0)) + 1
+                self.market_buy_count_by_slug[current_slug] = new_buy_count
+                self._db_strategy_event(
+                    "MARKET_BUY_COUNT_UPDATED",
+                    {
+                        "slug": current_slug,
+                        "count": new_buy_count,
+                        "max_per_market": int(self.market_max_buy_events_per_market),
+                        "instrument_id": str(filled_inst) if filled_inst else None,
+                        "client_order_id": filled_id,
+                        "liquidity_side": str(liquidity_side_raw or ""),
+                    },
+                )
 
         self.consecutive_denied_orders = 0
         self.last_quote_update_ts = 0.0
@@ -5095,6 +5153,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 self._reload_stop_event,
                 self._quote_watchdog_stop_event,
                 self._redeem_stop_event,
+                self._balance_stop_event,
                 self._binance_ws_stop_event,
                 self._terminal_dashboard_stop_event,
             ],
@@ -5103,6 +5162,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 self._reload_thread,
                 self._quote_watchdog_thread,
                 self._redeem_thread,
+                self._balance_thread,
                 self._binance_ws_thread,
                 self._terminal_dashboard_thread,
             ],

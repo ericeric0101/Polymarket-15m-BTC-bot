@@ -397,7 +397,7 @@ class SpotPricerMixin:
                         self._last_strike_fallback_log_ts = time.time()
                 else:
                     now_ts = time.time()
-                    if now_ts - self._last_digital_pricer_log_ts >= 30:
+                    if now_ts - self._last_digital_pricer_log_ts >= 60:
                         up_prob = MakerEngine.digital_up_probability(
                             spot=float(external),
                             strike=float(strike),
