@@ -504,17 +504,17 @@ class TakerExitMixin:
             if qty <= 0:
                 continue
 
-            # Check if thesis has weakened for this position
+            # Only trigger urgent maker exit after a confirmed side flip.
+            # A weak score alone is too noisy and can shake us out of
+            # positions that later settle in our favor.
             matches_position = (self._instrument_for_side(self.active_side) == inst_id)
-            thesis_weakened = (not matches_position) or (
-                abs(self.side_decision_score) < getattr(self, "exit_stop_loss_thesis_min_score_abs", Decimal("1"))
-            )
+            confirmed_offside = (not matches_position) and bool(self.active_side_locked)
 
-            # Confirmation mechanism: require consecutive thesis-weakened cycles
-            # to filter out signal noise (avoid "false kills")
+            # Require consecutive confirmed-offside cycles to filter out
+            # transient flips before escalating to an urgent exit.
             if not hasattr(self, "_urgent_exit_confirm_hits"):
                 self._urgent_exit_confirm_hits: dict[str, int] = {}
-            if thesis_weakened:
+            if confirmed_offside:
                 self._urgent_exit_confirm_hits[inst_key] = self._urgent_exit_confirm_hits.get(inst_key, 0) + 1
             else:
                 self._urgent_exit_confirm_hits[inst_key] = 0
@@ -648,6 +648,7 @@ class TakerExitMixin:
                 f"unrealized_loss={float(unrealized_loss_total):+.4f} "
                 f"score={float(self.side_decision_score):.2f} "
                 f"matches_position={matches_position} "
+                f"active_side_locked={self.active_side_locked} "
                 f"confirms={self._urgent_exit_confirm_hits[inst_key]} "
                 f"ttl={urgent_ttl}s"
             )
@@ -671,10 +672,10 @@ class TakerExitMixin:
                     "unrealized_loss_total": float(unrealized_loss_total),
                     "signal_score": float(self.side_decision_score),
                     "matches_position": "1" if matches_position else "0",
+                    "active_side_locked": "1" if self.active_side_locked else "0",
                     "time_left_sec": time_left_sec,
                     "confirmations": self._urgent_exit_confirm_hits[inst_key],
                     "ttl_sec": urgent_ttl,
                 },
             )
             break  # Only one urgent exit per cycle
-

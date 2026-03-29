@@ -1147,6 +1147,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         self.latest_quote_depth_by_inst: Dict[str, Tuple[Optional[Decimal], Optional[Decimal]]] = {}
         self.orderbook_levels_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self._inventory_delta_shares = Decimal("0")
+        self._startup_rehydrated_inventory_force_sell_only = False
         self.inventory_last_update_ts = 0.0
         self.consecutive_denied_orders = 0
         self.maker_kill_switch = False
@@ -1611,6 +1612,155 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         )
         return realized_net
 
+    def _rebuild_inventory_state_from_db(
+        self,
+        instrument_id: Any,
+        target_qty: Decimal,
+        lookback_hours: int = 72,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Rebuild per-instrument inventory ledger from ORDER_FILLED history.
+        Used only on startup rehydrate when the strategy restarted mid-market.
+        """
+        inst = self._normalize_instrument_id(instrument_id)
+        inst_key = self._instrument_key(inst)
+        if inst is None or not inst_key or target_qty <= 0:
+            return None
+        if not self.trade_db:
+            return None
+        db_path = getattr(self.trade_db, "db_path", "")
+        if not db_path:
+            return None
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, lookback_hours))).isoformat()
+        ledger: Dict[str, Dict[str, Any]] = {}
+        first_fill_ts: float = 0.0
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT ts, side, price, qty, commission_usdc
+                FROM order_events
+                WHERE event_type='ORDER_FILLED'
+                  AND instrument_id=?
+                  AND ts >= ?
+                ORDER BY id
+                """,
+                (inst_key, cutoff),
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Inventory rehydrate DB replay failed for {inst_key}: {e}")
+            return None
+
+        for row in rows:
+            side_norm = self._normalize_side_text(row["side"])
+            fill_price = Decimal(str(row["price"] or 0))
+            fill_qty = Decimal(str(row["qty"] or 0))
+            commission = Decimal(str(row["commission_usdc"] or 0))
+            if not side_norm or fill_price <= 0 or fill_qty <= 0:
+                continue
+            if first_fill_ts <= 0:
+                try:
+                    first_fill_ts = datetime.fromisoformat(str(row["ts"])).timestamp()
+                except Exception:
+                    first_fill_ts = time.time()
+            InventoryLedger.update_from_fill(
+                live_inventory_cost=ledger,
+                instrument_key=inst_key,
+                side=side_norm,
+                fill_price=fill_price,
+                fill_qty=fill_qty,
+                commission=commission,
+                now_ts=first_fill_ts or time.time(),
+            )
+
+        state = ledger.get(inst_key)
+        if not state:
+            return None
+
+        replay_qty = Decimal(str(state.get("qty", "0")))
+        if replay_qty <= 0:
+            return None
+
+        # Trust current open-position qty from cache, but keep replayed cost basis.
+        if replay_qty != target_qty:
+            fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
+            scaled_fee = fee_remaining
+            if replay_qty > 0 and fee_remaining > 0:
+                scaled_fee = fee_remaining * (target_qty / replay_qty)
+            state["qty"] = target_qty
+            state["entry_fee_remaining"] = max(Decimal("0"), scaled_fee)
+        if float(state.get("opened_ts", 0.0)) <= 0:
+            state["opened_ts"] = first_fill_ts or time.time()
+        return state
+
+    def _rehydrate_inventory_state_on_startup(self) -> None:
+        """
+        On same-market restarts, recover local inventory tracking from cache positions
+        and recent fill history so exit logic can continue managing existing holdings.
+        """
+        if self.live_inventory_cost or self.inventory_delta_shares > 0:
+            return
+
+        restore_targets: List[InstrumentId] = []
+        for inst in self.current_market_instruments or []:
+            norm = self._normalize_instrument_id(inst)
+            if norm is not None and norm not in restore_targets:
+                restore_targets.append(norm)
+        if self.instrument_id is not None:
+            norm = self._normalize_instrument_id(self.instrument_id)
+            if norm is not None and norm not in restore_targets:
+                restore_targets.append(norm)
+        if not restore_targets:
+            return
+
+        restored_total = Decimal("0")
+        restored_items: List[Dict[str, Any]] = []
+        for inst in restore_targets:
+            open_qty = self._get_sellable_qty_for_current_instrument(instrument_id=inst)
+            if open_qty <= 0:
+                continue
+            state = self._rebuild_inventory_state_from_db(inst, target_qty=open_qty)
+            if state is None:
+                state = {
+                    "qty": open_qty,
+                    "avg_entry_price": Decimal("0"),
+                    "entry_fee_remaining": Decimal("0"),
+                    "opened_ts": time.time(),
+                }
+                logger.warning(
+                    f"Inventory rehydrate fallback: restored qty without cost basis "
+                    f"inst={self._instrument_key(inst)} qty={float(open_qty):.6f}"
+                )
+            self.live_inventory_cost[self._instrument_key(inst)] = state
+            restored_total += Decimal(str(state.get("qty", "0")))
+            restored_items.append(
+                {
+                    "instrument_id": self._instrument_key(inst),
+                    "qty": float(Decimal(str(state.get("qty", "0")))),
+                    "avg_entry_price": float(Decimal(str(state.get("avg_entry_price", "0")))),
+                }
+            )
+
+        if restored_total > 0:
+            self.inventory_delta_shares = restored_total
+            self._startup_rehydrated_inventory_force_sell_only = True
+            logger.warning(
+                "Startup inventory rehydrated: "
+                f"slug={self.current_market_slug or ''} restored_qty={float(restored_total):.6f} "
+                f"legs={len(restored_items)}"
+            )
+            self._db_strategy_event(
+                "STARTUP_INVENTORY_REHYDRATED",
+                {
+                    "slug": self.current_market_slug or "",
+                    "restored_total_qty": float(restored_total),
+                    "legs": restored_items,
+                },
+            )
+
     @staticmethod
     def _extract_token_id_from_instrument(instrument_id: str) -> Optional[str]:
         """
@@ -1923,6 +2073,7 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         else:
             self.inventory_delta_shares = Decimal("0")
             self.live_inventory_cost.clear()
+            self._startup_rehydrated_inventory_force_sell_only = False
         self.market_cycle_realized_net_usdc = Decimal("0")
         self.pending_taker_exit_by_inst.clear()
         self.taker_exit_tail_attempted_by_inst.clear()
@@ -2381,8 +2532,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
             return
         await self._maybe_finalize_side_decision(time.time(), phase)
         if self.bi_side_enabled and self.active_side == ActiveSide.NONE:
-            self._cancel_active_maker_orders()
-            return
+            if self.inventory_delta_shares <= 0:
+                self._cancel_active_maker_orders()
+                return
 
         # --- Balance Pre-check (live only) ---
         _balance_forced_sell_only = False
@@ -2422,7 +2574,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
                 self._db_strategy_event("REGIME_GUARD_RECOVERED", {"ts": now_guard_ts})
             elif now_guard_ts < self.regime_guard_conservative_until_ts:
                 _regime_guard_active = True
-        _forced_sell_only = _balance_forced_sell_only
+        if self.inventory_delta_shares <= 0 and self._startup_rehydrated_inventory_force_sell_only:
+            self._startup_rehydrated_inventory_force_sell_only = False
+        _forced_sell_only = _balance_forced_sell_only or self._startup_rehydrated_inventory_force_sell_only
 
         # Check whether current inventory should be force-closed via taker orders.
         await self._maybe_taker_exit_positions(time.time(), is_simulation=self._is_dry_run_mode())
@@ -3198,6 +3352,9 @@ class IntegratedBTCStrategy(SideDecisionMixin, SpotPricerMixin, TakerExitMixin, 
         # Find BTC instrument FIRST and wait for it
         if not self._wait_for_btc_instrument(timeout_sec=60, poll_interval_sec=2):
             raise RuntimeError("Startup check failed: no BTC 15-min instrument loaded")
+
+        # Recover local inventory tracking if the strategy restarted mid-market.
+        self._rehydrate_inventory_state_on_startup()
 
         log_strategy_run_start(
             trade_db=self.trade_db,
