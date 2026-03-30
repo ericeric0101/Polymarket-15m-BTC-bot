@@ -227,8 +227,20 @@ class PricingRuntimeMixin:
             return Decimal("0")
         local_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
         inst_txt = str(instrument_id or "")
+        inst_key = self._instrument_key(instrument_id)
         token_id = self._extract_token_id_from_instrument(inst_txt)
         onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
+        if (
+            onchain_qty is not None
+            and onchain_qty <= 0
+            and inst_key
+            and self.sellable_fallback_after_buy_sec > 0
+        ):
+            recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0))
+            if recent_buy_ts > 0 and (time.time() - recent_buy_ts) <= float(self.sellable_fallback_after_buy_sec):
+                if local_qty > 0:
+                    return min(confirmed_qty, local_qty)
+                return confirmed_qty
         if onchain_qty is None:
             return min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
         safe_onchain = onchain_qty * (Decimal("1") - self.conditional_balance_safety_buffer_pct)

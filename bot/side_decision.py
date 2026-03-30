@@ -19,6 +19,7 @@ from typing import Any, Dict, List
 from loguru import logger
 
 from bot.enums import ActiveSide, MarketPhase
+from bot.market_data import extract_market_start_ts_from_slug
 from execution.maker_engine import MakerEngine
 
 
@@ -189,6 +190,35 @@ class SideDecisionMixin:
         if strike_dec is None or strike_dec <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
         inputs["strike"] = float(strike_dec)
+
+        # Lock the per-market open spot early enough for side-decision use.
+        # Recent logs showed open_drift_signal was inert because current_market_open_spot
+        # remained unset until fair-pricer activity later in the loop.
+        if self.current_market_open_spot is None and self.current_market_slug:
+            slug = str(self.current_market_slug)
+            start_ts = self.market_start_ts_by_slug.get(slug)
+            if start_ts is None:
+                parsed_start = extract_market_start_ts_from_slug(slug)
+                if parsed_start is not None:
+                    start_ts = parsed_start
+                    self.market_start_ts_by_slug[slug] = parsed_start
+            if start_ts is not None:
+                anchor = self._resolve_opening_strike_from_history(int(start_ts))
+                if anchor is not None:
+                    _anchor_ts, anchor_px = anchor
+                    self.current_market_open_spot = anchor_px
+                    logger.info(
+                        f"✓ Locked current_market_open_spot for {slug} from spot history: "
+                        f"${float(anchor_px):,.2f}"
+                    )
+            if self.current_market_open_spot is None and strike_dec > 0:
+                # BTC 15m up/down strike is the opening price to beat, so strike is a
+                # defensible fallback anchor when no history sample is available yet.
+                self.current_market_open_spot = strike_dec
+                logger.info(
+                    f"✓ Locked current_market_open_spot for {slug} from strike fallback: "
+                    f"${float(strike_dec):,.2f}"
+                )
 
         gap_pct = (spot - strike_dec) / strike_dec if strike_dec > 0 else Decimal("0")
         inputs["gap_pct"] = float(gap_pct)

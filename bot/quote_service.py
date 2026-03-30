@@ -122,6 +122,8 @@ def log_no_quote_diagnostics(
     active_order_keys_fn: Callable[..., list[str]],
     last_no_quote_diag_ts_by_inst: dict[str, float],
     logger_info_fn: Callable[[str], None],
+    reason_family_fn: Optional[Callable[[str], str]] = None,
+    strategy_event_fn: Optional[Callable[[str, dict[str, Any]], None]] = None,
 ) -> None:
     if submitted_attempts != 0:
         return
@@ -161,6 +163,38 @@ def log_no_quote_diagnostics(
             msg_parts.append(f"fee_rate={float(fee_rate):.6f}")
         msg_parts.append(f"blocked={blocked}")
         logger_info_fn(" ".join(msg_parts))
+        if strategy_event_fn is not None:
+            buy_desired = next((desired for desired in per_inst if str(desired.get("side")) == "buy"), None)
+            primary = buy_desired or (per_inst[0] if per_inst else None)
+            primary_reason = str(primary.get("diag_reason", "")) if primary else ""
+            family = reason_family_fn(primary_reason) if (reason_family_fn and primary_reason) else ""
+            event_type = ""
+            if family == "econ_gate":
+                event_type = "NO_TRADE_ECON_GATE"
+            elif family == "reduce_only":
+                event_type = "NO_TRADE_REDUCE_ONLY"
+            elif family == "reduce_only_tail_guard":
+                event_type = "NO_TRADE_REDUCE_ONLY_TAIL_GUARD"
+            elif family == "trend_protection":
+                event_type = "NO_TRADE_TREND_PROTECTION"
+            elif family == "side_disabled" and primary_reason.startswith("side_disabled:edge_gate_buy"):
+                event_type = "NO_TRADE_DIRECTIONAL_EDGE_GATE"
+            if event_type:
+                payload = {
+                    "instrument_id": str(inst_id),
+                    "blocked": blocked,
+                    "primary_reason": primary_reason,
+                    "phase": phase_value,
+                }
+                if isinstance(fair, Decimal):
+                    payload["fair"] = float(fair)
+                if isinstance(bid, Decimal):
+                    payload["bid"] = float(bid)
+                if isinstance(ask, Decimal):
+                    payload["ask"] = float(ask)
+                if isinstance(fee_rate, Decimal):
+                    payload["fee_rate"] = float(fee_rate)
+                strategy_event_fn(event_type, payload)
 
 
 def retreat_crossing_buy_quote(

@@ -42,6 +42,11 @@ class FillLedgerMixin:
             now_ts=time.time(),
         )
         if realized_net is None or side_norm != "sell":
+            if side_norm == "buy" and inst_key:
+                # A new winning run starts from the fresh fill price.
+                self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
+                self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
+                self.recent_buy_fill_ts_by_inst[inst_key] = time.time()
             return realized_net
         state = self.live_inventory_cost.get(inst_key, {})
         sell_qty = min(fill_qty, pre_qty)
@@ -50,6 +55,14 @@ class FillLedgerMixin:
             f"entry={float(pre_avg_entry):.4f} exit={float(fill_price):.4f} "
             f"net_pnl={float(realized_net):+.4f} remaining={float(state['qty']):.6f}"
         )
+        try:
+            remaining_qty = Decimal(str(state.get("qty", "0")))
+        except Exception:
+            remaining_qty = Decimal("0")
+        if remaining_qty <= 0:
+            self._clear_profit_run_state(instrument_id)
+            if inst_key:
+                self.recent_buy_fill_ts_by_inst.pop(inst_key, None)
         return realized_net
 
     def _record_market_buy_count_if_needed(
