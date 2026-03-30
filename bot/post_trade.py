@@ -31,7 +31,8 @@ def build_fill_order_event_payload(
     liquidity_side_raw: Any,
     inventory_delta_shares: Decimal,
     raw_commission_dec: Decimal,
-    fill_commission_dec: Decimal,
+    effective_fee_usdc_dec: Decimal,
+    effective_fee_shares_dec: Decimal,
     filled_econ: Any,
     filled_directional_snapshot: dict[str, Any],
     realized_net_usdc: Decimal | None,
@@ -39,8 +40,9 @@ def build_fill_order_event_payload(
     return {
         "liquidity_side": str(liquidity_side_raw),
         "inventory_delta_shares": float(inventory_delta_shares),
-        "raw_commission_usdc": float(raw_commission_dec),
-        "effective_commission_usdc": float(fill_commission_dec),
+        "raw_commission": float(raw_commission_dec),
+        "effective_fee_usdc": float(effective_fee_usdc_dec),
+        "effective_fee_shares": float(effective_fee_shares_dec),
         "expected_rebate_usdc": (
             float(getattr(filled_econ, "expected_rebate_usdc", 0.0))
             if filled_econ is not None

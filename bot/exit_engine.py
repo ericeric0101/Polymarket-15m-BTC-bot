@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from bot.models import ExitDecision, ExitDecisionType, MarketSnapshot, PositionState, SignalDecision
+from execution.rebate_model import estimate_taker_fee_usdc
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,10 @@ class ExitPolicyEngine:
     def evaluate(self, snapshot: MarketSnapshot, position: PositionState, signal: SignalDecision) -> ExitDecision:
         exit_px_effective = snapshot.best_bid * (Decimal("1") - snapshot.slippage_buffer_pct)
         gross_if_exit = position.qty * (exit_px_effective - position.avg_entry_price)
-        exit_fee_est = (position.qty * exit_px_effective) * snapshot.fee_rate
+        exit_fee_est = estimate_taker_fee_usdc(
+            shares=position.qty,
+            probability=exit_px_effective,
+        )
         net_if_exit = gross_if_exit - position.entry_fee_remaining - exit_fee_est
         band = self._classify_band(snapshot, signal)
         base_metadata = {

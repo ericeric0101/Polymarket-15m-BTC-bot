@@ -22,7 +22,8 @@ class InventoryLedger:
         side: str,
         fill_price: Decimal,
         fill_qty: Decimal,
-        commission: Decimal,
+        fee_usdc: Decimal,
+        fee_shares: Decimal,
         now_ts: float,
     ) -> Optional[Decimal]:
         if not instrument_key or fill_qty <= 0 or fill_price <= 0:
@@ -39,13 +40,14 @@ class InventoryLedger:
         if side == "buy":
             old_qty = Decimal(str(state.get("qty", "0")))
             old_avg = Decimal(str(state.get("avg_entry_price", "0")))
-            new_qty = old_qty + fill_qty
+            net_fill_qty = max(Decimal("0"), fill_qty - max(Decimal("0"), fee_shares))
+            new_qty = old_qty + net_fill_qty
             if new_qty <= 0:
                 return None
             weighted_notional = (old_qty * old_avg) + (fill_qty * fill_price) if old_qty > 0 and old_avg > 0 else (fill_qty * fill_price)
             state["qty"] = new_qty
             state["avg_entry_price"] = weighted_notional / new_qty
-            state["entry_fee_remaining"] = Decimal(str(state.get("entry_fee_remaining", "0"))) + max(Decimal("0"), commission)
+            state["entry_fee_remaining"] = Decimal(str(state.get("entry_fee_remaining", "0"))) + max(Decimal("0"), fee_usdc)
             if float(state.get("opened_ts", 0.0)) <= 0:
                 state["opened_ts"] = now_ts
             return None
@@ -62,7 +64,7 @@ class InventoryLedger:
         fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
         alloc_ratio = sell_qty / old_qty if old_qty > 0 else Decimal("0")
         entry_fee_alloc = fee_remaining * alloc_ratio
-        realized_net = (sell_qty * (fill_price - avg_entry)) - entry_fee_alloc - max(Decimal("0"), commission)
+        realized_net = (sell_qty * (fill_price - avg_entry)) - entry_fee_alloc - max(Decimal("0"), fee_usdc)
 
         remaining_qty = old_qty - sell_qty
         remaining_fee = max(Decimal("0"), fee_remaining - entry_fee_alloc)

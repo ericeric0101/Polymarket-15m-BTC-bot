@@ -25,7 +25,8 @@ class FillLedgerMixin:
         side: str,
         fill_price: Decimal,
         fill_qty: Decimal,
-        commission: Decimal,
+        fee_usdc: Decimal,
+        fee_shares: Decimal,
     ) -> Optional[Decimal]:
         inst_key = self._instrument_key(instrument_id)
         side_norm = self._normalize_side_text(side)
@@ -38,7 +39,8 @@ class FillLedgerMixin:
             side=side_norm,
             fill_price=fill_price,
             fill_qty=fill_qty,
-            commission=commission,
+            fee_usdc=fee_usdc,
+            fee_shares=fee_shares,
             now_ts=time.time(),
         )
         if realized_net is None or side_norm != "sell":
@@ -97,21 +99,30 @@ class FillLedgerMixin:
     def _record_observed_fee_rate_from_fill(
         self,
         *,
+        side_for_ledger: str,
         fill_qty_dec: Decimal,
         fill_price_dec: Decimal,
-        fill_commission_dec: Decimal,
+        effective_fee_usdc_dec: Decimal,
+        effective_fee_shares_dec: Decimal,
     ) -> None:
         try:
             notional = fill_qty_dec * fill_price_dec
-            commission = fill_commission_dec
-            if notional > 0 and commission >= 0:
-                observed_bps = int(round(float((commission / notional) * Decimal("10000"))))
+            commission_usdc = effective_fee_usdc_dec
+            if notional > 0 and commission_usdc > 0:
+                observed_bps = int(round(float((commission_usdc / notional) * Decimal("10000"))))
                 if observed_bps > 0:
                     self.last_observed_fee_rate_bps = observed_bps
                     logger.info(
                         f"Observed effective fee rate from fill: {observed_bps} bps "
-                        f"(commission={float(commission):.6f}, notional={float(notional):.6f})"
+                        f"(fee_usdc={float(commission_usdc):.6f}, notional={float(notional):.6f})"
                     )
+            elif side_for_ledger == "buy" and effective_fee_shares_dec > 0:
+                logger.info(
+                    "Observed taker BUY fee in shares: "
+                    f"fee_shares={float(effective_fee_shares_dec):.6f} "
+                    f"gross_qty={float(fill_qty_dec):.6f} "
+                    f"price={float(fill_price_dec):.4f}"
+                )
         except Exception as e:
             logger.debug(f"Could not derive observed fee bps from fill: {e}")
 

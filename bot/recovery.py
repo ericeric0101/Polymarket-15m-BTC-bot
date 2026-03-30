@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -51,7 +52,7 @@ class StrategyRecoveryMixin:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT ts, side, price, qty, commission_usdc
+                SELECT ts, side, price, qty, commission_usdc, payload_json
                 FROM order_events
                 WHERE event_type='ORDER_FILLED'
                   AND instrument_id=?
@@ -69,7 +70,14 @@ class StrategyRecoveryMixin:
             side_norm = self._normalize_side_text(row["side"])
             fill_price = Decimal(str(row["price"] or 0))
             fill_qty = Decimal(str(row["qty"] or 0))
-            commission = Decimal(str(row["commission_usdc"] or 0))
+            fee_usdc = Decimal(str(row["commission_usdc"] or 0))
+            fee_shares = Decimal("0")
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+                if isinstance(payload, dict):
+                    fee_shares = Decimal(str(payload.get("effective_fee_shares", 0) or 0))
+            except Exception:
+                fee_shares = Decimal("0")
             if not side_norm or fill_price <= 0 or fill_qty <= 0:
                 continue
             if first_fill_ts <= 0:
@@ -83,7 +91,8 @@ class StrategyRecoveryMixin:
                 side=side_norm,
                 fill_price=fill_price,
                 fill_qty=fill_qty,
-                commission=commission,
+                fee_usdc=fee_usdc,
+                fee_shares=fee_shares,
                 now_ts=first_fill_ts or time.time(),
             )
 

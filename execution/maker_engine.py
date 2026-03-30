@@ -5,7 +5,11 @@ from enum import Enum
 from typing import Dict, Any, Tuple, Optional, List
 from decimal import Decimal
 
-from execution.rebate_model import estimate_quote_economics, QuoteEconomics
+from execution.rebate_model import (
+    QuoteEconomics,
+    estimate_quote_economics,
+    estimate_taker_fee_usdc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,7 @@ class MakerEngineConfig:
         maker_execution_non_atomic_vol_mult: Decimal,
         maker_execution_depth_impact_mult: Decimal,
         maker_execution_vwap_mult: Decimal,
+        maker_buy_taker_leakage_prob: Decimal,
     ):
         self.maker_half_spread = maker_half_spread
         self.maker_quote_size_usdc = maker_quote_size_usdc
@@ -68,6 +73,7 @@ class MakerEngineConfig:
         self.maker_execution_non_atomic_vol_mult = maker_execution_non_atomic_vol_mult
         self.maker_execution_depth_impact_mult = maker_execution_depth_impact_mult
         self.maker_execution_vwap_mult = maker_execution_vwap_mult
+        self.maker_buy_taker_leakage_prob = maker_buy_taker_leakage_prob
 
 
 class MakerEngine:
@@ -511,6 +517,17 @@ class MakerEngine:
             if bid_econ.shares > 0
             else Decimal("0")
         )
+        bid_taker_leakage_usdc = Decimal("0")
+        if bid_econ.shares > 0 and self.config.maker_buy_taker_leakage_prob > 0:
+            bid_taker_leakage_usdc = estimate_taker_fee_usdc(
+                shares=bid_econ.shares,
+                probability=quote_bid,
+            ) * self.config.maker_buy_taker_leakage_prob
+        bid_taker_leakage_ps = (
+            bid_taker_leakage_usdc / bid_econ.shares
+            if bid_econ.shares > 0
+            else Decimal("0")
+        )
         ask_fee_ps = (
             ask_econ.fee_equivalent_usdc / ask_econ.shares
             if ask_econ.shares > 0
@@ -540,13 +557,13 @@ class MakerEngine:
         # Directional edge:
         # BUY  -> value minus paid price and execution/friction costs
         # SELL -> received price minus fair value and execution/friction costs
-        bid_directional_edge_ps = fair_price - quote_bid - bid_fee_ps - bid_exec_penalty_ps - bid_adverse_ps
+        bid_directional_edge_ps = fair_price - quote_bid - bid_fee_ps - bid_taker_leakage_ps - bid_exec_penalty_ps - bid_adverse_ps
         ask_directional_edge_ps = quote_ask - fair_price - ask_fee_ps - ask_exec_penalty_ps - ask_adverse_ps
         bid_directional_edge_usdc = bid_directional_edge_ps * bid_econ.shares
         ask_directional_edge_usdc = ask_directional_edge_ps * ask_econ.shares
 
         if allowed_buy:
-            robust_bid_net = bid_econ.expected_net_usdc - bid_exec_penalty
+            robust_bid_net = bid_econ.expected_net_usdc - bid_exec_penalty - bid_taker_leakage_usdc
             side_plan["buy"] = (
                 quote_bid,
                 bid_econ,
@@ -556,7 +573,7 @@ class MakerEngine:
                 bid_directional_edge_ps,
                 bid_directional_edge_usdc,
                 fair_price,
-                bid_fee_ps,
+                bid_fee_ps + bid_taker_leakage_ps,
                 bid_exec_penalty_ps + bid_adverse_ps,
             )
         else:
@@ -564,12 +581,12 @@ class MakerEngine:
                 quote_bid,
                 bid_econ,
                 False,
-                bid_econ.expected_net_usdc - bid_exec_penalty,
+                bid_econ.expected_net_usdc - bid_exec_penalty - bid_taker_leakage_usdc,
                 bid_exec_penalty,
                 bid_directional_edge_ps,
                 bid_directional_edge_usdc,
                 fair_price,
-                bid_fee_ps,
+                bid_fee_ps + bid_taker_leakage_ps,
                 bid_exec_penalty_ps + bid_adverse_ps,
             )
             

@@ -55,6 +55,13 @@ CRYPTO_FEE_CURVE = FeeCurveConfig(
     maker_rebate_share=Decimal(os.getenv("MAKER_REBATE_SHARE", "0.20")),
 )
 
+# Official Polymarket taker fee schedule for crypto markets.
+OFFICIAL_CRYPTO_TAKER_FEE_CURVE = FeeCurveConfig(
+    fee_rate=Decimal("0.072"),
+    exponent=Decimal("1"),
+    maker_rebate_share=Decimal("0"),
+)
+
 
 def bps_to_fee_rate(bps: int) -> Decimal:
     """
@@ -118,3 +125,37 @@ def estimate_quote_economics(
         expected_spread_capture_usdc=expected_spread_capture,
         expected_net_usdc=expected_net,
     )
+
+
+def estimate_taker_fee_usdc(
+    shares: Decimal,
+    probability: Decimal,
+    config: FeeCurveConfig = OFFICIAL_CRYPTO_TAKER_FEE_CURVE,
+) -> Decimal:
+    """
+    Official Polymarket taker fee in USDC.
+    """
+    return estimate_fee_equivalent_usdc(
+        shares=shares,
+        probability=probability,
+        config=config,
+    )
+
+
+def estimate_taker_buy_fee_shares(
+    shares: Decimal,
+    probability: Decimal,
+    config: FeeCurveConfig = OFFICIAL_CRYPTO_TAKER_FEE_CURVE,
+) -> Decimal:
+    """
+    For BUY taker fills, Polymarket collects the fee in shares.
+    """
+    p = _clamp_probability(probability)
+    fee_usdc = estimate_taker_fee_usdc(
+        shares=shares,
+        probability=p,
+        config=config,
+    )
+    if p <= 0:
+        return Decimal("0")
+    return fee_usdc / p

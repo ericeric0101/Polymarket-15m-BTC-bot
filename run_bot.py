@@ -137,7 +137,11 @@ from bot.risk_policy import (
 )
 from execution.fee_rate_client import FeeRateClient
 from execution.parameter_tuner import ParameterTuner
-from execution.rebate_model import CRYPTO_FEE_CURVE
+from execution.rebate_model import (
+    CRYPTO_FEE_CURVE,
+    estimate_taker_buy_fee_shares,
+    estimate_taker_fee_usdc,
+)
 from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.grafana_exporter import get_grafana_exporter
@@ -735,6 +739,10 @@ class IntegratedBTCStrategy(
         self.maker_execution_non_atomic_vol_mult = Decimal(os.getenv("MAKER_EXECUTION_NON_ATOMIC_VOL_MULT", "0.2"))
         self.maker_execution_depth_impact_mult = Decimal(os.getenv("MAKER_EXECUTION_DEPTH_IMPACT_MULT", "1.0"))
         self.maker_execution_vwap_mult = Decimal(os.getenv("MAKER_EXECUTION_VWAP_MULT", "0.5"))
+        self.maker_buy_taker_leakage_prob = max(
+            Decimal("0"),
+            min(Decimal("1"), Decimal(os.getenv("MAKER_BUY_TAKER_LEAKAGE_PROB", "0.15"))),
+        )
         self.orderbook_fetch_interval_sec = max(1, int(os.getenv("ORDERBOOK_FETCH_INTERVAL_SEC", "5")))
         self.orderbook_levels_limit = max(1, int(os.getenv("ORDERBOOK_LEVELS_LIMIT", "10")))
         self.requote_bucket_tokens = self.maker_requote_max_per_sec
@@ -1085,6 +1093,7 @@ class IntegratedBTCStrategy(
             maker_execution_non_atomic_vol_mult=self.maker_execution_non_atomic_vol_mult,
             maker_execution_depth_impact_mult=self.maker_execution_depth_impact_mult,
             maker_execution_vwap_mult=self.maker_execution_vwap_mult,
+            maker_buy_taker_leakage_prob=self.maker_buy_taker_leakage_prob,
         )
         self.maker_engine = MakerEngine(maker_config)
 
@@ -3819,10 +3828,26 @@ class IntegratedBTCStrategy(
         taker_exit_reason = self.taker_exit_reason_by_client_order_id.get(filled_id)
         liquidity_side_raw = getattr(event, "liquidity_side", "")
         is_maker_fill = self._is_maker_fill_liquidity(liquidity_side_raw)
-        # Normalize maker economics: maker fills are treated as zero-fee for strategy PnL/DB.
-        fill_commission_dec = Decimal("0") if is_maker_fill else raw_commission_dec
         side_for_ledger = filled_side or self._normalize_side_text(getattr(event, "order_side", ""))
         fill_side_norm = side_for_ledger or self._normalize_side_text(getattr(event, "order_side", ""))
+        effective_fee_usdc_dec = Decimal("0")
+        effective_fee_shares_dec = Decimal("0")
+        if not is_maker_fill and side_for_ledger:
+            # Official Polymarket taker fee model:
+            # - fee is calculated in USDC
+            # - BUY collects fee in shares
+            # - SELL collects fee in USDC
+            effective_fee_usdc_calc = estimate_taker_fee_usdc(
+                shares=fill_qty_dec,
+                probability=fill_price_dec,
+            )
+            if side_for_ledger == "buy":
+                effective_fee_shares_dec = estimate_taker_buy_fee_shares(
+                    shares=fill_qty_dec,
+                    probability=fill_price_dec,
+                )
+            else:
+                effective_fee_usdc_dec = effective_fee_usdc_calc
         # Non-maker fills (e.g. taker-exit IOC market sells) are not in active_maker_orders.
         # Keep inventory_delta_shares in sync for those fills as well.
         if not maker_matched and fill_qty_dec > 0:
@@ -3838,7 +3863,8 @@ class IntegratedBTCStrategy(
                 side=side_for_ledger,
                 fill_price=fill_price_dec,
                 fill_qty=fill_qty_dec,
-                commission=fill_commission_dec,
+                fee_usdc=effective_fee_usdc_dec,
+                fee_shares=effective_fee_shares_dec,
             )
         if (
             side_for_ledger == "buy"
@@ -3949,9 +3975,11 @@ class IntegratedBTCStrategy(
         self.last_quote_update_ts = 0.0
 
         self._record_observed_fee_rate_from_fill(
+            side_for_ledger=str(side_for_ledger or ""),
             fill_qty_dec=fill_qty_dec,
             fill_price_dec=fill_price_dec,
-            fill_commission_dec=fill_commission_dec,
+            effective_fee_usdc_dec=effective_fee_usdc_dec,
+            effective_fee_shares_dec=effective_fee_shares_dec,
         )
 
         self.rebate_reporter.record_fill(
@@ -3972,12 +4000,13 @@ class IntegratedBTCStrategy(
                 if filled_econ is not None
                 else None
             ),
-            commission_usdc=float(fill_commission_dec),
+            commission_usdc=float(effective_fee_usdc_dec),
             payload=build_fill_order_event_payload(
                 liquidity_side_raw=liquidity_side_raw,
                 inventory_delta_shares=self.inventory_delta_shares,
                 raw_commission_dec=raw_commission_dec,
-                fill_commission_dec=fill_commission_dec,
+                effective_fee_usdc_dec=effective_fee_usdc_dec,
+                effective_fee_shares_dec=effective_fee_shares_dec,
                 filled_econ=filled_econ,
                 filled_directional_snapshot=filled_directional_snapshot,
                 realized_net_usdc=realized_net_usdc,
@@ -3991,7 +4020,7 @@ class IntegratedBTCStrategy(
                 side=side_norm,
                 qty=float(getattr(event, "last_qty", 0.0) or 0.0),
                 price=float(getattr(event, "last_px", 0.0) or 0.0),
-                commission_usdc=float(fill_commission_dec),
+                commission_usdc=float(effective_fee_usdc_dec),
                 client_order_id=filled_id,
                 is_taker_exit=filled_id.startswith("BTC-15M-TAKER-EXIT-"),
             )
