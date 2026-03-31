@@ -923,6 +923,12 @@ class IntegratedBTCStrategy(
         self.maker_profit_run_trailing_drawdown_ps = Decimal(
             os.getenv("MAKER_PROFIT_RUN_TRAILING_DRAWDOWN_PS", "0.05")
         )
+        self.maker_profit_run_unlock_profit_ps = Decimal(
+            os.getenv("MAKER_PROFIT_RUN_UNLOCK_PROFIT_PS", "0.18")
+        )
+        self.maker_profit_run_unlock_trailing_drawdown_ps = Decimal(
+            os.getenv("MAKER_PROFIT_RUN_UNLOCK_TRAILING_DRAWDOWN_PS", "0.02")
+        )
         
         # Maker-style urgent exit: place maker SELL at best_bid when thesis weakens
         self.maker_urgent_exit_enabled = os.getenv(
@@ -1420,6 +1426,19 @@ class IntegratedBTCStrategy(
         peak_profit_ps = max(peak_bid - avg_entry, peak_fair - avg_entry)
         if peak_profit_ps < self.maker_profit_run_min_profit_ps:
             return False, ""
+        unlock_active = (
+            self.maker_profit_run_unlock_profit_ps > 0
+            and peak_profit_ps >= self.maker_profit_run_unlock_profit_ps
+        )
+        trailing_drawdown_ps = self.maker_profit_run_trailing_drawdown_ps
+        if (
+            unlock_active
+            and self.maker_profit_run_unlock_trailing_drawdown_ps > 0
+        ):
+            trailing_drawdown_ps = min(
+                trailing_drawdown_ps,
+                self.maker_profit_run_unlock_trailing_drawdown_ps,
+            )
         hold_sec = 0.0
         try:
             opened_ts = float(state.get("opened_ts", 0.0))
@@ -1430,19 +1449,21 @@ class IntegratedBTCStrategy(
         drawdown_bid = max(Decimal("0"), peak_bid - best_bid)
         fair_now = fair if fair is not None else peak_fair
         drawdown_fair = max(Decimal("0"), peak_fair - fair_now)
-        if hold_sec < float(self.maker_profit_run_min_hold_sec):
+        if hold_sec < float(self.maker_profit_run_min_hold_sec) and not unlock_active:
             return True, (
                 f"profit_run_hold hold={hold_sec:.1f}s<{self.maker_profit_run_min_hold_sec}s "
                 f"peak_profit={float(peak_profit_ps):.4f}"
             )
         if (
-            drawdown_bid < self.maker_profit_run_trailing_drawdown_ps
-            and drawdown_fair < self.maker_profit_run_trailing_drawdown_ps
+            drawdown_bid < trailing_drawdown_ps
+            and drawdown_fair < trailing_drawdown_ps
         ):
+            reason_prefix = "profit_run_hold_unlocked" if unlock_active else "profit_run_hold"
             return True, (
-                f"profit_run_hold drawdown_bid={float(drawdown_bid):.4f} "
+                f"{reason_prefix} drawdown_bid={float(drawdown_bid):.4f} "
                 f"drawdown_fair={float(drawdown_fair):.4f} "
-                f"< trail={float(self.maker_profit_run_trailing_drawdown_ps):.4f}"
+                f"< trail={float(trailing_drawdown_ps):.4f} "
+                f"peak_profit={float(peak_profit_ps):.4f}"
             )
         return False, ""
 
