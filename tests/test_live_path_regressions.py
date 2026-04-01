@@ -31,6 +31,9 @@ class DummyStrategyForFill(FillLedgerMixin):
         self._inventory_delta_shares = Decimal("0")
         self.inventory_last_update_ts = 0.0
         self.instrument_id = "inst-1"
+        self._sell_recovery_required_by_inst = {}
+        self._sell_recovery_reason_by_inst = {}
+        self._sell_recovery_venue_cap_by_inst = {}
         self.taker_exit_reason_by_client_order_id = {}
         self.maker_high_cost_exit_cooldown_enabled = False
         self.maker_high_cost_exit_cooldown_sec = 0
@@ -80,6 +83,9 @@ class DummyStrategyForFill(FillLedgerMixin):
         self.latest_market_bid = None
         self.latest_market_ask = None
         self.live_inventory_fill_calls = []
+        self.maker_profit_run_peak_bid_by_inst = {}
+        self.maker_profit_run_peak_fair_by_inst = {}
+        self.recent_buy_fill_ts_by_inst = {}
         self.strategy_events = []
         self.order_events = []
         self.order_metric_count = 0
@@ -181,6 +187,83 @@ class DummyStrategyForRehydrate:
 
     def _db_strategy_event(self, event_type, payload=None):
         self.strategy_events.append((event_type, payload or {}))
+
+
+class DummyMakerInstrumentStrategy:
+    def __init__(self) -> None:
+        self.bi_side_enabled = True
+        self.active_side = ActiveSide.DOWN
+        self.instrument_id = "inst-primary"
+        self.current_up_instrument_id = "inst-up"
+        self.current_down_instrument_id = "inst-down"
+        self.live_inventory_cost = {
+            "inst-up": {"qty": Decimal("5.1")},
+        }
+        self._sell_recovery_required_by_inst = {"inst-up": 1.0, "inst-recovery": 2.0}
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
+
+    def _normalize_instrument_id(self, instrument_id):
+        return instrument_id
+
+    def _primary_instrument_for_market(self):
+        return self.current_up_instrument_id or self.current_down_instrument_id or self.instrument_id
+
+    def _instrument_for_side(self, side):
+        if side == ActiveSide.UP:
+            return self.current_up_instrument_id or self._primary_instrument_for_market()
+        if side == ActiveSide.DOWN:
+            return self.current_down_instrument_id
+        return None
+
+
+class DummyRejectRecoveryStrategy:
+    def __init__(self) -> None:
+        self.active_maker_orders = {}
+        self.pending_taker_exit_by_inst = {}
+        self.taker_exit_reject_cooldown_sec = 0
+        self.taker_exit_reject_cooldown_until_by_inst = {}
+        self._sell_reject_pause_until_by_inst = {}
+        self._sell_recovery_required_by_inst = {}
+        self._sell_recovery_reason_by_inst = {}
+        self._sell_recovery_venue_cap_by_inst = {}
+        self.consecutive_denied_orders = 0
+        self.sell_balance_retry_pause_sec = 3.0
+        self._force_quote_refresh_once = False
+        self._force_quote_refresh_reason = ""
+        self.rebate_reporter = SimpleNamespace(record_denied=lambda: None)
+        self.order_metric_count = 0
+        self.current_market_slug = "btc-updown-15m-test"
+        self.order_events = []
+
+    def _clear_pending_taker_exit_for_order(self, *_args, **_kwargs):
+        return None
+
+    def _normalize_side_text(self, side_val):
+        return IntegratedBTCStrategy._normalize_side_text(side_val)
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
+
+    def _extract_token_id_from_instrument(self, instrument_id):
+        return IntegratedBTCStrategy._extract_token_id_from_instrument(str(instrument_id))
+
+    def _extract_venue_balance_shares_from_reject(self, reason):
+        return IntegratedBTCStrategy._extract_venue_balance_shares_from_reject(reason)
+
+    def _cancel_maker_order_side(self, *_args, **_kwargs):
+        return None
+
+    def _get_conditional_balance_for_token(self, token_id=None, force_refresh=False):
+        self.last_conditional_refresh = (token_id, force_refresh)
+        return Decimal("0")
+
+    def _increment_order_metric(self, *_args, **_kwargs):
+        self.order_metric_count += 1
+
+    def _db_order_event(self, **kwargs):
+        self.order_events.append(kwargs)
 
 
 class DummyUrgentExitStrategy(TakerExitMixin):
@@ -288,6 +371,51 @@ def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
     assert strategy._startup_rehydrated_inventory_force_sell_only is True
     assert strategy.live_inventory_cost["inst-up"]["avg_entry_price"] == Decimal("0.37")
     assert strategy.strategy_events[0][0] == "STARTUP_INVENTORY_REHYDRATED"
+
+
+def test_maker_quote_instruments_include_held_and_recovery_legs():
+    strategy = DummyMakerInstrumentStrategy()
+
+    instruments = IntegratedBTCStrategy._maker_quote_instruments(strategy)
+
+    assert instruments == ["inst-down", "inst-up", "inst-recovery"]
+
+
+def test_balance_reject_marks_sell_recovery_and_caps_qty():
+    strategy = DummyRejectRecoveryStrategy()
+    event = SimpleNamespace(
+        client_order_id="BTC-15M-MAKER-SELL-1",
+        reason="PolyApiException[status_code=400, error_message={'error': 'not enough balance / allowance: the balance is not enough -> balance: 4997830, order amount: 5100000'}]",
+        instrument_id="cond-123-456.POLYMARKET",
+        order_side="SELL",
+        venue_order_id=None,
+    )
+
+    IntegratedBTCStrategy._handle_order_rejection_like_event(strategy, event, title="ORDER REJECTED")
+
+    assert strategy._sell_recovery_required_by_inst["cond-123-456.POLYMARKET"] > 0
+    assert strategy._sell_recovery_venue_cap_by_inst["cond-123-456.POLYMARKET"] == Decimal("4.99783")
+    assert strategy._force_quote_refresh_once is True
+    assert strategy._force_quote_refresh_reason == "sell_recovery_balance_reject"
+
+
+def test_taker_buy_fill_updates_inventory_delta_with_net_shares():
+    strategy = DummyStrategyForFill()
+
+    fill = SimpleNamespace(
+        client_order_id="BUY-1",
+        last_px=0.46,
+        last_qty=5.2,
+        commission=0.2392,
+        liquidity_side="TAKER",
+        order_side="BUY",
+        instrument_id="inst-1",
+        venue_order_id=None,
+    )
+
+    IntegratedBTCStrategy.on_order_filled(strategy, fill)
+
+    assert strategy.inventory_delta_shares == Decimal("5.10699904")
 
 
 def test_urgent_exit_does_not_replace_recent_urgent_sell_too_quickly():

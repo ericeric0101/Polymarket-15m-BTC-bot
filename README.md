@@ -288,7 +288,10 @@ polymarket-btc-15m-bot/
 │
 ├── .env.example                 # Template for environment variables
 ├── .gitignore
-├── LEGACY_PATCH_STATUS.md       # Live path vs legacy path vs runtime patch inventory
+├── docs/
+│   ├── LEGACY_PATCH_STATUS.md   # Live path vs legacy path vs runtime patch inventory
+│   ├── readme_ZH.md             # 中文說明
+│   └── ...                      # 設計/策略/規格文件
 ├── pytest.ini                   # Pytest collection guardrails (legacy script tests excluded)
 ├── redis_control.py             # Switch trading mode (sim/live/test)
 ├── requirements.txt             # Python dependencies
@@ -303,7 +306,7 @@ This repo currently has two different categories of "tests":
 - live-path checks for the current bot
 - legacy script-style test files left from older architecture experiments
 
-The current live trading path is documented in [`LEGACY_PATCH_STATUS.md`](LEGACY_PATCH_STATUS.md). In particular:
+The current live trading path is documented in [`LEGACY_PATCH_STATUS.md`](docs/LEGACY_PATCH_STATUS.md). In particular:
 
 - `run_bot.py`, `bot/`, `execution/`, `monitoring/`, and the Binance/Coinbase data sources are current production path
 - `core/ingestion/`, `core/nautilus_core/`, and `core/strategy_brain/` are legacy / sidecar areas and should not be treated as the active trading core
@@ -325,7 +328,7 @@ Important note on runtime patches:
 - several scripts under `scripts/patch_*.py` modify `venv/site-packages`
 - these are runtime-critical in the current setup
 
-Read [`LEGACY_PATCH_STATUS.md`](LEGACY_PATCH_STATUS.md) before cleaning up `core/` or patch scripts.
+Read [`LEGACY_PATCH_STATUS.md`](docs/LEGACY_PATCH_STATUS.md) before cleaning up `core/` or patch scripts.
 
 🤝 Contributing
 Contributions are welcome! Here's how you can help:

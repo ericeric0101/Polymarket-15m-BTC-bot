@@ -554,7 +554,7 @@ Polymarket-BTC-15-Minute-Trading-Bot-main/
 ├── redis_control.py            # Redis 模式切換工具
 ├── .env.example
 ├── README.md
-└── readme_ZH.md
+└── docs/readme_ZH.md
 ```
 
 補充：
@@ -569,7 +569,7 @@ Polymarket-BTC-15-Minute-Trading-Bot-main/
 
 - 目前真正的 live trading 主路徑是 [`run_bot.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py)、[`bot/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot)、[`execution/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/execution)、[`monitoring/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/monitoring) 與 Binance / Coinbase data source
 - [`core/ingestion/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/ingestion)、[`core/nautilus_core/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/nautilus_core)、[`core/strategy_brain/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/strategy_brain) 目前屬於 legacy / sidecar 區域，不應直接當作現行交易核心
-- 詳細分類見 [`LEGACY_PATCH_STATUS.md`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/LEGACY_PATCH_STATUS.md)
+- 詳細分類見 [`LEGACY_PATCH_STATUS.md`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/docs/LEGACY_PATCH_STATUS.md)
 
 ### 語法檢查
 

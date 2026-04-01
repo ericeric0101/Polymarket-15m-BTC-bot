@@ -23,7 +23,7 @@ Do NOT review individual files in isolation.
 
 Focus on cross-module interactions.
 
-Follow the analysis specification in skills.md.
+Follow the analysis specification in docs/skills.md.
 
 ---
 

@@ -1276,6 +1276,9 @@ class IntegratedBTCStrategy(
         )
         self._conditional_balance_cache_by_token: Dict[str, Dict[str, Any]] = {}
         self._sell_reject_pause_until_by_inst: Dict[str, float] = {}
+        self._sell_recovery_required_by_inst: Dict[str, float] = {}
+        self._sell_recovery_reason_by_inst: Dict[str, str] = {}
+        self._sell_recovery_venue_cap_by_inst: Dict[str, Decimal] = {}
         self.sell_delay_after_buy_sec = max(
             0.0, float(os.getenv("SELL_DELAY_AFTER_BUY_SEC", "3"))
         )
@@ -1800,6 +1803,17 @@ class IntegratedBTCStrategy(
         return m.group(1)
 
     @staticmethod
+    def _extract_venue_balance_shares_from_reject(reason: str) -> Optional[Decimal]:
+        txt = str(reason or "")
+        m = re.search(r"balance:\s*([0-9]+)", txt)
+        if not m:
+            return None
+        try:
+            return Decimal(m.group(1)) / Decimal("1000000")
+        except Exception:
+            return None
+
+    @staticmethod
     def _extract_market_slug_from_instrument(instrument: Any) -> str:
         info = getattr(instrument, "info", None) or {}
         if isinstance(info, dict):
@@ -1974,14 +1988,45 @@ class IntegratedBTCStrategy(
         self.last_auto_tune_ts = now_ts
 
     def _maker_quote_instruments(self) -> List[InstrumentId]:
+        instruments: List[InstrumentId] = []
+        seen: Set[str] = set()
+
+        def _append(inst: Optional[InstrumentId]) -> None:
+            if inst is None:
+                return
+            key = self._instrument_key(inst)
+            if not key or key in seen:
+                return
+            instruments.append(inst)
+            seen.add(key)
+
         if self.bi_side_enabled:
             active_inst = self._instrument_for_side(self.active_side)
-            if self.active_side == ActiveSide.NONE or active_inst is None:
-                return []
-            return [active_inst]
-        if self.instrument_id is None:
-            return []
-        return [self.instrument_id]
+            if self.active_side != ActiveSide.NONE and active_inst is not None:
+                _append(active_inst)
+        elif self.instrument_id is not None:
+            _append(self.instrument_id)
+
+        # Always include legs with confirmed inventory so they remain in the
+        # normal maker requote loop even after active-side flips.
+        for inst_key, state in list(self.live_inventory_cost.items()):
+            try:
+                qty = Decimal(str(state.get("qty", "0")))
+            except Exception:
+                qty = Decimal("0")
+            if qty <= 0:
+                continue
+            inst = self._normalize_instrument_id(inst_key)
+            if inst is not None:
+                _append(inst)
+
+        # Preserve instruments that recently failed SELL due to venue balance lag.
+        for inst_key in list(self._sell_recovery_required_by_inst.keys()):
+            inst = self._normalize_instrument_id(inst_key)
+            if inst is not None:
+                _append(inst)
+
+        return instruments
 
     async def _quote_maker_orders(self, bid_price: Decimal, ask_price: Decimal) -> None:
         """
@@ -2307,8 +2352,18 @@ class IntegratedBTCStrategy(
                 sell_pause_until = float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0))
                 sellable_qty = None
                 confirmed_inventory_qty = Decimal("0")
+                other_held_inventory_qty = Decimal("0")
                 if side == "sell":
                     confirmed_inventory_qty = self._get_confirmed_inventory_qty_for_instrument(inst_id)
+                    for held_key, held_state in list(self.live_inventory_cost.items()):
+                        if held_key == inst_key:
+                            continue
+                        try:
+                            held_qty = Decimal(str(held_state.get("qty", "0")))
+                        except Exception:
+                            held_qty = Decimal("0")
+                        if held_qty > 0:
+                            other_held_inventory_qty += held_qty
                     recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0))
                     if recent_buy_ts > 0 and self.sell_delay_after_buy_sec > 0:
                         sell_pause_until = max(
@@ -2420,7 +2475,12 @@ class IntegratedBTCStrategy(
                 desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
                 if side == "sell" and confirmed_inventory_qty <= 0:
                     desired_entry["should_quote"] = False
-                    desired_entry["diag_reason"] = "confirmed_inventory_zero"
+                    if other_held_inventory_qty > 0:
+                        desired_entry["diag_reason"] = (
+                            f"confirmed_inventory_zero_current_leg other_held={float(other_held_inventory_qty):.6f}"
+                        )
+                    else:
+                        desired_entry["diag_reason"] = "confirmed_inventory_zero"
 
                 # FIX: Protect profitable existing sell orders from being canceled.
                 # When sell_cost_protect or high_cost_exit_cooldown blocks the NEW
@@ -2649,6 +2709,10 @@ class IntegratedBTCStrategy(
         if side == "sell" and not self._is_dry_run_mode():
             sellable_qty = self._get_effective_sellable_qty(instrument_id=instrument_id)
             confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
+            inst_key = self._instrument_key(instrument_id)
+            venue_cap = self._sell_recovery_venue_cap_by_inst.get(inst_key, None) if inst_key else None
+            if venue_cap is not None and venue_cap > 0:
+                sellable_qty = min(sellable_qty, venue_cap)
             adjusted_qty, sellable_guard_reason = apply_sellable_inventory_guard(
                 qty_dec=qty_dec,
                 precision=precision,
@@ -2798,6 +2862,11 @@ class IntegratedBTCStrategy(
             created_ts=time.time(),
             target_version=int(target_version or 0),
         )
+        if side == "sell":
+            inst_key = self._instrument_key(instrument_id)
+            if inst_key:
+                self._sell_recovery_required_by_inst.pop(inst_key, None)
+                self._sell_recovery_reason_by_inst.pop(inst_key, None)
         self._db_order_event(
             event_type="ORDER_SUBMIT",
             client_order_id=str(order.client_order_id),
@@ -2844,6 +2913,11 @@ class IntegratedBTCStrategy(
                     float(directional_snapshot.get("robust_net_usdc"))
                     if directional_snapshot and directional_snapshot.get("robust_net_usdc") is not None
                     else None
+                ),
+                "sell_recovery_required": (
+                    bool(self._sell_recovery_required_by_inst.get(self._instrument_key(instrument_id), 0.0))
+                    if side == "sell"
+                    else False
                 ),
             },
         )
@@ -3813,6 +3887,7 @@ class IntegratedBTCStrategy(
         filled_directional_snapshot: Dict[str, Any] = {}
         filled_inst: Any = None
         maker_matched = False
+        pending_fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
             order = state.get("order")
@@ -3824,7 +3899,7 @@ class IntegratedBTCStrategy(
                 if isinstance(snap, dict):
                     filled_directional_snapshot = snap
                 filled_inst = state.get("instrument_id")
-                fill_qty = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
+                fill_qty = pending_fill_qty_dec
                 if fill_qty <= 0:
                     fill_qty = Decimal(str(state.get("quantity", "0")))
                 total_qty = Decimal(str(state.get("quantity", "0")))
@@ -3832,10 +3907,6 @@ class IntegratedBTCStrategy(
                 if accumulated > total_qty and total_qty > 0:
                     fill_qty = max(Decimal("0"), total_qty - Decimal(str(state.get("filled_qty", "0"))))
                     accumulated = total_qty
-                if side == "buy":
-                    self.inventory_delta_shares += fill_qty
-                else:
-                    self.inventory_delta_shares -= fill_qty
                 state["filled_qty"] = accumulated
                 if total_qty <= 0 or accumulated >= total_qty:
                     self.active_maker_orders.pop(order_key, None)
@@ -3844,7 +3915,7 @@ class IntegratedBTCStrategy(
             filled_inst = getattr(event, "instrument_id", None) or self.instrument_id
 
         fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
-        fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
+        fill_qty_dec = pending_fill_qty_dec
         raw_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
         taker_exit_reason = self.taker_exit_reason_by_client_order_id.get(filled_id)
         liquidity_side_raw = getattr(event, "liquidity_side", "")
@@ -3869,12 +3940,20 @@ class IntegratedBTCStrategy(
                 )
             else:
                 effective_fee_usdc_dec = effective_fee_usdc_calc
+        inventory_fill_delta_dec = fill_qty_dec
+        if side_for_ledger == "buy":
+            inventory_fill_delta_dec = max(Decimal("0"), fill_qty_dec - effective_fee_shares_dec)
+        if maker_matched and fill_qty_dec > 0:
+            if side_for_ledger == "buy":
+                self.inventory_delta_shares += inventory_fill_delta_dec
+            elif side_for_ledger == "sell":
+                self.inventory_delta_shares -= fill_qty_dec
         # Non-maker fills (e.g. taker-exit IOC market sells) are not in active_maker_orders.
         # Keep inventory_delta_shares in sync for those fills as well.
         if not maker_matched and fill_qty_dec > 0:
             side_norm = self._normalize_side_text(getattr(event, "order_side", ""))
             if side_norm == "buy":
-                self.inventory_delta_shares += fill_qty_dec
+                self.inventory_delta_shares += inventory_fill_delta_dec
             elif side_norm == "sell":
                 self.inventory_delta_shares -= fill_qty_dec
         realized_net_usdc = None
@@ -3887,6 +3966,11 @@ class IntegratedBTCStrategy(
                 fee_usdc=effective_fee_usdc_dec,
                 fee_shares=effective_fee_shares_dec,
             )
+        filled_inst_key = self._instrument_key(filled_inst)
+        if side_for_ledger == "sell" and filled_inst_key:
+            self._sell_recovery_required_by_inst.pop(filled_inst_key, None)
+            self._sell_recovery_reason_by_inst.pop(filled_inst_key, None)
+            self._sell_recovery_venue_cap_by_inst.pop(filled_inst_key, None)
         if (
             side_for_ledger == "buy"
             and self.maker_high_cost_exit_cooldown_enabled
@@ -4177,6 +4261,7 @@ class IntegratedBTCStrategy(
 
         self.consecutive_denied_orders += 1
         reason = reject_result.reason
+        venue_balance_shares = self._extract_venue_balance_shares_from_reject(reason)
         self._db_order_event(
             event_type="ORDER_REJECTED" if "REJECTED" in title else "ORDER_DENIED",
             client_order_id=str(getattr(event, "client_order_id", "")),
@@ -4184,7 +4269,13 @@ class IntegratedBTCStrategy(
             side=str(getattr(event, "order_side", "")),
             status="REJECTED",
             reason=reason,
-            payload={"title": title, "consecutive_denied": self.consecutive_denied_orders},
+            payload={
+                "title": title,
+                "consecutive_denied": self.consecutive_denied_orders,
+                "instrument_id": str(getattr(event, "instrument_id", "") or ""),
+                "venue_balance_shares": float(venue_balance_shares) if venue_balance_shares is not None else None,
+                "sell_recovery_candidate": bool(reject_result.rejected_side == "sell"),
+            },
         )
         if "POST_ONLY_NOT_SUPPORTED" in reason:
             if self.maker_use_post_only:
@@ -4220,6 +4311,10 @@ class IntegratedBTCStrategy(
                         float(self._sell_reject_pause_until_by_inst.get(inst_key, 0.0)),
                         now_ts + pause_sec,
                     )
+                    self._sell_recovery_required_by_inst[inst_key] = now_ts
+                    self._sell_recovery_reason_by_inst[inst_key] = reason
+                    if venue_balance_shares is not None and venue_balance_shares > 0:
+                        self._sell_recovery_venue_cap_by_inst[inst_key] = venue_balance_shares
                 # Keep BUY quotes alive; block SELL quotes only.
                 self._cancel_maker_order_side("sell", reason="sell_balance_reject", instrument_id=reject_result.rejected_inst)
                 # Refresh conditional balance cache immediately to reduce repeated rejects.
@@ -4229,10 +4324,18 @@ class IntegratedBTCStrategy(
                     else None
                 )
                 self._get_conditional_balance_for_token(token_id=token_id, force_refresh=True)
+                self._force_quote_refresh_once = True
+                self._force_quote_refresh_reason = "sell_recovery_balance_reject"
+                venue_balance_txt = (
+                    f"{float(venue_balance_shares):.6f}"
+                    if venue_balance_shares is not None
+                    else "unknown"
+                )
                 logger.warning(
                     "SELL balance/allowance rejection detected; "
                     f"treat as venue balance lag and retry after {pause_sec:.1f}s "
-                    f"(instrument={inst_key or '-'}). BUY side remains active."
+                    f"(instrument={inst_key or '-'}, venue_balance={venue_balance_txt}). "
+                    "BUY side remains active."
                 )
                 # Venue balance lag is a synchronization issue, not a strategy failure.
                 self.consecutive_denied_orders = max(0, self.consecutive_denied_orders - 1)

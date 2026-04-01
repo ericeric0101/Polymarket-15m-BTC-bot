@@ -15,4 +15,4 @@ Implications:
 
 See:
 
-- `/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/LEGACY_PATCH_STATUS.md`
+- `/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/docs/LEGACY_PATCH_STATUS.md`
