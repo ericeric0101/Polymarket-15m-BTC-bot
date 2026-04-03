@@ -782,6 +782,12 @@ class IntegratedBTCStrategy(
         self.maker_auto_tune_interval_sec = int(os.getenv("MAKER_AUTO_TUNE_INTERVAL_SEC", "300"))
         
         self.maker_momentum_filter_pct = Decimal(os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.06"))
+        self.maker_momentum_buy_filter_pct = Decimal(
+            os.getenv("MAKER_MOMENTUM_BUY_FILTER_PCT", os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.04"))
+        )
+        self.maker_momentum_sell_filter_pct = Decimal(
+            os.getenv("MAKER_MOMENTUM_SELL_FILTER_PCT", os.getenv("MAKER_MOMENTUM_FILTER_PCT", "0.02"))
+        )
         self.maker_momentum_window_ticks = int(os.getenv("MAKER_MOMENTUM_WINDOW_TICKS", "20"))
         self.bi_side_enabled = os.getenv("BI_SIDE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
         self.bi_side_decision_mode = os.getenv("BI_SIDE_DECISION_MODE", "boundary_only").strip().lower()
@@ -2266,7 +2272,8 @@ class IntegratedBTCStrategy(
                 min_directional_edge_ps_conservative=self.maker_min_directional_edge_ps_conservative,
                 now_ts=now_ts,
                 buy_cooldown_until_ts=float(self.buy_cooldown_until_ts),
-                momentum_filter_pct=self.maker_momentum_filter_pct,
+                momentum_buy_filter_pct=self.maker_momentum_buy_filter_pct,
+                momentum_sell_filter_pct=self.maker_momentum_sell_filter_pct,
                 momentum_window_ticks=self.maker_momentum_window_ticks,
                 momentum_history=momentum_history,
                 fair=fair,
@@ -2298,8 +2305,15 @@ class IntegratedBTCStrategy(
 
             if guard_outcome.momentum_buy_blocked and guard_outcome.momentum_trend_pct is not None:
                 if not getattr(self, "_logged_mom_buy", False) or time.time() - getattr(self, "_last_mom_ts", 0) > 30:
+                    threshold_pct = (
+                        float((guard_outcome.momentum_buy_threshold_pct or Decimal("0")) * 100)
+                        if guard_outcome.momentum_buy_threshold_pct is not None
+                        else 0.0
+                    )
                     logger.warning(
-                        f"Trend Protection: momentum filter (dropped {float(guard_outcome.momentum_trend_pct * 100):.1f}%). Blocking BUY orders."
+                        "Trend Protection: momentum filter "
+                        f"(dropped {float(guard_outcome.momentum_trend_pct * 100):.1f}% <= -{threshold_pct:.1f}%). "
+                        "Blocking BUY orders."
                     )
                     self._logged_mom_buy = True
                     self._last_mom_ts = time.time()
@@ -2308,8 +2322,15 @@ class IntegratedBTCStrategy(
 
             if guard_outcome.momentum_sell_blocked and guard_outcome.momentum_trend_pct is not None:
                 if not getattr(self, "_logged_mom_sell", False) or time.time() - getattr(self, "_last_mom_ts_s", 0) > 30:
+                    threshold_pct = (
+                        float((guard_outcome.momentum_sell_threshold_pct or Decimal("0")) * 100)
+                        if guard_outcome.momentum_sell_threshold_pct is not None
+                        else 0.0
+                    )
                     logger.warning(
-                        f"Trend Protection: momentum filter (pumped {float(guard_outcome.momentum_trend_pct * 100):.1f}%). Blocking SELL orders."
+                        "Trend Protection: momentum filter "
+                        f"(pumped {float(guard_outcome.momentum_trend_pct * 100):.1f}% >= +{threshold_pct:.1f}%). "
+                        "Blocking SELL orders."
                     )
                     self._logged_mom_sell = True
                     self._last_mom_ts_s = time.time()

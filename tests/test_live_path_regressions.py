@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from bot.enums import ActiveSide, MarketPhase
 from bot.fill_ledger import FillLedgerMixin
+from bot.quoting import apply_quote_plan_guards
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
@@ -583,3 +584,110 @@ def test_strike_prefers_polymarket_chainlink_history_anchor():
 
     assert strike == Decimal("66625.19")
     assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_open"
+
+
+def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
+    side_plan = {
+        "buy": (
+            Decimal("0.44"),
+            None,
+            True,
+            Decimal("0.10"),
+            Decimal("0"),
+            Decimal("0.05"),
+            Decimal("0.20"),
+            Decimal("0.50"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        "sell": (
+            Decimal("0.50"),
+            None,
+            True,
+            Decimal("0.10"),
+            Decimal("0"),
+            Decimal("0.01"),
+            Decimal("0.05"),
+            Decimal("0.50"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+    }
+    outcome = apply_quote_plan_guards(
+        side_plan=side_plan,
+        quote_mode="both",
+        phase_value=MarketPhase.ACTIVE.value,
+        inventory_delta_shares=Decimal("0"),
+        early_sell_only_sec=0.0,
+        time_left_sec_global=600.0,
+        directional_edge_gate_enabled=False,
+        regime_guard_active=False,
+        min_directional_edge_ps=Decimal("0.01"),
+        min_directional_edge_ps_conservative=Decimal("0.02"),
+        now_ts=100.0,
+        buy_cooldown_until_ts=0.0,
+        momentum_buy_filter_pct=Decimal("0.04"),
+        momentum_sell_filter_pct=Decimal("0.20"),
+        momentum_window_ticks=4,
+        momentum_history=[Decimal("0.50"), Decimal("0.49"), Decimal("0.46"), Decimal("0.435")],
+        fair=Decimal("0.50"),
+        min_fair_price=Decimal("0.05"),
+        max_fair_price=Decimal("0.95"),
+        end_ts=1000.0,
+        min_minutes_to_close=3.0,
+        reduce_only_no_new_sell_last_sec=45,
+        forced_sell_only=False,
+        active_side=ActiveSide.UP.value,
+        min_directional_edge_ps_down=None,
+    )
+
+    assert outcome.momentum_buy_blocked is True
+    assert outcome.momentum_sell_blocked is False
+    assert outcome.side_disable_reason_by_side["buy"] == "momentum_buy_block"
+
+
+def test_quote_plan_guards_never_blocks_inventory_exit_sell_on_momentum():
+    side_plan = {
+        "sell": (
+            Decimal("0.60"),
+            None,
+            True,
+            Decimal("0.10"),
+            Decimal("0"),
+            Decimal("0.03"),
+            Decimal("0.15"),
+            Decimal("0.55"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+    }
+    outcome = apply_quote_plan_guards(
+        side_plan=side_plan,
+        quote_mode="both",
+        phase_value=MarketPhase.ACTIVE.value,
+        inventory_delta_shares=Decimal("5.4"),
+        early_sell_only_sec=0.0,
+        time_left_sec_global=600.0,
+        directional_edge_gate_enabled=False,
+        regime_guard_active=False,
+        min_directional_edge_ps=Decimal("0.01"),
+        min_directional_edge_ps_conservative=Decimal("0.02"),
+        now_ts=100.0,
+        buy_cooldown_until_ts=0.0,
+        momentum_buy_filter_pct=Decimal("0.04"),
+        momentum_sell_filter_pct=Decimal("0.02"),
+        momentum_window_ticks=4,
+        momentum_history=[Decimal("0.50"), Decimal("0.55"), Decimal("0.58"), Decimal("0.62")],
+        fair=Decimal("0.55"),
+        min_fair_price=Decimal("0.05"),
+        max_fair_price=Decimal("0.95"),
+        end_ts=1000.0,
+        min_minutes_to_close=3.0,
+        reduce_only_no_new_sell_last_sec=45,
+        forced_sell_only=False,
+        active_side=ActiveSide.UP.value,
+        min_directional_edge_ps_down=None,
+    )
+
+    assert outcome.momentum_sell_blocked is False
+    assert "sell" not in outcome.side_disable_reason_by_side

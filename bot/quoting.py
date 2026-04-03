@@ -37,6 +37,8 @@ class QuotePlanGuardOutcome:
     reduce_only: ReduceOnlyDecision
     buy_cooldown_remaining: Optional[float]
     momentum_trend_pct: Optional[Decimal]
+    momentum_buy_threshold_pct: Optional[Decimal]
+    momentum_sell_threshold_pct: Optional[Decimal]
     momentum_buy_blocked: bool
     momentum_sell_blocked: bool
 
@@ -136,7 +138,8 @@ def apply_quote_plan_guards(
     min_directional_edge_ps_conservative: Decimal,
     now_ts: float,
     buy_cooldown_until_ts: float,
-    momentum_filter_pct: Decimal,
+    momentum_buy_filter_pct: Decimal,
+    momentum_sell_filter_pct: Decimal,
     momentum_window_ticks: int,
     momentum_history: list[Decimal],
     fair: Decimal,
@@ -189,14 +192,31 @@ def apply_quote_plan_guards(
     momentum_trend_pct: Optional[Decimal] = None
     momentum_buy_blocked = False
     momentum_sell_blocked = False
-    if momentum_filter_pct > 0 and len(momentum_history) >= momentum_window_ticks:
+    momentum_buy_threshold_pct: Optional[Decimal] = None
+    momentum_sell_threshold_pct: Optional[Decimal] = None
+    if (
+        (momentum_buy_filter_pct > 0 or momentum_sell_filter_pct > 0)
+        and len(momentum_history) >= momentum_window_ticks
+    ):
         recent_px = momentum_history[-1]
         old_px = momentum_history[-momentum_window_ticks]
         momentum_trend_pct = (recent_px - old_px) / old_px if old_px > 0 else Decimal("0")
-        if momentum_trend_pct <= -momentum_filter_pct and "buy" in side_plan:
+        if momentum_buy_filter_pct > 0:
+            momentum_buy_threshold_pct = -momentum_buy_filter_pct
+        if momentum_sell_filter_pct > 0:
+            momentum_sell_threshold_pct = momentum_sell_filter_pct
+        if (
+            momentum_buy_filter_pct > 0
+            and momentum_trend_pct <= -momentum_buy_filter_pct
+            and "buy" in side_plan
+        ):
             momentum_buy_blocked = True
             set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "momentum_buy_block")
-        if momentum_trend_pct >= momentum_filter_pct and "sell" in side_plan:
+        if (
+            momentum_sell_filter_pct > 0
+            and momentum_trend_pct >= momentum_sell_filter_pct
+            and "sell" in side_plan
+        ):
             # Only block SELL when there is no existing inventory to exit.
             # If the bot holds shares (inventory_delta_shares > 0), this SELL is
             # reduce-only (exiting a position), and should NOT be blocked by
@@ -241,6 +261,8 @@ def apply_quote_plan_guards(
         reduce_only=reduce_only,
         buy_cooldown_remaining=buy_cooldown_remaining,
         momentum_trend_pct=momentum_trend_pct,
+        momentum_buy_threshold_pct=momentum_buy_threshold_pct,
+        momentum_sell_threshold_pct=momentum_sell_threshold_pct,
         momentum_buy_blocked=momentum_buy_blocked,
         momentum_sell_blocked=momentum_sell_blocked,
     )
