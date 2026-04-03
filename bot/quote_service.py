@@ -413,6 +413,12 @@ def build_desired_quote_entry(
     maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
     thesis_weakened: bool = False,
     offside_confirmed: bool = False,
+    # Thesis-aware emergency exit: time_left_sec is used to compute the
+    # absolute last-resort window. Pass None if unavailable.
+    time_left_sec: float | None = None,
+    # Seconds before expiry where loss-selling is always allowed regardless
+    # of thesis state. This is the true safety net of last resort.
+    absolute_last_resort_sec: float = 60.0,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -456,11 +462,39 @@ def build_desired_quote_entry(
                     f"sellable_below_min sellable={float(sellable_qty):.6f} "
                     f"< min={float(maker_exchange_min_shares):.6f}"
                 )
-        # Allow loss-selling when:
-        # 1) emergency window near expiry,
-        # 2) thesis weakened,
-        # 3) inventory is confirmed offside against a locked side decision.
-        allow_loss_sell = emergency_window or thesis_weakened or offside_confirmed
+        # Allow loss-selling with thesis-aware logic:
+        #
+        # 1) thesis_bad: thesis weakened OR inventory confirmed offside.
+        #    This is always allowed regardless of time.
+        # 2) emergency_with_thesis: we are in the emergency time window (e.g.
+        #    last 120s) AND thesis is also bad. The emergency window alone is
+        #    NOT sufficient — it must be confirmed by signal state.
+        # 3) absolute_last_resort: genuinely final seconds (<60s). We always
+        #    allow loss-selling here to prevent holding a dead position to
+        #    settlement, but the window is intentionally narrow.
+        #
+        # Previously: allow_loss_sell = emergency_window or thesis_weakened or offside_confirmed
+        # Problem: emergency_window was purely time-based and would override
+        # HOLD_IN_BAND decisions, causing loss sells when direction was correct.
+        #
+        _thesis_bad = thesis_weakened or offside_confirmed
+        _allow_emergency_with_thesis = emergency_window and _thesis_bad
+        _allow_absolute_last_resort = (
+            time_left_sec is not None
+            and absolute_last_resort_sec > 0
+            and time_left_sec < absolute_last_resort_sec
+        )
+        allow_loss_sell = _thesis_bad or _allow_emergency_with_thesis or _allow_absolute_last_resort
+        # Compute reason tag for observability (visible in diag logs and order payload).
+        if allow_loss_sell:
+            if _thesis_bad:
+                _loss_sell_reason = "thesis_bad"
+            elif _allow_absolute_last_resort:
+                _loss_sell_reason = f"absolute_last_resort(<{absolute_last_resort_sec:.0f}s)"
+            else:
+                _loss_sell_reason = "emergency_with_thesis"
+        else:
+            _loss_sell_reason = ""
         if (
             should_quote
             and high_cost_exit_cooldown_enabled
@@ -527,6 +561,10 @@ def build_desired_quote_entry(
         "p_fair": p_fair,
         "fee_ps": fee_ps,
         "other_cost_ps": other_cost_ps,
+        # Observability: non-empty only when a loss-sell was gated/allowed.
+        # Values: "thesis_bad" | "emergency_with_thesis" |
+        #         "absolute_last_resort(<Ns)" | "" (no loss-sell override)
+        "loss_sell_reason": _loss_sell_reason if side == "sell" else "",
     }
 
 

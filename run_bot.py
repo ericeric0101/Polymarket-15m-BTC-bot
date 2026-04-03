@@ -816,6 +816,24 @@ class IntegratedBTCStrategy(
         self.bi_side_flip_min_score_up = Decimal(str(os.getenv("BI_SIDE_FLIP_MIN_SCORE_UP", "2")))
         self.bi_side_flip_max_score_down = Decimal(str(os.getenv("BI_SIDE_FLIP_MAX_SCORE_DOWN", "-2")))
         self.bi_side_flip_min_fair = Decimal(str(os.getenv("BI_SIDE_FLIP_MIN_FAIR", "0.60")))
+
+        # --- SignalEngine toggle (new vs legacy side decision) ---
+        # Set SIDE_DECISION_ENGINE_NEW=0 to revert to legacy integer-voting system
+        self.side_decision_engine_new = os.getenv(
+            "SIDE_DECISION_ENGINE_NEW", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.side_signal_min_confidence = float(os.getenv("SIDE_SIGNAL_MIN_CONFIDENCE", "0.15"))
+        self.side_signal_threshold_up = float(os.getenv("SIDE_SIGNAL_THRESHOLD_UP", "0.05"))
+        self.side_signal_threshold_down = float(os.getenv("SIDE_SIGNAL_THRESHOLD_DOWN", "0.05"))
+        # SignalEngine EMA windows
+        self.side_signal_btc_ema_fast_sec = float(os.getenv("SIDE_SIGNAL_BTC_EMA_FAST_SEC", "3.0"))
+        self.side_signal_btc_ema_slow_sec = float(os.getenv("SIDE_SIGNAL_BTC_EMA_SLOW_SEC", "10.0"))
+        self.side_signal_mid_ema_fast_sec = float(os.getenv("SIDE_SIGNAL_MID_EMA_FAST_SEC", "5.0"))
+        self.side_signal_mid_ema_slow_sec = float(os.getenv("SIDE_SIGNAL_MID_EMA_SLOW_SEC", "20.0"))
+        # BTC trend normalisation factor
+        self.side_signal_btc_trend_norm_pct = float(os.getenv("SIDE_SIGNAL_BTC_TREND_NORM_PCT", "0.0005"))
+        # Mid-price velocity reversal threshold
+        self.side_signal_mid_velocity_reversal = float(os.getenv("SIDE_SIGNAL_MID_VELOCITY_REVERSAL", "0.010"))
         self.maker_fair_pricer_mode = os.getenv("MAKER_FAIR_PRICER_MODE", "drift").strip().lower()
         if self.maker_fair_pricer_mode not in {"drift", "digital"}:
             self.maker_fair_pricer_mode = "drift"
@@ -1291,6 +1309,18 @@ class IntegratedBTCStrategy(
         self._binance_ws_price_ts: float = 0.0
         self._binance_ws_stop_event = threading.Event()
         self._binance_ws_thread: Optional[threading.Thread] = None
+
+        # --- SignalEngine (continuous probabilistic side decision) ---
+        from bot.signal_engine import SignalEngine, SignalEngineConfig
+        self._signal_engine = SignalEngine(SignalEngineConfig(
+            btc_ema_fast_sec=self.side_signal_btc_ema_fast_sec,
+            btc_ema_slow_sec=self.side_signal_btc_ema_slow_sec,
+            mid_ema_fast_sec=self.side_signal_mid_ema_fast_sec,
+            mid_ema_slow_sec=self.side_signal_mid_ema_slow_sec,
+            min_confidence=self.side_signal_min_confidence,
+            btc_trend_norm_pct=self.side_signal_btc_trend_norm_pct,
+            mid_velocity_reversal_threshold=self.side_signal_mid_velocity_reversal,
+        ))
         self._maker_worker_lock = threading.Lock()
         self._maker_worker_running = False
         self.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
@@ -1867,6 +1897,15 @@ class IntegratedBTCStrategy(
         history.append(mid_price)
         if len(history) > self.max_real_history:
             history.pop(0)
+        # Feed UP token mid into SignalEngine for market consensus signal
+        up_inst = getattr(self, 'current_up_instrument_id', None)
+        if (
+            up_inst is not None
+            and self._normalize_instrument_id(instrument_id) == up_inst
+            and hasattr(self, '_signal_engine')
+        ):
+            import time as _time
+            self._signal_engine.update_market_mid(mid_price, _time.time())
 
     def _activate_maker_kill_switch(self, reason: str) -> None:
         self.maker_kill_switch = True
@@ -2470,6 +2509,7 @@ class IntegratedBTCStrategy(
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                     thesis_weakened=_thesis_weakened,
                     offside_confirmed=_offside_confirmed,
+                    time_left_sec=time_left_sec_global,
                 )
                 desired_entry["dynamic_fee_rate"] = quote_ctx.dynamic_fee_rate
                 desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
@@ -2621,6 +2661,7 @@ class IntegratedBTCStrategy(
                 dynamic_fee_rate,
                 directional_snapshot=directional_snapshot,
                 target_version=target_version,
+                loss_sell_reason=desired.get("loss_sell_reason", ""),
             )
 
         log_no_quote_diagnostics(
@@ -2648,6 +2689,7 @@ class IntegratedBTCStrategy(
         dynamic_fee_rate: Optional[Decimal] = None,
         directional_snapshot: Optional[Dict[str, Any]] = None,
         target_version: Optional[int] = None,
+        loss_sell_reason: str = "",
     ) -> None:
         instrument_id = self._normalize_instrument_id(instrument_id)
         instrument = self.cache.instrument(instrument_id) if instrument_id else None
@@ -2919,6 +2961,7 @@ class IntegratedBTCStrategy(
                     if side == "sell"
                     else False
                 ),
+                "loss_sell_reason": loss_sell_reason if side == "sell" and loss_sell_reason else None,
             },
         )
         self.rebate_reporter.record_quote(
@@ -2995,6 +3038,18 @@ class IntegratedBTCStrategy(
             },
         )
         self._bootstrap_regime_guard_window_from_db()
+
+        # Log which side-decision engine is active
+        if self.bi_side_enabled:
+            engine_label = "SignalEngine (probabilistic)" if self.side_decision_engine_new else "Legacy (integer voting)"
+            logger.info(
+                f"Side decision engine: {engine_label} | "
+                f"min_confidence={self.side_signal_min_confidence} "
+                f"threshold_up={self.side_signal_threshold_up} "
+                f"threshold_down={self.side_signal_threshold_down} | "
+                f"BTC EMA {self.side_signal_btc_ema_fast_sec}s/{self.side_signal_btc_ema_slow_sec}s | "
+                f"Mid EMA {self.side_signal_mid_ema_fast_sec}s/{self.side_signal_mid_ema_slow_sec}s"
+            )
         
         # Ensure we have sufficient history.
         if len(self.price_history) < 20:

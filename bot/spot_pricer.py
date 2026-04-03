@@ -109,6 +109,13 @@ class SpotPricerMixin:
                             if price_str:
                                 self._binance_ws_price = Decimal(price_str)
                                 self._binance_ws_price_ts = time.time()
+                                # Feed into SignalEngine's BTC EMA tracker
+                                _sig_eng = getattr(self, "_signal_engine", None)
+                                if _sig_eng is not None:
+                                    _sig_eng.update_btc_price(
+                                        self._binance_ws_price,
+                                        self._binance_ws_price_ts,
+                                    )
                         except Exception:
                             pass
             except Exception as e:

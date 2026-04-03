@@ -4,8 +4,9 @@ import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
 
-from bot.enums import ActiveSide
+from bot.enums import ActiveSide, MarketPhase
 from bot.fill_ledger import FillLedgerMixin
+from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
 from run_bot import IntegratedBTCStrategy
 
@@ -331,6 +332,88 @@ class DummyUrgentExitStrategy(TakerExitMixin):
         self.db_events.append(kwargs)
 
 
+class DummySideFlipStrategy(SideDecisionMixin):
+    def __init__(self, *, held_qty: Decimal) -> None:
+        self.bi_side_enabled = True
+        self.active_side = ActiveSide.UP
+        self.active_side_locked = True
+        self.bi_side_allow_intramarket_flip = True
+        self.side_flip_count = 1
+        self.bi_side_flip_max_per_market = 1
+        self.bi_side_flip_confirmations = 1
+        self.bi_side_flip_min_score_up = Decimal("2")
+        self.bi_side_flip_max_score_down = Decimal("-2")
+        self.bi_side_flip_min_fair = Decimal("0.60")
+        self.bi_side_min_time_left_sec = 180
+        self.current_market_end_timestamp = 10_000.0
+        self.active_side_locked = True
+        self.side_decision_due_ts = 0.0
+        self.active_side = ActiveSide.UP
+        self.current_market_slug = "btc-updown-15m-test"
+        self.market_strike_cache_by_slug = {"btc-updown-15m-test": Decimal("66867")}
+        self.market_strike_source_by_slug = {"btc-updown-15m-test": "binance_rest_open"}
+        self.current_up_instrument_id = "inst-up"
+        self.current_down_instrument_id = "inst-down"
+        self.instrument_id = "inst-up"
+        self.live_inventory_cost = {
+            "inst-up": {"qty": held_qty, "avg_entry_price": Decimal("0.59")},
+        }
+        self.side_pending_flip_side = ActiveSide.NONE
+        self.side_pending_flip_count = 0
+        self.side_decision_score = Decimal("2")
+        self.side_decision_reason = "strike=1 momentum=1 open_drift=0 regime=0"
+        self.side_decision_ts = 0.0
+        self.side_decision_done_for_market = True
+        self.side_decision_inputs = {}
+        self._force_quote_refresh_once = False
+        self._force_quote_refresh_reason = ""
+        self._last_side_observation_signature = None
+        self._last_side_decision_log_ts = 0.0
+        self._last_side_decision_log_signature = None
+        self._side_decision_skip_log_ts_by_reason = {}
+        self.side_decision_skip_log_interval_sec = 1.0
+        self.bi_side_decision_log_interval_sec = 1.0
+        self.bi_side_reeval_interval_sec = 1.0
+        self.strategy_events = []
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
+
+    def _instrument_for_side(self, side):
+        if side == ActiveSide.UP:
+            return "inst-up"
+        if side == ActiveSide.DOWN:
+            return "inst-down"
+        return None
+
+    def _primary_instrument_for_market(self):
+        return "inst-up"
+
+    def _sync_active_instrument(self):
+        return None
+
+    def _db_strategy_event(self, event_type, payload=None):
+        self.strategy_events.append((event_type, payload or {}))
+
+    async def _get_market_strike_for_instrument(self, _instrument_id):
+        return Decimal("66867")
+
+    def _compute_side_decision(self, now_ts):
+        return (
+            ActiveSide.DOWN,
+            Decimal("-2"),
+            "strike=-1 momentum=0 open_drift=-1 regime=0",
+            {
+                "fair_up": 0.01,
+                "fair_down": 0.99,
+                "strike_signal": -1,
+                "momentum_signal": 0,
+                "open_drift_signal": -1,
+                "regime_signal": 0,
+            },
+        )
+
+
 def test_partial_fills_only_increment_market_buy_count_once():
     strategy = DummyStrategyForFill()
 
@@ -426,3 +509,26 @@ def test_urgent_exit_does_not_replace_recent_urgent_sell_too_quickly():
     assert strategy.cancel_calls == []
     assert strategy.submit_calls == []
     assert strategy.db_events == []
+
+
+def test_held_inventory_allows_one_extra_flip_after_quota_exhausted():
+    strategy = DummySideFlipStrategy(held_qty=Decimal("5.4"))
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.DOWN
+    assert strategy.side_flip_count == 2
+    assert strategy.strategy_events[-1][0] == "SIDE_MODE_FLIPPED"
+    assert strategy.strategy_events[-1][1]["extra_flip_for_held_inventory"] is True
+
+
+def test_no_extra_flip_without_material_held_inventory():
+    strategy = DummySideFlipStrategy(held_qty=Decimal("0.01"))
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.UP
+    assert strategy.side_flip_count == 1
+    assert strategy.strategy_events == []
