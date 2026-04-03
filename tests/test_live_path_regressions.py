@@ -406,7 +406,7 @@ class DummyUrgentExitMatchedStrategy(TakerExitMixin):
 class DummySideFlipStrategy(SideDecisionMixin):
     def __init__(self, *, held_qty: Decimal) -> None:
         self.bi_side_enabled = True
-        self.side_decision_engine_new = False
+        self.side_decision_engine_new = True
         self.active_side = ActiveSide.UP
         self.active_side_locked = True
         self.bi_side_allow_intramarket_flip = True
@@ -417,6 +417,10 @@ class DummySideFlipStrategy(SideDecisionMixin):
         self.bi_side_flip_max_score_down = Decimal("-2")
         self.bi_side_flip_min_score_up_new = Decimal("0.12")
         self.bi_side_flip_max_score_down_new = Decimal("-0.12")
+        self.bi_side_flip_confirmations_held_new = 4
+        self.bi_side_flip_min_persist_sec_held_new = 8.0
+        self.bi_side_flip_min_score_up_held_new = Decimal("0.18")
+        self.bi_side_flip_max_score_down_held_new = Decimal("-0.18")
         self.bi_side_flip_min_fair = Decimal("0.60")
         self.bi_side_min_time_left_sec = 180
         self.current_market_end_timestamp = 10_000.0
@@ -434,6 +438,7 @@ class DummySideFlipStrategy(SideDecisionMixin):
         }
         self.side_pending_flip_side = ActiveSide.NONE
         self.side_pending_flip_count = 0
+        self.side_pending_flip_since_ts = 0.0
         self.side_decision_score = Decimal("2")
         self.side_decision_reason = "strike=1 momentum=1 open_drift=0 regime=0"
         self.side_decision_ts = 0.0
@@ -488,15 +493,11 @@ class DummySideFlipStrategy(SideDecisionMixin):
     def _compute_side_decision(self, now_ts):
         return (
             ActiveSide.DOWN,
-            Decimal("-2"),
-            "strike=-1 momentum=0 open_drift=-1 regime=0",
+            Decimal("-0.20"),
+            "cs=-0.2000",
             {
                 "fair_up": 0.01,
                 "fair_down": 0.99,
-                "strike_signal": -1,
-                "momentum_signal": 0,
-                "open_drift_signal": -1,
-                "regime_signal": 0,
             },
         )
 
@@ -676,10 +677,12 @@ def test_urgent_exit_does_not_fire_when_signal_still_matches_position():
 
 def test_held_inventory_allows_one_extra_flip_after_quota_exhausted():
     strategy = DummySideFlipStrategy(held_qty=Decimal("5.4"))
+    strategy.bi_side_flip_confirmations = 1
 
     asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
     asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
-    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=102.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=108.0, phase=MarketPhase.ACTIVE))
 
     assert strategy.active_side == ActiveSide.DOWN
     assert strategy.side_flip_count == 2
@@ -736,8 +739,8 @@ def test_side_change_cancels_stale_buy_orders_for_old_instrument():
     def _compute_side_decision(_now_ts):
         return (
             ActiveSide.DOWN,
-            Decimal("-2"),
-            "legacy_down",
+            Decimal("-0.20"),
+            "cs=-0.2000",
             {
                 "fair_up": 0.20,
                 "fair_down": 0.80,
@@ -748,10 +751,44 @@ def test_side_change_cancels_stale_buy_orders_for_old_instrument():
 
     asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
     asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=102.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=108.0, phase=MarketPhase.ACTIVE))
 
     assert strategy.active_side == ActiveSide.DOWN
     assert ("buy:inst-up", "side_change_stale_buy") in strategy.cancel_calls
     assert any(evt == "SIDE_CHANGE_CANCELED_STALE_BUYS" for evt, _ in strategy.strategy_events)
+
+
+def test_new_signal_held_inventory_flip_requires_more_time_and_confirms():
+    strategy = DummySideFlipStrategy(held_qty=Decimal("5.4"))
+    strategy.side_decision_engine_new = True
+    strategy.active_side = ActiveSide.UP
+    strategy.side_flip_count = 0
+    strategy.bi_side_flip_confirmations = 1
+
+    def _compute_side_decision(_now_ts):
+        return (
+            ActiveSide.DOWN,
+            Decimal("-0.20"),
+            "cs=-0.2000",
+            {
+                "fair_up": 0.20,
+                "fair_down": 0.80,
+            },
+        )
+
+    strategy._compute_side_decision = _compute_side_decision
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=102.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=103.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.UP
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=108.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.DOWN
 
 
 def test_strike_prefers_polymarket_chainlink_history_anchor():

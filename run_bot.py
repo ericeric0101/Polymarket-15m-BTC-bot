@@ -711,9 +711,7 @@ class IntegratedBTCStrategy(
                 str(self.maker_min_directional_edge_ps_conservative),
             )
         )
-        self.directional_entry_min_score_abs = Decimal(
-            os.getenv("DIRECTIONAL_ENTRY_MIN_SCORE_ABS", "1")
-        )
+
         self.maker_adverse_selection_buffer = Decimal(os.getenv("MAKER_ADVERSE_SELECTION_BUFFER", "0.0005"))
         self.maker_use_post_only = os.getenv("MAKER_POST_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
         self.maker_post_only_strict = os.getenv("MAKER_POST_ONLY_STRICT", "1").strip().lower() not in ("0", "false", "no")
@@ -801,13 +799,7 @@ class IntegratedBTCStrategy(
         self.bi_side_max_score_down = Decimal(str(os.getenv("BI_SIDE_MAX_SCORE_DOWN", "-1")))
         self.bi_side_mixed_low = Decimal(str(os.getenv("BI_SIDE_MIXED_LOW", "-1")))
         self.bi_side_mixed_high = Decimal(str(os.getenv("BI_SIDE_MIXED_HIGH", "1")))
-        self.bi_side_strike_gap_pct = Decimal(str(os.getenv("BI_SIDE_STRIKE_GAP_PCT", "0.0015")))
-        self.bi_side_mom_window_ticks = max(2, int(os.getenv("BI_SIDE_MOM_WINDOW_TICKS", str(self.maker_momentum_window_ticks))))
-        self.bi_side_mom_pct = Decimal(str(os.getenv("BI_SIDE_MOM_PCT", "0.0025")))
-        self.bi_side_open_drift_pct = Decimal(str(os.getenv("BI_SIDE_OPEN_DRIFT_PCT", "0.0020")))
-        self.bi_side_require_confirming_signal = os.getenv(
-            "BI_SIDE_REQUIRE_CONFIRMING_SIGNAL", "1"
-        ).strip().lower() not in ("0", "false", "no")
+
         self.bi_side_regime_n_markets = max(2, int(os.getenv("BI_SIDE_REGIME_N_MARKETS", "4")))
         self.bi_side_regime_sum_pnl_usdc = Decimal(str(os.getenv("BI_SIDE_REGIME_SUM_PNL_USDC", "-2.0")))
         self.bi_side_regime_min_neg = max(1, int(os.getenv("BI_SIDE_REGIME_MIN_NEG", "3")))
@@ -818,16 +810,10 @@ class IntegratedBTCStrategy(
         self.bi_side_reeval_interval_sec = max(0.2, float(os.getenv("BI_SIDE_REEVAL_INTERVAL_SEC", "1.0")))
         self.bi_side_decision_log_interval_sec = max(1.0, float(os.getenv("BI_SIDE_LOG_INTERVAL_SEC", "15.0")))
         self.bi_side_flip_confirmations = max(1, int(os.getenv("BI_SIDE_FLIP_CONFIRMATIONS", "2")))
-        self.bi_side_flip_max_per_market = max(0, int(os.getenv("BI_SIDE_FLIP_MAX_PER_MARKET", "1")))
-        self.bi_side_flip_min_score_up = Decimal(str(os.getenv("BI_SIDE_FLIP_MIN_SCORE_UP", "2")))
-        self.bi_side_flip_max_score_down = Decimal(str(os.getenv("BI_SIDE_FLIP_MAX_SCORE_DOWN", "-2")))
-        self.bi_side_flip_min_fair = Decimal(str(os.getenv("BI_SIDE_FLIP_MIN_FAIR", "0.60")))
 
-        # --- SignalEngine toggle (new vs legacy side decision) ---
-        # Set SIDE_DECISION_ENGINE_NEW=0 to revert to legacy integer-voting system
-        self.side_decision_engine_new = os.getenv(
-            "SIDE_DECISION_ENGINE_NEW", "1"
-        ).strip().lower() in ("1", "true", "yes", "on")
+
+        # Side decisions now run exclusively on the probabilistic SignalEngine.
+        self.side_decision_engine_new = True
         self.side_signal_min_confidence = float(os.getenv("SIDE_SIGNAL_MIN_CONFIDENCE", "0.15"))
         self.side_signal_threshold_up = float(os.getenv("SIDE_SIGNAL_THRESHOLD_UP", "0.05"))
         self.side_signal_threshold_down = float(os.getenv("SIDE_SIGNAL_THRESHOLD_DOWN", "0.05"))
@@ -849,12 +835,42 @@ class IntegratedBTCStrategy(
                 str(-self._new_signal_confident_score_abs_default),
             )
         )
+        self.bi_side_flip_confirmations_held_new = max(
+            self.bi_side_flip_confirmations,
+            int(
+                os.getenv(
+                    "BI_SIDE_FLIP_CONFIRMATIONS_HELD_NEW",
+                    str(max(self.bi_side_flip_confirmations, 4)),
+                )
+            ),
+        )
+        self.bi_side_flip_min_persist_sec_held_new = max(
+            0.0,
+            float(os.getenv("BI_SIDE_FLIP_MIN_PERSIST_SEC_HELD_NEW", "8")),
+        )
+        _held_flip_default = max(
+            self._new_signal_confident_score_abs_default,
+            Decimal("0.18"),
+        )
+        self.bi_side_flip_min_score_up_held_new = Decimal(
+            os.getenv(
+                "BI_SIDE_FLIP_MIN_SCORE_UP_HELD_NEW",
+                str(_held_flip_default),
+            )
+        )
+        self.bi_side_flip_max_score_down_held_new = Decimal(
+            os.getenv(
+                "BI_SIDE_FLIP_MAX_SCORE_DOWN_HELD_NEW",
+                str(-_held_flip_default),
+            )
+        )
         self.directional_entry_min_score_abs_new = Decimal(
             os.getenv(
                 "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW",
                 str(self._new_signal_entry_score_abs_default),
             )
         )
+        self.directional_entry_min_score_abs = self.directional_entry_min_score_abs_new
         # SignalEngine EMA windows
         self.side_signal_btc_ema_fast_sec = float(os.getenv("SIDE_SIGNAL_BTC_EMA_FAST_SEC", "3.0"))
         self.side_signal_btc_ema_slow_sec = float(os.getenv("SIDE_SIGNAL_BTC_EMA_SLOW_SEC", "10.0"))
@@ -933,12 +949,7 @@ class IntegratedBTCStrategy(
         self.exit_hold_band_min_price = Decimal(
             os.getenv("EXIT_HOLD_BAND_MIN_PRICE", "0.68")
         )
-        self.exit_conviction_band_min_score_abs_legacy = Decimal(
-            os.getenv("EXIT_CONVICTION_BAND_MIN_SCORE_ABS", "1")
-        )
-        self.exit_hold_band_min_score_abs_legacy = Decimal(
-            os.getenv("EXIT_HOLD_BAND_MIN_SCORE_ABS", "1")
-        )
+
         self.exit_conviction_stop_loss_multiplier = Decimal(
             os.getenv("EXIT_CONVICTION_STOP_LOSS_MULTIPLIER", "1.75")
         )
@@ -951,11 +962,9 @@ class IntegratedBTCStrategy(
         ).strip().lower() not in ("0", "false", "no")
         self.exit_stop_loss_hold_on_none_signal = os.getenv(
             "EXIT_STOP_LOSS_HOLD_ON_NONE_SIGNAL",
-            "1" if self.side_decision_engine_new else "0",
+            "1",
         ).strip().lower() not in ("0", "false", "no")
-        self.exit_stop_loss_thesis_min_score_abs_legacy = Decimal(
-            os.getenv("EXIT_STOP_LOSS_THESIS_MIN_SCORE_ABS", "1")
-        )
+
         self.exit_hold_band_requires_locked = os.getenv(
             "EXIT_HOLD_BAND_REQUIRES_LOCKED", "1"
         ).strip().lower() not in ("0", "false", "no")
@@ -966,9 +975,7 @@ class IntegratedBTCStrategy(
             0,
             int(os.getenv("MAKER_PROFIT_RUN_MIN_HOLD_SEC", "20")),
         )
-        self.maker_profit_run_min_score_abs_legacy = Decimal(
-            os.getenv("MAKER_PROFIT_RUN_MIN_SCORE_ABS", "1")
-        )
+
         self.maker_profit_run_min_profit_ps = Decimal(
             os.getenv("MAKER_PROFIT_RUN_MIN_PROFIT_PS", "0.04")
         )
@@ -998,55 +1005,45 @@ class IntegratedBTCStrategy(
         self.maker_urgent_exit_min_confirmations = max(
             1, int(os.getenv("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS", "3"))
         )
-        self.side_thesis_weak_score_abs = (
-            Decimal(
-                os.getenv(
-                    "SIDE_THESIS_WEAK_SCORE_ABS_NEW",
-                    str(self.directional_entry_min_score_abs_new),
-                )
+        self.side_thesis_weak_score_abs = Decimal(
+            os.getenv(
+                "SIDE_THESIS_WEAK_SCORE_ABS_NEW",
+                str(self.directional_entry_min_score_abs_new),
             )
-            if self.side_decision_engine_new
-            else Decimal(os.getenv("SIDE_THESIS_WEAK_SCORE_ABS", "0.5"))
         )
-        self.exit_conviction_band_min_score_abs = (
-            Decimal(
-                os.getenv(
-                    "EXIT_CONVICTION_BAND_MIN_SCORE_ABS_NEW",
-                    str(self._new_signal_confident_score_abs_default),
-                )
+        self.side_thesis_weak_requires_opposite_side_new = os.getenv(
+            "SIDE_THESIS_WEAK_REQUIRES_OPPOSITE_SIDE_NEW",
+            "1",
+        ).strip().lower() not in ("0", "false", "no")
+        self.side_thesis_weak_opposite_score_abs_new = Decimal(
+            os.getenv(
+                "SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW",
+                str(_held_flip_default),
             )
-            if self.side_decision_engine_new
-            else self.exit_conviction_band_min_score_abs_legacy
         )
-        self.exit_hold_band_min_score_abs = (
-            Decimal(
-                os.getenv(
-                    "EXIT_HOLD_BAND_MIN_SCORE_ABS_NEW",
-                    str(self._new_signal_confident_score_abs_default),
-                )
+        self.exit_conviction_band_min_score_abs = Decimal(
+            os.getenv(
+                "EXIT_CONVICTION_BAND_MIN_SCORE_ABS_NEW",
+                str(self._new_signal_confident_score_abs_default),
             )
-            if self.side_decision_engine_new
-            else self.exit_hold_band_min_score_abs_legacy
         )
-        self.exit_stop_loss_thesis_min_score_abs = (
-            Decimal(
-                os.getenv(
-                    "EXIT_STOP_LOSS_THESIS_MIN_SCORE_ABS_NEW",
-                    str(self.directional_entry_min_score_abs_new),
-                )
+        self.exit_hold_band_min_score_abs = Decimal(
+            os.getenv(
+                "EXIT_HOLD_BAND_MIN_SCORE_ABS_NEW",
+                str(self._new_signal_confident_score_abs_default),
             )
-            if self.side_decision_engine_new
-            else self.exit_stop_loss_thesis_min_score_abs_legacy
         )
-        self.maker_profit_run_min_score_abs = (
-            Decimal(
-                os.getenv(
-                    "MAKER_PROFIT_RUN_MIN_SCORE_ABS_NEW",
-                    str(self._new_signal_confident_score_abs_default),
-                )
+        self.exit_stop_loss_thesis_min_score_abs = Decimal(
+            os.getenv(
+                "EXIT_STOP_LOSS_THESIS_MIN_SCORE_ABS_NEW",
+                str(self.directional_entry_min_score_abs_new),
             )
-            if self.side_decision_engine_new
-            else self.maker_profit_run_min_score_abs_legacy
+        )
+        self.maker_profit_run_min_score_abs = Decimal(
+            os.getenv(
+                "MAKER_PROFIT_RUN_MIN_SCORE_ABS_NEW",
+                str(self._new_signal_confident_score_abs_default),
+            )
         )
         # Implied sigma: derive σ from market mid to improve fair price
         self.maker_implied_sigma_enabled = os.getenv(
@@ -2540,17 +2537,8 @@ class IntegratedBTCStrategy(
                 min_expected_net_usdc = self.maker_min_expected_net_usdc
                 if (
                     side == "buy"
-                    and abs(self.side_decision_score) < (
-                        self.directional_entry_min_score_abs_new
-                        if self.side_decision_engine_new
-                        else self.directional_entry_min_score_abs
-                    )
+                    and abs(self.side_decision_score) < self.directional_entry_min_score_abs_new
                 ):
-                    required_score_abs = (
-                        self.directional_entry_min_score_abs_new
-                        if self.side_decision_engine_new
-                        else self.directional_entry_min_score_abs
-                    )
                     self._db_order_event(
                         event_type="ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
                         side=side.upper(),
@@ -2560,8 +2548,8 @@ class IntegratedBTCStrategy(
                             "slug": current_slug,
                             "instrument_id": str(inst_id),
                             "side_score": float(self.side_decision_score),
-                            "required_score_abs": float(required_score_abs),
-                            "engine": "new_signal" if self.side_decision_engine_new else "legacy",
+                            "required_score_abs": float(self.directional_entry_min_score_abs_new),
+                            "engine": "new_signal",
                         },
                     )
                     continue
@@ -2595,12 +2583,15 @@ class IntegratedBTCStrategy(
                     ):
                         _offside_confirmed = True
                     score = float(self.side_decision_score)
-                    if self.active_side == ActiveSide.UP and score < 0:
+                    opposite_score_abs = float(self.side_thesis_weak_opposite_score_abs_new)
+                    requires_opposite_side = bool(self.side_thesis_weak_requires_opposite_side_new)
+                    if self.active_side == ActiveSide.UP and score <= -opposite_score_abs:
                         _thesis_weakened = True
-                    elif self.active_side == ActiveSide.DOWN and score > 0:
+                    elif self.active_side == ActiveSide.DOWN and score >= opposite_score_abs:
                         _thesis_weakened = True
                     elif (
-                        self.active_side != ActiveSide.NONE
+                        not requires_opposite_side
+                        and self.active_side != ActiveSide.NONE
                         and abs(score) < float(self.side_thesis_weak_score_abs)
                     ):
                         _thesis_weakened = True
@@ -3138,7 +3129,6 @@ class IntegratedBTCStrategy(
                 "bi_side_enabled": self.bi_side_enabled,
                 "active_side": self.active_side.value,
                 "git_revision": self.runtime_git_revision,
-                "bi_side_require_confirming_signal": self.bi_side_require_confirming_signal,
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),
@@ -3170,9 +3160,8 @@ class IntegratedBTCStrategy(
 
         # Log which side-decision engine is active
         if self.bi_side_enabled:
-            engine_label = "SignalEngine (probabilistic)" if self.side_decision_engine_new else "Legacy (integer voting)"
             logger.info(
-                f"Side decision engine: {engine_label} | "
+                "Side decision engine: SignalEngine (probabilistic) | "
                 f"min_confidence={self.side_signal_min_confidence} "
                 f"threshold_up={self.side_signal_threshold_up} "
                 f"threshold_down={self.side_signal_threshold_down} | "
@@ -3882,6 +3871,7 @@ class IntegratedBTCStrategy(
         previous_side_flip_count = self.side_flip_count
         previous_pending_flip_side = self.side_pending_flip_side
         previous_pending_flip_count = self.side_pending_flip_count
+        previous_pending_flip_since_ts = float(getattr(self, "side_pending_flip_since_ts", 0.0))
         self.current_market_slug = selection.current_market_slug
         start_ts = selection.selected_market.get("market_timestamp")
         if self.current_market_slug and start_ts:
@@ -3925,6 +3915,7 @@ class IntegratedBTCStrategy(
             self.side_flip_count = previous_side_flip_count
             self.side_pending_flip_side = previous_pending_flip_side
             self.side_pending_flip_count = previous_pending_flip_count
+            self.side_pending_flip_since_ts = previous_pending_flip_since_ts
             self.side_decision_done_for_market = previous_active_side != ActiveSide.NONE or previous_side_ts > 0
             self._sync_active_instrument()
             logger.info(

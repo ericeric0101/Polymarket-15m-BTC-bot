@@ -37,19 +37,13 @@ class SideDecisionMixin:
         self.side_decision_ts = 0.0
         self.side_decision_score = Decimal("0")
         self.side_decision_reason = "market_reset"
-        # Grace period: only used by legacy engine; new engine uses confidence instead.
-        use_grace = (
-            self.bi_side_enabled
-            and not getattr(self, 'side_decision_engine_new', False)
-        )
-        self.side_decision_due_ts = (
-            time.time() + float(self.bi_side_decision_grace_sec)
-        ) if use_grace else 0.0
+        self.side_decision_due_ts = 0.0
         self.side_decision_done_for_market = not self.bi_side_enabled
         self.side_decision_inputs = {}
         self.side_flip_count = 0
         self.side_pending_flip_side = ActiveSide.NONE
         self.side_pending_flip_count = 0
+        self.side_pending_flip_since_ts = 0.0
         self._last_side_observation_signature = None
         self._last_side_decision_log_ts = 0.0
         self._last_side_decision_log_signature = None
@@ -195,8 +189,8 @@ class SideDecisionMixin:
         score: Decimal,
         inputs: Dict[str, Any],
     ) -> bool:
-        min_score_up = self.bi_side_flip_min_score_up_new if getattr(self, "side_decision_engine_new", False) else self.bi_side_flip_min_score_up
-        max_score_down = self.bi_side_flip_max_score_down_new if getattr(self, "side_decision_engine_new", False) else self.bi_side_flip_max_score_down
+        min_score_up = self.bi_side_flip_min_score_up_new
+        max_score_down = self.bi_side_flip_max_score_down_new
         if side == ActiveSide.UP:
             fair_value = inputs.get("fair_up")
             if score < min_score_up:
@@ -232,6 +226,29 @@ class SideDecisionMixin:
             return False
         return True
 
+    def _held_inventory_flip_requirements_met(
+        self,
+        *,
+        side: ActiveSide,
+        score: Decimal,
+        now_ts: float,
+    ) -> bool:
+        if not self._held_inventory_allows_extra_flip(proposed_side=side):
+            return True
+        min_score_up = self.bi_side_flip_min_score_up_held_new
+        max_score_down = self.bi_side_flip_max_score_down_held_new
+        if side == ActiveSide.UP and score < min_score_up:
+            return False
+        if side == ActiveSide.DOWN and score > max_score_down:
+            return False
+        min_persist = float(getattr(self, "bi_side_flip_min_persist_sec_held_new", 0.0))
+        if min_persist <= 0:
+            return True
+        pending_since = float(getattr(self, "side_pending_flip_since_ts", 0.0) or 0.0)
+        if pending_since <= 0:
+            return False
+        return (now_ts - pending_since) >= min_persist
+
     def _populate_spot_source_inputs(
         self,
         inputs: Dict[str, Any],
@@ -259,10 +276,8 @@ class SideDecisionMixin:
     # ------------------------------------------------------------------
 
     def _compute_side_decision(self, now_ts: float) -> tuple[ActiveSide, Decimal, str, Dict[str, Any]]:
-        """Route to new SignalEngine or legacy voting system based on toggle."""
-        if getattr(self, 'side_decision_engine_new', False):
-            return self._compute_side_decision_new(now_ts)
-        return self._compute_side_decision_legacy(now_ts)
+        """Compute side decision using the new probabilistic SignalEngine."""
+        return self._compute_side_decision_new(now_ts)
 
     # ------------------------------------------------------------------
     # Helper: get UP token mid-price from cache
@@ -322,7 +337,7 @@ class SideDecisionMixin:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
         inputs["strike"] = float(strike_dec)
 
-        # Lock per-market open spot (shared with legacy)
+        # Lock per-market open spot for open-drift style reference and logging.
         self._ensure_market_open_spot_locked(strike_dec)
         inputs["market_open_spot"] = float(self.current_market_open_spot) if self.current_market_open_spot is not None else None
 
@@ -346,9 +361,8 @@ class SideDecisionMixin:
         # Feed mid into signal engine
         _sig_eng: Optional[SignalEngine] = getattr(self, '_signal_engine', None)
         if _sig_eng is None:
-            # Fallback to legacy if engine not initialised
-            logger.warning("SignalEngine not initialised, falling back to legacy")
-            return self._compute_side_decision_legacy(now_ts)
+            logger.warning("SignalEngine not initialised; holding NONE until engine is ready")
+            return ActiveSide.NONE, Decimal("0"), "signal_engine_unavailable", inputs
 
         if market_mid is not None:
             _sig_eng.update_market_mid(market_mid, now_ts)
@@ -449,160 +463,6 @@ class SideDecisionMixin:
                 f"${float(strike_dec):,.2f}"
             )
 
-    # ------------------------------------------------------------------
-    # LEGACY: integer voting side decision (preserved for fallback)
-    # ------------------------------------------------------------------
-
-    def _compute_side_decision_legacy(self, now_ts: float) -> tuple[ActiveSide, Decimal, str, Dict[str, Any]]:
-        inputs: Dict[str, Any] = {
-            "slug": self.current_market_slug or "",
-            "engine": "legacy",
-            "fair_up": None,
-            "fair_down": None,
-            "strike_signal": 0,
-            "momentum_signal": 0,
-            "open_drift_signal": 0,
-            "regime_signal": 0,
-            "gap_pct": None,
-            "mom_pct": None,
-            "open_drift_pct": None,
-            "recent_window_combined_pnls": self._effective_recent_cycle_window(),
-        }
-        if not self.bi_side_enabled:
-            return ActiveSide.UP, Decimal("999"), "bi_side_disabled", inputs
-
-        spot = self._capture_market_open_spot()
-        inputs["spot"] = float(spot) if spot is not None else None
-        self._populate_spot_source_inputs(inputs, reference_spot=spot, now_ts=now_ts)
-        if spot is None or spot <= 0:
-            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
-        strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
-        if strike_dec is None or strike_dec <= 0:
-            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
-        inputs["strike"] = float(strike_dec)
-
-        # Lock the per-market open spot early enough for side-decision use.
-        self._ensure_market_open_spot_locked(strike_dec)
-        inputs["market_open_spot"] = float(self.current_market_open_spot) if self.current_market_open_spot is not None else None
-
-        gap_pct = (spot - strike_dec) / strike_dec if strike_dec > 0 else Decimal("0")
-        inputs["gap_pct"] = float(gap_pct)
-        strike_signal = 0
-        if gap_pct >= self.bi_side_strike_gap_pct:
-            strike_signal = 1
-        elif gap_pct <= -self.bi_side_strike_gap_pct:
-            strike_signal = -1
-        inputs["strike_signal"] = strike_signal
-
-        active_instrument = self._primary_instrument_for_market()
-        momentum_history = self._momentum_history_for_instrument(active_instrument)
-        mom_pct = Decimal("0")
-        momentum_signal = 0
-        if len(momentum_history) >= self.bi_side_mom_window_ticks:
-            recent_px = momentum_history[-1]
-            old_px = momentum_history[-self.bi_side_mom_window_ticks]
-            if old_px > 0:
-                mom_pct = (recent_px - old_px) / old_px
-                if mom_pct >= self.bi_side_mom_pct:
-                    momentum_signal = 1
-                elif mom_pct <= -self.bi_side_mom_pct:
-                    momentum_signal = -1
-        inputs["mom_pct"] = float(mom_pct)
-        inputs["momentum_signal"] = momentum_signal
-
-        open_spot = self.current_market_open_spot
-        open_drift_pct = None
-        open_drift_signal = 0
-        if open_spot and open_spot > 0:
-            open_drift_pct = (spot - open_spot) / open_spot
-            if open_drift_pct >= self.bi_side_open_drift_pct:
-                open_drift_signal = 1
-            elif open_drift_pct <= -self.bi_side_open_drift_pct:
-                open_drift_signal = -1
-        inputs["open_drift_pct"] = float(open_drift_pct) if open_drift_pct is not None else None
-        inputs["open_drift_signal"] = open_drift_signal
-
-        regime_signal = 0
-        window = inputs["recent_window_combined_pnls"]
-        neg_count = sum(1 for v in window if v < 0)
-        window_sum = sum(window)
-        if (
-            len(window) >= self.bi_side_regime_n_markets
-            and neg_count >= self.bi_side_regime_min_neg
-            and Decimal(str(window_sum)) <= self.bi_side_regime_sum_pnl_usdc
-            and (strike_signal <= 0 or momentum_signal <= 0)
-        ):
-            regime_signal = -1
-        inputs["regime_signal"] = regime_signal
-        inputs["recent_window_sum_pnl_usdc"] = float(window_sum)
-        inputs["recent_window_negative_markets"] = neg_count
-
-        fair_up = None
-        fair_down = None
-        if self.maker_fair_pricer_mode == "digital":
-            end_ts = getattr(self, "current_market_end_timestamp", None)
-            time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
-            sigma = self.maker_digital_sigma_default
-            est_sigma = self._estimate_external_spot_sigma_annualized()
-            if est_sigma and est_sigma > 0:
-                sigma = est_sigma
-            sigma = sigma * self.maker_digital_vol_scale
-            sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
-            if self.maker_digital_sigma_time_decay_enabled and time_left_sec > 0:
-                ref = self.maker_digital_sigma_time_decay_ref_sec
-                decay = max(self.maker_digital_sigma_time_decay_min, min(1.0, time_left_sec / ref))
-                sigma = sigma * Decimal(str(round(decay, 4)))
-                sigma = max(self.maker_digital_sigma_floor, sigma)
-            fair_up = MakerEngine.digital_up_probability(
-                spot=float(spot),
-                strike=float(strike_dec),
-                sigma_annual=float(sigma),
-                time_left_sec=time_left_sec,
-            )
-            fair_down = Decimal("1.0") - fair_up
-        inputs["fair_up"] = float(fair_up) if fair_up is not None else None
-        inputs["fair_down"] = float(fair_down) if fair_down is not None else None
-
-        score = (
-            Decimal(str(strike_signal))
-            + Decimal(str(momentum_signal))
-            + Decimal(str(open_drift_signal))
-            + (Decimal("0.5") * Decimal(str(regime_signal)))
-        )
-        reason = (
-            f"strike={strike_signal} momentum={momentum_signal} "
-            f"open_drift={open_drift_signal} regime={regime_signal}"
-        )
-        proposed_side = ActiveSide.NONE
-        if score >= self.bi_side_min_score_up:
-            proposed_side = ActiveSide.UP
-        elif score <= self.bi_side_max_score_down and self.current_down_instrument_id is not None:
-            proposed_side = ActiveSide.DOWN
-
-        if proposed_side != ActiveSide.NONE and self.current_market_slug:
-            penalty_key = f"{self.current_market_slug}:{proposed_side.value}"
-            penalty_until = float(self.side_stop_loss_penalty_until_by_market_side.get(penalty_key, 0.0))
-            if now_ts < penalty_until:
-                inputs["side_penalty_side"] = proposed_side.value
-                inputs["side_penalty_until_ts"] = penalty_until
-                inputs["side_penalty_remaining_sec"] = max(0.0, penalty_until - now_ts)
-                return ActiveSide.NONE, score, f"{reason} side_penalty={proposed_side.value.lower()}", inputs
-
-        if proposed_side != ActiveSide.NONE and self.bi_side_require_confirming_signal:
-            proposed_sign = 1 if proposed_side == ActiveSide.UP else -1
-            has_confirming_signal = (
-                strike_signal == proposed_sign
-                or open_drift_signal == proposed_sign
-            )
-            inputs["requires_confirming_signal"] = True
-            inputs["has_confirming_signal"] = has_confirming_signal
-            if momentum_signal == proposed_sign and not has_confirming_signal:
-                return ActiveSide.NONE, score, f"{reason} second_signal_required", inputs
-
-        if proposed_side != ActiveSide.NONE:
-            return proposed_side, score, reason, inputs
-        return ActiveSide.NONE, score, reason, inputs
-
     async def _maybe_finalize_side_decision(self, now_ts: float, phase: Any) -> None:  # phase: MarketPhase
         if not self.bi_side_enabled:
             self.active_side = ActiveSide.UP
@@ -683,15 +543,29 @@ class SideDecisionMixin:
             if side == ActiveSide.NONE or side == self.active_side or not flip_ready:
                 self.side_pending_flip_side = ActiveSide.NONE
                 self.side_pending_flip_count = 0
+                self.side_pending_flip_since_ts = 0.0
                 return
             if not can_attempt_flip and not extra_flip_for_held_inventory:
                 return
             if side != self.side_pending_flip_side:
                 self.side_pending_flip_side = side
                 self.side_pending_flip_count = 1
+                self.side_pending_flip_since_ts = now_ts
                 return
             self.side_pending_flip_count += 1
-            if self.side_pending_flip_count < self.bi_side_flip_confirmations:
+            required_confirmations = self.bi_side_flip_confirmations
+            if self._held_inventory_allows_extra_flip(proposed_side=side):
+                required_confirmations = max(
+                    required_confirmations,
+                    int(getattr(self, "bi_side_flip_confirmations_held_new", required_confirmations)),
+                )
+            if self.side_pending_flip_count < required_confirmations:
+                return
+            if not self._held_inventory_flip_requirements_met(
+                side=side,
+                score=score,
+                now_ts=now_ts,
+            ):
                 return
             old_side = self.active_side
             self.active_side = side
@@ -703,6 +577,7 @@ class SideDecisionMixin:
             self.side_flip_count += 1
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
+            self.side_pending_flip_since_ts = 0.0
             self._sync_active_instrument()
             if old_side != side:
                 self._cancel_stale_buy_orders_after_side_change(
@@ -745,6 +620,7 @@ class SideDecisionMixin:
             self.active_side_locked = True
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
+            self.side_pending_flip_since_ts = 0.0
             if old_side != side:
                 self._force_quote_refresh_once = True
                 self._force_quote_refresh_reason = f"locked_entry:{old_side.value}->{side.value}"
