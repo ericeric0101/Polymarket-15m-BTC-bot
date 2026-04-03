@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 
 from bot.enums import ActiveSide, MarketPhase
+from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin
+from bot.pricing_runtime import PricingRuntimeMixin
+from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisionType
 from bot.quoting import apply_quote_plan_guards
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
+from execution.exit_policy import ExitStage
 from run_bot import IntegratedBTCStrategy
 
 
@@ -231,6 +236,7 @@ class DummyRejectRecoveryStrategy:
         self._sell_recovery_required_by_inst = {}
         self._sell_recovery_reason_by_inst = {}
         self._sell_recovery_venue_cap_by_inst = {}
+        self.sell_recovery_qty_buffer_shares = Decimal("0.01")
         self.consecutive_denied_orders = 0
         self.sell_balance_retry_pause_sec = 3.0
         self._force_quote_refresh_once = False
@@ -334,9 +340,73 @@ class DummyUrgentExitStrategy(TakerExitMixin):
         self.db_events.append(kwargs)
 
 
+class DummyUrgentExitMatchedStrategy(TakerExitMixin):
+    def __init__(self) -> None:
+        self.maker_urgent_exit_enabled = True
+        self._maker_urgent_exit_last_ts = 0.0
+        self.maker_urgent_exit_cooldown_sec = 0
+        self.current_market_end_timestamp = 1_000_000.0
+        self.live_inventory_cost = {
+            "inst-up": {
+                "qty": Decimal("5.2"),
+                "avg_entry_price": Decimal("0.47"),
+            }
+        }
+        self.active_side = ActiveSide.UP
+        self.active_side_locked = True
+        self.side_decision_engine_new = True
+        self.pending_taker_exit_by_inst = {}
+        self.active_maker_orders = {}
+        self.cache = SimpleNamespace(instrument=lambda _inst: None)
+        self.order_factory = SimpleNamespace(limit=lambda **kwargs: kwargs)
+        self._urgent_exit_confirm_hits = {}
+        self.maker_urgent_exit_min_confirmations = 1
+        self.maker_urgent_exit_min_loss_usdc = Decimal("0.10")
+        self.side_decision_score = Decimal("0.18")
+        self._signal_engine = SimpleNamespace(is_mid_reversal=lambda holding_up: True)
+        self.cancel_calls = []
+        self.submit_calls = []
+        self.db_events = []
+
+    def _maker_quote_instruments(self):
+        return []
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
+
+    def _normalize_instrument_id(self, instrument_id):
+        return instrument_id
+
+    def _instrument_for_side(self, side):
+        return "inst-up" if side == ActiveSide.UP else "inst-down"
+
+    def _side_for_instrument_id(self, instrument_id):
+        return ActiveSide.UP if instrument_id == "inst-up" else ActiveSide.DOWN
+
+    def _get_quote_for_instrument(self, instrument_id):
+        assert instrument_id == "inst-up"
+        return Decimal("0.24"), Decimal("0.25")
+
+    def _order_key_for(self, side, instrument_id):
+        return f"{side}:{instrument_id}"
+
+    def _cancel_maker_order_side(self, side, reason, instrument_id=None):
+        self.cancel_calls.append((side, reason, instrument_id))
+
+    def _get_effective_sellable_qty(self, instrument_id=None):
+        return Decimal("5.2")
+
+    def submit_order(self, order):
+        self.submit_calls.append(order)
+
+    def _db_order_event(self, **kwargs):
+        self.db_events.append(kwargs)
+
+
 class DummySideFlipStrategy(SideDecisionMixin):
     def __init__(self, *, held_qty: Decimal) -> None:
         self.bi_side_enabled = True
+        self.side_decision_engine_new = False
         self.active_side = ActiveSide.UP
         self.active_side_locked = True
         self.bi_side_allow_intramarket_flip = True
@@ -345,6 +415,8 @@ class DummySideFlipStrategy(SideDecisionMixin):
         self.bi_side_flip_confirmations = 1
         self.bi_side_flip_min_score_up = Decimal("2")
         self.bi_side_flip_max_score_down = Decimal("-2")
+        self.bi_side_flip_min_score_up_new = Decimal("0.12")
+        self.bi_side_flip_max_score_down_new = Decimal("-0.12")
         self.bi_side_flip_min_fair = Decimal("0.60")
         self.bi_side_min_time_left_sec = 180
         self.current_market_end_timestamp = 10_000.0
@@ -377,9 +449,19 @@ class DummySideFlipStrategy(SideDecisionMixin):
         self.bi_side_decision_log_interval_sec = 1.0
         self.bi_side_reeval_interval_sec = 1.0
         self.strategy_events = []
+        self.active_maker_orders = {
+            "buy:inst-up": {
+                "side": "buy",
+                "instrument_id": "inst-up",
+            }
+        }
+        self.cancel_calls = []
 
     def _instrument_key(self, instrument_id):
         return str(instrument_id) if instrument_id is not None else ""
+
+    def _normalize_instrument_id(self, instrument_id):
+        return instrument_id
 
     def _instrument_for_side(self, side):
         if side == ActiveSide.UP:
@@ -396,6 +478,9 @@ class DummySideFlipStrategy(SideDecisionMixin):
 
     def _db_strategy_event(self, event_type, payload=None):
         self.strategy_events.append((event_type, payload or {}))
+
+    def _cancel_maker_order_side(self, order_key, reason=""):
+        self.cancel_calls.append((order_key, reason))
 
     async def _get_market_strike_for_instrument(self, _instrument_id):
         return Decimal("66867")
@@ -455,6 +540,31 @@ class DummySpotPricerStrategy(SpotPricerMixin):
 
     def _fetch_binance_open_price_sync(self, start_ts):
         return Decimal("66602.20")
+
+
+class DummySellableQtyStrategy(PricingRuntimeMixin):
+    def __init__(self) -> None:
+        self.live_inventory_cost = {"inst-down": {"qty": Decimal("5.312753")}}
+        self.recent_buy_fill_ts_by_inst = {"inst-down": time.time()}
+        self.sellable_fallback_after_buy_sec = 10
+        self.sellable_after_buy_buffer_shares = Decimal("0.05")
+        self.conditional_balance_safety_buffer_pct = Decimal("0.001")
+        self._sell_recovery_venue_cap_by_inst = {}
+
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id=None):
+        return Decimal("5.312753")
+
+    def _get_sellable_qty_for_current_instrument(self, instrument_id=None):
+        return Decimal("5.312753")
+
+    def _extract_token_id_from_instrument(self, inst_txt):
+        return "token-down"
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
+
+    def _get_conditional_balance_for_token(self, token_id=None, force_refresh=False):
+        return Decimal("0")
 
 
 def test_partial_fills_only_increment_market_buy_count_once():
@@ -520,7 +630,7 @@ def test_balance_reject_marks_sell_recovery_and_caps_qty():
     IntegratedBTCStrategy._handle_order_rejection_like_event(strategy, event, title="ORDER REJECTED")
 
     assert strategy._sell_recovery_required_by_inst["cond-123-456.POLYMARKET"] > 0
-    assert strategy._sell_recovery_venue_cap_by_inst["cond-123-456.POLYMARKET"] == Decimal("4.99783")
+    assert strategy._sell_recovery_venue_cap_by_inst["cond-123-456.POLYMARKET"] == Decimal("4.98783")
     assert strategy._force_quote_refresh_once is True
     assert strategy._force_quote_refresh_reason == "sell_recovery_balance_reject"
 
@@ -554,10 +664,21 @@ def test_urgent_exit_does_not_replace_recent_urgent_sell_too_quickly():
     assert strategy.db_events == []
 
 
+def test_urgent_exit_does_not_fire_when_signal_still_matches_position():
+    strategy = DummyUrgentExitMatchedStrategy()
+
+    asyncio.run(strategy._maybe_maker_urgent_exit(now_ts=100.0))
+
+    assert strategy.cancel_calls == []
+    assert strategy.submit_calls == []
+    assert strategy.db_events == []
+
+
 def test_held_inventory_allows_one_extra_flip_after_quota_exhausted():
     strategy = DummySideFlipStrategy(held_qty=Decimal("5.4"))
 
     asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
     asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
 
     assert strategy.active_side == ActiveSide.DOWN
@@ -575,6 +696,62 @@ def test_no_extra_flip_without_material_held_inventory():
     assert strategy.active_side == ActiveSide.UP
     assert strategy.side_flip_count == 1
     assert strategy.strategy_events == []
+
+
+def test_new_signal_flip_uses_new_scale_thresholds():
+    strategy = DummySideFlipStrategy(held_qty=Decimal("2.0"))
+    strategy.side_decision_engine_new = True
+    strategy.active_side = ActiveSide.DOWN
+    strategy.active_side_locked = True
+    strategy.side_flip_count = 0
+    strategy.bi_side_flip_confirmations = 1
+
+    def _compute_side_decision(_now_ts):
+        return (
+            ActiveSide.UP,
+            Decimal("0.16"),
+            "cs=+0.1600",
+            {
+                "fair_up": 0.72,
+                "fair_down": 0.28,
+            },
+        )
+
+    strategy._compute_side_decision = _compute_side_decision
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.UP
+    assert strategy.side_flip_count == 1
+    assert strategy.strategy_events[-1][0] == "SIDE_MODE_FLIPPED"
+
+
+def test_side_change_cancels_stale_buy_orders_for_old_instrument():
+    strategy = DummySideFlipStrategy(held_qty=Decimal("2.0"))
+    strategy.active_side = ActiveSide.UP
+    strategy.side_flip_count = 0
+    strategy.bi_side_flip_confirmations = 1
+
+    def _compute_side_decision(_now_ts):
+        return (
+            ActiveSide.DOWN,
+            Decimal("-2"),
+            "legacy_down",
+            {
+                "fair_up": 0.20,
+                "fair_down": 0.80,
+            },
+        )
+
+    strategy._compute_side_decision = _compute_side_decision
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.DOWN
+    assert ("buy:inst-up", "side_change_stale_buy") in strategy.cancel_calls
+    assert any(evt == "SIDE_CHANGE_CANCELED_STALE_BUYS" for evt, _ in strategy.strategy_events)
 
 
 def test_strike_prefers_polymarket_chainlink_history_anchor():
@@ -691,3 +868,131 @@ def test_quote_plan_guards_never_blocks_inventory_exit_sell_on_momentum():
 
     assert outcome.momentum_sell_blocked is False
     assert "sell" not in outcome.side_disable_reason_by_side
+
+
+def test_effective_sellable_qty_prefers_local_after_buy_with_buffer():
+    strategy = DummySellableQtyStrategy()
+
+    qty = strategy._get_effective_sellable_qty("inst-down")
+
+    assert qty == Decimal("5.262753")
+
+
+def test_effective_sellable_qty_uses_buffered_venue_cap_after_reject():
+    strategy = DummySellableQtyStrategy()
+    strategy._sell_recovery_venue_cap_by_inst["inst-down"] = Decimal("5.25781")
+
+    qty = strategy._get_effective_sellable_qty("inst-down")
+
+    assert qty == Decimal("5.25781")
+
+
+def test_exit_policy_does_not_mark_supported_new_signal_as_stop_loss():
+    engine = ExitPolicyEngine(
+        ExitEngineConfig(
+            min_hold_sec=0,
+            stop_loss_usdc=Decimal("0.50"),
+            stop_loss_confirmations=2,
+            stop_loss_requires_thesis_weakening=True,
+            stop_loss_thesis_min_score_abs=Decimal("0.05"),
+            stop_loss_hold_on_none_signal=True,
+            conviction_band_min_price=Decimal("0.60"),
+            hold_band_min_price=Decimal("0.68"),
+            conviction_band_min_score_abs=Decimal("0.15"),
+            hold_band_min_score_abs=Decimal("0.15"),
+            conviction_stop_loss_multiplier=Decimal("1.75"),
+            conviction_extra_confirmations=1,
+            hold_band_requires_locked=True,
+        )
+    )
+    snapshot = MarketSnapshot(
+        instrument_id="inst-up",
+        phase=MarketPhase.ACTIVE.value,
+        time_left_sec=592.0,
+        best_bid=Decimal("0.23"),
+        best_ask=Decimal("0.25"),
+        fee_rate=Decimal("0"),
+        spread=Decimal("0.02"),
+        spread_pct=Decimal("0.08"),
+        slippage_buffer_pct=Decimal("0"),
+        exit_stage=ExitStage.PASSIVE,
+        in_reduce_only_tail=False,
+        stop_loss_disabled_in_tail=False,
+    )
+    position = PositionState(
+        instrument_id="inst-up",
+        qty=Decimal("5.41"),
+        sellable_qty=Decimal("5.41"),
+        avg_entry_price=Decimal("0.470184842883549"),
+        entry_fee_remaining=Decimal("0"),
+        hold_sec=20.0,
+        stop_loss_confirm_hits=0,
+    )
+    signal = SignalDecision(
+        active_side=ActiveSide.UP.value,
+        score=Decimal("0.183103"),
+        locked=True,
+        reason="cs=+0.1831",
+        matches_position=True,
+    )
+
+    decision = engine.evaluate(snapshot, position, signal)
+
+    assert decision.decision_type == ExitDecisionType.NONE
+    assert decision.reason == "thesis_still_supported"
+
+
+def test_exit_policy_holds_position_when_signal_is_none():
+    engine = ExitPolicyEngine(
+        ExitEngineConfig(
+            min_hold_sec=0,
+            stop_loss_usdc=Decimal("0.50"),
+            stop_loss_confirmations=2,
+            stop_loss_requires_thesis_weakening=True,
+            stop_loss_thesis_min_score_abs=Decimal("0.05"),
+            stop_loss_hold_on_none_signal=True,
+            conviction_band_min_price=Decimal("0.60"),
+            hold_band_min_price=Decimal("0.68"),
+            conviction_band_min_score_abs=Decimal("0.15"),
+            hold_band_min_score_abs=Decimal("0.15"),
+            conviction_stop_loss_multiplier=Decimal("1.75"),
+            conviction_extra_confirmations=1,
+            hold_band_requires_locked=True,
+        )
+    )
+    snapshot = MarketSnapshot(
+        instrument_id="inst-down",
+        phase=MarketPhase.ACTIVE.value,
+        time_left_sec=554.0,
+        best_bid=Decimal("0.50"),
+        best_ask=Decimal("0.51"),
+        fee_rate=Decimal("0"),
+        spread=Decimal("0.01"),
+        spread_pct=Decimal("0.02"),
+        slippage_buffer_pct=Decimal("0"),
+        exit_stage=ExitStage.PASSIVE,
+        in_reduce_only_tail=False,
+        stop_loss_disabled_in_tail=False,
+    )
+    position = PositionState(
+        instrument_id="inst-down",
+        qty=Decimal("5.40"),
+        sellable_qty=Decimal("5.3946"),
+        avg_entry_price=Decimal("0.66"),
+        entry_fee_remaining=Decimal("0"),
+        hold_sec=60.0,
+        stop_loss_confirm_hits=1,
+    )
+    signal = SignalDecision(
+        active_side=ActiveSide.NONE.value,
+        score=Decimal("0.025633"),
+        locked=False,
+        reason="low_confidence",
+        matches_position=False,
+    )
+
+    decision = engine.evaluate(snapshot, position, signal)
+
+    assert decision.decision_type == ExitDecisionType.NONE
+    assert decision.reason == "signal_none_hold"
+    assert decision.metadata["signal_is_none"] == "1"

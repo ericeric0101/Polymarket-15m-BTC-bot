@@ -511,21 +511,10 @@ class TakerExitMixin:
             matches_position = (self._instrument_for_side(self.active_side) == inst_id)
             confirmed_offside = (not matches_position) and bool(self.active_side_locked)
 
-            # SignalEngine mid-price velocity reversal detection:
-            # If the mid-price is rapidly moving against our held position,
-            # treat as offside even before the side decision formally flips.
-            _sig_eng = getattr(self, '_signal_engine', None)
-            if (
-                not confirmed_offside
-                and _sig_eng is not None
-                and getattr(self, 'side_decision_engine_new', False)
-                and bool(self.active_side_locked)
-            ):
-                inst_side = self._side_for_instrument_id(inst_id)
-                if inst_side in (ActiveSide.UP, ActiveSide.DOWN):
-                    holding_up = (inst_side == ActiveSide.UP)
-                    if _sig_eng.is_mid_reversal(holding_up):
-                        confirmed_offside = True
+            # Under the continuous SignalEngine, mid-price reversal can be a
+            # useful warning signal, but it must not by itself override a still-
+            # matching locked thesis. Requiring an actual side mismatch avoids
+            # urgent exits firing while score/side still support the position.
 
             # Require consecutive confirmed-offside cycles to filter out
             # transient flips before escalating to an urgent exit.

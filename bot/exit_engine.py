@@ -14,6 +14,7 @@ class ExitEngineConfig:
     stop_loss_confirmations: int
     stop_loss_requires_thesis_weakening: bool
     stop_loss_thesis_min_score_abs: Decimal
+    stop_loss_hold_on_none_signal: bool
     conviction_band_min_price: Decimal
     hold_band_min_price: Decimal
     conviction_band_min_score_abs: Decimal
@@ -54,9 +55,27 @@ class ExitPolicyEngine:
             "signal_score": str(signal.score),
             "signal_locked": "1" if signal.locked else "0",
         }
-        thesis_weakened = (not signal.matches_position) or (
-            abs(signal.score) < self.config.stop_loss_thesis_min_score_abs
+        signal_side = str(signal.active_side).upper()
+        signal_is_none = signal_side == "NONE"
+        explicit_offside = (not signal.matches_position) and not signal_is_none
+        thesis_weakened = explicit_offside or (
+            not signal_is_none and abs(signal.score) < self.config.stop_loss_thesis_min_score_abs
         )
+
+        if self.config.stop_loss_hold_on_none_signal and signal_is_none:
+            return ExitDecision(
+                decision_type=ExitDecisionType.NONE,
+                reason="signal_none_hold",
+                net_if_exit=net_if_exit,
+                gross_if_exit=gross_if_exit,
+                exit_fee_est=exit_fee_est,
+                exit_px_effective=exit_px_effective,
+                metadata={
+                    **base_metadata,
+                    "signal_is_none": "1",
+                    "thesis_weakened": "0",
+                },
+            )
 
         if band == "hold":
             return ExitDecision(
@@ -99,6 +118,7 @@ class ExitPolicyEngine:
                 exit_px_effective=exit_px_effective,
                 metadata={
                     **base_metadata,
+                    "signal_is_none": "1" if signal_is_none else "0",
                     "thesis_weakened": "1" if thesis_weakened else "0",
                     "stop_loss_threshold": str(stop_loss_threshold),
                     "required_confirmations": str(required_confirmations),
@@ -117,6 +137,7 @@ class ExitPolicyEngine:
                 confirm_hits=confirm_hits,
                 metadata={
                     **base_metadata,
+                    "signal_is_none": "1" if signal_is_none else "0",
                     "thesis_weakened": "1" if thesis_weakened else "0",
                     "stop_loss_threshold": str(stop_loss_threshold),
                     "required_confirmations": str(required_confirmations),
@@ -133,6 +154,7 @@ class ExitPolicyEngine:
             confirm_hits=confirm_hits,
             metadata={
                 **base_metadata,
+                "signal_is_none": "1" if signal_is_none else "0",
                 "thesis_weakened": "1" if thesis_weakened else "0",
                 "stop_loss_threshold": str(stop_loss_threshold),
                 "required_confirmations": str(required_confirmations),

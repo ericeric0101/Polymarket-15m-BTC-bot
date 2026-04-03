@@ -66,6 +66,47 @@ class SideDecisionMixin:
         window = list(self.recent_market_combined_pnls)[-self.bi_side_regime_n_markets :]
         return [float(v) for v in window]
 
+    def _cancel_stale_buy_orders_after_side_change(
+        self,
+        *,
+        old_side: ActiveSide,
+        new_side: ActiveSide,
+    ) -> None:
+        if new_side == ActiveSide.NONE or not getattr(self, "active_side_locked", False):
+            return
+        active_maker_orders = getattr(self, "active_maker_orders", None)
+        cancel_fn = getattr(self, "_cancel_maker_order_side", None)
+        if not isinstance(active_maker_orders, dict) or not callable(cancel_fn):
+            return
+        target_inst = self._normalize_instrument_id(self._instrument_for_side(new_side))
+        if target_inst is None:
+            return
+        canceled_order_keys: List[str] = []
+        for order_key, state in list(active_maker_orders.items()):
+            if str(state.get("side", "") or "") != "buy":
+                continue
+            inst = self._normalize_instrument_id(state.get("instrument_id"))
+            if inst is None or inst == target_inst:
+                continue
+            cancel_fn(order_key, reason="side_change_stale_buy")
+            canceled_order_keys.append(str(order_key))
+        if canceled_order_keys:
+            logger.warning(
+                "Canceled stale BUY orders after side change: "
+                f"{old_side.value}->{new_side.value} "
+                f"target_inst={target_inst} count={len(canceled_order_keys)}"
+            )
+            self._db_strategy_event(
+                "SIDE_CHANGE_CANCELED_STALE_BUYS",
+                {
+                    "slug": str(getattr(self, "current_market_slug", "") or ""),
+                    "old_side": old_side.value,
+                    "new_side": new_side.value,
+                    "target_instrument_id": str(target_inst),
+                    "canceled_order_keys": canceled_order_keys,
+                },
+            )
+
     # ------------------------------------------------------------------
     # Logging helpers
     # ------------------------------------------------------------------
@@ -154,13 +195,15 @@ class SideDecisionMixin:
         score: Decimal,
         inputs: Dict[str, Any],
     ) -> bool:
+        min_score_up = self.bi_side_flip_min_score_up_new if getattr(self, "side_decision_engine_new", False) else self.bi_side_flip_min_score_up
+        max_score_down = self.bi_side_flip_max_score_down_new if getattr(self, "side_decision_engine_new", False) else self.bi_side_flip_max_score_down
         if side == ActiveSide.UP:
             fair_value = inputs.get("fair_up")
-            if score < self.bi_side_flip_min_score_up:
+            if score < min_score_up:
                 return False
         elif side == ActiveSide.DOWN:
             fair_value = inputs.get("fair_down")
-            if score > self.bi_side_flip_max_score_down:
+            if score > max_score_down:
                 return False
         else:
             return False
@@ -628,6 +671,10 @@ class SideDecisionMixin:
             return
 
         if self.active_side_locked:
+            self.side_decision_score = score
+            self.side_decision_reason = reason
+            self.side_decision_ts = now_ts
+            self.side_decision_inputs = dict(inputs)
             extra_flip_for_held_inventory = (
                 not can_attempt_flip
                 and self._held_inventory_allows_extra_flip(proposed_side=side)
@@ -657,6 +704,11 @@ class SideDecisionMixin:
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
             self._sync_active_instrument()
+            if old_side != side:
+                self._cancel_stale_buy_orders_after_side_change(
+                    old_side=old_side,
+                    new_side=side,
+                )
             if self.active_side_locked and side != ActiveSide.NONE:
                 self._force_quote_refresh_once = True
                 self._force_quote_refresh_reason = f"locked_flip:{old_side.value}->{side.value}"
@@ -699,6 +751,11 @@ class SideDecisionMixin:
         elif side == ActiveSide.NONE:
             self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
         self._sync_active_instrument()
+        if old_side != side:
+            self._cancel_stale_buy_orders_after_side_change(
+                old_side=old_side,
+                new_side=side,
+            )
         event_name = "SIDE_MODE_CHANGED" if old_side != side else "SIDE_DECISION"
         payload = dict(inputs)
         payload.update(

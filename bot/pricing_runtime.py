@@ -230,25 +230,52 @@ class PricingRuntimeMixin:
         inst_key = self._instrument_key(instrument_id)
         token_id = self._extract_token_id_from_instrument(inst_txt)
         onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
+        venue_cap = self._sell_recovery_venue_cap_by_inst.get(inst_key, None) if inst_key else None
+        recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0)) if inst_key else 0.0
+        after_buy_window_active = (
+            recent_buy_ts > 0
+            and self.sellable_fallback_after_buy_sec > 0
+            and (time.time() - recent_buy_ts) <= float(self.sellable_fallback_after_buy_sec)
+        )
+        after_buy_buffer = getattr(self, "sellable_after_buy_buffer_shares", Decimal("0"))
+
+        def _quantize_safe(qty: Decimal) -> Decimal:
+            return max(Decimal("0"), qty)
+
+        if after_buy_window_active:
+            base_qty = min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
+            applied_venue_cap = False
+            if venue_cap is not None and venue_cap > 0:
+                base_qty = min(base_qty, venue_cap)
+                applied_venue_cap = True
+            if not applied_venue_cap:
+                base_qty = _quantize_safe(base_qty - after_buy_buffer)
+            if base_qty > 0:
+                return base_qty
+
         if (
             onchain_qty is not None
             and onchain_qty <= 0
             and inst_key
             and self.sellable_fallback_after_buy_sec > 0
         ):
-            recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0))
-            if recent_buy_ts > 0 and (time.time() - recent_buy_ts) <= float(self.sellable_fallback_after_buy_sec):
+            if after_buy_window_active:
                 if local_qty > 0:
-                    return min(confirmed_qty, local_qty)
+                    return _quantize_safe(min(confirmed_qty, local_qty) - after_buy_buffer)
                 return confirmed_qty
         if onchain_qty is None:
-            return min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
+            fallback_qty = min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
+            if venue_cap is not None and venue_cap > 0:
+                fallback_qty = min(fallback_qty, venue_cap)
+            return _quantize_safe(fallback_qty)
         safe_onchain = onchain_qty * (Decimal("1") - self.conditional_balance_safety_buffer_pct)
-        safe_onchain = max(Decimal("0"), safe_onchain)
+        safe_onchain = _quantize_safe(safe_onchain)
         candidates = [confirmed_qty]
         if local_qty > 0:
             candidates.append(local_qty)
         candidates.append(safe_onchain)
+        if venue_cap is not None and venue_cap > 0:
+            candidates.append(venue_cap)
         return min(candidates)
 
     def _compute_maker_order_qty(self, limit_price: Decimal, precision: int) -> Decimal:
