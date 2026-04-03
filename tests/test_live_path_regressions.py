@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from bot.enums import ActiveSide, MarketPhase
 from bot.fill_ledger import FillLedgerMixin
+from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
 from run_bot import IntegratedBTCStrategy
@@ -414,6 +415,47 @@ class DummySideFlipStrategy(SideDecisionMixin):
         )
 
 
+class DummySpotPricerStrategy(SpotPricerMixin):
+    def __init__(self) -> None:
+        self.market_strike_cache_by_slug = {}
+        self.market_strike_source_by_slug = {}
+        self.market_start_ts_by_slug = {"btc-updown-15m-test": 1_000}
+        self.market_strike_anchor_max_lag_sec = 180
+        self.market_strike_anchor_near_sec = 30
+        self.market_strike_rest_retry_sec = 60
+        self.market_strike_rest_last_try_ts_by_slug = {}
+        self.market_strike_last_gamma_validate_ts_by_slug = {}
+        self.market_strike_last_gamma_warn_ts_by_slug = {}
+        self.market_strike_gamma_validate_interval_sec = 180
+        self.market_strike_gamma_warn_abs_usd = Decimal("5")
+        self.market_strike_gamma_mismatch_warn_interval_sec = 180
+        self.polymarket_chainlink_history = [(1000.1, Decimal("66625.19"))]
+        self.polymarket_chainlink_history_max = 1200
+        self.external_spot_history = [(1000.1, Decimal("66602.20"))]
+        self.external_spot_history_max = 1200
+        self.latest_external_spot = Decimal("66630.00")
+        self.latest_external_spot_source = "polymarket_chainlink_ws"
+        self.latest_external_spot_source_ts = 1000.2
+        self.current_market_slug = "btc-updown-15m-test"
+        self._logged_first_spot = False
+        self.cache = SimpleNamespace(instrument=lambda _inst: SimpleNamespace(info={"question": ""}))
+
+    def _normalize_instrument_id(self, instrument_id):
+        return instrument_id
+
+    def _extract_market_slug_from_instrument(self, _instrument):
+        return "btc-updown-15m-test"
+
+    async def _maybe_validate_strike_with_gamma(self, slug, local_strike):
+        return None
+
+    def _extract_strike_from_question(self, question_text):
+        return None
+
+    def _fetch_binance_open_price_sync(self, start_ts):
+        return Decimal("66602.20")
+
+
 def test_partial_fills_only_increment_market_buy_count_once():
     strategy = DummyStrategyForFill()
 
@@ -532,3 +574,12 @@ def test_no_extra_flip_without_material_held_inventory():
     assert strategy.active_side == ActiveSide.UP
     assert strategy.side_flip_count == 1
     assert strategy.strategy_events == []
+
+
+def test_strike_prefers_polymarket_chainlink_history_anchor():
+    strategy = DummySpotPricerStrategy()
+
+    strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+
+    assert strike == Decimal("66625.19")
+    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_open"

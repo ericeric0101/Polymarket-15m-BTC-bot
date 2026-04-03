@@ -27,11 +27,77 @@ from bot.market_data import (
     fetch_gamma_market_by_slug,
     extract_price_to_beat_from_market_payload,
 )
+from bot.price_streams import (
+    BINANCE_AGGTRADE_WS_URL,
+    POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD,
+    POLYMARKET_LIVE_WS_URL,
+    extract_binance_aggtrade_tick,
+    extract_polymarket_chainlink_tick,
+)
 from execution.maker_engine import MakerEngine
 
 
 class SpotPricerMixin:
     """Mixin providing BTC spot price, Binance WS, and fair probability logic."""
+
+    # ------------------------------------------------------------------
+    # Polymarket Chainlink WebSocket
+    # ------------------------------------------------------------------
+
+    def _start_polymarket_chainlink_ws(self) -> None:
+        import threading
+        if (
+            self._polymarket_chainlink_ws_thread is not None
+            and self._polymarket_chainlink_ws_thread.is_alive()
+        ):
+            return
+        self._polymarket_chainlink_ws_stop_event.clear()
+        self._polymarket_chainlink_ws_thread = threading.Thread(
+            target=self._polymarket_chainlink_ws_loop,
+            name="polymarket-chainlink-ws",
+            daemon=True,
+        )
+        self._polymarket_chainlink_ws_thread.start()
+        logger.info("Polymarket Chainlink WebSocket thread started")
+
+    def _polymarket_chainlink_ws_loop(self) -> None:
+        import json as _json
+        import websockets.sync.client as ws_sync  # type: ignore
+
+        reconnect_delay = 1.0
+        max_reconnect_delay = 30.0
+        while not self._polymarket_chainlink_ws_stop_event.is_set():
+            try:
+                with ws_sync.connect(
+                    POLYMARKET_LIVE_WS_URL,
+                    close_timeout=5,
+                    ping_interval=None,
+                    ping_timeout=None,
+                ) as ws:
+                    reconnect_delay = 1.0
+                    logger.info("✓ Polymarket Chainlink WS connected")
+                    ws.send(_json.dumps(POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD))
+                    while not self._polymarket_chainlink_ws_stop_event.is_set():
+                        try:
+                            raw = ws.recv(timeout=5)
+                        except TimeoutError:
+                            continue
+                        tick = extract_polymarket_chainlink_tick(raw)
+                        if tick is None:
+                            continue
+                        self._polymarket_chainlink_price = tick.price
+                        self._polymarket_chainlink_price_ts = tick.received_at_ts
+                        self._polymarket_chainlink_event_ts_ms = tick.updated_at_ms
+                        self._record_polymarket_chainlink_observation(
+                            tick.price,
+                            tick.received_at_ts,
+                        )
+            except Exception as exc:
+                logger.debug(
+                    f"Polymarket Chainlink WS error: {exc}; reconnect in {reconnect_delay:.0f}s"
+                )
+                self._polymarket_chainlink_ws_stop_event.wait(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
     # ------------------------------------------------------------------
     # Binance WebSocket
@@ -63,7 +129,7 @@ class SpotPricerMixin:
         """
         import websockets.sync.client as ws_sync  # type: ignore
 
-        url = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+        url = BINANCE_AGGTRADE_WS_URL
         reconnect_delay = 1.0
         max_reconnect_delay = 30.0
         max_connection_sec = 23 * 3600  # Reconnect before 24h limit
@@ -102,13 +168,10 @@ class SpotPricerMixin:
                             continue
 
                         try:
-                            import json as _json
-                            data = _json.loads(raw)
-                            # aggTrade payload: {"p": "96123.45", "q": "0.1", ...}
-                            price_str = data.get("p")
-                            if price_str:
-                                self._binance_ws_price = Decimal(price_str)
-                                self._binance_ws_price_ts = time.time()
+                            tick = extract_binance_aggtrade_tick(raw)
+                            if tick is not None:
+                                self._binance_ws_price = tick.price
+                                self._binance_ws_price_ts = tick.received_at_ts
                                 # Feed into SignalEngine's BTC EMA tracker
                                 _sig_eng = getattr(self, "_signal_engine", None)
                                 if _sig_eng is not None:
@@ -129,23 +192,43 @@ class SpotPricerMixin:
 
     async def _fetch_external_spot_price(self) -> Optional[Decimal]:
         """
-        Get BTC spot price. Primary: Binance WebSocket (near-zero latency).
-        Fallback: Coinbase HTTP (if WS is stale >10s).
+        Get BTC reference spot price.
+        Primary: Polymarket Chainlink WS.
+        Fallback: Binance WS.
+        Last resort: Coinbase HTTP.
         """
-        # Use Binance WS price if fresh (within 10 seconds)
+        # Primary: Polymarket Chainlink WS if fresh.
+        if self._polymarket_chainlink_price is not None:
+            age = time.time() - self._polymarket_chainlink_price_ts
+            if age < 10.0:
+                price = self._polymarket_chainlink_price
+                self.latest_external_spot_source = "polymarket_chainlink_ws"
+                self.latest_external_spot_source_ts = self._polymarket_chainlink_price_ts
+                if not getattr(self, "_logged_first_spot", False):
+                    logger.info(f"✓ First BTC reference spot via Polymarket Chainlink WS: ${price:,.2f}")
+                    self._logged_first_spot = True
+                return price
+            logger.debug(f"Polymarket Chainlink WS price stale ({age:.1f}s), falling back")
+
+        # Fallback: Binance WS price if fresh.
         if self._binance_ws_price is not None:
             age = time.time() - self._binance_ws_price_ts
             if age < 10.0:
                 price = self._binance_ws_price
+                self.latest_external_spot_source = "binance_ws"
+                self.latest_external_spot_source_ts = self._binance_ws_price_ts
                 if not getattr(self, "_logged_first_spot", False):
-                    logger.info(f"✓ First BTC spot via Binance WS: ${price:,.2f}")
+                    logger.info(f"✓ First BTC reference spot via Binance WS fallback: ${price:,.2f}")
                     self._logged_first_spot = True
                 return price
-            else:
-                logger.debug(f"Binance WS price stale ({age:.1f}s), falling back to HTTP")
+            logger.debug(f"Binance WS price stale ({age:.1f}s), falling back to HTTP")
 
         # Fallback: Coinbase HTTP
-        return await asyncio.to_thread(self._fetch_coinbase_spot_sync)
+        price = await asyncio.to_thread(self._fetch_coinbase_spot_sync)
+        if price is not None and price > 0:
+            self.latest_external_spot_source = "coinbase_http"
+            self.latest_external_spot_source_ts = time.time()
+        return price
 
     def _fetch_coinbase_spot_sync(self) -> Optional[Decimal]:
         """Coinbase HTTP fallback for BTC spot price."""
@@ -166,6 +249,15 @@ class SpotPricerMixin:
             price=price,
         )
 
+    def _record_polymarket_chainlink_observation(self, price: Decimal, ts: float) -> None:
+        history = getattr(self, "polymarket_chainlink_history", None)
+        if history is None:
+            return
+        history.append((ts, price))
+        max_len = int(getattr(self, "polymarket_chainlink_history_max", 1200) or 1200)
+        if len(history) > max_len:
+            history.pop(0)
+
     def _resolve_opening_strike_from_history(self, start_ts: int) -> Optional[tuple]:
         return resolve_opening_strike_from_history(
             external_spot_history=self.external_spot_history,
@@ -173,6 +265,42 @@ class SpotPricerMixin:
             max_lag_sec=float(self.market_strike_anchor_max_lag_sec),
             near_window_sec=float(self.market_strike_anchor_near_sec),
         )
+
+    def _resolve_opening_strike_from_polymarket_history(self, start_ts: int) -> Optional[tuple]:
+        return resolve_opening_strike_from_history(
+            external_spot_history=getattr(self, "polymarket_chainlink_history", []),
+            start_ts=start_ts,
+            max_lag_sec=float(self.market_strike_anchor_max_lag_sec),
+            near_window_sec=float(self.market_strike_anchor_near_sec),
+        )
+
+    def _maybe_latch_opening_strike_from_live_reference(
+        self,
+        *,
+        slug: str,
+        start_ts: int,
+    ) -> Optional[Decimal]:
+        now_ts = time.time()
+        if now_ts < float(start_ts):
+            return None
+        if now_ts > float(start_ts) + float(self.market_strike_anchor_max_lag_sec):
+            return None
+        if str(getattr(self, "latest_external_spot_source", "") or "") != "polymarket_chainlink_ws":
+            return None
+        price = getattr(self, "latest_external_spot", None)
+        if price is None or price <= 0:
+            return None
+        src_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+        if src_ts <= 0 or abs(src_ts - float(start_ts)) > float(self.market_strike_anchor_max_lag_sec):
+            return None
+        self.market_strike_cache_by_slug[slug] = price
+        self.market_strike_source_by_slug[slug] = "polymarket_chainlink_live_latch"
+        logger.info(
+            f"[STRIKE] Locked opening strike from Polymarket Chainlink live latch: "
+            f"${float(price):.2f} for slug={slug} "
+            f"(sample_dt={src_ts - float(start_ts):+.2f}s)"
+        )
+        return price
 
     def _fetch_binance_open_price_sync(self, start_ts: int) -> Optional[Decimal]:
         import os
@@ -264,7 +392,55 @@ class SpotPricerMixin:
             await self._maybe_validate_strike_with_gamma(slug, cached)
             return cached
 
-        # 2) Try parsing from instrument question text
+        strike = None
+
+        # If no slug, can't do history/REST lookups
+        if not slug:
+            info = getattr(instrument, "info", None) or {}
+            if not isinstance(info, dict):
+                info = {}
+            question = str(info.get("question", "") or "")
+            return self._extract_strike_from_question(question)
+
+        # 2) Resolve market start time
+        start_ts = self.market_start_ts_by_slug.get(slug)
+        if start_ts is None:
+            parsed_start = extract_market_start_ts_from_slug(slug)
+            if parsed_start is not None:
+                start_ts = parsed_start
+                self.market_start_ts_by_slug[slug] = parsed_start
+        if start_ts is None:
+            info = getattr(instrument, "info", None) or {}
+            if not isinstance(info, dict):
+                info = {}
+            question = str(info.get("question", "") or "")
+            strike = self._extract_strike_from_question(question)
+            return strike
+
+        # 3) Primary: Polymarket Chainlink history around market open
+        anchor = self._resolve_opening_strike_from_polymarket_history(start_ts)
+        if anchor is not None:
+            anchor_ts, anchor_px = anchor
+            self.market_strike_cache_by_slug[slug] = anchor_px
+            self.market_strike_source_by_slug[slug] = "polymarket_chainlink_open"
+            logger.info(
+                f"[STRIKE] Locked opening strike from Polymarket Chainlink history: "
+                f"${float(anchor_px):.2f} for slug={slug} "
+                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
+            )
+            await self._maybe_validate_strike_with_gamma(slug, anchor_px)
+            return anchor_px
+
+        # 4) If market just started and we already have a fresh Polymarket tick, latch it.
+        live_latched = self._maybe_latch_opening_strike_from_live_reference(
+            slug=slug,
+            start_ts=int(start_ts),
+        )
+        if live_latched is not None:
+            await self._maybe_validate_strike_with_gamma(slug, live_latched)
+            return live_latched
+
+        # 5) Fallback: parse from question text
         info = getattr(instrument, "info", None) or {}
         if not isinstance(info, dict):
             info = {}
@@ -276,34 +452,21 @@ class SpotPricerMixin:
             logger.info(f"✓ Locked opening strike for {slug} via question parsing: ${strike:,.2f}")
             return strike
 
-        # If no slug, can't do history/REST lookups
-        if not slug:
-            return strike
-
-        # 3) Try resolving from external spot history near market open
-        start_ts = self.market_start_ts_by_slug.get(slug)
-        if start_ts is None:
-            parsed_start = extract_market_start_ts_from_slug(slug)
-            if parsed_start is not None:
-                start_ts = parsed_start
-                self.market_start_ts_by_slug[slug] = parsed_start
-        if start_ts is None:
-            return strike
-
+        # 6) Generic external spot history fallback
         anchor = self._resolve_opening_strike_from_history(start_ts)
         if anchor is not None:
             anchor_ts, anchor_px = anchor
             self.market_strike_cache_by_slug[slug] = anchor_px
             self.market_strike_source_by_slug[slug] = "spot_history_open"
             logger.info(
-                f"[STRIKE] Locked opening strike from spot history: "
+                f"[STRIKE] Locked opening strike from spot history fallback: "
                 f"${float(anchor_px):.2f} for slug={slug} "
                 f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
             )
             await self._maybe_validate_strike_with_gamma(slug, anchor_px)
             return anchor_px
 
-        # 4) Binance REST backfill as last resort
+        # 7) Binance REST backfill as last resort
         import asyncio as _asyncio
         now_ts = time.time()
         last_try = float(self.market_strike_rest_last_try_ts_by_slug.get(slug, 0.0))
@@ -341,9 +504,6 @@ class SpotPricerMixin:
             self.latest_external_spot = external
             self.external_spot_consecutive_failures = 0  # BUG-5 FIX: reset on success
             self._record_external_spot_observation(external)
-            if self.current_market_open_spot is None and self.current_market_slug:
-                self.current_market_open_spot = external
-                logger.info(f"✓ Locked current_market_open_spot for {self.current_market_slug}: ${external:,.2f}")
 
             strike = None
             sigma = self.maker_digital_sigma_default
@@ -415,16 +575,34 @@ class SpotPricerMixin:
                         if outcome == "down":
                             fair_for_token = Decimal("1.0") - up_prob
                         imp_str = f" implied_σ={float(implied_sigma_used):.4f}" if implied_sigma_used else ""
-                        logger.info(
-                            "Digital pricer inputs: "
-                            f"spot={float(external):.2f} strike={float(strike):.2f} "
-                            f"sigma={float(sigma):.4f}{imp_str} t_left={time_left_sec:.1f}s "
-                            f"token_outcome={outcome or 'unknown'} "
-                            f"up_prob={float(up_prob):.4f} "
-                            f"fair_down={float(Decimal('1.0') - up_prob):.4f} "
-                            f"fair_for_token={float(fair_for_token):.4f} "
-                            f"active_side={self.active_side.value}"
+                        fair_color = "green" if fair_for_token >= Decimal("0.60") else "yellow" if fair_for_token >= Decimal("0.40") else "red"
+                        side_color = "green" if self.active_side.value == "UP" else "red" if self.active_side.value == "DOWN" else "yellow"
+                        source_color = "cyan" if (self.latest_external_spot_source or "") == "polymarket_chainlink_ws" else "yellow"
+                        msg = (
+                            "<white>Digital pricer inputs:</white> "
+                            f"spot=<cyan>{float(external):.2f}</cyan> "
+                            f"spot_source=<{source_color}>{self.latest_external_spot_source or '-'}</{source_color}> "
+                            f"strike=<magenta>{float(strike):.2f}</magenta> "
+                            f"sigma=<white>{float(sigma):.4f}</white>{imp_str} "
+                            f"t_left=<white>{time_left_sec:.1f}s</white> "
+                            f"token_outcome=<blue>{outcome or 'unknown'}</blue> "
+                            f"up_prob=<yellow>{float(up_prob):.4f}</yellow> "
+                            f"fair_down=<yellow>{float(Decimal('1.0') - up_prob):.4f}</yellow> "
+                            f"fair_for_token=<{fair_color}>{float(fair_for_token):.4f}</{fair_color}> "
+                            f"active_side=<{side_color}>{self.active_side.value}</{side_color}>"
                         )
+                        if self._binance_ws_price is not None:
+                            msg += f" binance_spot=<white>{float(self._binance_ws_price):.2f}</white>"
+                        logger.opt(colors=True).info(msg)
+                        if self._binance_ws_price is not None:
+                            delta = external - self._binance_ws_price
+                            delta_color = "green" if delta > 0 else "red" if delta < 0 else "yellow"
+                            logger.opt(colors=True).info(
+                                "<white>Digital pricer reference check:</white> "
+                                f"reference_spot=<cyan>{float(external):.2f}</cyan> "
+                                f"binance_spot=<white>{float(self._binance_ws_price):.2f}</white> "
+                                f"delta=<{delta_color}>{float(delta):+.2f}</{delta_color}>"
+                            )
                         self._last_digital_pricer_log_ts = now_ts
 
             fair = MakerEngine.calculate_fair_price(

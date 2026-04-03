@@ -189,6 +189,28 @@ class SideDecisionMixin:
             return False
         return True
 
+    def _populate_spot_source_inputs(
+        self,
+        inputs: Dict[str, Any],
+        *,
+        reference_spot: Optional[Decimal],
+        now_ts: float,
+    ) -> None:
+        inputs["reference_spot_source"] = str(getattr(self, "latest_external_spot_source", "") or "")
+        inputs["reference_spot_price"] = float(reference_spot) if reference_spot is not None else None
+        ref_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+        inputs["reference_spot_age_sec"] = max(0.0, now_ts - ref_ts) if ref_ts > 0 else None
+
+        binance_px = getattr(self, "_binance_ws_price", None)
+        binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)
+        inputs["binance_spot_price"] = float(binance_px) if binance_px is not None else None
+        inputs["binance_spot_age_sec"] = max(0.0, now_ts - binance_ts) if binance_ts > 0 else None
+
+        poly_px = getattr(self, "_polymarket_chainlink_price", None)
+        poly_ts = float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0)
+        inputs["polymarket_chainlink_price"] = float(poly_px) if poly_px is not None else None
+        inputs["polymarket_chainlink_age_sec"] = max(0.0, now_ts - poly_ts) if poly_ts > 0 else None
+
     # ------------------------------------------------------------------
     # Core decision logic (dispatcher)
     # ------------------------------------------------------------------
@@ -238,7 +260,7 @@ class SideDecisionMixin:
         """Continuous probabilistic side decision using SignalEngine."""
         inputs: Dict[str, Any] = {
             "slug": self.current_market_slug or "",
-            "engine": "signal_engine",
+            "engine": "new_signal",
             "fair_up": None,
             "fair_down": None,
         }
@@ -248,6 +270,7 @@ class SideDecisionMixin:
         # --- Gather spot & strike ---
         spot = self._capture_market_open_spot()
         inputs["spot"] = float(spot) if spot is not None else None
+        self._populate_spot_source_inputs(inputs, reference_spot=spot, now_ts=now_ts)
         if spot is None or spot <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
 
@@ -407,6 +430,7 @@ class SideDecisionMixin:
 
         spot = self._capture_market_open_spot()
         inputs["spot"] = float(spot) if spot is not None else None
+        self._populate_spot_source_inputs(inputs, reference_spot=spot, now_ts=now_ts)
         if spot is None or spot <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
         strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))

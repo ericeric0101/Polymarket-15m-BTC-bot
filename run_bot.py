@@ -1126,10 +1126,14 @@ class IntegratedBTCStrategy(
         self.orderbook_unavailable_token: Optional[str] = None
         self.last_external_spot: Optional[Decimal] = None
         self.latest_external_spot: Optional[Decimal] = None
+        self.latest_external_spot_source: str = ""
+        self.latest_external_spot_source_ts: float = 0.0
         self.external_spot_consecutive_failures: int = 0  # BUG-5 FIX
         self.external_spot_max_failures: int = int(os.getenv("EXTERNAL_SPOT_MAX_FAILURES", "10"))
         self.external_spot_history: List[Tuple[float, Decimal]] = []
         self.external_spot_history_max = max(60, int(os.getenv("EXTERNAL_SPOT_HISTORY_MAX", "1200")))
+        self.polymarket_chainlink_history: List[Tuple[float, Decimal]] = []
+        self.polymarket_chainlink_history_max = max(60, int(os.getenv("POLYMARKET_CHAINLINK_HISTORY_MAX", str(self.external_spot_history_max))))
         self.market_strike_cache_by_slug: Dict[str, Decimal] = {}
         self.market_strike_source_by_slug: Dict[str, str] = {}
         self.market_start_ts_by_slug: Dict[str, int] = {}
@@ -1309,6 +1313,11 @@ class IntegratedBTCStrategy(
         self._binance_ws_price_ts: float = 0.0
         self._binance_ws_stop_event = threading.Event()
         self._binance_ws_thread: Optional[threading.Thread] = None
+        self._polymarket_chainlink_price: Optional[Decimal] = None
+        self._polymarket_chainlink_price_ts: float = 0.0
+        self._polymarket_chainlink_event_ts_ms: Optional[int] = None
+        self._polymarket_chainlink_ws_stop_event = threading.Event()
+        self._polymarket_chainlink_ws_thread: Optional[threading.Thread] = None
 
         # --- SignalEngine (continuous probabilistic side decision) ---
         from bot.signal_engine import SignalEngine, SignalEngineConfig
@@ -1545,19 +1554,17 @@ class IntegratedBTCStrategy(
         self.current_token_id = self._extract_token_id_from_instrument(str(target)) if target is not None else None
 
     def _capture_market_open_spot(self) -> Optional[Decimal]:
-        # Side-decision needs the freshest possible BTC spot. If we prefer the
-        # cached external spot first, it can freeze at the market-open value when
-        # fair-pricer updates stall, which in turn keeps strike/open-drift signals
-        # pinned at zero.
-        if self._binance_ws_price is not None and self._binance_ws_price > 0:
-            ws_age = time.time() - float(self._binance_ws_price_ts or 0.0)
-            if ws_age < 10.0:
-                return self._binance_ws_price
+        if self.latest_external_spot is not None and self.latest_external_spot > 0:
+            src_age = time.time() - float(self.latest_external_spot_source_ts or 0.0)
+            if src_age < 10.0:
+                return self.latest_external_spot
         spot = self.latest_external_spot or self.last_external_spot
         if spot is not None and spot > 0:
             return spot
         if self._binance_ws_price is not None and self._binance_ws_price > 0:
             return self._binance_ws_price
+        if self._polymarket_chainlink_price is not None and self._polymarket_chainlink_price > 0:
+            return self._polymarket_chainlink_price
         if self.external_spot_history:
             _, hist_px = self.external_spot_history[-1]
             if hist_px > 0:
@@ -3079,7 +3086,8 @@ class IntegratedBTCStrategy(
         self._lifecycle_thread = start_background_thread(self._start_market_lifecycle_timer, "market-lifecycle")
         # Initialize live Prometheus trading metrics
         self._init_live_prom_metrics()
-        # Start Binance WebSocket for real-time BTC price
+        # Start real-time BTC price streams
+        self._start_polymarket_chainlink_ws()
         self._start_binance_ws()
         # Also start the legacy reload timer as a fallback
         self._reload_stop_event.clear()
@@ -3544,6 +3552,11 @@ class IntegratedBTCStrategy(
         side_reason_txt = self.side_decision_reason if self.bi_side_enabled else "disabled"
         side_locked_txt = "1" if self.active_side_locked else "0"
         side_due_in = max(0.0, self.side_decision_due_ts - now_ts) if self.bi_side_enabled and self.side_decision_due_ts > 0 else 0.0
+        ref_spot_txt = f"{float(self.latest_external_spot):.2f}" if self.latest_external_spot is not None else "None"
+        ref_src_txt = str(self.latest_external_spot_source or "-")
+        ref_age = max(0.0, now_ts - float(self.latest_external_spot_source_ts or 0.0)) if self.latest_external_spot_source_ts > 0 else -1.0
+        binance_spot_txt = f"{float(self._binance_ws_price):.2f}" if self._binance_ws_price is not None else "None"
+        binance_age = max(0.0, now_ts - float(self._binance_ws_price_ts or 0.0)) if self._binance_ws_price_ts > 0 else -1.0
 
         logger.info(
             "STATUS "
@@ -3556,6 +3569,8 @@ class IntegratedBTCStrategy(
             f"side_locked={side_locked_txt} "
             f"side_reason={side_reason_txt} "
             f"side_due_in={side_due_in:.1f}s "
+            f"ref_spot={ref_spot_txt} ref_src={ref_src_txt} ref_age={ref_age:.1f}s "
+            f"binance_spot={binance_spot_txt} binance_age={binance_age:.1f}s "
             f"bid={bid_txt} ask={ask_txt} "
             f"stale_for={stale_for:.1f}s invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
@@ -4424,6 +4439,7 @@ class IntegratedBTCStrategy(
                 self._redeem_stop_event,
                 self._balance_stop_event,
                 self._binance_ws_stop_event,
+                self._polymarket_chainlink_ws_stop_event,
                 self._terminal_dashboard_stop_event,
             ],
             threads=[
@@ -4433,6 +4449,7 @@ class IntegratedBTCStrategy(
                 self._redeem_thread,
                 self._balance_thread,
                 self._binance_ws_thread,
+                self._polymarket_chainlink_ws_thread,
                 self._terminal_dashboard_thread,
             ],
             join_timeout_sec=2.0,

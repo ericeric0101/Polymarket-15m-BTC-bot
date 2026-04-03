@@ -2,36 +2,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
+import sys
 import threading
 import time
-from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from loguru import logger
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-BINANCE_WS_URL = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
-POLYMARKET_LIVE_WS_URL = "wss://ws-live-data.polymarket.com"
-POLYMARKET_SUBSCRIBE_PAYLOAD = {
-    "action": "subscribe",
-    "subscriptions": [
-        {
-            "topic": "crypto_prices_chainlink",
-            "type": "*",
-            "filters": "",
-        }
-    ],
-}
-
-
-@dataclass
-class PriceTick:
-    source: str
-    price: Decimal
-    updated_at_ms: Optional[int]
-    received_at_ts: float
-    raw_summary: str = ""
+from bot.price_streams import (
+    BINANCE_AGGTRADE_WS_URL,
+    POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD,
+    POLYMARKET_LIVE_WS_URL,
+    PriceTick,
+    extract_binance_aggtrade_tick,
+    extract_polymarket_chainlink_tick,
+)
 
 
 class SharedState:
@@ -69,124 +60,6 @@ def _to_decimal(value: Any) -> Optional[Decimal]:
     return dec
 
 
-def _to_epoch_ms(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        num = float(value)
-    except Exception:
-        return None
-    if num <= 0:
-        return None
-    if num > 1_000_000_000_000:
-        return int(num)
-    if num > 1_000_000_000:
-        return int(num * 1000)
-    return None
-
-
-def _string_contains_btc(obj: Any) -> bool:
-    try:
-        txt = json.dumps(obj, ensure_ascii=False).lower()
-    except Exception:
-        txt = str(obj).lower()
-    return "btc" in txt
-
-
-def _extract_polymarket_chainlink_tick(payload: Any) -> Optional[PriceTick]:
-    """
-    Polymarket live WS message shape is not documented in this repo.
-    This parser is intentionally tolerant and searches nested dict/list payloads
-    for a BTC-related object containing a price-like numeric field.
-    """
-
-    candidate_price_keys = (
-        "price",
-        "currentPrice",
-        "current_price",
-        "value",
-        "answer",
-        "mark",
-        "px",
-    )
-    candidate_time_keys = (
-        "updatedAt",
-        "updated_at",
-        "timestamp",
-        "ts",
-        "time",
-    )
-
-    if isinstance(payload, dict):
-        topic = str(payload.get("topic", "")).lower()
-        inner = payload.get("payload")
-        if topic == "crypto_prices_chainlink" and isinstance(inner, dict):
-            symbol = str(inner.get("symbol", "")).lower()
-            if "btc" in symbol:
-                price = None
-                updated_ms = None
-                for key in candidate_price_keys:
-                    if key in inner:
-                        price = _to_decimal(inner.get(key))
-                        if price is not None and price > 0:
-                            break
-                for key in candidate_time_keys:
-                    if key in inner:
-                        updated_ms = _to_epoch_ms(inner.get(key))
-                        if updated_ms is not None:
-                            break
-                if updated_ms is None:
-                    for key in candidate_time_keys:
-                        if key in payload:
-                            updated_ms = _to_epoch_ms(payload.get(key))
-                            if updated_ms is not None:
-                                break
-                if price is not None and price > 0:
-                    return PriceTick(
-                        source="polymarket_ws",
-                        price=price,
-                        updated_at_ms=updated_ms,
-                        received_at_ts=time.time(),
-                        raw_summary=str(payload)[:240],
-                    )
-
-    def walk(node: Any) -> Optional[PriceTick]:
-        if isinstance(node, dict):
-            if _string_contains_btc(node):
-                price: Optional[Decimal] = None
-                updated_ms: Optional[int] = None
-                for key in candidate_price_keys:
-                    if key in node:
-                        price = _to_decimal(node.get(key))
-                        if price is not None and price > 0:
-                            break
-                for key in candidate_time_keys:
-                    if key in node:
-                        updated_ms = _to_epoch_ms(node.get(key))
-                        if updated_ms is not None:
-                            break
-                if price is not None and price > 0:
-                    return PriceTick(
-                        source="polymarket_ws",
-                        price=price,
-                        updated_at_ms=updated_ms,
-                        received_at_ts=time.time(),
-                        raw_summary=str(node)[:240],
-                    )
-            for value in node.values():
-                found = walk(value)
-                if found is not None:
-                    return found
-        elif isinstance(node, list):
-            for item in node:
-                found = walk(item)
-                if found is not None:
-                    return found
-        return None
-
-    return walk(payload)
-
-
 def _run_binance_stream(state: SharedState, stop_event: threading.Event) -> None:
     import websockets.sync.client as ws_sync  # type: ignore
 
@@ -194,7 +67,7 @@ def _run_binance_stream(state: SharedState, stop_event: threading.Event) -> None
     while not stop_event.is_set():
         try:
             with ws_sync.connect(
-                BINANCE_WS_URL,
+                BINANCE_AGGTRADE_WS_URL,
                 close_timeout=5,
                 ping_interval=None,
                 ping_timeout=None,
@@ -203,23 +76,10 @@ def _run_binance_stream(state: SharedState, stop_event: threading.Event) -> None
                 logger.info("Binance WS connected")
                 while not stop_event.is_set():
                     raw = ws.recv(timeout=5)
-                    data = json.loads(raw)
-                    px = _to_decimal(data.get("p"))
-                    if px is None or px <= 0:
+                    tick = extract_binance_aggtrade_tick(raw)
+                    if tick is None:
                         continue
-                    event_time_ms = None
-                    if "E" in data:
-                        event_time_ms = _to_epoch_ms(data.get("E"))
-                    state.set_tick(
-                        name="binance",
-                        tick=PriceTick(
-                            source="binance_ws",
-                            price=px,
-                            updated_at_ms=event_time_ms,
-                            received_at_ts=time.time(),
-                            raw_summary=str(data)[:180],
-                        ),
-                    )
+                    state.set_tick(name="binance", tick=tick)
         except TimeoutError:
             continue
         except Exception as exc:
@@ -247,7 +107,7 @@ def _run_polymarket_stream(
             ) as ws:
                 reconnect_delay = 1.0
                 logger.info("Polymarket live WS connected")
-                ws.send(json.dumps(POLYMARKET_SUBSCRIBE_PAYLOAD))
+                ws.send(json.dumps(POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD))
                 while not stop_event.is_set():
                     raw = ws.recv(timeout=5)
                     state.set_polymarket_preview(str(raw)[:600])
@@ -257,7 +117,7 @@ def _run_polymarket_stream(
                         payload = json.loads(raw)
                     except Exception:
                         continue
-                    tick = _extract_polymarket_chainlink_tick(payload)
+                    tick = extract_polymarket_chainlink_tick(payload)
                     if tick is None:
                         continue
                     state.set_tick(name="polymarket", tick=tick)
