@@ -34,6 +34,7 @@ class SideDecisionMixin:
     def _reset_side_decision_state(self) -> None:
         self.active_side = ActiveSide.UP if not self.bi_side_enabled else self._normalize_active_side(self.bi_side_default_mode)
         self.active_side_locked = False
+        self.active_side_locked_since_ts = 0.0
         self.side_decision_ts = 0.0
         self.side_decision_score = Decimal("0")
         self.side_decision_reason = "market_reset"
@@ -189,8 +190,24 @@ class SideDecisionMixin:
         score: Decimal,
         inputs: Dict[str, Any],
     ) -> bool:
-        min_score_up = self.bi_side_flip_min_score_up_new
-        max_score_down = self.bi_side_flip_max_score_down_new
+        min_score_up = Decimal(
+            str(
+                getattr(
+                    self,
+                    "bi_side_flip_min_score_up_new",
+                    getattr(self, "directional_entry_min_score_abs_new", Decimal("0.05")),
+                )
+            )
+        )
+        max_score_down = Decimal(
+            str(
+                getattr(
+                    self,
+                    "bi_side_flip_max_score_down_new",
+                    -min_score_up,
+                )
+            )
+        )
         if side == ActiveSide.UP:
             fair_value = inputs.get("fair_up")
             if score < min_score_up:
@@ -207,7 +224,8 @@ class SideDecisionMixin:
             fair_dec = Decimal(str(fair_value))
         except Exception:
             return False
-        return fair_dec >= self.bi_side_flip_min_fair
+        min_fair = Decimal(str(getattr(self, "bi_side_flip_min_fair", "0.60")))
+        return fair_dec >= min_fair
 
     def _held_inventory_allows_extra_flip(self, *, proposed_side: ActiveSide) -> bool:
         if not self.active_side_locked or proposed_side in (ActiveSide.NONE, self.active_side):
@@ -235,8 +253,24 @@ class SideDecisionMixin:
     ) -> bool:
         if not self._held_inventory_allows_extra_flip(proposed_side=side):
             return True
-        min_score_up = self.bi_side_flip_min_score_up_held_new
-        max_score_down = self.bi_side_flip_max_score_down_held_new
+        min_score_up = Decimal(
+            str(
+                getattr(
+                    self,
+                    "bi_side_flip_min_score_up_held_new",
+                    getattr(self, "bi_side_flip_min_score_up_new", Decimal("0.18")),
+                )
+            )
+        )
+        max_score_down = Decimal(
+            str(
+                getattr(
+                    self,
+                    "bi_side_flip_max_score_down_held_new",
+                    -min_score_up,
+                )
+            )
+        )
         if side == ActiveSide.UP and score < min_score_up:
             return False
         if side == ActiveSide.DOWN and score > max_score_down:
@@ -469,10 +503,12 @@ class SideDecisionMixin:
             self.side_decision_done_for_market = True
             self._sync_active_instrument()
             return
+        flip_max_per_market = int(getattr(self, "bi_side_flip_max_per_market", 1))
+        allow_intramarket_flip = bool(getattr(self, "bi_side_allow_intramarket_flip", False))
         can_attempt_flip = (
             self.active_side_locked
-            and self.bi_side_allow_intramarket_flip
-            and self.side_flip_count < self.bi_side_flip_max_per_market
+            and allow_intramarket_flip
+            and self.side_flip_count < flip_max_per_market
         )
         if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
             return
@@ -575,6 +611,8 @@ class SideDecisionMixin:
             self.side_decision_done_for_market = True
             self.side_decision_inputs = dict(inputs)
             self.side_flip_count += 1
+            if self.active_side_locked and side != ActiveSide.NONE and old_side != side:
+                self.active_side_locked_since_ts = now_ts
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
             self.side_pending_flip_since_ts = 0.0
@@ -618,6 +656,8 @@ class SideDecisionMixin:
         self.side_decision_inputs = inputs
         if self.bi_side_lock_until_reduce_only and phase == MarketPhase.ACTIVE and side != ActiveSide.NONE:
             self.active_side_locked = True
+            if old_side != side or self.active_side_locked_since_ts <= 0:
+                self.active_side_locked_since_ts = now_ts
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
             self.side_pending_flip_since_ts = 0.0
@@ -625,6 +665,7 @@ class SideDecisionMixin:
                 self._force_quote_refresh_once = True
                 self._force_quote_refresh_reason = f"locked_entry:{old_side.value}->{side.value}"
         elif side == ActiveSide.NONE:
+            self.active_side_locked_since_ts = 0.0
             self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
         self._sync_active_instrument()
         if old_side != side:

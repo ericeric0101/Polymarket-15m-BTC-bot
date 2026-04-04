@@ -4,12 +4,35 @@ import asyncio
 import math
 import time
 from decimal import Decimal
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Protocol, Tuple
 
 from loguru import logger
 
 from bot.wallet_ops import ensure_balance_clob_client
 from execution.rebate_model import bps_to_fee_rate
+
+
+class PricingRuntimeHost(Protocol):
+    real_price_history_by_inst: dict[str, list[Decimal]]
+    real_price_history: list[Decimal]
+    instrument_id: Any
+    cache: Any
+    maker_fee_rate_default_decimal: Decimal
+    maker_fee_rate_legacy_bps_default: int
+    _fee_rate_local_cache_by_token: dict[str, Any]
+    fee_rate_fetch_interval_sec: int
+    fee_rate_client: Any
+    _last_fee_log_state_by_token: dict[str, Any]
+    fee_log_interval_sec: int
+    orderbook_levels_cache_by_token: dict[str, Any]
+    orderbook_fetch_interval_sec: int
+    orderbook_levels_limit: int
+    live_inventory_cost: dict[str, Any]
+    current_token_id: Optional[str]
+    _balance_clob_client: Any
+
+    def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
+    def _instrument_key(self, instrument_id: Any) -> str: ...
 
 
 class PricingRuntimeMixin:
@@ -20,7 +43,7 @@ class PricingRuntimeMixin:
     strategy decision policy itself.
     """
 
-    def _momentum_history_for_instrument(self, instrument_id: Any) -> List[Decimal]:
+    def _momentum_history_for_instrument(self: PricingRuntimeHost, instrument_id: Any) -> List[Decimal]:
         inst_key = str(instrument_id) if instrument_id is not None else ""
         if inst_key:
             per_inst = self.real_price_history_by_inst.get(inst_key)
@@ -28,7 +51,7 @@ class PricingRuntimeMixin:
                 return per_inst
         return self.real_price_history
 
-    def _get_total_sellable_qty(self, instrument_ids: Optional[List[Any]] = None) -> Decimal:
+    def _get_total_sellable_qty(self: PricingRuntimeHost, instrument_ids: Optional[List[Any]] = None) -> Decimal:
         ids = instrument_ids or []
         if not ids and self.instrument_id is not None:
             ids = [self.instrument_id]
@@ -42,7 +65,7 @@ class PricingRuntimeMixin:
             total += self._get_sellable_qty_for_current_instrument(instrument_id=inst_id)
         return total
 
-    def _infer_market_fee_rate_default(self) -> Decimal:
+    def _infer_market_fee_rate_default(self: PricingRuntimeHost) -> Decimal:
         """
         Infer fee-curve parameter by market type when /fee-rate is unavailable.
         """
@@ -67,7 +90,7 @@ class PricingRuntimeMixin:
             pass
         return default_rate
 
-    async def _get_dynamic_fee_rate(self, token_id: Optional[str] = None) -> Optional[Decimal]:
+    async def _get_dynamic_fee_rate(self: PricingRuntimeHost, token_id: Optional[str] = None) -> Optional[Decimal]:
         """
         Fetch dynamic fee rate from CLOB /fee-rate endpoint using current token_id.
         """

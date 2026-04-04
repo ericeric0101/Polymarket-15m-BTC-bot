@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal, ROUND_FLOOR
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
 
 from loguru import logger
 from nautilus_trader.model.enums import OrderSide, TimeInForce
@@ -25,10 +25,42 @@ from bot.models import (
 )
 
 
+class TakerExitHost(Protocol):
+    taker_exit_enabled: bool
+    taker_exit_cooldown_sec: int
+    taker_exit_eval_interval_sec: float
+    taker_exit_reject_cooldown_until_by_inst: dict[str, float]
+    taker_exit_tail_attempted_by_inst: dict[str, Any]
+    taker_exit_last_eval_ts_by_inst: dict[str, float]
+    live_inventory_cost: dict[str, Any]
+    pending_taker_exit_by_inst: dict[str, Any]
+    last_taker_exit_ts_by_inst: dict[str, float]
+    current_market_end_timestamp: Any
+    maker_reduce_only_no_new_sell_last_sec: int
+    taker_exit_disable_stop_loss_last_sec: int
+    market_phase: Any
+    active_side: Any
+    side_decision_score: Decimal
+    active_side_locked: bool
+    side_decision_reason: str
+
+    def _maker_quote_instruments(self) -> list[Any]: ...
+    def _instrument_key(self, instrument_id: Any) -> str: ...
+    def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
+    def _get_quote_for_instrument(self, instrument_id: Any) -> Optional[tuple[Decimal, Decimal]]: ...
+    async def _get_dynamic_fee_rate(self, token_id: Optional[str] = None) -> Optional[Decimal]: ...
+    def _extract_token_id_from_instrument(self, instrument_id: str) -> Optional[str]: ...
+    def _infer_market_fee_rate_default(self) -> Decimal: ...
+    def _is_emergency_exit_window(self, time_left_sec: Optional[float]) -> bool: ...
+    def _get_effective_sellable_qty(self, instrument_id: Optional[Any]) -> Decimal: ...
+    def _instrument_for_side(self, side: Any) -> Any: ...
+    def _side_for_instrument_id(self, instrument_id: Any) -> Any: ...
+
+
 class TakerExitMixin:
     """Mixin providing taker exit position management logic."""
 
-    async def _maybe_taker_exit_positions(self, now_ts: float, is_simulation: bool) -> None:
+    async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
             return
         if self.taker_exit_cooldown_sec < 0:
@@ -172,8 +204,11 @@ class TakerExitMixin:
                 and self.taker_exit_max_hold_near_close_sec > 0
                 and time_left_sec <= float(self.taker_exit_max_hold_near_close_sec)
             )
+            held_side = self._side_for_instrument_id(inst_id).value if hasattr(self, "_side_for_instrument_id") else "NONE"
 
             if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
+                if hasattr(self, "position_manager"):
+                    self.position_manager.reset_stop_loss_regime(inst_key)
                 self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
                 hold_reason_tag = "hold_band" if exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND else "hold_to_redeem"
                 self._record_exit_policy_decision_throttled(
@@ -214,6 +249,35 @@ class TakerExitMixin:
                     self._logged_hold_redeem_te = True
                     self._last_hold_redeem_te_log = now_ts
                 continue
+
+            if exit_decision.decision_type in (
+                ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
+                ExitDecisionType.TAKER_STOP_LOSS,
+            ) and hasattr(self, "position_manager"):
+                regime = self.position_manager.assess_stop_loss_regime(
+                    inst_key=inst_key,
+                    now_ts=now_ts,
+                    qty=qty,
+                    opened_ts=opened_ts,
+                    held_side=held_side,
+                    signal_active_side=signal_decision.active_side,
+                    signal_score=signal_decision.score,
+                    signal_matches_position=signal_decision.matches_position,
+                    force_exit=force_offside_near_close,
+                )
+                if regime.status != "armed":
+                    self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                    self._log_taker_exit_skip_throttled(
+                        inst_key=inst_key,
+                        reason_tag=f"position_manager_{regime.status}",
+                        message=(
+                            "Skip taker exit: position manager gate "
+                            f"({regime.reason}) best_bid={float(best_bid):.4f} "
+                            f"avg_entry={float(avg_entry):.4f} est_net={float(net_if_exit):+.4f}"
+                        ),
+                        now_ts=now_ts,
+                    )
+                    continue
 
             if exit_decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION:
                 self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
@@ -260,6 +324,8 @@ class TakerExitMixin:
                 continue
 
             if not force_offside_near_close and exit_decision.decision_type != ExitDecisionType.TAKER_STOP_LOSS:
+                if hasattr(self, "position_manager"):
+                    self.position_manager.reset_stop_loss_regime(inst_key)
                 self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
                 continue
             self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
@@ -529,6 +595,23 @@ class TakerExitMixin:
             min_confirms = getattr(self, "maker_urgent_exit_min_confirmations", 3)
             if self._urgent_exit_confirm_hits[inst_key] < min_confirms:
                 continue
+
+            if hasattr(self, "position_manager"):
+                held_side = self._side_for_instrument_id(inst_id).value if hasattr(self, "_side_for_instrument_id") else "NONE"
+                opened_ts = float(state.get("opened_ts", 0.0))
+                regime = self.position_manager.assess_stop_loss_regime(
+                    inst_key=inst_key,
+                    now_ts=now_ts,
+                    qty=qty,
+                    opened_ts=opened_ts,
+                    held_side=held_side,
+                    signal_active_side=self.active_side.value,
+                    signal_score=self.side_decision_score,
+                    signal_matches_position=matches_position,
+                    force_exit=False,
+                )
+                if regime.status != "armed":
+                    continue
 
             # Check unrealized loss
             avg_entry = Decimal(str(state.get("avg_entry_price", "0")))

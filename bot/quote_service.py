@@ -23,6 +23,15 @@ class QuoteInstrumentContext:
     diag_context: dict[str, Any]
 
 
+@dataclass
+class BuyEntryEvaluation:
+    skip: bool
+    min_expected_net_usdc: Decimal
+    event_type: str = ""
+    reason: str = ""
+    payload: dict[str, Any] | None = None
+
+
 def extract_instrument_tick(instrument: Any, default_tick: str = "0.01") -> Decimal:
     tick = Decimal(default_tick)
     if instrument is not None:
@@ -50,7 +59,166 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "other_cost_ps": desired.get("other_cost_ps"),
         "exec_penalty_usdc": desired.get("exec_penalty"),
         "robust_net_usdc": desired.get("robust_net"),
+        "planned_best_bid": desired.get("planned_best_bid"),
+        "planned_best_ask": desired.get("planned_best_ask"),
+        "planned_quote_ts": desired.get("planned_quote_ts"),
     }
+
+
+def evaluate_buy_entry_controls(
+    *,
+    side: str,
+    bi_side_enabled: bool,
+    active_side_locked: bool,
+    active_side_value: str,
+    latest_observation_supports_locked_side: bool,
+    side_score: Decimal,
+    directional_entry_min_score_abs_new: Decimal,
+    maker_min_expected_net_usdc: Decimal,
+    maker_reload_min_expected_net_multiplier: Decimal,
+    current_inst_inventory_qty: Decimal,
+    maker_reload_inventory_threshold_shares: Decimal,
+    current_slug: str,
+    inst_id: Any,
+) -> BuyEntryEvaluation:
+    min_expected_net_usdc = maker_min_expected_net_usdc
+    if side != "buy":
+        return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc)
+    if (
+        bi_side_enabled
+        and active_side_locked
+        and str(active_side_value or "NONE").upper() != "NONE"
+        and not latest_observation_supports_locked_side
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            event_type="ORDER_SKIP_DIRECTIONAL_OBSERVATION_MISMATCH",
+            reason="directional_observation_mismatch",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "active_side": active_side_value,
+                "side_score": float(side_score),
+                "engine": "new_signal",
+            },
+        )
+    if abs(side_score) < directional_entry_min_score_abs_new:
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            event_type="ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
+            reason="directional_entry_gate",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "side_score": float(side_score),
+                "required_score_abs": float(directional_entry_min_score_abs_new),
+                "engine": "new_signal",
+            },
+        )
+    if (
+        maker_reload_min_expected_net_multiplier > Decimal("1")
+        and current_inst_inventory_qty + Decimal("0.000001")
+        >= maker_reload_inventory_threshold_shares
+    ):
+        min_expected_net_usdc = (
+            maker_min_expected_net_usdc * maker_reload_min_expected_net_multiplier
+        )
+    return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc)
+
+
+def attach_desired_entry_runtime_metadata(
+    *,
+    desired_entry: dict[str, Any],
+    dynamic_fee_rate: Decimal | None,
+    min_expected_net_usdc: Decimal,
+    quote: tuple[Decimal, Decimal] | None,
+    now_ts: float,
+) -> dict[str, Any]:
+    desired_entry["dynamic_fee_rate"] = dynamic_fee_rate
+    desired_entry["min_expected_net_usdc"] = min_expected_net_usdc
+    if quote is not None:
+        desired_entry["planned_best_bid"] = quote[0]
+        desired_entry["planned_best_ask"] = quote[1]
+        desired_entry["planned_quote_ts"] = now_ts
+    return desired_entry
+
+
+def apply_confirmed_inventory_sell_guard(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    confirmed_inventory_qty: Decimal,
+    other_held_inventory_qty: Decimal,
+) -> dict[str, Any]:
+    if side != "sell" or confirmed_inventory_qty > 0:
+        return desired_entry
+    desired_entry["should_quote"] = False
+    if other_held_inventory_qty > 0:
+        desired_entry["diag_reason"] = (
+            f"confirmed_inventory_zero_current_leg other_held={float(other_held_inventory_qty):.6f}"
+        )
+    else:
+        desired_entry["diag_reason"] = "confirmed_inventory_zero"
+    return desired_entry
+
+
+def preserve_profitable_existing_sell_order(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    existing_state: dict[str, Any] | None,
+    avg_entry: Decimal,
+    maker_sell_cost_protect_fee_buffer_ps: Decimal,
+    maker_sell_min_profit_floor_ps: Decimal,
+) -> dict[str, Any]:
+    if side != "sell" or desired_entry.get("should_quote", False):
+        return desired_entry
+    diag = str(desired_entry.get("diag_reason", ""))
+    if not any(token in diag for token in ("sell_cost_protect", "high_cost_exit_cooldown", "min_profit_floor")):
+        return desired_entry
+    if existing_state is None:
+        return desired_entry
+    existing_price = Decimal(str(existing_state.get("price", 0)))
+    cost_floor = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
+    if existing_price < cost_floor:
+        return desired_entry
+    desired_entry["should_quote"] = True
+    desired_entry["price"] = existing_price
+    desired_entry["diag_reason"] = (
+        f"sell_preserved existing={float(existing_price):.4f} "
+        f">= floor={float(cost_floor):.4f} "
+        f"(new_blocked: {diag})"
+    )
+    return desired_entry
+
+
+def apply_reload_edge_guard(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    current_inst_inventory_qty: Decimal,
+    maker_reload_inventory_threshold_shares: Decimal,
+    maker_reload_min_directional_edge_ps: Decimal,
+) -> dict[str, Any]:
+    if (
+        side != "buy"
+        or current_inst_inventory_qty + Decimal("0.000001") < maker_reload_inventory_threshold_shares
+    ):
+        return desired_entry
+    directional_edge_ps = desired_entry.get("directional_edge_ps")
+    desired_entry["reload_min_directional_edge_ps"] = maker_reload_min_directional_edge_ps
+    if (
+        isinstance(directional_edge_ps, Decimal)
+        and directional_edge_ps < maker_reload_min_directional_edge_ps
+    ):
+        desired_entry["should_quote"] = False
+        desired_entry["diag_reason"] = (
+            f"reload_edge_gate directional_edge_ps={float(directional_edge_ps):.6f} "
+            f"< min={float(maker_reload_min_directional_edge_ps):.6f}"
+        )
+    return desired_entry
 
 
 def reconcile_unwanted_quotes(
@@ -207,9 +375,7 @@ def retreat_crossing_buy_quote(
 ) -> Decimal | None:
     if quote_now is None:
         return limit_price
-    _best_bid_now, best_ask_now = quote_now
-    if limit_price < best_ask_now:
-        return limit_price
+    best_bid_now, best_ask_now = quote_now
     tick = Decimal("0.01")
     try:
         raw_tick = getattr(instrument, "price_increment", None) if instrument is not None else None
@@ -224,19 +390,97 @@ def retreat_crossing_buy_quote(
     if tick <= 0:
         tick = Decimal("0.01")
     old_limit_price = limit_price
-    limit_price = align_price_fn(best_ask_now - tick, "buy", instrument)
-    if limit_price >= best_ask_now:
+    passive_cap = best_bid_now if best_bid_now > 0 else (best_ask_now - tick)
+    if old_limit_price <= passive_cap:
+        return old_limit_price
+    limit_price = align_price_fn(passive_cap, "buy", instrument)
+    if limit_price >= best_ask_now or limit_price > passive_cap:
         logger_warning_fn(
-            f"Skip crossing BUY quote {float(old_limit_price):.4f} >= ask {float(best_ask_now):.4f} "
-            f"(retreat failed -> {float(limit_price):.4f})"
+            f"Skip aggressive BUY quote {float(old_limit_price):.4f} "
+            f"(bid={float(best_bid_now):.4f} ask={float(best_ask_now):.4f}) "
+            f"(passive retreat failed -> {float(limit_price):.4f})"
         )
         return None
     logger_info_fn(
-        "Adjusted BUY quote to avoid crossing: "
+        "Adjusted BUY quote to passive maker level: "
         f"{float(old_limit_price):.4f} -> {float(limit_price):.4f} "
-        f"(ask={float(best_ask_now):.4f})"
+        f"(bid={float(best_bid_now):.4f} ask={float(best_ask_now):.4f})"
     )
     return limit_price
+
+
+def maybe_apply_continuation_entry(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    active_side_locked: bool,
+    active_side_value: str,
+    inst_id: Any,
+    active_instrument_id: Any,
+    side_score: Decimal,
+    locked_for_sec: float,
+    time_left_sec: float | None,
+    current_inventory_qty: Decimal,
+    best_bid: Decimal,
+    fair: Decimal | None,
+    continuation_enabled: bool,
+    continuation_size_multiplier: Decimal,
+    continuation_min_score_abs: Decimal = Decimal("0.32"),
+    continuation_min_locked_sec: float = 20.0,
+    continuation_min_time_left_sec: float = 300.0,
+    continuation_max_price_premium_ps: Decimal = Decimal("0.02"),
+    continuation_min_robust_net_usdc: Decimal = Decimal("-0.025"),
+) -> dict[str, Any]:
+    if not continuation_enabled or side != "buy":
+        return desired_entry
+    if bool(desired_entry.get("should_quote", False)):
+        desired_entry.setdefault("entry_mode", "value")
+        desired_entry.setdefault("size_multiplier", Decimal("1"))
+        return desired_entry
+    if not active_side_locked or str(active_side_value or "NONE").upper() == "NONE":
+        return desired_entry
+    if str(inst_id) != str(active_instrument_id):
+        return desired_entry
+    if current_inventory_qty > 0:
+        return desired_entry
+    active_side_txt = str(active_side_value or "NONE").upper()
+    if active_side_txt == "UP":
+        if side_score < continuation_min_score_abs:
+            return desired_entry
+    elif active_side_txt == "DOWN":
+        if side_score > -continuation_min_score_abs:
+            return desired_entry
+    else:
+        return desired_entry
+    if locked_for_sec < float(continuation_min_locked_sec):
+        return desired_entry
+    if time_left_sec is None or time_left_sec < float(continuation_min_time_left_sec):
+        return desired_entry
+    if best_bid <= 0 or fair is None or fair <= 0:
+        return desired_entry
+    robust_net = desired_entry.get("robust_net")
+    if not isinstance(robust_net, Decimal) or robust_net < continuation_min_robust_net_usdc:
+        return desired_entry
+    if best_bid > fair + continuation_max_price_premium_ps:
+        return desired_entry
+    diag_reason = str(desired_entry.get("diag_reason", "") or "")
+    if not (
+        diag_reason.startswith("econ_gate")
+        or diag_reason.startswith("side_disabled:edge_gate_buy")
+    ):
+        return desired_entry
+
+    desired_entry["should_quote"] = True
+    desired_entry["price"] = best_bid
+    desired_entry["entry_mode"] = "continuation"
+    desired_entry["size_multiplier"] = max(Decimal("0"), continuation_size_multiplier)
+    desired_entry["diag_reason"] = (
+        f"continuation_entry locked_for={locked_for_sec:.1f}s "
+        f"score={float(side_score):+.4f} "
+        f"robust_net={float(robust_net):.6f} "
+        f"bid={float(best_bid):.4f} fair={float(fair):.4f}"
+    )
+    return desired_entry
 
 
 def apply_sellable_inventory_guard(
@@ -561,6 +805,8 @@ def build_desired_quote_entry(
         "p_fair": p_fair,
         "fee_ps": fee_ps,
         "other_cost_ps": other_cost_ps,
+        "entry_mode": "value" if side == "buy" else "",
+        "size_multiplier": Decimal("1"),
         # Observability: non-empty only when a loss-sell was gated/allowed.
         # Values: "thesis_bad" | "emergency_with_thesis" |
         #         "absolute_last_resort(<Ns)" | "" (no loss-sell override)

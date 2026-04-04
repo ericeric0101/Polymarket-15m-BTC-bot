@@ -2,10 +2,26 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Protocol, Tuple
 
 from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
+
+
+class OrderRuntimeHost(Protocol):
+    active_maker_orders: dict[str, dict[str, Any]]
+    maker_cancel_cooldown_sec: int
+    maker_cancel_ack_timeout_sec: int
+    maker_cancel_max_retries: int
+    maker_error_pause_sec: int
+    quote_pause_until_ts: float
+    rebate_reporter: Any
+    cache: Any
+
+    def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
+    def _activate_maker_kill_switch(self, reason: str) -> None: ...
+    def cancel_order(self, order: Any) -> None: ...
+    def _db_order_event(self, **kwargs: Any) -> None: ...
 
 
 class OrderRuntimeMixin:
@@ -20,7 +36,7 @@ class OrderRuntimeMixin:
     def _order_key_for(side: str, instrument_id: Any) -> str:
         return f"{side}:{instrument_id}"
 
-    def _active_order_keys(self, side: Optional[str] = None, instrument_id: Optional[Any] = None) -> List[str]:
+    def _active_order_keys(self: OrderRuntimeHost, side: Optional[str] = None, instrument_id: Optional[Any] = None) -> List[str]:
         keys: List[str] = []
         target_inst = str(instrument_id) if instrument_id is not None else None
         for key, state in self.active_maker_orders.items():
@@ -33,7 +49,7 @@ class OrderRuntimeMixin:
             keys.append(key)
         return keys
 
-    def _get_quote_for_instrument(self, instrument_id: Any) -> Optional[Tuple[Decimal, Decimal]]:
+    def _get_quote_for_instrument(self: OrderRuntimeHost, instrument_id: Any) -> Optional[Tuple[Decimal, Decimal]]:
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
             return None
@@ -54,16 +70,16 @@ class OrderRuntimeMixin:
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
         return bid_decimal, ask_decimal
 
-    def _activate_maker_kill_switch(self, reason: str) -> None:
+    def _activate_maker_kill_switch(self: OrderRuntimeHost, reason: str) -> None:
         self.maker_kill_switch = True
         self._cancel_active_maker_orders()
         logger.error(f"MAKER KILL SWITCH ACTIVATED: {reason}")
 
-    def _cancel_active_maker_orders(self) -> None:
+    def _cancel_active_maker_orders(self: OrderRuntimeHost) -> None:
         for order_key in list(self.active_maker_orders.keys()):
             self._cancel_maker_order_side(order_key, reason="risk")
 
-    def _cancel_maker_order_side(self, side: str, reason: str = "risk", instrument_id: Optional[Any] = None) -> None:
+    def _cancel_maker_order_side(self: OrderRuntimeHost, side: str, reason: str = "risk", instrument_id: Optional[Any] = None) -> None:
         target_keys: List[str] = []
         if side in self.active_maker_orders and instrument_id is None:
             target_keys = [side]
@@ -72,7 +88,7 @@ class OrderRuntimeMixin:
         for order_key in target_keys:
             self._cancel_maker_order_key(order_key, reason=reason)
 
-    def _cancel_maker_order_key(self, order_key: str, reason: str = "risk") -> None:
+    def _cancel_maker_order_key(self: OrderRuntimeHost, order_key: str, reason: str = "risk") -> None:
         state = self.active_maker_orders.get(order_key)
         if not state:
             return

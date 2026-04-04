@@ -5,12 +5,16 @@ import time
 from decimal import Decimal
 from types import SimpleNamespace
 
+from bot.adapter_overrides import install_runtime_compatibility_overrides
+from bot.app_config import AppConfig
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
-from bot.fill_ledger import FillLedgerMixin
+from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisionType
+from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
+from bot.quote_service import maybe_apply_continuation_entry, retreat_crossing_buy_quote
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
@@ -21,6 +25,64 @@ from run_bot import IntegratedBTCStrategy
 class DummyOrder:
     def __init__(self, client_order_id: str) -> None:
         self.client_order_id = client_order_id
+
+
+class DummyProfitHoldStrategy:
+    def __init__(self) -> None:
+        now_ts = time.time()
+        self.maker_profit_run_enabled = True
+        self.maker_early_profit_hold_enabled = True
+        self.maker_early_profit_hold_min_hold_sec = 60
+        self.maker_early_profit_hold_max_profit_ps = Decimal("0.08")
+        self.maker_early_profit_hold_min_score_abs = Decimal("0.18")
+        self.active_side_locked = True
+        self.active_side = ActiveSide.DOWN
+        self.side_decision_score = Decimal("-0.47")
+        self.maker_profit_run_min_score_abs = Decimal("0.12")
+        self.maker_profit_run_min_profit_ps = Decimal("0.04")
+        self.maker_profit_run_unlock_profit_ps = Decimal("0.18")
+        self.maker_profit_run_trailing_drawdown_ps = Decimal("0.05")
+        self.maker_profit_run_unlock_trailing_drawdown_ps = Decimal("0.02")
+        self.maker_profit_run_min_hold_sec = 20
+        self.exit_policy = SimpleNamespace(stage=lambda _time_left_sec: SimpleNamespace(value="PASSIVE"))
+        self.live_inventory_cost = {
+            "inst-down": {
+                "qty": Decimal("5.30"),
+                "opened_ts": now_ts - 10.0,
+            }
+        }
+        self.maker_profit_run_peak_bid_by_inst = {}
+        self.maker_profit_run_peak_fair_by_inst = {}
+        self.position_manager = PositionManager(
+            PositionManagerConfig(
+                early_profit_hold_enabled=True,
+                early_profit_hold_min_hold_sec=60,
+                early_profit_hold_max_profit_ps=Decimal("0.08"),
+                early_profit_hold_min_score_abs=Decimal("0.18"),
+                profit_run_enabled=True,
+                profit_run_min_hold_sec=20,
+                profit_run_min_profit_ps=Decimal("0.04"),
+                profit_run_min_score_abs=Decimal("0.12"),
+                profit_run_trailing_drawdown_ps=Decimal("0.05"),
+                profit_run_unlock_profit_ps=Decimal("0.18"),
+                profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+                stop_loss_entry_protection_sec=45,
+                continuation_entry_protection_sec=60,
+                stop_loss_regime_min_sec=8,
+                stop_loss_regime_confirmations=4,
+                stop_loss_min_opposite_score_abs=Decimal("0.18"),
+            )
+        )
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
+
+    def _instrument_for_side(self, side):
+        if side == ActiveSide.DOWN:
+            return "inst-down"
+        if side == ActiveSide.UP:
+            return "inst-up"
+        return None
 
 
 class DummyStrategyForFill(FillLedgerMixin):
@@ -110,8 +172,12 @@ class DummyStrategyForFill(FillLedgerMixin):
     def _normalize_side_text(self, side_val):
         return IntegratedBTCStrategy._normalize_side_text(side_val)
 
-    def _is_maker_fill_liquidity(self, liquidity_side):
-        return IntegratedBTCStrategy._is_maker_fill_liquidity(liquidity_side)
+    def _classify_fill_liquidity(self, liquidity_side, raw_commission_dec, maker_matched):
+        return IntegratedBTCStrategy._classify_fill_liquidity(
+            liquidity_side,
+            raw_commission_dec,
+            maker_matched,
+        )
 
     def _instrument_key(self, instrument_id):
         return str(instrument_id) if instrument_id is not None else ""
@@ -224,6 +290,11 @@ class DummyMakerInstrumentStrategy:
         if side == ActiveSide.DOWN:
             return self.current_down_instrument_id
         return None
+
+
+class DummyBuyDriftStrategy:
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id) if instrument_id is not None else ""
 
 
 class DummyRejectRecoveryStrategy:
@@ -367,6 +438,33 @@ class DummyUrgentExitMatchedStrategy(TakerExitMixin):
         self.cancel_calls = []
         self.submit_calls = []
         self.db_events = []
+        self.position_manager = PositionManager(
+            PositionManagerConfig(
+                early_profit_hold_enabled=True,
+                early_profit_hold_min_hold_sec=60,
+                early_profit_hold_max_profit_ps=Decimal("0.08"),
+                early_profit_hold_min_score_abs=Decimal("0.18"),
+                profit_run_enabled=True,
+                profit_run_min_hold_sec=20,
+                profit_run_min_profit_ps=Decimal("0.04"),
+                profit_run_min_score_abs=Decimal("0.12"),
+                profit_run_trailing_drawdown_ps=Decimal("0.05"),
+                profit_run_unlock_profit_ps=Decimal("0.18"),
+                profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+                stop_loss_entry_protection_sec=45,
+                continuation_entry_protection_sec=60,
+                stop_loss_regime_min_sec=8,
+                stop_loss_regime_confirmations=4,
+                stop_loss_min_opposite_score_abs=Decimal("0.18"),
+            )
+        )
+        self.position_manager.on_fill(
+            inst_key="inst-up",
+            side="buy",
+            remaining_qty=Decimal("5.2"),
+            thesis_side=ActiveSide.UP.value,
+            now_ts=time.time(),
+        )
 
     def _maker_quote_instruments(self):
         return []
@@ -1033,3 +1131,402 @@ def test_exit_policy_holds_position_when_signal_is_none():
     assert decision.decision_type == ExitDecisionType.NONE
     assert decision.reason == "signal_none_hold"
     assert decision.metadata["signal_is_none"] == "1"
+
+
+def test_same_side_early_profit_hold_blocks_small_quick_profit_sells():
+    strategy = DummyProfitHoldStrategy()
+
+    hold, reason = IntegratedBTCStrategy._should_hold_profitable_position(
+        strategy,
+        instrument_id="inst-down",
+        best_bid=Decimal("0.64"),
+        fair=Decimal("0.65"),
+        avg_entry=Decimal("0.6206"),
+        time_left_sec=700.0,
+        thesis_weakened=False,
+        offside_confirmed=False,
+    )
+
+    assert hold is True
+    assert reason.startswith("early_profit_hold")
+
+
+def test_retreat_crossing_buy_quote_clamps_to_best_bid_for_synthetic_maker():
+    info_messages = []
+    warning_messages = []
+
+    price = retreat_crossing_buy_quote(
+        limit_price=Decimal("0.44"),
+        instrument=None,
+        quote_now=(Decimal("0.31"), Decimal("0.33")),
+        align_price_fn=lambda px, _side, _instrument: px,
+        logger_warning_fn=warning_messages.append,
+        logger_info_fn=info_messages.append,
+    )
+
+    assert price == Decimal("0.31")
+    assert info_messages
+    assert not warning_messages
+
+
+def test_continuation_entry_reenables_buy_when_locked_signal_is_strong_and_price_is_still_passive():
+    desired = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.019712 (expected_net=0.022528, exec_penalty=0.033916) < min=0.001020",
+        "robust_net": Decimal("-0.019712"),
+        "price": Decimal("0.60"),
+    }
+
+    updated = maybe_apply_continuation_entry(
+        desired_entry=desired,
+        side="buy",
+        active_side_locked=True,
+        active_side_value=ActiveSide.UP.value,
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        side_score=Decimal("0.35"),
+        locked_for_sec=30.0,
+        time_left_sec=600.0,
+        current_inventory_qty=Decimal("0"),
+        best_bid=Decimal("0.58"),
+        fair=Decimal("0.6034"),
+        continuation_enabled=True,
+        continuation_size_multiplier=Decimal("1.0"),
+    )
+
+    assert updated["should_quote"] is True
+    assert updated["entry_mode"] == "continuation"
+    assert updated["price"] == Decimal("0.58")
+
+
+def test_continuation_entry_stays_blocked_when_market_is_too_expensive():
+    desired = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.066255 (expected_net=-0.023000, exec_penalty=0.034818) < min=0.001020",
+        "robust_net": Decimal("-0.066255"),
+        "price": Decimal("0.70"),
+    }
+
+    updated = maybe_apply_continuation_entry(
+        desired_entry=desired,
+        side="buy",
+        active_side_locked=True,
+        active_side_value=ActiveSide.UP.value,
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        side_score=Decimal("0.42"),
+        locked_for_sec=30.0,
+        time_left_sec=580.0,
+        current_inventory_qty=Decimal("0"),
+        best_bid=Decimal("0.69"),
+        fair=Decimal("0.6108"),
+        continuation_enabled=True,
+        continuation_size_multiplier=Decimal("1.0"),
+    )
+
+    assert updated["should_quote"] is False
+
+
+def test_continuation_entry_stays_blocked_when_latest_observation_flips_against_locked_side():
+    desired = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.010000 < min=0.001020",
+        "robust_net": Decimal("-0.010000"),
+        "price": Decimal("0.42"),
+    }
+
+    updated = maybe_apply_continuation_entry(
+        desired_entry=desired,
+        side="buy",
+        active_side_locked=True,
+        active_side_value=ActiveSide.DOWN.value,
+        inst_id="inst-down",
+        active_instrument_id="inst-down",
+        side_score=Decimal("0.43"),
+        locked_for_sec=30.0,
+        time_left_sec=400.0,
+        current_inventory_qty=Decimal("0"),
+        best_bid=Decimal("0.42"),
+        fair=Decimal("0.50"),
+        continuation_enabled=True,
+        continuation_size_multiplier=Decimal("1.0"),
+    )
+
+    assert updated["should_quote"] is False
+
+
+def test_buy_submit_quote_guard_skips_when_book_drifted_too_far():
+    strategy = DummyBuyDriftStrategy()
+
+    should_skip = IntegratedBTCStrategy._should_skip_buy_submit_for_quote_drift(
+        strategy,
+        instrument_id="inst-down",
+        quote_now=(Decimal("0.33"), Decimal("0.35")),
+        directional_snapshot={
+            "planned_best_bid": Decimal("0.42"),
+            "planned_best_ask": Decimal("0.43"),
+            "planned_quote_ts": time.time(),
+        },
+        instrument=None,
+    )
+
+    assert should_skip is True
+
+
+def test_fill_liquidity_classification_prefers_matched_maker_when_raw_side_unknown_and_no_commission():
+    classification = classify_fill_liquidity(
+        liquidity_side="",
+        raw_commission_dec=Decimal("0"),
+        maker_matched=True,
+    )
+
+    assert classification == "maker"
+
+
+def test_urgent_exit_respects_position_manager_gate_during_entry_protection():
+    strategy = DummyUrgentExitMatchedStrategy()
+    strategy.active_side = ActiveSide.DOWN
+    strategy.active_side_locked = True
+    strategy.side_decision_score = Decimal("-0.35")
+
+    asyncio.run(strategy._maybe_maker_urgent_exit(time.time()))
+
+    assert strategy.submit_calls == []
+
+
+def test_position_manager_requires_persistent_opposite_regime_before_stop_loss_arms():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+
+    manager.on_fill(
+        inst_key="inst-up",
+        side="buy",
+        remaining_qty=Decimal("5.4"),
+        thesis_side=ActiveSide.UP.value,
+        now_ts=100.0,
+    )
+
+    early = manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=120.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.40"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+    assert early.status == "hold"
+    assert early.reason.startswith("entry_protection")
+
+    pending = manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=146.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.40"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+    assert pending.status == "pending"
+
+    manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=150.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.41"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+    manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=154.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.42"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+
+    armed = manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=158.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.42"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+    assert armed.status == "armed"
+
+    quick_reset = manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=154.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.UP.value,
+        signal_score=Decimal("0.22"),
+        signal_matches_position=True,
+        force_exit=False,
+    )
+    assert quick_reset.status == "hold"
+
+
+def test_position_manager_resets_stop_loss_regime_when_signal_returns_supported():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=20,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=2,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+
+    manager.on_fill(
+        inst_key="inst-up",
+        side="buy",
+        remaining_qty=Decimal("5.4"),
+        thesis_side=ActiveSide.UP.value,
+        now_ts=100.0,
+    )
+    manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=130.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.35"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+    decision = manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=131.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.UP.value,
+        signal_score=Decimal("0.22"),
+        signal_matches_position=True,
+        force_exit=False,
+    )
+
+    assert decision.status == "hold"
+    assert decision.reason.startswith("held_thesis_not_opposite")
+
+
+def test_continuation_entry_gets_longer_entry_protection():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=2,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+
+    manager.on_fill(
+        inst_key="inst-up",
+        side="buy",
+        remaining_qty=Decimal("5.4"),
+        thesis_side=ActiveSide.UP.value,
+        entry_mode="continuation",
+        now_ts=100.0,
+    )
+
+    decision = manager.assess_stop_loss_regime(
+        inst_key="inst-up",
+        now_ts=150.0,
+        qty=Decimal("5.4"),
+        opened_ts=100.0,
+        held_side=ActiveSide.UP.value,
+        signal_active_side=ActiveSide.DOWN.value,
+        signal_score=Decimal("-0.40"),
+        signal_matches_position=False,
+        force_exit=False,
+    )
+
+    assert decision.status == "hold"
+    assert "mode=continuation" in decision.reason
+
+
+def test_app_config_reads_extended_env(monkeypatch):
+    monkeypatch.setenv("MAKER_REQUOTE_MIN_AGE_SEC", "9")
+    monkeypatch.setenv("MAKER_DIGITAL_SIGMA_DEFAULT", "0.77")
+    monkeypatch.setenv("AUTO_REDEEM_ENABLED", "1")
+    monkeypatch.setenv("TRADE_DB_PATH", "./logs/custom.db")
+    monkeypatch.setenv("REGIME_GUARD_N_MARKETS", "6")
+
+    cfg = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert cfg.maker.requote_min_age_sec == 9.0
+    assert cfg.maker.digital_sigma_default == Decimal("0.77")
+    assert cfg.operations.auto_redeem_enabled is True
+    assert cfg.operations.trade_db_path == "./logs/custom.db"
+    assert cfg.risk.regime_guard_n_markets == 6
+
+
+def test_runtime_compatibility_overrides_install():
+    install_runtime_compatibility_overrides()
+
+    from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
+    from nautilus_trader.adapters.polymarket.execution import PolymarketExecutionClient
+    import py_clob_client.http_helpers.helpers as pyclob_helpers
+
+    assert getattr(PolymarketDataClient, "_btc15m_runtime_compat_patched", False) is True
+    assert getattr(PolymarketExecutionClient, "_btc15m_runtime_compat_patched", False) is True
+    assert getattr(pyclob_helpers, "_btc15m_runtime_compat_patched", False) is True

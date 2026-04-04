@@ -1,13 +1,111 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import time
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 from loguru import logger
 
 from bot.inventory import InventoryLedger
 from bot.post_trade import apply_fill_followup
+from execution.rebate_model import estimate_taker_buy_fee_shares, estimate_taker_fee_usdc
+
+
+@dataclass
+class FillLiquidityInterpretation:
+    liquidity_class: str
+    is_maker_fill: bool
+    effective_fee_usdc_dec: Decimal
+    effective_fee_shares_dec: Decimal
+    warning_message: str = ""
+
+
+class FillLedgerHost(Protocol):
+    live_inventory_cost: dict[str, Any]
+    maker_profit_run_peak_bid_by_inst: dict[str, Decimal]
+    maker_profit_run_peak_fair_by_inst: dict[str, Decimal]
+    recent_buy_fill_ts_by_inst: dict[str, float]
+    post_fill_buy_cooldown_sec: float
+    buy_cooldown_until_ts: float
+    fill_cooldown_policy: Any
+    market_cycle_realized_net_usdc: Decimal
+    recent_fill_pnl_results: list[Any]
+    quote_pause_until_ts: float
+
+    def _instrument_key(self, instrument_id: Any) -> str: ...
+    def _normalize_side_text(self, side: str) -> str: ...
+    def _clear_profit_run_state(self, instrument_id: Any) -> None: ...
+    def _db_strategy_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
+
+
+def classify_fill_liquidity(
+    liquidity_side: Any,
+    raw_commission_dec: Decimal,
+    maker_matched: bool,
+) -> str:
+    txt = str(liquidity_side or "").strip().upper()
+    if txt in {"MAKER", "1", "ADD", "ADD_LIQUIDITY", "PROVIDE", "PROVIDER"}:
+        return "maker"
+    if txt in {"TAKER", "2", "REMOVE", "REMOVE_LIQUIDITY", "TAKE", "TAKER_A", "TAKER_B"}:
+        return "taker"
+    if raw_commission_dec > 0:
+        return "taker"
+    if maker_matched:
+        return "maker"
+    return "unknown"
+
+
+def interpret_fill_liquidity(
+    *,
+    liquidity_side: Any,
+    raw_commission_dec: Decimal,
+    maker_matched: bool,
+    side_for_ledger: str,
+    fill_price_dec: Decimal,
+    fill_qty_dec: Decimal,
+    filled_limit_price: Decimal,
+    filled_id: str,
+) -> FillLiquidityInterpretation:
+    liquidity_class = classify_fill_liquidity(
+        liquidity_side=liquidity_side,
+        raw_commission_dec=raw_commission_dec,
+        maker_matched=maker_matched,
+    )
+    is_maker_fill = liquidity_class == "maker"
+    effective_fee_usdc_dec = Decimal("0")
+    effective_fee_shares_dec = Decimal("0")
+    if not is_maker_fill and side_for_ledger:
+        effective_fee_usdc_calc = estimate_taker_fee_usdc(
+            shares=fill_qty_dec,
+            probability=fill_price_dec,
+        )
+        if side_for_ledger == "buy":
+            effective_fee_shares_dec = estimate_taker_buy_fee_shares(
+                shares=fill_qty_dec,
+                probability=fill_price_dec,
+            )
+        else:
+            effective_fee_usdc_dec = effective_fee_usdc_calc
+    warning_message = ""
+    if maker_matched and liquidity_class == "taker" and filled_limit_price > 0 and side_for_ledger:
+        if (
+            (side_for_ledger == "buy" and fill_price_dec <= filled_limit_price)
+            or (side_for_ledger == "sell" and fill_price_dec >= filled_limit_price)
+        ):
+            warning_message = (
+                "Maker order fill was labeled taker despite passive price improvement "
+                f"(order={filled_id} side={side_for_ledger} limit={float(filled_limit_price):.4f} "
+                f"fill={float(fill_price_dec):.4f} liquidity_side={liquidity_side!r} "
+                f"commission={float(raw_commission_dec):.6f})"
+            )
+    return FillLiquidityInterpretation(
+        liquidity_class=liquidity_class,
+        is_maker_fill=is_maker_fill,
+        effective_fee_usdc_dec=effective_fee_usdc_dec,
+        effective_fee_shares_dec=effective_fee_shares_dec,
+        warning_message=warning_message,
+    )
 
 
 class FillLedgerMixin:
@@ -20,7 +118,7 @@ class FillLedgerMixin:
     """
 
     def _update_live_inventory_cost_from_fill(
-        self,
+        self: FillLedgerHost,
         instrument_id: Any,
         side: str,
         fill_price: Decimal,
@@ -68,7 +166,7 @@ class FillLedgerMixin:
         return realized_net
 
     def _record_market_buy_count_if_needed(
-        self,
+        self: FillLedgerHost,
         *,
         side_for_ledger: str,
         current_slug: str,
@@ -97,7 +195,7 @@ class FillLedgerMixin:
         )
 
     def _record_observed_fee_rate_from_fill(
-        self,
+        self: FillLedgerHost,
         *,
         side_for_ledger: str,
         fill_qty_dec: Decimal,
@@ -127,7 +225,7 @@ class FillLedgerMixin:
             logger.debug(f"Could not derive observed fee bps from fill: {e}")
 
     def _apply_post_fill_followup(
-        self,
+        self: FillLedgerHost,
         *,
         fill_side_norm: str | None,
         realized_net_usdc: Decimal | None,
