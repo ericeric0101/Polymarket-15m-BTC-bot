@@ -20,9 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 import random
-import httpx
 import re
-import json
 import threading
 import uuid
 import subprocess
@@ -94,7 +92,6 @@ from bot.market_data import (
     fetch_coinbase_spot_sync,
     record_external_spot_observation,
     resolve_opening_strike_from_history,
-    fetch_gamma_market_by_slug,
 )
 from bot.models import ExitDecisionType, MarketSnapshot, PositionState, SignalDecision
 from bot.quoting import (
@@ -113,27 +110,21 @@ from bot.quote_service import (
     extract_instrument_tick,
     log_no_quote_diagnostics,
     maybe_apply_continuation_entry,
+    maybe_apply_trapped_inventory_recovery,
     preserve_profitable_existing_sell_order,
     reconcile_unwanted_quotes,
     should_requote_existing_order,
 )
 from bot.settings import initialize_strategy_settings
+from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
+from bot.market_discovery import (
+    resolve_best_btc_15m_market,
+    resolve_btc_15m_market_slugs,
+    resolve_primary_btc_15m_instrument_ids,
+)
+from bot.merge_ops import try_merge_yes_no_positions
 
 load_dotenv()
-
-
-def _build_btc_15m_slug_candidates(lookback: int = 1, lookahead: int = 4) -> List[str]:
-    """
-    Build candidate BTC 15-min market slugs around current UTC interval.
-    """
-    now = datetime.now(timezone.utc)
-    interval_start = int(now.timestamp() // 900) * 900
-    slugs = []
-    for offset in range(-lookback, lookahead + 1):
-        ts = interval_start + (offset * 900)
-        if ts > 0:
-            slugs.append(f"btc-updown-15m-{ts}")
-    return slugs
 
 
 def detect_runtime_git_revision(repo_root: Path) -> str:
@@ -162,218 +153,6 @@ def detect_runtime_git_revision(repo_root: Path) -> str:
         return commit
     except Exception:
         return "unknown"
-
-
-async def _discover_existing_btc_15m_slugs(candidates: List[str]) -> List[str]:
-    """
-    Query Gamma API directly and keep only slugs that currently exist.
-    """
-    api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
-    existing: List[str] = []
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for slug in candidates:
-            try:
-                response = await client.get(
-                    f"{api_base}/markets",
-                    params={
-                        "active": "true",
-                        "closed": "false",
-                        "archived": "false",
-                        "slug": slug,
-                        "limit": 1,
-                    },
-                )
-                response.raise_for_status()
-                data = response.json()
-                if isinstance(data, list) and len(data) > 0:
-                    existing.append(slug)
-            except Exception as e:
-                logger.debug(f"Slug discovery failed for {slug}: {e}")
-
-    return existing
-
-
-def resolve_btc_15m_market_slugs() -> List[str]:
-    """
-    Resolve BTC 15-min market slugs without monkey patching Nautilus internals.
-    """
-    lookback = int(os.getenv("BTC_MARKET_LOOKBACK_INTERVALS", "1"))
-    lookahead = int(os.getenv("BTC_MARKET_LOOKAHEAD_INTERVALS", "4"))
-    candidates = _build_btc_15m_slug_candidates(lookback=lookback, lookahead=lookahead)
-    if not candidates:
-        return []
-
-    try:
-        existing = asyncio.run(_discover_existing_btc_15m_slugs(candidates))
-    except Exception as e:
-        logger.warning(f"Gamma discovery failed, using deterministic candidates: {e}")
-        existing = []
-
-    if existing:
-        logger.info(f"Resolved BTC 15-min slugs from Gamma API: {existing}")
-        return existing
-
-    # Fallback to current + future intervals if API is unreachable.
-    fallback = [s for s in candidates if int(s.rsplit("-", 1)[-1]) >= int(datetime.now(timezone.utc).timestamp()) - 900]
-    logger.warning(f"No confirmed slugs from Gamma API; using fallback candidates: {fallback}")
-    return fallback
-
-
-def select_primary_btc_15m_slug(slugs: List[str]) -> Optional[str]:
-    """
-    Select the nearest current/future 15m BTC slug (single value).
-    """
-    if not slugs:
-        return None
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    parsed: List[tuple[int, str]] = []
-    for slug in slugs:
-        try:
-            ts = int(slug.rsplit("-", 1)[-1])
-            parsed.append((ts, slug))
-        except Exception:
-            continue
-    if not parsed:
-        return slugs[0]
-    future = [(ts, s) for ts, s in parsed if ts >= now_ts - 900]
-    if future:
-        future.sort(key=lambda x: x[0])
-        return future[0][1]
-    parsed.sort(key=lambda x: x[0], reverse=True)
-    return parsed[0][1]
-
-
-# _fetch_gamma_market_by_slug was moved to bot.market_data.fetch_gamma_market_by_slug
-
-
-def _parse_json_list(value: Any) -> List[Any]:
-    if isinstance(value, list):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-        except Exception:
-            txt = value.strip()
-            if txt.startswith("[") and txt.endswith("]"):
-                txt = txt[1:-1]
-            return [p.strip().strip('"').strip("'") for p in txt.split(",") if p.strip()]
-    return []
-
-
-def _valid_token_id(value: Any) -> bool:
-    return bool(re.fullmatch(r"\d{20,}", str(value or "").strip()))
-
-
-async def _hydrate_gamma_market_details(market: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fetch /markets/{id} when list payload has incomplete token fields.
-    """
-    api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
-    market_id = market.get("id") or market.get("marketId") or market.get("conditionId") or market.get("condition_id")
-    if not market_id:
-        return market
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            response = await client.get(f"{api_base}/markets/{market_id}")
-            if response.status_code != 200:
-                return market
-            payload = response.json()
-            if isinstance(payload, dict):
-                merged = dict(market)
-                merged.update(payload)
-                return merged
-        except Exception:
-            return market
-    return market
-
-
-def _extract_instrument_ids_from_gamma_market(market: Dict[str, Any]) -> List[InstrumentId]:
-    """
-    Build Nautilus InstrumentIds from one Gamma market payload.
-    """
-    condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
-    if not condition_id:
-        return []
-
-    token_ids = _parse_json_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
-    if len(token_ids) < 2:
-        token_ids = _parse_json_list(market.get("clobTokenIDs"))
-    if len(token_ids) < 2:
-        tokens = market.get("tokens")
-        if isinstance(tokens, list):
-            token_ids = []
-            for token in tokens:
-                if not isinstance(token, dict):
-                    continue
-                token_id = token.get("token_id") or token.get("tokenId")
-                if _valid_token_id(token_id):
-                    token_ids.append(str(token_id))
-    token_ids = [str(token_id).strip() for token_id in token_ids if _valid_token_id(token_id)]
-
-    result: List[InstrumentId] = []
-    for token_id in token_ids:
-        try:
-            result.append(InstrumentId.from_str(f"{condition_id}-{token_id}.POLYMARKET"))
-        except Exception:
-            continue
-    return result
-
-
-def resolve_primary_btc_15m_instrument_ids(slug: str) -> List[InstrumentId]:
-    """
-    Resolve exact instrument IDs for a target BTC 15m slug.
-    """
-    try:
-        market = asyncio.run(fetch_gamma_market_by_slug(slug))
-    except Exception as e:
-        logger.warning(f"Failed to fetch Gamma market for slug {slug}: {e}")
-        return []
-
-    if not market:
-        logger.warning(f"No Gamma market found for slug: {slug}")
-        return []
-
-    instrument_ids = _extract_instrument_ids_from_gamma_market(market)
-    if not instrument_ids:
-        try:
-            hydrated = asyncio.run(_hydrate_gamma_market_details(market))
-        except Exception:
-            hydrated = market
-        instrument_ids = _extract_instrument_ids_from_gamma_market(hydrated)
-    if not instrument_ids:
-        logger.warning(f"No instrument IDs extracted from slug: {slug}")
-        return []
-    return instrument_ids
-
-
-def resolve_best_btc_15m_market(slugs: List[str]) -> tuple[Optional[str], List[InstrumentId]]:
-    """
-    Try candidate slugs in order and return the first slug with valid instrument IDs.
-    """
-    if not slugs:
-        return None, []
-
-    primary = select_primary_btc_15m_slug(slugs)
-    ordered: List[str] = []
-    if primary:
-        ordered.append(primary)
-    ordered.extend([s for s in slugs if s not in ordered])
-
-    for slug in ordered:
-        instrument_ids = resolve_primary_btc_15m_instrument_ids(slug)
-        if instrument_ids:
-            return slug, instrument_ids
-
-    return primary, []
-
-
-
-
 class IntegratedBTCStrategy(
     SideDecisionMixin,
     SpotPricerMixin,
@@ -557,6 +336,47 @@ class IntegratedBTCStrategy(
         if self.maker_sell_cost_protect_emergency_last_sec <= 0:
             return False
         return time_left_sec <= float(self.maker_sell_cost_protect_emergency_last_sec)
+
+    def _assess_thesis_weakened(
+        self,
+        *,
+        inst_id: Any,
+        now_ts: float,
+        side_score: Decimal,
+    ) -> bool:
+        inst_key = self._instrument_key(inst_id)
+        if not inst_key:
+            return False
+
+        raw_thesis_weakened = False
+        score = float(side_score)
+        opposite_score_abs = float(self.side_thesis_weak_opposite_score_abs_new)
+        requires_opposite_side = bool(self.side_thesis_weak_requires_opposite_side_new)
+        if self.active_side == ActiveSide.UP and score <= -opposite_score_abs:
+            raw_thesis_weakened = True
+        elif self.active_side == ActiveSide.DOWN and score >= opposite_score_abs:
+            raw_thesis_weakened = True
+        elif (
+            not requires_opposite_side
+            and self.active_side != ActiveSide.NONE
+            and abs(score) < float(self.side_thesis_weak_score_abs)
+        ):
+            raw_thesis_weakened = True
+
+        recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0))
+        if (
+            raw_thesis_weakened
+            and recent_buy_ts > 0
+            and self.side_thesis_weak_min_hold_sec_new > 0
+            and (now_ts - recent_buy_ts) < float(self.side_thesis_weak_min_hold_sec_new)
+        ):
+            self.side_thesis_weak_hits_by_inst[inst_key] = 0
+            return False
+
+        hits = int(self.side_thesis_weak_hits_by_inst.get(inst_key, 0))
+        hits = hits + 1 if raw_thesis_weakened else 0
+        self.side_thesis_weak_hits_by_inst[inst_key] = hits
+        return raw_thesis_weakened and hits >= int(self.side_thesis_weak_confirmations_new)
 
     def _normalize_active_side(self, side: Any) -> ActiveSide:
         txt = str(side or "").strip().upper()
@@ -997,11 +817,6 @@ class IntegratedBTCStrategy(
             import time as _time
             self._signal_engine.update_market_mid(mid_price, _time.time())
 
-    def _activate_maker_kill_switch(self, reason: str) -> None:
-        self.maker_kill_switch = True
-        self._cancel_active_maker_orders()
-        logger.error(f"MAKER KILL SWITCH ACTIVATED: {reason}")
-
     def _reset_maker_state_for_new_market(
         self,
         prev_instrument_id: Optional[str],
@@ -1032,27 +847,7 @@ class IntegratedBTCStrategy(
             self._startup_rehydrated_inventory_force_sell_only = False
             self.position_manager.clear_all()
         self.market_cycle_realized_net_usdc = Decimal("0")
-        self.pending_taker_exit_by_inst.clear()
-        self.taker_exit_tail_attempted_by_inst.clear()
-        self.taker_exit_last_eval_ts_by_inst.clear()
-        self.taker_exit_reject_cooldown_until_by_inst.clear()
-        self.taker_exit_stop_loss_hits_by_inst.clear()
-        self.stop_loss_reentry_pause_until_by_inst.clear()
-        self.side_stop_loss_penalty_until_by_market_side.clear()
-        self.market_stop_loss_count_by_slug.clear()
-        self.market_buy_count_by_slug.clear()
-        self.market_buy_counted_order_ids_by_slug.clear()
-        self.taker_exit_reason_by_client_order_id.clear()
-        self._taker_exit_skip_log_ts_by_key.clear()
-        self.high_cost_exit_cooldown_until_by_inst.clear()
-        self.high_cost_last_fill_price_by_inst.clear()
-        self._sell_reject_pause_until_by_inst.clear()
-        self._conditional_balance_cache_by_token.clear()
-        self.latest_quote_depth_by_inst.clear()
-        self.maker_profit_run_peak_bid_by_inst.clear()
-        self.maker_profit_run_peak_fair_by_inst.clear()
-        self.recent_buy_fill_ts_by_inst.clear()
-        self.orderbook_levels_cache_by_token.clear()
+        bind_market_cycle_state(self, MarketCycleState())
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
             self.maker_kill_switch = False
             logger.warning("Maker kill switch auto-reset on market rollover.")
@@ -1088,8 +883,6 @@ class IntegratedBTCStrategy(
         if side.lower() == "buy":
             return projected + in_flight_qty + qty
         return projected - in_flight_qty - qty
-
-    # Simulation logic extracted to execution/sim_adapter.py
 
     def _maybe_auto_tune(self, now_ts: float) -> None:
         if not self.auto_tune_enabled:
@@ -1158,28 +951,23 @@ class IntegratedBTCStrategy(
 
         return instruments
 
-    async def _quote_maker_orders(self, bid_price: Decimal, ask_price: Decimal) -> None:
-        """
-        Place symmetric maker quotes if expected net economics is positive.
-        """
+    async def _prepare_quote_cycle(self) -> Optional[Dict[str, Any]]:
         if self.maker_kill_switch:
-            return
+            return None
 
         if time.time() < self.quote_pause_until_ts:
-            return
+            return None
 
-        # --- Market Lifecycle Gate ---
         phase = self._update_market_phase()
         if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
             self._cancel_active_maker_orders()
-            return
+            return None
         await self._maybe_finalize_side_decision(time.time(), phase)
         if self.bi_side_enabled and self.active_side == ActiveSide.NONE:
             if self.inventory_delta_shares <= 0:
                 self._cancel_active_maker_orders()
-                return
+                return None
 
-        # --- Balance Pre-check (live only) ---
         _balance_forced_sell_only = False
         _regime_guard_active = False
         if not self._is_dry_run_mode():
@@ -1209,7 +997,7 @@ class IntegratedBTCStrategy(
                                 f"Skipping maker quotes."
                             )
                             self._last_balance_warn_ts = time.time()
-                        return
+                        return None
         if self.regime_guard_enabled:
             now_guard_ts = time.time()
             if self.regime_guard_conservative_until_ts > 0 and now_guard_ts >= self.regime_guard_conservative_until_ts:
@@ -1229,7 +1017,7 @@ class IntegratedBTCStrategy(
         now_ts = time.time()
         force_quote_refresh_once = bool(getattr(self, "_force_quote_refresh_once", False))
         if not force_quote_refresh_once and now_ts - self.last_quote_update_ts < self.quote_refresh_sec:
-            return
+            return None
         if force_quote_refresh_once:
             logger.info(
                 "Fast requote triggered after locked side change: "
@@ -1259,7 +1047,7 @@ class IntegratedBTCStrategy(
             self._activate_maker_kill_switch(
                 f"Inventory {self.inventory_delta_shares} exceeds max {self.maker_max_inventory_shares}"
             )
-            return
+            return None
 
         recent_vol = self._compute_recent_volatility()
         if recent_vol is None:
@@ -1275,9 +1063,8 @@ class IntegratedBTCStrategy(
         if not target_instruments:
             if self.bi_side_enabled:
                 self._cancel_active_maker_orders()
-            return
+            return None
 
-        # Refill Requote Token Bucket
         time_passed = max(0.0, now_ts - self.requote_bucket_last_refill)
         self.requote_bucket_tokens = min(
             self.maker_requote_max_per_sec,
@@ -1285,12 +1072,36 @@ class IntegratedBTCStrategy(
         )
         self.requote_bucket_last_refill = now_ts
 
-        desired_quotes: Dict[str, Dict[str, Any]] = {}
         target_inst_set = {str(inst) for inst in target_instruments}
-        diag_context_by_inst: Dict[str, Dict[str, Any]] = {}
-        submitted_attempts = 0
         end_ts = getattr(self, "current_market_end_timestamp", None)
         time_left_sec_global = (end_ts - now_ts) if end_ts is not None else None
+
+        return {
+            "phase": phase,
+            "forced_sell_only": _forced_sell_only,
+            "regime_guard_active": _regime_guard_active,
+            "now_ts": now_ts,
+            "recent_vol": recent_vol,
+            "target_instruments": target_instruments,
+            "target_inst_set": target_inst_set,
+            "end_ts": end_ts,
+            "time_left_sec_global": time_left_sec_global,
+        }
+
+    async def _evaluate_quote_targets(
+        self,
+        *,
+        phase: MarketPhase,
+        forced_sell_only: bool,
+        regime_guard_active: bool,
+        now_ts: float,
+        recent_vol: Optional[Decimal],
+        target_instruments: List[Any],
+        end_ts: Optional[float],
+        time_left_sec_global: Optional[float],
+    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+        desired_quotes: Dict[str, Dict[str, Any]] = {}
+        diag_context_by_inst: Dict[str, Dict[str, Any]] = {}
 
         for inst_id in target_instruments:
             quote_ctx = await build_quote_instrument_context(
@@ -1326,7 +1137,7 @@ class IntegratedBTCStrategy(
                 current_time_ts=now_ts,
                 tick_size=quote_ctx.tick,
                 recent_vol=recent_vol,
-                balance_forced_sell_only=_forced_sell_only,
+                balance_forced_sell_only=forced_sell_only,
                 bid_depth=quote_ctx.bid_depth,
                 ask_depth=quote_ctx.ask_depth,
                 bid_levels=quote_ctx.bid_levels,
@@ -1345,7 +1156,7 @@ class IntegratedBTCStrategy(
                 early_sell_only_sec=float(self.maker_early_sell_only_sec),
                 time_left_sec_global=time_left_sec_global,
                 directional_edge_gate_enabled=self.maker_directional_edge_gate_enabled,
-                regime_guard_active=_regime_guard_active,
+                regime_guard_active=regime_guard_active,
                 min_directional_edge_ps=self.maker_min_directional_edge_ps,
                 min_directional_edge_ps_conservative=self.maker_min_directional_edge_ps_conservative,
                 now_ts=now_ts,
@@ -1360,7 +1171,7 @@ class IntegratedBTCStrategy(
                 end_ts=end_ts,
                 min_minutes_to_close=self.maker_min_minutes_to_close,
                 reduce_only_no_new_sell_last_sec=self.maker_reduce_only_no_new_sell_last_sec,
-                forced_sell_only=_forced_sell_only,
+                forced_sell_only=forced_sell_only,
                 active_side=self.active_side.value,
                 min_directional_edge_ps_down=self.maker_min_directional_edge_ps_down,
             )
@@ -1575,19 +1386,11 @@ class IntegratedBTCStrategy(
                         and target_active_inst != inst_id
                     ):
                         _offside_confirmed = True
-                    score = float(self.side_decision_score)
-                    opposite_score_abs = float(self.side_thesis_weak_opposite_score_abs_new)
-                    requires_opposite_side = bool(self.side_thesis_weak_requires_opposite_side_new)
-                    if self.active_side == ActiveSide.UP and score <= -opposite_score_abs:
-                        _thesis_weakened = True
-                    elif self.active_side == ActiveSide.DOWN and score >= opposite_score_abs:
-                        _thesis_weakened = True
-                    elif (
-                        not requires_opposite_side
-                        and self.active_side != ActiveSide.NONE
-                        and abs(score) < float(self.side_thesis_weak_score_abs)
-                    ):
-                        _thesis_weakened = True
+                    _thesis_weakened = self._assess_thesis_weakened(
+                        inst_id=inst_id,
+                        now_ts=now_ts,
+                        side_score=self.side_decision_score,
+                    )
                     if quote_ctx.quote is not None:
                         self._update_profit_run_peaks(
                             inst_id,
@@ -1604,7 +1407,7 @@ class IntegratedBTCStrategy(
                     reduce_only_reason=reduce_only_reason,
                     reduce_only_tail_sell_block=reduce_only_tail_sell_block,
                     reduce_only_no_new_sell_last_sec=self.maker_reduce_only_no_new_sell_last_sec,
-                    forced_sell_only=_forced_sell_only,
+                    forced_sell_only=forced_sell_only,
                     min_expected_net_usdc=min_expected_net_usdc,
                     now_ts=now_ts,
                     sell_pause_until=sell_pause_until,
@@ -1669,6 +1472,22 @@ class IntegratedBTCStrategy(
                     maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
                     maker_reload_min_directional_edge_ps=self.maker_reload_min_directional_edge_ps,
                 )
+                desired_entry = maybe_apply_trapped_inventory_recovery(
+                    desired_entry=desired_entry,
+                    side=side,
+                    trapped_inventory_recovery_enabled=self.trapped_inventory_recovery_enabled,
+                    current_inst_inventory_qty=current_inst_inventory_qty,
+                    maker_exchange_min_shares=self.maker_exchange_min_shares,
+                    active_side_locked=bool(self.active_side_locked),
+                    inst_id=inst_id,
+                    active_instrument_id=self._instrument_for_side(self.active_side),
+                    latest_observation_supports_locked_side=self._latest_observation_supports_locked_side(
+                        self.active_side,
+                        self.side_decision_score,
+                    ),
+                    robust_net=desired_entry.get("robust_net"),
+                    max_robust_net_deficit_usdc=self.trapped_inventory_recovery_max_robust_net_deficit_usdc,
+                )
                 if side == "buy" and quote_ctx.quote is not None:
                     locked_for_sec = (
                         max(0.0, now_ts - float(getattr(self, "active_side_locked_since_ts", 0.0)))
@@ -1692,6 +1511,20 @@ class IntegratedBTCStrategy(
                         continuation_size_multiplier=self.continuation_entry_size_multiplier,
                     )
                 desired_quotes[order_key] = desired_entry
+
+        return desired_quotes, diag_context_by_inst
+
+    async def _submit_quote_cycle(
+        self,
+        *,
+        phase: MarketPhase,
+        now_ts: float,
+        target_instruments: List[Any],
+        target_inst_set: Set[str],
+        desired_quotes: Dict[str, Dict[str, Any]],
+        diag_context_by_inst: Dict[str, Dict[str, Any]],
+    ) -> None:
+        submitted_attempts = 0
 
         reconcile_unwanted_quotes(
             active_maker_orders=self.active_maker_orders,
@@ -1730,7 +1563,7 @@ class IntegratedBTCStrategy(
                 tick=tick,
                 maker_requote_hysteresis_ticks=self.maker_requote_hysteresis_ticks,
                 target_anchor_price_by_order_key=self._target_anchor_price_by_order_key,
-                target_version_by_order_key=self._target_version_by_order_key,
+            target_version_by_order_key=self._target_version_by_order_key,
             )
 
             current = self.active_maker_orders.get(order_key)
@@ -1788,6 +1621,32 @@ class IntegratedBTCStrategy(
             logger_info_fn=logger.info,
             reason_family_fn=self._reason_family,
             strategy_event_fn=self._db_strategy_event,
+        )
+
+    async def _quote_maker_orders(self, bid_price: Decimal, ask_price: Decimal) -> None:
+        """
+        Place symmetric maker quotes if expected net economics is positive.
+        """
+        cycle = await self._prepare_quote_cycle()
+        if cycle is None:
+            return
+        desired_quotes, diag_context_by_inst = await self._evaluate_quote_targets(
+            phase=cycle["phase"],
+            forced_sell_only=cycle["forced_sell_only"],
+            regime_guard_active=cycle["regime_guard_active"],
+            now_ts=cycle["now_ts"],
+            recent_vol=cycle["recent_vol"],
+            target_instruments=cycle["target_instruments"],
+            end_ts=cycle["end_ts"],
+            time_left_sec_global=cycle["time_left_sec_global"],
+        )
+        await self._submit_quote_cycle(
+            phase=cycle["phase"],
+            now_ts=cycle["now_ts"],
+            target_instruments=cycle["target_instruments"],
+            target_inst_set=cycle["target_inst_set"],
+            desired_quotes=desired_quotes,
+            diag_context_by_inst=diag_context_by_inst,
         )
 
     async def _submit_maker_quote(
@@ -1977,14 +1836,6 @@ class IntegratedBTCStrategy(
             current_price = (quote.bid_price + quote.ask_price) / 2
             self.price_history.append(current_price)
         
-        # Try to get historical quotes from cache
-        # Note: This depends on your data provider storing history
-        quotes = self.cache.quote_tick(self.instrument_id)
-        if quotes and len(quotes) > 0:
-            for quote in quotes[-20:]:  # Take last 20 quotes
-                mid_price = (quote.bid_price + quote.ask_price) / 2
-                self.price_history.append(mid_price)
-        
         self.price_history = dedupe_price_history(self.price_history)
         
         # If still not enough, generate synthetic data
@@ -2084,164 +1935,27 @@ class IntegratedBTCStrategy(
             self._try_merge_yes_no_positions()
 
     def _try_merge_yes_no_positions(self) -> None:
-        """
-        Check if we hold both YES and NO tokens for the same condition.
-        If so, merge the minimum overlapping amount back to USDC.
-        This recovers locked capital.
-        """
-        try:
-            pk = os.getenv("POLYMARKET_PK", "").strip()
-            if not pk or int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")) != 0:
-                return  # Can't do direct on-chain tx without EOA
-
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-
-            clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
-            rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
-            chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
-
-            # Get current instruments to find YES/NO pairs
-            instruments = self.cache.instruments() if hasattr(self, 'cache') else []
-            if not instruments:
-                return
-
-            # Group instruments by condition_id (market)
-            from collections import defaultdict
-            condition_pairs: dict[str, list] = defaultdict(list)
-            for inst in instruments:
-                if hasattr(inst, 'info') and inst.info:
-                    condition_id = inst.info.get('condition_id', '')
-                    if condition_id:
-                        token_id = inst.info.get('token_id', '')
-                        if token_id:
-                            condition_pairs[condition_id].append({
-                                'token_id': token_id,
-                                'instrument': inst,
-                            })
-
-            # Only check conditions with 2 tokens (YES + NO)
-            if not hasattr(self, '_balance_clob_client') or self._balance_clob_client is None:
-                return
-            client = self._balance_clob_client
-
-            for condition_id, tokens in condition_pairs.items():
-                if len(tokens) < 2:
-                    continue
-
-                # Query on-chain balance for each token
-                balances = []
-                for t in tokens:
-                    try:
-                        params = BalanceAllowanceParams(
-                            asset_type=AssetType.CONDITIONAL,
-                            token_id=t['token_id'],
-                            signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
-                        )
-                        result = client.get_balance_allowance(params)
-                        balance_raw = int(result.get("balance", "0")) if result else 0
-                        balances.append(balance_raw)
-                    except Exception:
-                        balances.append(0)
-
-                # If we hold both tokens, merge the minimum amount
-                min_balance = min(balances)
-                if min_balance < 100000:  # Less than 0.1 USDC worth, skip
-                    continue
-
-                merge_amount_usdc = min_balance / 1_000_000
-                logger.info(
-                    f"Merge opportunity detected! condition={condition_id[:16]}... "
-                    f"overlap={merge_amount_usdc:.4f} USDC — executing merge"
-                )
-
-                # Execute on-chain merge
-                success = self._execute_merge_on_chain(
-                    pk=pk,
-                    condition_id=condition_id,
-                    amount=min_balance,
-                    rpc_url=rpc_url,
-                    chain_id=chain_id,
-                )
-                
-                # Deduct from live_inventory_cost if successful to prevent ghost inventory
-                if success:
-                    deduct_qty = Decimal(str(merge_amount_usdc))
-                    old_delta, self.inventory_delta_shares = adjust_inventory_after_merge(
-                        tokens=tokens,
-                        deduct_qty=deduct_qty,
-                        live_inventory_cost=self.live_inventory_cost,
-                        inventory_delta_shares=self.inventory_delta_shares,
-                        instrument_key_fn=self._instrument_key,
-                    )
-                    logger.info(
-                        f"Deducted {float(deduct_qty):.6f} from live_inventory_cost "
-                        f"and inventory_delta after merge. "
-                        f"delta {float(old_delta):.6f} -> {float(self.inventory_delta_shares):.6f}"
-                    )
-
-        except Exception as e:
-            logger.debug(f"Merge check failed: {e}")
+        try_merge_yes_no_positions(
+            strategy=self,
+            logger_info_fn=logger.info,
+            logger_debug_fn=logger.debug,
+            logger_warning_fn=logger.warning,
+            adjust_inventory_after_merge_fn=adjust_inventory_after_merge,
+        )
 
     def _execute_merge_on_chain(
         self, pk: str, condition_id: str, amount: int, rpc_url: str, chain_id: int
     ) -> bool:
-        """Execute CTF mergePositions on-chain."""
-        try:
-            from web3 import Web3
-            from web3.middleware import ExtraDataToPOAMiddleware
-
-            CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-            USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            CTF_MERGE_ABI = [{
-                "inputs": [
-                    {"internalType": "address", "name": "collateralToken", "type": "address"},
-                    {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
-                    {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
-                    {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"},
-                    {"internalType": "uint256", "name": "amount", "type": "uint256"},
-                ],
-                "name": "mergePositions",
-                "outputs": [],
-                "stateMutability": "nonpayable",
-                "type": "function",
-            }]
-
-            w3 = Web3(Web3.HTTPProvider(rpc_url))
-            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-
-            from eth_account import Account
-            acct = Account.from_key(pk)
-            owner = w3.to_checksum_address(acct.address)
-
-            contract = w3.eth.contract(
-                address=w3.to_checksum_address(CTF_ADDRESS),
-                abi=CTF_MERGE_ABI,
-            )
-
-            tx = contract.functions.mergePositions(
-                w3.to_checksum_address(USDC_ADDRESS),
-                b"\x00" * 32,
-                Web3.to_bytes(hexstr=condition_id),
-                [1, 2],  # YES=1, NO=2
-                amount,
-            ).build_transaction({
-                "chainId": chain_id,
-                "from": owner,
-                "nonce": w3.eth.get_transaction_count(owner, "pending"),
-            })
-            signed = w3.eth.account.sign_transaction(tx, private_key=pk)
-            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
-            receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=120)
-            usdc_recovered = amount / 1_000_000
-            logger.info(
-                f"✓ Merge SUCCESS: condition={condition_id[:16]}... "
-                f"recovered={usdc_recovered:.4f} USDC tx={txh.hex()} status={receipt.status}"
-            )
-            return receipt.status == 1
-        except Exception as e:
-            logger.warning(f"Merge on-chain failed: {e}")
-            return False
+        from bot.merge_ops import execute_merge_on_chain
+        return execute_merge_on_chain(
+            pk=pk,
+            condition_id=condition_id,
+            amount=amount,
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            logger_info_fn=logger.info,
+            logger_warning_fn=logger.warning,
+        )
 
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """

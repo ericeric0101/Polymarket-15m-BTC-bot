@@ -10,11 +10,16 @@ from bot.app_config import AppConfig
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
+from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisionType
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
-from bot.quote_service import maybe_apply_continuation_entry, retreat_crossing_buy_quote
+from bot.quote_service import (
+    maybe_apply_continuation_entry,
+    maybe_apply_trapped_inventory_recovery,
+    retreat_crossing_buy_quote,
+)
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
@@ -1530,3 +1535,55 @@ def test_runtime_compatibility_overrides_install():
     assert getattr(PolymarketDataClient, "_btc15m_runtime_compat_patched", False) is True
     assert getattr(PolymarketExecutionClient, "_btc15m_runtime_compat_patched", False) is True
     assert getattr(pyclob_helpers, "_btc15m_runtime_compat_patched", False) is True
+
+
+def test_app_config_rejects_invalid_patch_mode(monkeypatch):
+    monkeypatch.setenv("NAUTILUS_COMPAT_PATCH_MODE", "bad-mode")
+
+    try:
+        AppConfig.from_env(enable_terminal_dashboard=False)
+        assert False, "expected invalid patch mode to raise"
+    except ValueError as exc:
+        assert "patch mode" in str(exc)
+
+
+def test_market_cycle_state_binding_replaces_per_market_containers():
+    strategy = SimpleNamespace()
+    first = MarketCycleState()
+    bind_market_cycle_state(strategy, first)
+    strategy.pending_taker_exit_by_inst["inst-up"] = "order-1"
+
+    second = MarketCycleState()
+    bind_market_cycle_state(strategy, second)
+
+    assert strategy.market_cycle_state is second
+    assert strategy.pending_taker_exit_by_inst == {}
+    assert strategy.pending_taker_exit_by_inst is second.pending_taker_exit_by_inst
+
+
+def test_trapped_inventory_recovery_overrides_buy_cooldown():
+    desired = {
+        "should_quote": False,
+        "diag_reason": "side_disabled:post_fill_buy_cooldown_12s",
+        "robust_net": Decimal("0.03"),
+        "entry_mode": "value",
+        "size_multiplier": Decimal("1"),
+    }
+
+    out = maybe_apply_trapped_inventory_recovery(
+        desired_entry=desired,
+        side="buy",
+        trapped_inventory_recovery_enabled=True,
+        current_inst_inventory_qty=Decimal("3.0"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        active_side_locked=True,
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        latest_observation_supports_locked_side=True,
+        robust_net=Decimal("0.03"),
+        max_robust_net_deficit_usdc=Decimal("0.05"),
+    )
+
+    assert out["should_quote"] is True
+    assert out["entry_mode"] == "topup"
+    assert "trapped_inventory_recovery" in out["diag_reason"]

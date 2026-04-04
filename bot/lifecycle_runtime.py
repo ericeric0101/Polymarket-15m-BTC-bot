@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from decimal import Decimal
+from typing import Any, Dict, Protocol
 
 from loguru import logger
 
@@ -10,6 +11,36 @@ from bot.enums import ActiveSide, MarketPhase
 from bot.lifecycle import determine_lifecycle_timer_action, select_next_market_window
 from bot.ops import handle_waiting_phase_search
 from bot.post_trade import compute_settlement_summary
+
+
+class StrategyLifecycleHost(Protocol):
+    """
+    Minimum runtime contract for StrategyLifecycleMixin.
+
+    The mixin still relies on many strategy-level methods; this protocol lists
+    the critical ones so lifecycle refactors do not break silently.
+    """
+
+    market_phase: MarketPhase
+    current_market_slug: str
+    current_market_end_timestamp: Any
+    inventory_delta_shares: Decimal
+    market_cycle_realized_net_usdc: Decimal
+    active_side: ActiveSide
+    active_maker_orders: Dict[str, Dict[str, Any]]
+
+    def _db_strategy_event(self, event_type: str, payload: Dict[str, Any]) -> None: ...
+    def _cancel_active_maker_orders(self) -> None: ...
+    def _cancel_maker_order_side(self, order_key: str, reason: str = "") -> None: ...
+    def _record_market_settlement(self) -> None: ...
+    def _update_terminal_dashboard_snapshot(self) -> None: ...
+    def _append_cycle_and_maybe_trigger_regime_guard(
+        self,
+        *,
+        cycle_combined_pnl: float,
+        slug: str,
+        source: str,
+    ) -> None: ...
 
 
 class StrategyLifecycleMixin:

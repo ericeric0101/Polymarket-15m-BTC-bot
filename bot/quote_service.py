@@ -145,6 +145,49 @@ def attach_desired_entry_runtime_metadata(
     return desired_entry
 
 
+def maybe_apply_trapped_inventory_recovery(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    trapped_inventory_recovery_enabled: bool,
+    current_inst_inventory_qty: Decimal,
+    maker_exchange_min_shares: Decimal,
+    active_side_locked: bool,
+    inst_id: Any,
+    active_instrument_id: Any,
+    latest_observation_supports_locked_side: bool,
+    robust_net: Decimal | None,
+    max_robust_net_deficit_usdc: Decimal,
+) -> dict[str, Any]:
+    if (
+        side != "buy"
+        or not trapped_inventory_recovery_enabled
+        or current_inst_inventory_qty <= 0
+        or current_inst_inventory_qty + Decimal("0.000001") >= maker_exchange_min_shares
+        or not active_side_locked
+        or inst_id != active_instrument_id
+        or not latest_observation_supports_locked_side
+    ):
+        return desired_entry
+    diag_reason = str(desired_entry.get("diag_reason", "") or "")
+    if not (
+        diag_reason.startswith("side_disabled:post_fill_buy_cooldown")
+        or diag_reason.startswith("econ_gate")
+        or diag_reason.startswith("side_disabled:edge_gate_buy")
+    ):
+        return desired_entry
+    if isinstance(robust_net, Decimal) and robust_net < -abs(max_robust_net_deficit_usdc):
+        return desired_entry
+    desired_entry["should_quote"] = True
+    desired_entry["diag_reason"] = (
+        f"trapped_inventory_recovery qty={float(current_inst_inventory_qty):.6f} "
+        f"< min={float(maker_exchange_min_shares):.6f} prev={diag_reason or 'blocked'}"
+    )
+    desired_entry["entry_mode"] = "topup"
+    desired_entry["size_multiplier"] = Decimal("1")
+    return desired_entry
+
+
 def apply_confirmed_inventory_sell_guard(
     *,
     desired_entry: dict[str, Any],

@@ -60,6 +60,10 @@ class CompatibilityConfig:
     patch_mode: str
     auto_apply_patches: bool
 
+    def __post_init__(self) -> None:
+        if self.patch_mode not in {"off", "verify", "runtime"}:
+            raise ValueError(f"Unsupported compatibility patch mode: {self.patch_mode}")
+
 
 @dataclass(frozen=True)
 class MakerConfig:
@@ -142,6 +146,8 @@ class MakerConfig:
     implied_sigma_weight: Decimal
     continuation_entry_enabled: bool
     continuation_entry_size_multiplier: Decimal
+    trapped_inventory_recovery_enabled: bool
+    trapped_inventory_recovery_max_robust_net_deficit_usdc: Decimal
     sell_cost_protect_enabled: bool
     sell_cost_protect_fee_buffer_ps: Decimal
     sell_min_profit_floor_ps: Decimal
@@ -160,6 +166,18 @@ class MakerConfig:
     loss_pause_sec: float
     gate_block_grace_sec: int
     cancel_ack_dedupe_window_sec: int
+
+    def __post_init__(self) -> None:
+        if self.half_spread < 0:
+            raise ValueError("MAKER_HALF_SPREAD must be >= 0")
+        if self.quote_size_usdc <= 0:
+            raise ValueError("MAKER_QUOTE_SIZE_USDC must be > 0")
+        if self.min_shares <= 0 or self.exchange_min_shares <= 0:
+            raise ValueError("Maker min share settings must be > 0")
+        if self.reload_inventory_threshold_shares < 0:
+            raise ValueError("MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES must be >= 0")
+        if self.continuation_entry_size_multiplier <= 0:
+            raise ValueError("CONTINUATION_ENTRY_SIZE_MULTIPLIER must be > 0")
 
 
 @dataclass(frozen=True)
@@ -199,6 +217,8 @@ class SideDecisionConfig:
     side_thesis_weak_score_abs: Decimal
     side_thesis_weak_requires_opposite_side_new: bool
     side_thesis_weak_opposite_score_abs_new: Decimal
+    side_thesis_weak_confirmations_new: int
+    side_thesis_weak_min_hold_sec_new: int
     btc_ema_fast_sec: float
     btc_ema_slow_sec: float
     mid_ema_fast_sec: float
@@ -206,6 +226,16 @@ class SideDecisionConfig:
     btc_trend_norm_pct: float
     mid_velocity_reversal: float
     skip_log_interval_sec: float
+
+    def __post_init__(self) -> None:
+        if self.flip_confirmations < 1 or self.flip_confirmations_held < 1:
+            raise ValueError("Side flip confirmations must be >= 1")
+        if self.side_thesis_weak_confirmations_new < 1:
+            raise ValueError("SIDE_THESIS_WEAK_CONFIRMATIONS_NEW must be >= 1")
+        if self.directional_entry_min_score_abs_new < 0:
+            raise ValueError("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
+        if self.side_thesis_weak_opposite_score_abs_new < 0:
+            raise ValueError("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -258,6 +288,12 @@ class ExitConfig:
     maker_profit_run_min_score_abs: Decimal
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
+
+    def __post_init__(self) -> None:
+        if self.taker_exit_stop_loss_confirmations < 1:
+            raise ValueError("TAKER_EXIT_STOP_LOSS_CONFIRMATIONS must be >= 1")
+        if self.maker_urgent_exit_min_confirmations < 1:
+            raise ValueError("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -499,6 +535,11 @@ class AppConfig:
                 implied_sigma_weight=_env_decimal("MAKER_DIGITAL_IMPLIED_SIGMA_WEIGHT", "0.50"),
                 continuation_entry_enabled=_env_bool_inverted("CONTINUATION_ENTRY_ENABLED", True),
                 continuation_entry_size_multiplier=_env_decimal("CONTINUATION_ENTRY_SIZE_MULTIPLIER", "1.0"),
+                trapped_inventory_recovery_enabled=_env_bool_inverted("TRAPPED_INVENTORY_RECOVERY_ENABLED", True),
+                trapped_inventory_recovery_max_robust_net_deficit_usdc=_env_decimal(
+                    "TRAPPED_INVENTORY_RECOVERY_MAX_ROBUST_NET_DEFICIT_USDC",
+                    "0.05",
+                ),
                 sell_cost_protect_enabled=_env_bool_inverted("MAKER_SELL_COST_PROTECT_ENABLED", True),
                 sell_cost_protect_fee_buffer_ps=_env_decimal("MAKER_SELL_COST_PROTECT_FEE_BUFFER_PS", "0.005"),
                 sell_min_profit_floor_ps=_env_decimal("MAKER_SELL_MIN_PROFIT_FLOOR_PS", "0"),
@@ -554,6 +595,8 @@ class AppConfig:
                 side_thesis_weak_score_abs=_env_decimal("SIDE_THESIS_WEAK_SCORE_ABS_NEW", str(entry_score_abs_default)),
                 side_thesis_weak_requires_opposite_side_new=_env_bool_inverted("SIDE_THESIS_WEAK_REQUIRES_OPPOSITE_SIDE_NEW", True),
                 side_thesis_weak_opposite_score_abs_new=_env_decimal("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW", str(held_flip_default)),
+                side_thesis_weak_confirmations_new=max(1, _env_int("SIDE_THESIS_WEAK_CONFIRMATIONS_NEW", 3)),
+                side_thesis_weak_min_hold_sec_new=max(0, _env_int("SIDE_THESIS_WEAK_MIN_HOLD_SEC_NEW", 45)),
                 btc_ema_fast_sec=_env_float("SIDE_SIGNAL_BTC_EMA_FAST_SEC", 3.0),
                 btc_ema_slow_sec=_env_float("SIDE_SIGNAL_BTC_EMA_SLOW_SEC", 10.0),
                 mid_ema_fast_sec=_env_float("SIDE_SIGNAL_MID_EMA_FAST_SEC", 5.0),

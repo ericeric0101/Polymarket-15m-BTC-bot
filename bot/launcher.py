@@ -32,11 +32,13 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.app_config import AppConfig
 from bot.compat_patches import apply_compatibility_patches
-from run_bot import (
-    IntegratedBTCStrategy,
+from bot.market_discovery import (
     resolve_best_btc_15m_market,
     resolve_btc_15m_market_slugs,
     resolve_primary_btc_15m_instrument_ids,
+)
+from run_bot import (
+    IntegratedBTCStrategy,
 )
 
 

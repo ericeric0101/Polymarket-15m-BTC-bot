@@ -69,9 +69,14 @@ def submit_maker_quote(
     qty_dec = strategy._compute_maker_order_qty(limit_price, precision)
     if side == "buy":
         entry_mode = str((directional_snapshot or {}).get("entry_mode", "value") or "value").lower()
-        if entry_mode == "continuation":
+        if entry_mode in {"continuation", "topup"}:
             size_multiplier = Decimal(
-                str((directional_snapshot or {}).get("size_multiplier", strategy.continuation_entry_size_multiplier))
+                str(
+                    (directional_snapshot or {}).get(
+                        "size_multiplier",
+                        strategy.continuation_entry_size_multiplier if entry_mode == "continuation" else Decimal("1"),
+                    )
+                )
             )
             min_buy_qty = max(strategy.maker_min_shares, strategy.maker_exchange_min_shares)
             qty_dec = max(qty_dec * size_multiplier, min_buy_qty)

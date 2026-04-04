@@ -14,7 +14,7 @@ import json
 import sqlite3
 import time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 from loguru import logger
 
@@ -22,6 +22,40 @@ from bot.enums import ActiveSide, MarketPhase
 from bot.market_data import extract_market_start_ts_from_slug
 from bot.signal_engine import SignalEngine
 from execution.maker_engine import MakerEngine
+
+
+class SideDecisionHost(Protocol):
+    """
+    Minimum contract expected by SideDecisionMixin.
+
+    This is intentionally incomplete; it documents the highest-risk runtime
+    dependencies so refactors do not silently drop required state.
+    """
+
+    active_side: ActiveSide
+    active_side_locked: bool
+    active_side_locked_since_ts: float
+    bi_side_enabled: bool
+    bi_side_default_mode: str
+    side_decision_score: Decimal
+    side_decision_reason: str
+    side_decision_due_ts: float
+    side_decision_done_for_market: bool
+    side_flip_count: int
+    current_market_slug: str
+    current_market_open_spot: Any
+    market_strike_source_by_slug: Dict[str, str]
+    external_spot_history: List[Any]
+    active_maker_orders: Dict[str, Any]
+    _signal_engine: SignalEngine
+
+    def _normalize_active_side(self, value: Any) -> ActiveSide: ...
+    def _sync_active_instrument(self) -> None: ...
+    def _cancel_maker_order_side(self, order_key: str, reason: str = "") -> None: ...
+    def _instrument_for_side(self, side: ActiveSide) -> Any: ...
+    def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
+    def _primary_instrument_for_market(self) -> Any: ...
+    def _db_strategy_event(self, event_type: str, payload: Dict[str, Any]) -> None: ...
 
 
 class SideDecisionMixin:

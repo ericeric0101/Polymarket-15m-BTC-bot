@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from loguru import logger
 
 from bot.app_config import AppConfig
+from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.enums import ActiveSide, MarketPhase
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import normalize_quote_mode
@@ -177,6 +178,10 @@ def initialize_strategy_settings(
     strategy.directional_entry_min_score_abs = strategy.directional_entry_min_score_abs_new
     strategy.continuation_entry_enabled = config.maker.continuation_entry_enabled
     strategy.continuation_entry_size_multiplier = config.maker.continuation_entry_size_multiplier
+    strategy.trapped_inventory_recovery_enabled = config.maker.trapped_inventory_recovery_enabled
+    strategy.trapped_inventory_recovery_max_robust_net_deficit_usdc = (
+        config.maker.trapped_inventory_recovery_max_robust_net_deficit_usdc
+    )
     strategy.side_signal_btc_ema_fast_sec = config.side.btc_ema_fast_sec
     strategy.side_signal_btc_ema_slow_sec = config.side.btc_ema_slow_sec
     strategy.side_signal_mid_ema_fast_sec = config.side.mid_ema_fast_sec
@@ -238,6 +243,8 @@ def initialize_strategy_settings(
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
     strategy.side_thesis_weak_requires_opposite_side_new = config.side.side_thesis_weak_requires_opposite_side_new
     strategy.side_thesis_weak_opposite_score_abs_new = config.side.side_thesis_weak_opposite_score_abs_new
+    strategy.side_thesis_weak_confirmations_new = config.side.side_thesis_weak_confirmations_new
+    strategy.side_thesis_weak_min_hold_sec_new = config.side.side_thesis_weak_min_hold_sec_new
     strategy.exit_conviction_band_min_score_abs = config.exit.exit_conviction_band_min_score_abs
     strategy.exit_hold_band_min_score_abs = config.exit.exit_hold_band_min_score_abs
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
@@ -410,9 +417,6 @@ def initialize_strategy_settings(
     strategy.no_quote_diag_interval_sec = config.observability.no_quote_diag_interval_sec
     strategy._last_no_quote_diag_ts_by_inst = {}
     strategy._last_sellable_skip_log_ts_by_inst = {}
-    strategy.maker_profit_run_peak_bid_by_inst = {}
-    strategy.maker_profit_run_peak_fair_by_inst = {}
-    strategy.recent_buy_fill_ts_by_inst = {}
     strategy.sellable_fallback_after_buy_sec = config.operations.sellable_fallback_after_buy_sec
     strategy.sellable_after_buy_buffer_shares = config.operations.sellable_after_buy_buffer_shares
     strategy.maker_gate_block_grace_sec = config.maker.gate_block_grace_sec
@@ -428,20 +432,7 @@ def initialize_strategy_settings(
     strategy._last_digital_pricer_log_ts = 0.0
     strategy.live_inventory_cost = {}
     strategy.last_taker_exit_ts_by_inst = {}
-    strategy.pending_taker_exit_by_inst = {}
-    strategy.taker_exit_reason_by_client_order_id = {}
-    strategy.taker_exit_tail_attempted_by_inst = {}
-    strategy.taker_exit_last_eval_ts_by_inst = {}
-    strategy.taker_exit_reject_cooldown_until_by_inst = {}
-    strategy.taker_exit_stop_loss_hits_by_inst = {}
-    strategy.stop_loss_reentry_pause_until_by_inst = {}
-    strategy.side_stop_loss_penalty_until_by_market_side = {}
-    strategy.market_stop_loss_count_by_slug = {}
-    strategy.market_buy_count_by_slug = {}
-    strategy.market_buy_counted_order_ids_by_slug = {}
-    strategy._taker_exit_skip_log_ts_by_key = {}
-    strategy.high_cost_exit_cooldown_until_by_inst = {}
-    strategy.high_cost_last_fill_price_by_inst = {}
+    bind_market_cycle_state(strategy, MarketCycleState())
     strategy.market_cycle_realized_net_usdc = Decimal("0")
     strategy.recent_market_combined_pnls = deque(maxlen=strategy.regime_guard_n_markets)
     strategy.regime_guard_conservative_until_ts = 0.0
@@ -454,8 +445,6 @@ def initialize_strategy_settings(
     strategy.latest_market_bid_ts = 0.0
     strategy.latest_market_ask_ts = 0.0
     strategy.stale_quote_synth_max_age_sec = config.market_data.stale_quote_synth_max_age_sec
-    strategy.latest_quote_depth_by_inst = {}
-    strategy.orderbook_levels_cache_by_token = {}
     strategy._inventory_delta_shares = Decimal("0")
     strategy._startup_rehydrated_inventory_force_sell_only = False
     strategy.inventory_last_update_ts = 0.0
