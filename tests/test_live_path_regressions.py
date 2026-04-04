@@ -16,10 +16,14 @@ from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisi
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
+    build_desired_quote_entry,
+    build_directional_snapshot,
     maybe_apply_continuation_entry,
     maybe_apply_trapped_inventory_recovery,
+    preserve_recent_loss_sell_order,
     retreat_crossing_buy_quote,
 )
+from bot.order_submission import submit_maker_quote
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
@@ -266,6 +270,76 @@ class DummyStrategyForRehydrate:
 
     def _db_strategy_event(self, event_type, payload=None):
         self.strategy_events.append((event_type, payload or {}))
+
+
+class DummyOrderFactory:
+    def limit(self, **kwargs):
+        return SimpleNamespace(**kwargs)
+
+
+class DummyTrendSubmitStrategy:
+    def __init__(self) -> None:
+        self.instrument = SimpleNamespace(size_precision=6, price_precision=3, price_increment=Decimal("0.01"))
+        self.order_factory = DummyOrderFactory()
+        self.maker_use_post_only = False
+        self.maker_post_only_strict = False
+        self.maker_min_shares = Decimal("5.4")
+        self.maker_exchange_min_shares = Decimal("5.0")
+        self.continuation_entry_size_multiplier = Decimal("1.0")
+        self.trend_buy_size_multiplier = Decimal("1.5")
+        self.stop_loss_reentry_pause_until_by_inst = {}
+        self.inventory_delta_shares = Decimal("0")
+        self.maker_max_inventory_shares = Decimal("20")
+        self._sell_recovery_required_by_inst = {}
+        self._sell_recovery_reason_by_inst = {}
+        self._sell_recovery_venue_cap_by_inst = {}
+        self.active_maker_orders = {}
+        self.rebate_reporter = SimpleNamespace(record_quote=lambda **kwargs: None)
+        self.submitted_orders = []
+        self.order_events = []
+        self.consecutive_denied_orders = 0
+
+    @property
+    def cache(self):
+        return SimpleNamespace(instrument=lambda _instrument_id: self.instrument)
+
+    def _normalize_instrument_id(self, instrument_id):
+        return instrument_id
+
+    def _align_price_to_tick(self, limit_price, _side, _instrument):
+        return limit_price
+
+    def _get_quote_for_instrument(self, _instrument_id):
+        return None
+
+    def _should_skip_buy_submit_for_quote_drift(self, **_kwargs):
+        return False
+
+    def _compute_maker_order_qty(self, _limit_price, _precision):
+        return Decimal("5.4")
+
+    def _instrument_key(self, instrument_id):
+        return str(instrument_id)
+
+    def _project_inventory_after_fill(self, side, qty_dec, instrument_id=None):
+        if side == "buy":
+            return self.inventory_delta_shares + qty_dec
+        return self.inventory_delta_shares - qty_dec
+
+    def _is_dry_run_mode(self):
+        return False
+
+    def _extract_token_id_from_instrument(self, _instrument_id):
+        return "token-1"
+
+    def _order_key_for(self, side, instrument_id):
+        return f"{side}:{instrument_id}"
+
+    def submit_order(self, order):
+        self.submitted_orders.append(order)
+
+    def _db_order_event(self, **kwargs):
+        self.order_events.append(kwargs)
 
 
 class DummyMakerInstrumentStrategy:
@@ -1575,6 +1649,7 @@ def test_trapped_inventory_recovery_overrides_buy_cooldown():
         side="buy",
         trapped_inventory_recovery_enabled=True,
         current_inst_inventory_qty=Decimal("3.0"),
+        trapped_inventory_recovery_min_qty=Decimal("1.0"),
         maker_exchange_min_shares=Decimal("5.0"),
         active_side_locked=True,
         inst_id="inst-up",
@@ -1587,3 +1662,276 @@ def test_trapped_inventory_recovery_overrides_buy_cooldown():
     assert out["should_quote"] is True
     assert out["entry_mode"] == "topup"
     assert "trapped_inventory_recovery" in out["diag_reason"]
+
+
+def test_trapped_inventory_recovery_skips_dust_inventory():
+    desired = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.010000 < min=0.001020",
+        "robust_net": Decimal("0.01"),
+        "entry_mode": "value",
+        "size_multiplier": Decimal("1"),
+    }
+
+    out = maybe_apply_trapped_inventory_recovery(
+        desired_entry=desired,
+        side="buy",
+        trapped_inventory_recovery_enabled=True,
+        current_inst_inventory_qty=Decimal("0.0331"),
+        trapped_inventory_recovery_min_qty=Decimal("1.0"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        active_side_locked=True,
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        latest_observation_supports_locked_side=True,
+        robust_net=Decimal("0.01"),
+        max_robust_net_deficit_usdc=Decimal("0.05"),
+    )
+
+    assert out["should_quote"] is False
+    assert out["entry_mode"] == "value"
+
+
+def test_trend_buy_size_multiplier_flows_into_submit_qty():
+    desired_entry = build_desired_quote_entry(
+        order_key="buy:inst-up",
+        side="buy",
+        inst_id="inst-up",
+        quote_data=(
+            Decimal("0.64"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.007"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            False,
+            Decimal("-0.031"),
+            Decimal("0.030"),
+            Decimal("0.010"),
+            Decimal("0.054"),
+            Decimal("0.6244"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={"buy": "econ_gate"},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("-0.005"),
+        now_ts=0.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+        entry_mode="trend",
+        trend_buy_penalty_discount=Decimal("0.50"),
+        trend_buy_score=Decimal("0.20"),
+        trend_buy_size_multiplier=Decimal("1.5"),
+    )
+    snapshot = build_directional_snapshot(desired_entry)
+    strategy = DummyTrendSubmitStrategy()
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=desired_entry["econ"],
+        directional_snapshot=snapshot,
+    )
+
+    assert strategy.submitted_orders, "expected submit_order to be called"
+    submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
+    assert submitted_qty == Decimal("8.100000")
+    assert strategy.order_events[-1]["payload"]["entry_mode"] == "trend"
+
+
+def test_reduce_only_overrides_trend_buy_quote():
+    desired_entry = build_desired_quote_entry(
+        order_key="buy:inst-up",
+        side="buy",
+        inst_id="inst-up",
+        quote_data=(
+            Decimal("0.81"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.135774"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            False,
+            Decimal("-0.010"),
+            Decimal("0.020"),
+            Decimal("0.010"),
+            Decimal("0.040"),
+            Decimal("0.8481"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={"buy": "reduce_only_buy_block"},
+        reduce_only_reason="fair 0.8481 > max 0.8000",
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("-0.005"),
+        now_ts=0.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+        entry_mode="trend",
+        trend_buy_penalty_discount=Decimal("0.50"),
+        trend_buy_score=Decimal("0.51"),
+        trend_buy_size_multiplier=Decimal("1.0"),
+    )
+
+    assert desired_entry["should_quote"] is False
+    assert desired_entry["diag_reason"] == "reduce_only: fair 0.8481 > max 0.8000"
+
+
+def test_loss_sell_requires_stop_loss_regime_and_min_hold():
+    desired_entry = build_desired_quote_entry(
+        order_key="sell:inst-down",
+        side="sell",
+        inst_id="inst-down",
+        quote_data=(
+            Decimal("0.50"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.020"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("0.020"),
+            Decimal("0.008"),
+            Decimal("0.010"),
+            Decimal("0.050"),
+            Decimal("0.5200"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"),
+        now_ts=120.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=Decimal("5.4"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0.58"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=True,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.005"),
+        maker_sell_min_profit_floor_ps=Decimal("0.010"),
+        thesis_weakened=True,
+        offside_confirmed=False,
+        stop_loss_regime_armed=False,
+        hold_sec=5.0,
+        loss_sell_min_hold_sec=10.0,
+        time_left_sec=600.0,
+    )
+
+    assert desired_entry["should_quote"] is False
+    assert desired_entry["diag_reason"] == "sell_cost_protect sell=0.5000 < min=0.5850"
+    assert desired_entry["loss_sell_reason"] == ""
+
+
+def test_loss_sell_allows_cost_break_only_when_regime_armed_and_hold_elapsed():
+    desired_entry = build_desired_quote_entry(
+        order_key="sell:inst-down",
+        side="sell",
+        inst_id="inst-down",
+        quote_data=(
+            Decimal("0.50"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.020"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("0.020"),
+            Decimal("0.008"),
+            Decimal("0.010"),
+            Decimal("0.050"),
+            Decimal("0.5200"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"),
+        now_ts=120.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=Decimal("5.4"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0.58"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=True,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.005"),
+        maker_sell_min_profit_floor_ps=Decimal("0.010"),
+        thesis_weakened=True,
+        offside_confirmed=False,
+        stop_loss_regime_armed=True,
+        hold_sec=15.0,
+        loss_sell_min_hold_sec=10.0,
+        time_left_sec=600.0,
+    )
+
+    assert desired_entry["should_quote"] is True
+    assert desired_entry["loss_sell_reason"] == "armed_thesis_bad"
+
+
+def test_preserve_recent_loss_sell_order_holds_higher_existing_price():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.40"),
+        "loss_sell_reason": "armed_thesis_bad",
+        "diag_reason": "armed_thesis_bad",
+    }
+    existing_state = {
+        "price": Decimal("0.50"),
+        "created_ts": 100.0,
+        "loss_sell_reason": "armed_thesis_bad",
+    }
+
+    out = preserve_recent_loss_sell_order(
+        desired_entry=desired_entry,
+        side="sell",
+        existing_state=existing_state,
+        now_ts=120.0,
+        loss_sell_reprice_min_interval_sec=45.0,
+    )
+
+    assert out["price"] == Decimal("0.50")
+    assert "loss_sell_reprice_hold" in out["diag_reason"]

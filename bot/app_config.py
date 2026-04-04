@@ -146,12 +146,22 @@ class MakerConfig:
     implied_sigma_weight: Decimal
     continuation_entry_enabled: bool
     continuation_entry_size_multiplier: Decimal
+    trend_buy_enabled: bool
+    trend_buy_min_score: Decimal
+    trend_buy_min_net_usdc: Decimal
+    trend_buy_penalty_discount: Decimal
+    trend_buy_min_time_left_sec: float
+    trend_buy_max_price_premium_ps: Decimal
+    trend_buy_size_multiplier: Decimal
     trapped_inventory_recovery_enabled: bool
+    trapped_inventory_recovery_min_qty: Decimal
     trapped_inventory_recovery_max_robust_net_deficit_usdc: Decimal
     sell_cost_protect_enabled: bool
     sell_cost_protect_fee_buffer_ps: Decimal
     sell_min_profit_floor_ps: Decimal
     sell_cost_protect_emergency_last_sec: int
+    loss_sell_min_hold_sec: float
+    loss_sell_reprice_min_interval_sec: float
     high_cost_exit_cooldown_enabled: bool
     high_cost_fill_threshold: Decimal
     high_cost_exit_cooldown_sec: int
@@ -178,6 +188,12 @@ class MakerConfig:
             raise ValueError("MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES must be >= 0")
         if self.continuation_entry_size_multiplier <= 0:
             raise ValueError("CONTINUATION_ENTRY_SIZE_MULTIPLIER must be > 0")
+        if self.trapped_inventory_recovery_min_qty < 0:
+            raise ValueError("TRAPPED_INVENTORY_RECOVERY_MIN_QTY must be >= 0")
+        if self.loss_sell_min_hold_sec < 0:
+            raise ValueError("MAKER_LOSS_SELL_MIN_HOLD_SEC must be >= 0")
+        if self.loss_sell_reprice_min_interval_sec < 0:
+            raise ValueError("MAKER_LOSS_SELL_REPRICE_MIN_INTERVAL_SEC must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -535,7 +551,18 @@ class AppConfig:
                 implied_sigma_weight=_env_decimal("MAKER_DIGITAL_IMPLIED_SIGMA_WEIGHT", "0.50"),
                 continuation_entry_enabled=_env_bool_inverted("CONTINUATION_ENTRY_ENABLED", True),
                 continuation_entry_size_multiplier=_env_decimal("CONTINUATION_ENTRY_SIZE_MULTIPLIER", "1.0"),
+                trend_buy_enabled=_env_bool("TREND_BUY_ENABLED", False),
+                trend_buy_min_score=_env_decimal("TREND_BUY_MIN_SCORE", "0.20"),
+                trend_buy_min_net_usdc=_env_decimal("TREND_BUY_MIN_NET_USDC", "-0.005"),
+                trend_buy_penalty_discount=max(
+                    Decimal("0"),
+                    min(Decimal("1"), _env_decimal("TREND_BUY_PENALTY_DISCOUNT", "0.50")),
+                ),
+                trend_buy_min_time_left_sec=_env_float("TREND_BUY_MIN_TIME_LEFT_SEC", 300.0),
+                trend_buy_max_price_premium_ps=_env_decimal("TREND_BUY_MAX_PRICE_PREMIUM_PS", "0.02"),
+                trend_buy_size_multiplier=_env_decimal("TREND_BUY_SIZE_MULTIPLIER", "1.0"),
                 trapped_inventory_recovery_enabled=_env_bool_inverted("TRAPPED_INVENTORY_RECOVERY_ENABLED", True),
+                trapped_inventory_recovery_min_qty=_env_decimal("TRAPPED_INVENTORY_RECOVERY_MIN_QTY", "1.0"),
                 trapped_inventory_recovery_max_robust_net_deficit_usdc=_env_decimal(
                     "TRAPPED_INVENTORY_RECOVERY_MAX_ROBUST_NET_DEFICIT_USDC",
                     "0.05",
@@ -544,6 +571,11 @@ class AppConfig:
                 sell_cost_protect_fee_buffer_ps=_env_decimal("MAKER_SELL_COST_PROTECT_FEE_BUFFER_PS", "0.005"),
                 sell_min_profit_floor_ps=_env_decimal("MAKER_SELL_MIN_PROFIT_FLOOR_PS", "0"),
                 sell_cost_protect_emergency_last_sec=max(0, _env_int("MAKER_SELL_COST_PROTECT_EMERGENCY_LAST_SEC", 60)),
+                loss_sell_min_hold_sec=max(0.0, _env_float("MAKER_LOSS_SELL_MIN_HOLD_SEC", 60.0)),
+                loss_sell_reprice_min_interval_sec=max(
+                    0.0,
+                    _env_float("MAKER_LOSS_SELL_REPRICE_MIN_INTERVAL_SEC", 45.0),
+                ),
                 high_cost_exit_cooldown_enabled=_env_bool_inverted("MAKER_HIGH_COST_EXIT_COOLDOWN_ENABLED", True),
                 high_cost_fill_threshold=_env_decimal("MAKER_HIGH_COST_FILL_THRESHOLD", "0.75"),
                 high_cost_exit_cooldown_sec=max(0, _env_int("MAKER_HIGH_COST_EXIT_COOLDOWN_SEC", 180)),

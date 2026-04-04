@@ -27,6 +27,7 @@ class QuoteInstrumentContext:
 class BuyEntryEvaluation:
     skip: bool
     min_expected_net_usdc: Decimal
+    entry_mode: str = "value"  # "value" or "trend"
     event_type: str = ""
     reason: str = ""
     payload: dict[str, Any] | None = None
@@ -62,6 +63,8 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "planned_best_bid": desired.get("planned_best_bid"),
         "planned_best_ask": desired.get("planned_best_ask"),
         "planned_quote_ts": desired.get("planned_quote_ts"),
+        "entry_mode": desired.get("entry_mode", "value"),
+        "size_multiplier": desired.get("size_multiplier", Decimal("1")),
     }
 
 
@@ -80,10 +83,21 @@ def evaluate_buy_entry_controls(
     maker_reload_inventory_threshold_shares: Decimal,
     current_slug: str,
     inst_id: Any,
+    # --- Trend-buy params ---
+    trend_buy_enabled: bool = False,
+    trend_buy_min_score: Decimal = Decimal("0.20"),
+    trend_buy_min_net_usdc: Decimal = Decimal("-0.005"),
+    active_instrument_id: Any = None,
+    time_left_sec: float | None = None,
+    trend_buy_min_time_left_sec: float = 300.0,
+    best_bid: Decimal | None = None,
+    fair: Decimal | None = None,
+    trend_buy_max_price_premium_ps: Decimal = Decimal("0.02"),
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
+    entry_mode = "value"
     if side != "buy":
-        return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc)
+        return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc, entry_mode=entry_mode)
     if (
         bi_side_enabled
         and active_side_locked
@@ -93,6 +107,7 @@ def evaluate_buy_entry_controls(
         return BuyEntryEvaluation(
             skip=True,
             min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
             event_type="ORDER_SKIP_DIRECTIONAL_OBSERVATION_MISMATCH",
             reason="directional_observation_mismatch",
             payload={
@@ -107,6 +122,7 @@ def evaluate_buy_entry_controls(
         return BuyEntryEvaluation(
             skip=True,
             min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
             event_type="ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
             reason="directional_entry_gate",
             payload={
@@ -117,6 +133,26 @@ def evaluate_buy_entry_controls(
                 "engine": "new_signal",
             },
         )
+    # --- Trend-buy mode detection ---
+    _active_side_txt = str(active_side_value or "NONE").upper()
+    if (
+        trend_buy_enabled
+        and active_side_locked
+        and _active_side_txt not in ("NONE", "")
+        and abs(side_score) >= trend_buy_min_score
+        and current_inst_inventory_qty <= 0
+        and active_instrument_id is not None
+        and str(inst_id) == str(active_instrument_id)
+        and (time_left_sec is None or time_left_sec >= trend_buy_min_time_left_sec)
+        and _trend_price_premium_ok(
+            best_bid=best_bid,
+            fair=fair,
+            max_premium=trend_buy_max_price_premium_ps,
+        )
+    ):
+        entry_mode = "trend"
+        min_expected_net_usdc = trend_buy_min_net_usdc
+
     if (
         maker_reload_min_expected_net_multiplier > Decimal("1")
         and current_inst_inventory_qty + Decimal("0.000001")
@@ -125,7 +161,37 @@ def evaluate_buy_entry_controls(
         min_expected_net_usdc = (
             maker_min_expected_net_usdc * maker_reload_min_expected_net_multiplier
         )
-    return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc)
+        # Reload always uses value mode regardless of trend detection.
+        entry_mode = "value"
+    return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc, entry_mode=entry_mode)
+
+
+def _trend_price_premium_ok(
+    best_bid: Decimal | None,
+    fair: Decimal | None,
+    max_premium: Decimal,
+) -> bool:
+    """Check that best_bid doesn't exceed fair by more than max_premium."""
+    if best_bid is None or fair is None or fair <= 0:
+        return False
+    return best_bid <= fair + max_premium
+
+
+def compute_trend_robust_net(
+    expected_net: Decimal,
+    exec_penalty: Decimal,
+    taker_leakage: Decimal,
+    trend_penalty_discount: Decimal,
+) -> Decimal:
+    """Recompute robust_net with discounted exec penalty for trend entries.
+
+    In trend mode the bot accepts thinner edge because the entry thesis is
+    directional conviction, not spread-capture.  The execution penalty —
+    which models forced-liquidation cost — is discounted because trend
+    entries are less likely to need immediate reversal.
+    """
+    discounted_penalty = exec_penalty * trend_penalty_discount
+    return expected_net - discounted_penalty - taker_leakage
 
 
 def attach_desired_entry_runtime_metadata(
@@ -151,6 +217,7 @@ def maybe_apply_trapped_inventory_recovery(
     side: str,
     trapped_inventory_recovery_enabled: bool,
     current_inst_inventory_qty: Decimal,
+    trapped_inventory_recovery_min_qty: Decimal,
     maker_exchange_min_shares: Decimal,
     active_side_locked: bool,
     inst_id: Any,
@@ -163,6 +230,7 @@ def maybe_apply_trapped_inventory_recovery(
         side != "buy"
         or not trapped_inventory_recovery_enabled
         or current_inst_inventory_qty <= 0
+        or current_inst_inventory_qty + Decimal("0.000001") < max(Decimal("0"), trapped_inventory_recovery_min_qty)
         or current_inst_inventory_qty + Decimal("0.000001") >= maker_exchange_min_shares
         or not active_side_locked
         or inst_id != active_instrument_id
@@ -233,6 +301,41 @@ def preserve_profitable_existing_sell_order(
         f"sell_preserved existing={float(existing_price):.4f} "
         f">= floor={float(cost_floor):.4f} "
         f"(new_blocked: {diag})"
+    )
+    return desired_entry
+
+
+def preserve_recent_loss_sell_order(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    existing_state: dict[str, Any] | None,
+    now_ts: float,
+    loss_sell_reprice_min_interval_sec: float,
+) -> dict[str, Any]:
+    if side != "sell" or not desired_entry.get("should_quote", False):
+        return desired_entry
+    loss_sell_reason = str(desired_entry.get("loss_sell_reason", "") or "")
+    if not loss_sell_reason:
+        return desired_entry
+    if existing_state is None or not existing_state.get("loss_sell_reason"):
+        return desired_entry
+    existing_price = Decimal(str(existing_state.get("price", 0) or 0))
+    new_price = Decimal(str(desired_entry.get("price", 0) or 0))
+    created_ts = float(existing_state.get("created_ts", 0.0) or 0.0)
+    if existing_price <= 0 or new_price <= 0 or created_ts <= 0:
+        return desired_entry
+    if new_price >= existing_price:
+        return desired_entry
+    if loss_sell_reprice_min_interval_sec <= 0:
+        return desired_entry
+    age_sec = max(0.0, now_ts - created_ts)
+    if age_sec >= float(loss_sell_reprice_min_interval_sec):
+        return desired_entry
+    desired_entry["price"] = existing_price
+    desired_entry["diag_reason"] = (
+        f"loss_sell_reprice_hold existing={float(existing_price):.4f} "
+        f"> new={float(new_price):.4f} age={age_sec:.1f}s"
     )
     return desired_entry
 
@@ -592,6 +695,7 @@ def build_active_maker_order_state(
     token_qty: float,
     created_ts: float,
     target_version: int,
+    loss_sell_reason: str = "",
 ) -> dict[str, Any]:
     return {
         "order": order,
@@ -604,6 +708,7 @@ def build_active_maker_order_state(
         "quantity": Decimal(str(token_qty)),
         "created_ts": created_ts,
         "target_version": target_version,
+        "loss_sell_reason": loss_sell_reason or "",
     }
 
 
@@ -700,12 +805,20 @@ def build_desired_quote_entry(
     maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
     thesis_weakened: bool = False,
     offside_confirmed: bool = False,
+    stop_loss_regime_armed: bool = False,
+    hold_sec: float = 0.0,
+    loss_sell_min_hold_sec: float = 0.0,
     # Thesis-aware emergency exit: time_left_sec is used to compute the
     # absolute last-resort window. Pass None if unavailable.
     time_left_sec: float | None = None,
     # Seconds before expiry where loss-selling is always allowed regardless
     # of thesis state. This is the true safety net of last resort.
     absolute_last_resort_sec: float = 60.0,
+    # --- Trend-buy params (orchestration passes down) ---
+    entry_mode: str = "value",
+    trend_buy_penalty_discount: Decimal = Decimal("0.50"),
+    trend_buy_score: Decimal = Decimal("0"),
+    trend_buy_size_multiplier: Decimal = Decimal("1"),
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -738,6 +851,36 @@ def build_desired_quote_entry(
                 f"exec_penalty={exec_penalty_display:.6f})"
             )
 
+    # --- Trend-buy override: re-evaluate econ gate with discounted penalty ---
+    if (
+        side == "buy"
+        and not should_quote
+        and entry_mode == "trend"
+        and isinstance(robust_net, Decimal)
+        and isinstance(exec_penalty, Decimal)
+    ):
+        # Separate taker_leakage from the MakerEngine robust_net.
+        # MakerEngine computes: robust_net = expected_net - exec_penalty - taker_leakage
+        # So: taker_leakage = expected_net - exec_penalty - robust_net
+        taker_leakage = econ.expected_net_usdc - exec_penalty - robust_net
+        trend_robust = compute_trend_robust_net(
+            expected_net=econ.expected_net_usdc,
+            exec_penalty=exec_penalty,
+            taker_leakage=taker_leakage,
+            trend_penalty_discount=trend_buy_penalty_discount,
+        )
+        if trend_robust >= min_expected_net_usdc:
+            should_quote = True
+            robust_net = trend_robust
+            entry_mode = "trend"
+            diag_reason = (
+                f"trend_buy_entry score={float(trend_buy_score):+.4f} "
+                f"trend_robust_net={float(trend_robust):.6f} "
+                f"(discount={float(trend_buy_penalty_discount):.2f} "
+                f"orig_penalty={exec_penalty_display:.6f}) "
+                f">= min={float(min_expected_net_usdc):.6f}"
+            )
+
     if side == "sell":
         if now_ts < sell_pause_until:
             should_quote = False
@@ -765,17 +908,22 @@ def build_desired_quote_entry(
         # HOLD_IN_BAND decisions, causing loss sells when direction was correct.
         #
         _thesis_bad = thesis_weakened or offside_confirmed
-        _allow_emergency_with_thesis = emergency_window and _thesis_bad
+        _allow_regime_loss_sell = (
+            _thesis_bad
+            and stop_loss_regime_armed
+            and hold_sec >= float(loss_sell_min_hold_sec)
+        )
+        _allow_emergency_with_thesis = emergency_window and _allow_regime_loss_sell
         _allow_absolute_last_resort = (
             time_left_sec is not None
             and absolute_last_resort_sec > 0
             and time_left_sec < absolute_last_resort_sec
         )
-        allow_loss_sell = _thesis_bad or _allow_emergency_with_thesis or _allow_absolute_last_resort
+        allow_loss_sell = _allow_regime_loss_sell or _allow_emergency_with_thesis or _allow_absolute_last_resort
         # Compute reason tag for observability (visible in diag logs and order payload).
         if allow_loss_sell:
-            if _thesis_bad:
-                _loss_sell_reason = "thesis_bad"
+            if _allow_regime_loss_sell:
+                _loss_sell_reason = "armed_thesis_bad"
             elif _allow_absolute_last_resort:
                 _loss_sell_reason = f"absolute_last_resort(<{absolute_last_resort_sec:.0f}s)"
             else:
@@ -827,10 +975,13 @@ def build_desired_quote_entry(
             )
 
     if reduce_only_reason and side == "buy":
+        should_quote = False
         diag_reason = f"reduce_only: {reduce_only_reason}"
     if reduce_only_tail_sell_block and side == "sell":
+        should_quote = False
         diag_reason = f"reduce_only_tail_guard: <= {reduce_only_no_new_sell_last_sec}s"
     if forced_sell_only and side == "buy":
+        should_quote = False
         diag_reason = "balance_forced_sell_only"
 
     return {
@@ -848,8 +999,12 @@ def build_desired_quote_entry(
         "p_fair": p_fair,
         "fee_ps": fee_ps,
         "other_cost_ps": other_cost_ps,
-        "entry_mode": "value" if side == "buy" else "",
-        "size_multiplier": Decimal("1"),
+        "entry_mode": entry_mode if side == "buy" else "",
+        "size_multiplier": (
+            max(Decimal("0"), trend_buy_size_multiplier)
+            if side == "buy" and entry_mode == "trend"
+            else Decimal("1")
+        ),
         # Observability: non-empty only when a loss-sell was gated/allowed.
         # Values: "thesis_bad" | "emergency_with_thesis" |
         #         "absolute_last_resort(<Ns)" | "" (no loss-sell override)

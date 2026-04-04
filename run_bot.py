@@ -112,6 +112,7 @@ from bot.quote_service import (
     maybe_apply_continuation_entry,
     maybe_apply_trapped_inventory_recovery,
     preserve_profitable_existing_sell_order,
+    preserve_recent_loss_sell_order,
     reconcile_unwanted_quotes,
     should_requote_existing_order,
 )
@@ -1037,6 +1038,8 @@ class IntegratedBTCStrategy(
                 ttl = float(state.get("urgent_exit_ttl", self.maker_order_ttl_sec))
             else:
                 ttl = self.maker_order_ttl_sec
+                if str(state.get("side", "") or "") == "sell" and state.get("loss_sell_reason"):
+                    ttl = max(ttl, float(getattr(self, "maker_loss_sell_reprice_min_interval_sec", ttl)))
             if created_ts <= 0 or (now_ts - created_ts) >= ttl:
                 side = str(state.get("side", "") or "")
                 is_urgent = " (urgent_exit)" if state.get("is_urgent_exit") else ""
@@ -1356,6 +1359,16 @@ class IntegratedBTCStrategy(
                     maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
                     current_slug=current_slug,
                     inst_id=inst_id,
+                    # Trend-buy params
+                    trend_buy_enabled=self.trend_buy_enabled,
+                    trend_buy_min_score=self.trend_buy_min_score,
+                    trend_buy_min_net_usdc=self.trend_buy_min_net_usdc,
+                    active_instrument_id=self._instrument_for_side(self.active_side),
+                    time_left_sec=time_left_sec_global,
+                    trend_buy_min_time_left_sec=self.trend_buy_min_time_left_sec,
+                    best_bid=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
+                    fair=quote_ctx.fair,
+                    trend_buy_max_price_premium_ps=self.trend_buy_max_price_premium_ps,
                 )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
@@ -1373,6 +1386,8 @@ class IntegratedBTCStrategy(
                 # normally block the new SELL price.
                 _thesis_weakened = False
                 _offside_confirmed = False
+                _stop_loss_regime_armed = False
+                hold_sec = 0.0
                 if (
                     side == "sell"
                     and self.inventory_delta_shares > 0
@@ -1391,6 +1406,30 @@ class IntegratedBTCStrategy(
                         now_ts=now_ts,
                         side_score=self.side_decision_score,
                     )
+                    if (
+                        hasattr(self, "position_manager")
+                        and inv_state is not None
+                    ):
+                        opened_ts = float(inv_state.get("opened_ts", 0.0))
+                        hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
+                        held_side = (
+                            self._side_for_instrument_id(inst_id).value
+                            if hasattr(self, "_side_for_instrument_id")
+                            else "NONE"
+                        )
+                        matches_position = self._instrument_for_side(self.active_side) == inst_id
+                        regime = self.position_manager.assess_stop_loss_regime(
+                            inst_key=inst_key,
+                            now_ts=now_ts,
+                            qty=current_inst_inventory_qty,
+                            opened_ts=opened_ts,
+                            held_side=held_side,
+                            signal_active_side=self.active_side.value,
+                            signal_score=self.side_decision_score,
+                            signal_matches_position=matches_position,
+                            force_exit=False,
+                        )
+                        _stop_loss_regime_armed = regime.status == "armed"
                     if quote_ctx.quote is not None:
                         self._update_profit_run_peaks(
                             inst_id,
@@ -1424,7 +1463,15 @@ class IntegratedBTCStrategy(
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                     thesis_weakened=_thesis_weakened,
                     offside_confirmed=_offside_confirmed,
+                    stop_loss_regime_armed=_stop_loss_regime_armed,
+                    hold_sec=hold_sec,
+                    loss_sell_min_hold_sec=self.maker_loss_sell_min_hold_sec,
                     time_left_sec=time_left_sec_global,
+                    # Trend-buy params
+                    entry_mode=buy_entry_eval.entry_mode,
+                    trend_buy_penalty_discount=self.trend_buy_penalty_discount,
+                    trend_buy_score=self.side_decision_score,
+                    trend_buy_size_multiplier=self.trend_buy_size_multiplier,
                 )
                 desired_entry = attach_desired_entry_runtime_metadata(
                     desired_entry=desired_entry,
@@ -1446,6 +1493,13 @@ class IntegratedBTCStrategy(
                     avg_entry=avg_entry,
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                )
+                desired_entry = preserve_recent_loss_sell_order(
+                    desired_entry=desired_entry,
+                    side=side,
+                    existing_state=self.active_maker_orders.get(order_key),
+                    now_ts=now_ts,
+                    loss_sell_reprice_min_interval_sec=self.maker_loss_sell_reprice_min_interval_sec,
                 )
                 if (
                     side == "sell"
@@ -1477,6 +1531,7 @@ class IntegratedBTCStrategy(
                     side=side,
                     trapped_inventory_recovery_enabled=self.trapped_inventory_recovery_enabled,
                     current_inst_inventory_qty=current_inst_inventory_qty,
+                    trapped_inventory_recovery_min_qty=self.trapped_inventory_recovery_min_qty,
                     maker_exchange_min_shares=self.maker_exchange_min_shares,
                     active_side_locked=bool(self.active_side_locked),
                     inst_id=inst_id,

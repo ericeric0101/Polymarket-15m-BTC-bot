@@ -69,12 +69,20 @@ def submit_maker_quote(
     qty_dec = strategy._compute_maker_order_qty(limit_price, precision)
     if side == "buy":
         entry_mode = str((directional_snapshot or {}).get("entry_mode", "value") or "value").lower()
-        if entry_mode in {"continuation", "topup"}:
+        if entry_mode in {"continuation", "topup", "trend"}:
             size_multiplier = Decimal(
                 str(
                     (directional_snapshot or {}).get(
                         "size_multiplier",
-                        strategy.continuation_entry_size_multiplier if entry_mode == "continuation" else Decimal("1"),
+                        (
+                            strategy.continuation_entry_size_multiplier
+                            if entry_mode == "continuation"
+                            else (
+                                getattr(strategy, "trend_buy_size_multiplier", Decimal("1"))
+                                if entry_mode == "trend"
+                                else Decimal("1")
+                            )
+                        ),
                     )
                 )
             )
@@ -254,6 +262,7 @@ def submit_maker_quote(
         token_qty=token_qty,
         created_ts=time.time(),
         target_version=int(target_version or 0),
+        loss_sell_reason=loss_sell_reason,
     )
     if side == "sell":
         inst_key = strategy._instrument_key(instrument_id)

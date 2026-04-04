@@ -178,10 +178,20 @@ def initialize_strategy_settings(
     strategy.directional_entry_min_score_abs = strategy.directional_entry_min_score_abs_new
     strategy.continuation_entry_enabled = config.maker.continuation_entry_enabled
     strategy.continuation_entry_size_multiplier = config.maker.continuation_entry_size_multiplier
+    strategy.trend_buy_enabled = config.maker.trend_buy_enabled
+    strategy.trend_buy_min_score = config.maker.trend_buy_min_score
+    strategy.trend_buy_min_net_usdc = config.maker.trend_buy_min_net_usdc
+    strategy.trend_buy_penalty_discount = config.maker.trend_buy_penalty_discount
+    strategy.trend_buy_min_time_left_sec = config.maker.trend_buy_min_time_left_sec
+    strategy.trend_buy_max_price_premium_ps = config.maker.trend_buy_max_price_premium_ps
+    strategy.trend_buy_size_multiplier = config.maker.trend_buy_size_multiplier
     strategy.trapped_inventory_recovery_enabled = config.maker.trapped_inventory_recovery_enabled
+    strategy.trapped_inventory_recovery_min_qty = config.maker.trapped_inventory_recovery_min_qty
     strategy.trapped_inventory_recovery_max_robust_net_deficit_usdc = (
         config.maker.trapped_inventory_recovery_max_robust_net_deficit_usdc
     )
+    strategy.maker_loss_sell_min_hold_sec = config.maker.loss_sell_min_hold_sec
+    strategy.maker_loss_sell_reprice_min_interval_sec = config.maker.loss_sell_reprice_min_interval_sec
     strategy.side_signal_btc_ema_fast_sec = config.side.btc_ema_fast_sec
     strategy.side_signal_btc_ema_slow_sec = config.side.btc_ema_slow_sec
     strategy.side_signal_mid_ema_fast_sec = config.side.mid_ema_fast_sec
