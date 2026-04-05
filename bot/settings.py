@@ -65,6 +65,8 @@ def initialize_strategy_settings(
     strategy.real_price_history_by_inst: Dict[str, List[Decimal]] = {}
     strategy.max_real_history = config.maker.vol_real_history_max
     strategy.last_reload_time = 0
+    strategy._rollover_requested_flag = False
+    strategy._waiting_miss_count = 0
 
     strategy.test_mode = test_mode
     strategy.maker_mode = config.maker.maker_mode
