@@ -209,6 +209,7 @@ def apply_quote_plan_guards(
             momentum_buy_filter_pct > 0
             and momentum_trend_pct <= -momentum_buy_filter_pct
             and "buy" in side_plan
+            and str(active_side or "").upper() in ("", "NONE")
         ):
             momentum_buy_blocked = True
             set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "momentum_buy_block")

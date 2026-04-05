@@ -31,6 +31,7 @@ from monitoring.performance_tracker import get_performance_tracker
 from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
+from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 
 
 def initialize_strategy_settings(
@@ -67,6 +68,10 @@ def initialize_strategy_settings(
     strategy.last_reload_time = 0
     strategy._rollover_requested_flag = False
     strategy._waiting_miss_count = 0
+    strategy.shadow_signal_enabled = True
+    strategy.shadow_signal_config = DEFAULT_SHADOW_SIGNAL_CONFIG
+    strategy._last_shadow_live_candidate_signature = None
+    strategy._last_main_live_candidate_signature = None
 
     strategy.test_mode = test_mode
     strategy.maker_mode = config.maker.maker_mode
@@ -252,6 +257,8 @@ def initialize_strategy_settings(
     strategy.maker_urgent_exit_ttl_sec = config.exit.maker_urgent_exit_ttl_sec
     strategy.maker_urgent_exit_cooldown_sec = config.exit.maker_urgent_exit_cooldown_sec
     strategy.maker_urgent_exit_min_confirmations = config.exit.maker_urgent_exit_min_confirmations
+    strategy.maker_urgent_exit_winner_peak_profit_ps = config.exit.maker_urgent_exit_winner_peak_profit_ps
+    strategy.maker_urgent_exit_winner_extra_confirmations = config.exit.maker_urgent_exit_winner_extra_confirmations
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
     strategy.side_thesis_weak_requires_opposite_side_new = config.side.side_thesis_weak_requires_opposite_side_new
     strategy.side_thesis_weak_opposite_score_abs_new = config.side.side_thesis_weak_opposite_score_abs_new
@@ -259,8 +266,10 @@ def initialize_strategy_settings(
     strategy.side_thesis_weak_min_hold_sec_new = config.side.side_thesis_weak_min_hold_sec_new
     strategy.exit_conviction_band_min_score_abs = config.exit.exit_conviction_band_min_score_abs
     strategy.exit_hold_band_min_score_abs = config.exit.exit_hold_band_min_score_abs
+    strategy.exit_hold_band_release_min_roi = config.exit.exit_hold_band_release_min_roi
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
+    strategy.maker_winner_continuation_min_fair_edge_ps = config.exit.maker_winner_continuation_min_fair_edge_ps
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
     strategy.maker_implied_sigma_weight = config.maker.implied_sigma_weight
     strategy.exit_policy = ExitPolicy(
@@ -281,6 +290,7 @@ def initialize_strategy_settings(
             hold_band_min_price=strategy.exit_hold_band_min_price,
             conviction_band_min_score_abs=strategy.exit_conviction_band_min_score_abs,
             hold_band_min_score_abs=strategy.exit_hold_band_min_score_abs,
+            hold_band_release_min_roi=strategy.exit_hold_band_release_min_roi,
             conviction_stop_loss_multiplier=strategy.exit_conviction_stop_loss_multiplier,
             conviction_extra_confirmations=strategy.exit_conviction_extra_confirmations,
             hold_band_requires_locked=strategy.exit_hold_band_requires_locked,
@@ -319,6 +329,7 @@ def initialize_strategy_settings(
                 int(getattr(strategy, "bi_side_flip_confirmations_held_new", 4)),
             ),
             stop_loss_min_opposite_score_abs=strategy.side_thesis_weak_opposite_score_abs_new,
+            winner_continuation_min_fair_edge_ps=strategy.maker_winner_continuation_min_fair_edge_ps,
         )
     )
     strategy.runtime_git_revision = detect_runtime_git_revision_fn(project_root)

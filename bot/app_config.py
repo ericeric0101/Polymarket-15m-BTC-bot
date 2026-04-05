@@ -302,10 +302,14 @@ class ExitConfig:
     maker_urgent_exit_ttl_sec: int
     maker_urgent_exit_cooldown_sec: int
     maker_urgent_exit_min_confirmations: int
+    maker_urgent_exit_winner_peak_profit_ps: Decimal
+    maker_urgent_exit_winner_extra_confirmations: int
     exit_conviction_band_min_score_abs: Decimal
     exit_hold_band_min_score_abs: Decimal
+    exit_hold_band_release_min_roi: Decimal
     exit_stop_loss_thesis_min_score_abs: Decimal
     maker_profit_run_min_score_abs: Decimal
+    maker_winner_continuation_min_fair_edge_ps: Decimal
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
 
@@ -688,10 +692,14 @@ class AppConfig:
                 maker_urgent_exit_ttl_sec=max(5, _env_int("MAKER_URGENT_EXIT_TTL_SEC", 15)),
                 maker_urgent_exit_cooldown_sec=max(1, _env_int("MAKER_URGENT_EXIT_COOLDOWN_SEC", 5)),
                 maker_urgent_exit_min_confirmations=max(1, _env_int("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS", 3)),
+                maker_urgent_exit_winner_peak_profit_ps=_env_decimal("MAKER_URGENT_EXIT_WINNER_PEAK_PROFIT_PS", "0.08"),
+                maker_urgent_exit_winner_extra_confirmations=max(0, _env_int("MAKER_URGENT_EXIT_WINNER_EXTRA_CONFIRMATIONS", 2)),
                 exit_conviction_band_min_score_abs=_env_decimal("EXIT_CONVICTION_BAND_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 exit_hold_band_min_score_abs=_env_decimal("EXIT_HOLD_BAND_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
+                exit_hold_band_release_min_roi=_env_decimal("EXIT_HOLD_BAND_RELEASE_MIN_ROI", "0.15"),
                 exit_stop_loss_thesis_min_score_abs=_env_decimal("EXIT_STOP_LOSS_THESIS_MIN_SCORE_ABS_NEW", str(entry_score_abs_default)),
                 maker_profit_run_min_score_abs=_env_decimal("MAKER_PROFIT_RUN_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
+                maker_winner_continuation_min_fair_edge_ps=_env_decimal("MAKER_WINNER_CONTINUATION_MIN_FAIR_EDGE_PS", "0.04"),
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
             ),

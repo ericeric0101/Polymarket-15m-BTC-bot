@@ -593,6 +593,30 @@ class TakerExitMixin:
                 continue
 
             min_confirms = getattr(self, "maker_urgent_exit_min_confirmations", 3)
+            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            peak_bid = getattr(self, "maker_profit_run_peak_bid_by_inst", {}).get(inst_key)
+            peak_fair = getattr(self, "maker_profit_run_peak_fair_by_inst", {}).get(inst_key)
+            peak_profit_ps = Decimal("0")
+            for peak_ref in (peak_bid, peak_fair):
+                if peak_ref is None:
+                    continue
+                try:
+                    peak_dec = Decimal(str(peak_ref))
+                except Exception:
+                    continue
+                if peak_dec > avg_entry:
+                    peak_profit_ps = max(peak_profit_ps, peak_dec - avg_entry)
+            winner_peak_profit_ps = getattr(
+                self,
+                "maker_urgent_exit_winner_peak_profit_ps",
+                Decimal("0"),
+            )
+            winner_extra_confirms = max(
+                0,
+                int(getattr(self, "maker_urgent_exit_winner_extra_confirmations", 0)),
+            )
+            if winner_extra_confirms > 0 and peak_profit_ps >= winner_peak_profit_ps:
+                min_confirms += winner_extra_confirms
             if self._urgent_exit_confirm_hits[inst_key] < min_confirms:
                 continue
 
@@ -614,7 +638,6 @@ class TakerExitMixin:
                     continue
 
             # Check unrealized loss
-            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
             quote = self._get_quote_for_instrument(inst_id)
             if quote is None:
                 continue
@@ -771,6 +794,9 @@ class TakerExitMixin:
                     "active_side_locked": "1" if self.active_side_locked else "0",
                     "time_left_sec": time_left_sec,
                     "confirmations": self._urgent_exit_confirm_hits[inst_key],
+                    "required_confirmations": min_confirms,
+                    "peak_profit_ps": float(peak_profit_ps),
+                    "winner_peak_profit_ps": float(winner_peak_profit_ps),
                     "ttl_sec": urgent_ttl,
                 },
             )

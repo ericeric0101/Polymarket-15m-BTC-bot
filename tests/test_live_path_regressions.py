@@ -16,6 +16,7 @@ from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisi
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
+    apply_shadow_entry_veto,
     apply_time_based_profitable_sell_cap,
     build_desired_quote_entry,
     build_directional_snapshot,
@@ -25,6 +26,7 @@ from bot.quote_service import (
     retreat_crossing_buy_quote,
 )
 from bot.order_submission import submit_maker_quote
+from bot.shadow_signal import ShadowSignalConfig, build_live_signal_compare_payload
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
@@ -440,6 +442,8 @@ class DummyUrgentExitStrategy(TakerExitMixin):
         }
         self.active_side = ActiveSide.DOWN
         self.active_side_locked = True
+        self.maker_profit_run_peak_bid_by_inst = {}
+        self.maker_profit_run_peak_fair_by_inst = {}
         self.pending_taker_exit_by_inst = {}
         self.active_maker_orders = {
             "sell:inst-up": {
@@ -453,8 +457,11 @@ class DummyUrgentExitStrategy(TakerExitMixin):
         self.order_factory = SimpleNamespace(limit=lambda **kwargs: kwargs)
         self._urgent_exit_confirm_hits = {}
         self.maker_urgent_exit_min_confirmations = 1
+        self.maker_urgent_exit_winner_peak_profit_ps = Decimal("0.08")
+        self.maker_urgent_exit_winner_extra_confirmations = 2
         self.maker_urgent_exit_min_loss_usdc = Decimal("0.10")
         self.side_decision_score = Decimal("-2")
+        self.maker_exchange_min_shares = Decimal("5")
         self.cancel_calls = []
         self.submit_calls = []
         self.db_events = []
@@ -505,6 +512,8 @@ class DummyUrgentExitMatchedStrategy(TakerExitMixin):
         }
         self.active_side = ActiveSide.UP
         self.active_side_locked = True
+        self.maker_profit_run_peak_bid_by_inst = {}
+        self.maker_profit_run_peak_fair_by_inst = {}
         self.side_decision_engine_new = True
         self.pending_taker_exit_by_inst = {}
         self.active_maker_orders = {}
@@ -512,6 +521,8 @@ class DummyUrgentExitMatchedStrategy(TakerExitMixin):
         self.order_factory = SimpleNamespace(limit=lambda **kwargs: kwargs)
         self._urgent_exit_confirm_hits = {}
         self.maker_urgent_exit_min_confirmations = 1
+        self.maker_urgent_exit_winner_peak_profit_ps = Decimal("0.08")
+        self.maker_urgent_exit_winner_extra_confirmations = 2
         self.maker_urgent_exit_min_loss_usdc = Decimal("0.10")
         self.side_decision_score = Decimal("0.18")
         self._signal_engine = SimpleNamespace(is_mid_reversal=lambda holding_up: True)
@@ -853,6 +864,18 @@ def test_urgent_exit_does_not_fire_when_signal_still_matches_position():
     assert strategy.db_events == []
 
 
+def test_urgent_exit_requires_more_confirmations_for_former_winner():
+    strategy = DummyUrgentExitStrategy()
+    strategy.active_maker_orders = {}
+    strategy.maker_profit_run_peak_bid_by_inst["inst-up"] = Decimal("0.49")
+    strategy._urgent_exit_confirm_hits["inst-up"] = 1
+
+    asyncio.run(strategy._maybe_maker_urgent_exit(now_ts=100.0))
+
+    assert strategy.submit_calls == []
+    assert strategy.db_events == []
+
+
 def test_held_inventory_allows_one_extra_flip_after_quota_exhausted():
     strategy = DummySideFlipStrategy(held_qty=Decimal("5.4"))
     strategy.bi_side_flip_confirmations = 1
@@ -1033,6 +1056,53 @@ def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
         min_directional_edge_ps_down=None,
     )
 
+    assert outcome.momentum_buy_blocked is False
+    assert "buy" not in outcome.side_disable_reason_by_side
+
+
+def test_quote_plan_guards_still_blocks_buy_momentum_without_active_side():
+    side_plan = {
+        "buy": (
+            Decimal("0.43"),
+            None,
+            True,
+            Decimal("0.10"),
+            Decimal("0"),
+            Decimal("0.05"),
+            Decimal("0.20"),
+            Decimal("0.50"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+    }
+    outcome = apply_quote_plan_guards(
+        side_plan=side_plan,
+        quote_mode="both",
+        phase_value=MarketPhase.ACTIVE.value,
+        inventory_delta_shares=Decimal("0"),
+        early_sell_only_sec=0.0,
+        time_left_sec_global=600.0,
+        directional_edge_gate_enabled=False,
+        regime_guard_active=False,
+        min_directional_edge_ps=Decimal("0.01"),
+        min_directional_edge_ps_conservative=Decimal("0.02"),
+        now_ts=100.0,
+        buy_cooldown_until_ts=0.0,
+        momentum_buy_filter_pct=Decimal("0.04"),
+        momentum_sell_filter_pct=Decimal("0.20"),
+        momentum_window_ticks=4,
+        momentum_history=[Decimal("0.50"), Decimal("0.49"), Decimal("0.46"), Decimal("0.435")],
+        fair=Decimal("0.50"),
+        min_fair_price=Decimal("0.05"),
+        max_fair_price=Decimal("0.95"),
+        end_ts=1000.0,
+        min_minutes_to_close=3.0,
+        reduce_only_no_new_sell_last_sec=45,
+        forced_sell_only=False,
+        active_side=ActiveSide.NONE.value,
+        min_directional_edge_ps_down=None,
+    )
+
     assert outcome.momentum_buy_blocked is True
     assert outcome.momentum_sell_blocked is False
     assert outcome.side_disable_reason_by_side["buy"] == "momentum_buy_block"
@@ -1115,6 +1185,7 @@ def test_exit_policy_does_not_mark_supported_new_signal_as_stop_loss():
             hold_band_min_price=Decimal("0.68"),
             conviction_band_min_score_abs=Decimal("0.15"),
             hold_band_min_score_abs=Decimal("0.15"),
+            hold_band_release_min_roi=Decimal("0.15"),
             conviction_stop_loss_multiplier=Decimal("1.75"),
             conviction_extra_confirmations=1,
             hold_band_requires_locked=True,
@@ -1170,6 +1241,7 @@ def test_exit_policy_holds_position_when_signal_is_none():
             hold_band_min_price=Decimal("0.68"),
             conviction_band_min_score_abs=Decimal("0.15"),
             hold_band_min_score_abs=Decimal("0.15"),
+            hold_band_release_min_roi=Decimal("0.15"),
             conviction_stop_loss_multiplier=Decimal("1.75"),
             conviction_extra_confirmations=1,
             hold_band_requires_locked=True,
@@ -1179,8 +1251,8 @@ def test_exit_policy_holds_position_when_signal_is_none():
         instrument_id="inst-down",
         phase=MarketPhase.ACTIVE.value,
         time_left_sec=554.0,
-        best_bid=Decimal("0.50"),
-        best_ask=Decimal("0.51"),
+        best_bid=Decimal("0.68"),
+        best_ask=Decimal("0.69"),
         fee_rate=Decimal("0"),
         spread=Decimal("0.01"),
         spread_pct=Decimal("0.02"),
@@ -1213,6 +1285,177 @@ def test_exit_policy_holds_position_when_signal_is_none():
     assert decision.metadata["signal_is_none"] == "1"
 
 
+def test_exit_policy_treats_none_signal_as_thesis_weakening_when_losing():
+    engine = ExitPolicyEngine(
+        ExitEngineConfig(
+            min_hold_sec=0,
+            stop_loss_usdc=Decimal("0.10"),
+            stop_loss_confirmations=2,
+            stop_loss_requires_thesis_weakening=True,
+            stop_loss_thesis_min_score_abs=Decimal("0.05"),
+            stop_loss_hold_on_none_signal=True,
+            conviction_band_min_price=Decimal("0.60"),
+            hold_band_min_price=Decimal("0.68"),
+            conviction_band_min_score_abs=Decimal("0.15"),
+            hold_band_min_score_abs=Decimal("0.15"),
+            hold_band_release_min_roi=Decimal("0.15"),
+            conviction_stop_loss_multiplier=Decimal("1.75"),
+            conviction_extra_confirmations=1,
+            hold_band_requires_locked=True,
+        )
+    )
+    snapshot = MarketSnapshot(
+        instrument_id="inst-down",
+        phase=MarketPhase.ACTIVE.value,
+        time_left_sec=554.0,
+        best_bid=Decimal("0.50"),
+        best_ask=Decimal("0.51"),
+        fee_rate=Decimal("0"),
+        spread=Decimal("0.01"),
+        spread_pct=Decimal("0.02"),
+        slippage_buffer_pct=Decimal("0"),
+        exit_stage=ExitStage.PASSIVE,
+        in_reduce_only_tail=False,
+        stop_loss_disabled_in_tail=False,
+    )
+    position = PositionState(
+        instrument_id="inst-down",
+        qty=Decimal("5.40"),
+        sellable_qty=Decimal("5.3946"),
+        avg_entry_price=Decimal("0.66"),
+        entry_fee_remaining=Decimal("0"),
+        hold_sec=60.0,
+        stop_loss_confirm_hits=0,
+    )
+    signal = SignalDecision(
+        active_side=ActiveSide.NONE.value,
+        score=Decimal("0.00"),
+        locked=False,
+        reason="low_confidence",
+        matches_position=False,
+    )
+
+    decision = engine.evaluate(snapshot, position, signal)
+
+    assert decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION
+    assert decision.metadata["signal_is_none"] == "1"
+    assert decision.metadata["thesis_weakened"] == "1"
+
+
+def test_exit_policy_holds_in_band_when_roi_is_below_release_threshold():
+    engine = ExitPolicyEngine(
+        ExitEngineConfig(
+            min_hold_sec=0,
+            stop_loss_usdc=Decimal("0.50"),
+            stop_loss_confirmations=2,
+            stop_loss_requires_thesis_weakening=True,
+            stop_loss_thesis_min_score_abs=Decimal("0.05"),
+            stop_loss_hold_on_none_signal=True,
+            conviction_band_min_price=Decimal("0.60"),
+            hold_band_min_price=Decimal("0.68"),
+            conviction_band_min_score_abs=Decimal("0.15"),
+            hold_band_min_score_abs=Decimal("0.15"),
+            hold_band_release_min_roi=Decimal("0.15"),
+            conviction_stop_loss_multiplier=Decimal("1.75"),
+            conviction_extra_confirmations=1,
+            hold_band_requires_locked=True,
+        )
+    )
+    snapshot = MarketSnapshot(
+        instrument_id="inst-up",
+        phase=MarketPhase.ACTIVE.value,
+        time_left_sec=540.0,
+        best_bid=Decimal("0.69"),
+        best_ask=Decimal("0.70"),
+        fee_rate=Decimal("0"),
+        spread=Decimal("0.01"),
+        spread_pct=Decimal("0.014"),
+        slippage_buffer_pct=Decimal("0"),
+        exit_stage=ExitStage.PASSIVE,
+        in_reduce_only_tail=False,
+        stop_loss_disabled_in_tail=False,
+    )
+    position = PositionState(
+        instrument_id="inst-up",
+        qty=Decimal("5.40"),
+        sellable_qty=Decimal("5.40"),
+        avg_entry_price=Decimal("0.66"),
+        entry_fee_remaining=Decimal("0"),
+        hold_sec=80.0,
+        stop_loss_confirm_hits=0,
+    )
+    signal = SignalDecision(
+        active_side=ActiveSide.UP.value,
+        score=Decimal("0.22"),
+        locked=True,
+        reason="cs=+0.22",
+        matches_position=True,
+    )
+
+    decision = engine.evaluate(snapshot, position, signal)
+
+    assert decision.decision_type == ExitDecisionType.HOLD_IN_BAND
+    assert decision.reason == "hold_band_in_thesis"
+    assert decision.metadata["hold_band_released"] == "0"
+
+
+def test_exit_policy_releases_hold_band_when_roi_crosses_threshold():
+    engine = ExitPolicyEngine(
+        ExitEngineConfig(
+            min_hold_sec=0,
+            stop_loss_usdc=Decimal("0.50"),
+            stop_loss_confirmations=2,
+            stop_loss_requires_thesis_weakening=True,
+            stop_loss_thesis_min_score_abs=Decimal("0.05"),
+            stop_loss_hold_on_none_signal=True,
+            conviction_band_min_price=Decimal("0.60"),
+            hold_band_min_price=Decimal("0.68"),
+            conviction_band_min_score_abs=Decimal("0.15"),
+            hold_band_min_score_abs=Decimal("0.15"),
+            hold_band_release_min_roi=Decimal("0.15"),
+            conviction_stop_loss_multiplier=Decimal("1.75"),
+            conviction_extra_confirmations=1,
+            hold_band_requires_locked=True,
+        )
+    )
+    snapshot = MarketSnapshot(
+        instrument_id="inst-up",
+        phase=MarketPhase.ACTIVE.value,
+        time_left_sec=540.0,
+        best_bid=Decimal("0.79"),
+        best_ask=Decimal("0.80"),
+        fee_rate=Decimal("0"),
+        spread=Decimal("0.01"),
+        spread_pct=Decimal("0.0125"),
+        slippage_buffer_pct=Decimal("0"),
+        exit_stage=ExitStage.PASSIVE,
+        in_reduce_only_tail=False,
+        stop_loss_disabled_in_tail=False,
+    )
+    position = PositionState(
+        instrument_id="inst-up",
+        qty=Decimal("5.40"),
+        sellable_qty=Decimal("5.40"),
+        avg_entry_price=Decimal("0.66"),
+        entry_fee_remaining=Decimal("0"),
+        hold_sec=80.0,
+        stop_loss_confirm_hits=0,
+    )
+    signal = SignalDecision(
+        active_side=ActiveSide.UP.value,
+        score=Decimal("0.22"),
+        locked=True,
+        reason="cs=+0.22",
+        matches_position=True,
+    )
+
+    decision = engine.evaluate(snapshot, position, signal)
+
+    assert decision.decision_type == ExitDecisionType.NONE
+    assert decision.metadata["band"] == "hold"
+    assert decision.metadata["hold_band_released"] == "1"
+
+
 def test_same_side_early_profit_hold_blocks_small_quick_profit_sells():
     strategy = DummyProfitHoldStrategy()
 
@@ -1229,6 +1472,66 @@ def test_same_side_early_profit_hold_blocks_small_quick_profit_sells():
 
     assert hold is True
     assert reason.startswith("early_profit_hold")
+
+
+def test_same_side_early_profit_hold_ignores_short_term_score_wobble():
+    strategy = DummyProfitHoldStrategy()
+    strategy.side_decision_score = Decimal("0.04")
+
+    hold, reason = IntegratedBTCStrategy._should_hold_profitable_position(
+        strategy,
+        instrument_id="inst-down",
+        best_bid=Decimal("0.64"),
+        fair=Decimal("0.65"),
+        avg_entry=Decimal("0.6206"),
+        time_left_sec=700.0,
+        thesis_weakened=False,
+        offside_confirmed=False,
+    )
+
+    assert hold is True
+    assert reason.startswith("early_profit_hold")
+
+
+def test_winner_continuation_holds_when_fair_edge_remains_large():
+    strategy = DummyProfitHoldStrategy()
+    strategy.side_decision_score = Decimal("0.04")
+    strategy.live_inventory_cost["inst-down"]["opened_ts"] = time.time() - 120.0
+    strategy.position_manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+            winner_continuation_min_fair_edge_ps=Decimal("0.04"),
+        )
+    )
+
+    hold, reason = IntegratedBTCStrategy._should_hold_profitable_position(
+        strategy,
+        instrument_id="inst-down",
+        best_bid=Decimal("0.74"),
+        fair=Decimal("0.80"),
+        avg_entry=Decimal("0.6206"),
+        time_left_sec=420.0,
+        thesis_weakened=False,
+        offside_confirmed=False,
+    )
+
+    assert hold is True
+    assert reason.startswith("winner_continuation")
 
 
 def test_retreat_crossing_buy_quote_clamps_to_best_bid_for_synthetic_maker():
@@ -1658,6 +1961,7 @@ def test_trapped_inventory_recovery_overrides_buy_cooldown():
         latest_observation_supports_locked_side=True,
         robust_net=Decimal("0.03"),
         max_robust_net_deficit_usdc=Decimal("0.05"),
+        time_left_sec=240.0,
     )
 
     assert out["should_quote"] is True
@@ -1687,10 +1991,66 @@ def test_trapped_inventory_recovery_skips_dust_inventory():
         latest_observation_supports_locked_side=True,
         robust_net=Decimal("0.01"),
         max_robust_net_deficit_usdc=Decimal("0.05"),
+        time_left_sec=240.0,
     )
 
     assert out["should_quote"] is False
     assert out["entry_mode"] == "value"
+
+
+def test_trapped_inventory_recovery_blocks_tail_topup():
+    desired = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.010000 < min=0.001020",
+        "robust_net": Decimal("0.01"),
+        "entry_mode": "value",
+        "size_multiplier": Decimal("1"),
+    }
+
+    out = maybe_apply_trapped_inventory_recovery(
+        desired_entry=desired,
+        side="buy",
+        trapped_inventory_recovery_enabled=True,
+        current_inst_inventory_qty=Decimal("3.0"),
+        trapped_inventory_recovery_min_qty=Decimal("1.0"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        active_side_locked=True,
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        latest_observation_supports_locked_side=True,
+        robust_net=Decimal("0.01"),
+        max_robust_net_deficit_usdc=Decimal("0.05"),
+        time_left_sec=120.0,
+    )
+
+    assert out["should_quote"] is False
+    assert out["entry_mode"] == "value"
+
+
+def test_shadow_entry_veto_blocks_opposite_candidate():
+    desired = {
+        "should_quote": True,
+        "diag_reason": "ok",
+        "entry_mode": "value",
+    }
+
+    out = apply_shadow_entry_veto(
+        desired_entry=desired,
+        side="buy",
+        entry_mode="value",
+        inst_id="inst-up",
+        up_instrument_id="inst-up",
+        down_instrument_id="inst-down",
+        shadow_payload={
+            "shadow_candidate_side": "BUY_DOWN",
+            "shadow_bias_side": "DOWN",
+            "shadow_score": -0.31,
+            "shadow_min_score_abs": 0.15,
+        },
+    )
+
+    assert out["should_quote"] is False
+    assert out["diag_reason"] == "shadow_veto_opposite_candidate:BUY_DOWN"
 
 
 def test_trend_buy_size_multiplier_flows_into_submit_qty():
@@ -2049,3 +2409,39 @@ def test_profit_cap_does_not_modify_loss_sell_orders():
 
     assert out["price"] == Decimal("0.8000")
     assert out["loss_sell_reason"] == "armed_thesis_bad"
+
+
+def test_live_shadow_payload_keeps_bias_side_separate_from_candidate_side():
+    payload = build_live_signal_compare_payload(
+        slug="btc-updown-15m-test",
+        spot=Decimal("100.2"),
+        strike=Decimal("100.0"),
+        sigma=Decimal("0.2"),
+        time_left_sec=769.9,
+        history=[
+            (700.0, Decimal("100.0")),
+            (730.0, Decimal("100.02")),
+            (760.0, Decimal("100.04")),
+        ],
+        now_ts=770.0,
+        active_side_value="UP",
+        active_side_locked=True,
+        side_score=Decimal("0.28"),
+        side_reason="cs=+0.28",
+        ask_up=Decimal("0.97"),
+        ask_down=Decimal("0.20"),
+        bid_up=Decimal("0.96"),
+        bid_down=Decimal("0.19"),
+        cfg=ShadowSignalConfig(
+            min_edge=Decimal("0.04"),
+            min_prob_band=Decimal("0.08"),
+            max_prob_band=Decimal("0.99"),
+            shadow_score_min_abs=0.05,
+            strike_z_scale=10.0,
+            ret_10_bps_scale=500.0,
+            ret_30_bps_scale=800.0,
+        ),
+    )
+
+    assert payload["shadow_bias_side"] == "UP"
+    assert payload["shadow_candidate_side"] == "BUY_DOWN"

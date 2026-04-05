@@ -19,6 +19,7 @@ class ExitEngineConfig:
     hold_band_min_price: Decimal
     conviction_band_min_score_abs: Decimal
     hold_band_min_score_abs: Decimal
+    hold_band_release_min_roi: Decimal
     conviction_stop_loss_multiplier: Decimal
     conviction_extra_confirmations: int
     hold_band_requires_locked: bool
@@ -48,21 +49,43 @@ class ExitPolicyEngine:
             probability=exit_px_effective,
         )
         net_if_exit = gross_if_exit - position.entry_fee_remaining - exit_fee_est
+        entry_cost_usdc = (position.qty * position.avg_entry_price) + position.entry_fee_remaining
+        net_exit_roi = (
+            net_if_exit / entry_cost_usdc
+            if entry_cost_usdc > 0
+            else Decimal("0")
+        )
         band = self._classify_band(snapshot, signal)
+        hold_band_released = (
+            band == "hold"
+            and self.config.hold_band_release_min_roi > 0
+            and net_exit_roi >= self.config.hold_band_release_min_roi
+        )
         base_metadata = {
             "band": band,
             "signal_matches_position": "1" if signal.matches_position else "0",
             "signal_score": str(signal.score),
             "signal_locked": "1" if signal.locked else "0",
+            "entry_cost_usdc": str(entry_cost_usdc),
+            "net_exit_roi": str(net_exit_roi),
+            "hold_band_released": "1" if hold_band_released else "0",
+            "hold_band_release_min_roi": str(self.config.hold_band_release_min_roi),
         }
         signal_side = str(signal.active_side).upper()
         signal_is_none = signal_side == "NONE"
         explicit_offside = (not signal.matches_position) and not signal_is_none
+        price_adverse = (
+            position.avg_entry_price > 0
+            and snapshot.best_bid < position.avg_entry_price
+            and gross_if_exit < 0
+        )
         thesis_weakened = explicit_offside or (
             not signal_is_none and abs(signal.score) < self.config.stop_loss_thesis_min_score_abs
         )
+        if signal_is_none and price_adverse:
+            thesis_weakened = True
 
-        if self.config.stop_loss_hold_on_none_signal and signal_is_none:
+        if self.config.stop_loss_hold_on_none_signal and signal_is_none and not price_adverse:
             return ExitDecision(
                 decision_type=ExitDecisionType.NONE,
                 reason="signal_none_hold",
@@ -77,7 +100,7 @@ class ExitPolicyEngine:
                 },
             )
 
-        if band == "hold":
+        if band == "hold" and not hold_band_released:
             return ExitDecision(
                 decision_type=ExitDecisionType.HOLD_IN_BAND,
                 reason="hold_band_in_thesis",
@@ -88,11 +111,6 @@ class ExitPolicyEngine:
                 metadata=base_metadata,
             )
 
-        price_adverse = (
-            position.avg_entry_price > 0
-            and snapshot.best_bid < position.avg_entry_price
-            and gross_if_exit < 0
-        )
         stop_loss_threshold = abs(self.config.stop_loss_usdc)
         required_confirmations = self.config.stop_loss_confirmations
         if band == "conviction":

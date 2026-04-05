@@ -225,6 +225,7 @@ def maybe_apply_trapped_inventory_recovery(
     latest_observation_supports_locked_side: bool,
     robust_net: Decimal | None,
     max_robust_net_deficit_usdc: Decimal,
+    time_left_sec: float | None = None,
 ) -> dict[str, Any]:
     if (
         side != "buy"
@@ -236,6 +237,8 @@ def maybe_apply_trapped_inventory_recovery(
         or inst_id != active_instrument_id
         or not latest_observation_supports_locked_side
     ):
+        return desired_entry
+    if time_left_sec is not None and time_left_sec < 180.0:
         return desired_entry
     diag_reason = str(desired_entry.get("diag_reason", "") or "")
     if not (
@@ -253,6 +256,58 @@ def maybe_apply_trapped_inventory_recovery(
     )
     desired_entry["entry_mode"] = "topup"
     desired_entry["size_multiplier"] = Decimal("1")
+    return desired_entry
+
+
+def apply_shadow_entry_veto(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    entry_mode: str,
+    inst_id: Any,
+    up_instrument_id: Any,
+    down_instrument_id: Any,
+    shadow_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if (
+        side != "buy"
+        or not desired_entry.get("should_quote", False)
+        or entry_mode == "topup"
+        or not shadow_payload
+    ):
+        return desired_entry
+
+    intended_side = None
+    intended_bias = None
+    if inst_id == up_instrument_id:
+        intended_side = "BUY_UP"
+        intended_bias = "UP"
+    elif inst_id == down_instrument_id:
+        intended_side = "BUY_DOWN"
+        intended_bias = "DOWN"
+    if intended_side is None:
+        return desired_entry
+
+    shadow_candidate_side = str(shadow_payload.get("shadow_candidate_side") or "")
+    shadow_bias_side = str(shadow_payload.get("shadow_bias_side") or "")
+    shadow_score = Decimal(str(shadow_payload.get("shadow_score") or "0"))
+    shadow_min_abs = Decimal(str(shadow_payload.get("shadow_min_score_abs") or "0"))
+
+    veto_reason = ""
+    if shadow_candidate_side and shadow_candidate_side != intended_side:
+        veto_reason = f"shadow_veto_opposite_candidate:{shadow_candidate_side}"
+    elif (
+        not shadow_candidate_side
+        and shadow_bias_side
+        and shadow_bias_side != intended_bias
+        and abs(shadow_score) >= shadow_min_abs
+    ):
+        veto_reason = f"shadow_veto_opposite_bias:{shadow_bias_side}@{float(shadow_score):.4f}"
+    if not veto_reason:
+        return desired_entry
+
+    desired_entry["should_quote"] = False
+    desired_entry["diag_reason"] = veto_reason
     return desired_entry
 
 

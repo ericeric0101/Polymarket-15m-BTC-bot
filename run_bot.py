@@ -8,6 +8,7 @@ Complete BTC 15-Min Trading Bot - FIXED VERSION
 """
 
 import asyncio
+import json
 import os
 import sys
 from collections import deque
@@ -98,6 +99,7 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
+    apply_shadow_entry_veto,
     apply_time_based_profitable_sell_cap,
     attach_desired_entry_runtime_metadata,
     apply_confirmed_inventory_sell_guard,
@@ -117,6 +119,7 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     should_requote_existing_order,
 )
+from bot.shadow_signal import build_live_signal_compare_payload
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.market_discovery import (
@@ -432,6 +435,83 @@ class IntegratedBTCStrategy(
             if hist_px > 0:
                 return hist_px
         return None
+
+    def _emit_live_signal_compare_snapshot(self, now_ts: float) -> None:
+        if not self.trade_db or not getattr(self, "shadow_signal_enabled", False):
+            return
+        payload = self._build_live_signal_compare_payload(now_ts)
+        if payload is None:
+            return
+        self._db_strategy_event("LIVE_SIGNAL_COMPARE", payload)
+
+        main_sig = json.dumps(
+            {
+                "slug": payload["slug"],
+                "main_candidate_side": payload.get("main_candidate_side"),
+                "main_score": round(float(payload.get("main_score") or 0.0), 4),
+                "main_locked": bool(payload.get("main_side_locked")),
+            },
+            sort_keys=True,
+        )
+        if main_sig != getattr(self, "_last_main_live_candidate_signature", None):
+            self._last_main_live_candidate_signature = main_sig
+            self._db_strategy_event("MAIN_SIGNAL_CANDIDATE_LIVE", payload)
+
+        shadow_sig = json.dumps(
+            {
+                "slug": payload["slug"],
+                "shadow_candidate_side": payload.get("shadow_candidate_side"),
+                "shadow_candidate_edge": round(float(payload.get("shadow_candidate_edge") or 0.0), 4),
+                "shadow_score": round(float(payload.get("shadow_score") or 0.0), 4),
+            },
+            sort_keys=True,
+        )
+        if shadow_sig != getattr(self, "_last_shadow_live_candidate_signature", None):
+            self._last_shadow_live_candidate_signature = shadow_sig
+            self._db_strategy_event("SHADOW_SIGNAL_CANDIDATE_LIVE", payload)
+
+    def _build_live_signal_compare_payload(self, now_ts: float) -> Optional[Dict[str, Any]]:
+        if not getattr(self, "shadow_signal_enabled", False):
+            return None
+        slug = str(self.current_market_slug or "")
+        if not slug:
+            return None
+        spot = self._capture_market_open_spot()
+        if spot is None or spot <= 0:
+            return None
+        strike = self.market_strike_cache_by_slug.get(slug)
+        up_quote = (
+            self._get_quote_for_instrument(self.current_up_instrument_id)
+            if self.current_up_instrument_id is not None
+            else None
+        )
+        down_quote = (
+            self._get_quote_for_instrument(self.current_down_instrument_id)
+            if self.current_down_instrument_id is not None
+            else None
+        )
+        sigma = self._estimate_external_spot_sigma_annualized() or self.maker_digital_sigma_default
+        sigma = min(self.maker_digital_sigma_ceiling, max(self.maker_digital_sigma_floor, sigma))
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
+        return build_live_signal_compare_payload(
+            slug=slug,
+            spot=spot,
+            strike=strike,
+            sigma=sigma,
+            time_left_sec=time_left_sec,
+            history=self.external_spot_history,
+            now_ts=now_ts,
+            active_side_value=self.active_side.value,
+            active_side_locked=bool(self.active_side_locked),
+            side_score=self.side_decision_score,
+            side_reason=self.side_decision_reason,
+            ask_up=up_quote[1] if up_quote is not None else None,
+            ask_down=down_quote[1] if down_quote is not None else None,
+            bid_up=up_quote[0] if up_quote is not None else None,
+            bid_down=down_quote[0] if down_quote is not None else None,
+            cfg=self.shadow_signal_config,
+        )
 
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
 
@@ -1253,6 +1333,7 @@ class IntegratedBTCStrategy(
                 self._logged_extreme_sell_block = False
                 self._logged_reduce_only_tail_sell_block = False
 
+            live_shadow_payload = None
             for side, quote_data in side_plan.items():
                 order_key = self._order_key_for(side, inst_id)
                 inst_key = self._instrument_key(inst_id)
@@ -1543,7 +1624,10 @@ class IntegratedBTCStrategy(
                     ),
                     robust_net=desired_entry.get("robust_net"),
                     max_robust_net_deficit_usdc=self.trapped_inventory_recovery_max_robust_net_deficit_usdc,
+                    time_left_sec=time_left_sec_global,
                 )
+                profit_cap_before_price = desired_entry.get("price")
+                profit_cap_before_reason = desired_entry.get("diag_reason")
                 desired_entry = apply_time_based_profitable_sell_cap(
                     desired_entry=desired_entry,
                     side=side,
@@ -1557,6 +1641,26 @@ class IntegratedBTCStrategy(
                     exit_stage_value=self.exit_policy.stage(time_left_sec_global).value,
                     tick=quote_ctx.tick,
                 )
+                if (
+                    side == "sell"
+                    and desired_entry.get("should_quote", False)
+                    and desired_entry.get("diag_reason") != profit_cap_before_reason
+                    and str(desired_entry.get("diag_reason", "")).startswith("profit_cap ")
+                    and desired_entry.get("price") != profit_cap_before_price
+                ):
+                    self._db_strategy_event(
+                        "PROFIT_CAP_APPLIED",
+                        {
+                            "side": "SELL",
+                            "old_price": float(Decimal(str(profit_cap_before_price))),
+                            "new_price": float(Decimal(str(desired_entry.get("price")))),
+                            "avg_entry": float(avg_entry),
+                            "best_bid": float(quote_ctx.quote[0]) if quote_ctx.quote is not None else None,
+                            "best_ask": float(quote_ctx.quote[1]) if quote_ctx.quote is not None else None,
+                            "exit_stage": self.exit_policy.stage(time_left_sec_global).value,
+                            "diag_reason": desired_entry.get("diag_reason"),
+                        },
+                    )
                 if side == "buy" and quote_ctx.quote is not None:
                     locked_for_sec = (
                         max(0.0, now_ts - float(getattr(self, "active_side_locked_since_ts", 0.0)))
@@ -1578,6 +1682,17 @@ class IntegratedBTCStrategy(
                         fair=quote_ctx.fair,
                         continuation_enabled=self.continuation_entry_enabled,
                         continuation_size_multiplier=self.continuation_entry_size_multiplier,
+                    )
+                    if live_shadow_payload is None:
+                        live_shadow_payload = self._build_live_signal_compare_payload(now_ts)
+                    desired_entry = apply_shadow_entry_veto(
+                        desired_entry=desired_entry,
+                        side=side,
+                        entry_mode=str(desired_entry.get("entry_mode", buy_entry_eval.entry_mode or "value")).lower(),
+                        inst_id=inst_id,
+                        up_instrument_id=self.current_up_instrument_id,
+                        down_instrument_id=self.current_down_instrument_id,
+                        shadow_payload=live_shadow_payload,
                     )
                 desired_quotes[order_key] = desired_entry
 
@@ -2116,6 +2231,7 @@ class IntegratedBTCStrategy(
         if now_ts - self.last_status_log_ts < self.strategy_status_interval_sec:
             return
         self.last_status_log_ts = now_ts
+        self._emit_live_signal_compare_snapshot(now_ts)
 
         reasons: List[str] = []
         if self._stopping:

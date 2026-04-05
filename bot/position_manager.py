@@ -43,6 +43,7 @@ class PositionManagerConfig:
     stop_loss_regime_min_sec: int
     stop_loss_regime_confirmations: int
     stop_loss_min_opposite_score_abs: Decimal
+    winner_continuation_min_fair_edge_ps: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -180,8 +181,6 @@ class PositionManager:
             return False, ""
         if not instrument_matches_active_side:
             return False, ""
-        if abs(side_decision_score) < self.config.profit_run_min_score_abs:
-            return False, ""
         if exit_stage_value != "PASSIVE":
             return False, ""
 
@@ -190,15 +189,28 @@ class PositionManager:
         peak_profit_ps = max(peak_bid - avg_entry, peak_fair - avg_entry)
         if (
             self.config.early_profit_hold_enabled
-            and abs(side_decision_score) >= self.config.early_profit_hold_min_score_abs
             and hold_sec < float(self.config.early_profit_hold_min_hold_sec)
             and peak_profit_ps < self.config.early_profit_hold_max_profit_ps
         ):
             return True, (
                 f"early_profit_hold hold={hold_sec:.1f}s<{self.config.early_profit_hold_min_hold_sec}s "
-                f"peak_profit={float(peak_profit_ps):.4f}<{float(self.config.early_profit_hold_max_profit_ps):.4f} "
-                f"score={float(side_decision_score):+.4f}"
+                f"peak_profit={float(peak_profit_ps):.4f}<{float(self.config.early_profit_hold_max_profit_ps):.4f}"
             )
+        fair_edge_ps = Decimal("0")
+        if fair is not None and fair > 0:
+            fair_edge_ps = max(Decimal("0"), fair - best_bid)
+        if (
+            self.config.winner_continuation_min_fair_edge_ps > 0
+            and best_bid > avg_entry
+            and fair_edge_ps >= self.config.winner_continuation_min_fair_edge_ps
+        ):
+            return True, (
+                f"winner_continuation fair_edge={float(fair_edge_ps):.4f}"
+                f">={float(self.config.winner_continuation_min_fair_edge_ps):.4f} "
+                f"best_bid={float(best_bid):.4f} fair={float(fair or best_bid):.4f}"
+            )
+        if abs(side_decision_score) < self.config.profit_run_min_score_abs:
+            return False, ""
         if peak_profit_ps < self.config.profit_run_min_profit_ps:
             return False, ""
 
