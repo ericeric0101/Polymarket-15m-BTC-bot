@@ -332,6 +332,10 @@ def initialize_strategy_settings(
     strategy.maker_sell_cost_protect_fee_buffer_ps = config.maker.sell_cost_protect_fee_buffer_ps
     strategy.maker_sell_min_profit_floor_ps = config.maker.sell_min_profit_floor_ps
     strategy.maker_sell_cost_protect_emergency_last_sec = config.maker.sell_cost_protect_emergency_last_sec
+    strategy.maker_profitable_sell_cap_enabled = config.maker.profitable_sell_cap_enabled
+    strategy.maker_profitable_sell_cap_passive_offset_ps = config.maker.profitable_sell_cap_passive_offset_ps
+    strategy.maker_profitable_sell_cap_aggressive_offset_ps = config.maker.profitable_sell_cap_aggressive_offset_ps
+    strategy.maker_profitable_sell_cap_taker_offset_ps = config.maker.profitable_sell_cap_taker_offset_ps
     strategy.maker_high_cost_exit_cooldown_enabled = config.maker.high_cost_exit_cooldown_enabled
     strategy.maker_high_cost_fill_threshold = config.maker.high_cost_fill_threshold
     strategy.maker_high_cost_exit_cooldown_sec = config.maker.high_cost_exit_cooldown_sec

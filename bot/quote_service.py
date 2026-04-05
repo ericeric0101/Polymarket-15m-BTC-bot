@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Optional
 
 
@@ -336,6 +336,70 @@ def preserve_recent_loss_sell_order(
     desired_entry["diag_reason"] = (
         f"loss_sell_reprice_hold existing={float(existing_price):.4f} "
         f"> new={float(new_price):.4f} age={age_sec:.1f}s"
+    )
+    return desired_entry
+
+
+def apply_time_based_profitable_sell_cap(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    avg_entry: Decimal,
+    maker_sell_cost_protect_fee_buffer_ps: Decimal,
+    maker_sell_min_profit_floor_ps: Decimal,
+    profitable_sell_cap_enabled: bool,
+    profitable_sell_cap_passive_offset_ps: Decimal,
+    profitable_sell_cap_aggressive_offset_ps: Decimal,
+    profitable_sell_cap_taker_offset_ps: Decimal,
+    exit_stage_value: str,
+    tick: Decimal,
+) -> dict[str, Any]:
+    if side != "sell" or not profitable_sell_cap_enabled:
+        return desired_entry
+    if not desired_entry.get("should_quote", False):
+        return desired_entry
+    if str(desired_entry.get("loss_sell_reason", "") or ""):
+        return desired_entry
+
+    try:
+        limit_price = Decimal(str(desired_entry.get("price", "0")))
+        best_bid = Decimal(str(desired_entry.get("planned_best_bid", "0")))
+        best_ask = Decimal(str(desired_entry.get("planned_best_ask", "0")))
+    except Exception:
+        return desired_entry
+    if avg_entry <= 0 or limit_price <= 0 or best_bid <= 0:
+        return desired_entry
+
+    cost_floor = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
+    if limit_price <= cost_floor:
+        return desired_entry
+
+    stage = str(exit_stage_value or "PASSIVE").upper()
+    if stage == "TAKER":
+        max_offset = profitable_sell_cap_taker_offset_ps
+    elif stage == "AGGRESSIVE":
+        max_offset = profitable_sell_cap_aggressive_offset_ps
+    else:
+        max_offset = profitable_sell_cap_passive_offset_ps
+
+    if tick <= 0:
+        tick = Decimal("0.01")
+
+    market_ask_ref = best_ask if best_ask > 0 else (best_bid + tick)
+    min_maker_sell = best_bid + tick
+    cap_price = max(cost_floor, min_maker_sell, market_ask_ref + max(Decimal("0"), max_offset))
+    cap_price = (cap_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+    cap_price = max(Decimal("0.01"), min(Decimal("0.99"), cap_price))
+    if limit_price <= cap_price:
+        return desired_entry
+
+    prev_reason = str(desired_entry.get("diag_reason", "") or "")
+    desired_entry["price"] = cap_price
+    desired_entry["diag_reason"] = (
+        f"profit_cap stage={stage} old={float(limit_price):.4f} "
+        f"cap={float(cap_price):.4f} bid={float(best_bid):.4f} ask={float(best_ask):.4f} "
+        f"offset={float(max_offset):.4f}"
+        + (f" prev={prev_reason}" if prev_reason else "")
     )
     return desired_entry
 

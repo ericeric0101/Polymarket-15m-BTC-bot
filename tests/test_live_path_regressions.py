@@ -16,6 +16,7 @@ from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisi
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
+    apply_time_based_profitable_sell_cap,
     build_desired_quote_entry,
     build_directional_snapshot,
     maybe_apply_continuation_entry,
@@ -1935,3 +1936,116 @@ def test_preserve_recent_loss_sell_order_holds_higher_existing_price():
 
     assert out["price"] == Decimal("0.50")
     assert "loss_sell_reprice_hold" in out["diag_reason"]
+
+
+def test_profit_cap_clamps_profitable_sell_to_realistic_midgame_price():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.8000"),
+        "planned_best_bid": Decimal("0.7000"),
+        "planned_best_ask": Decimal("0.7100"),
+        "diag_reason": "sell_signal",
+        "loss_sell_reason": "",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.5800"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="PASSIVE",
+        tick=Decimal("0.01"),
+    )
+
+    assert out["price"] == Decimal("0.7300")
+    assert "profit_cap" in out["diag_reason"]
+    assert "stage=PASSIVE" in out["diag_reason"]
+
+
+def test_profit_cap_gets_more_aggressive_in_tail_stage():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.8000"),
+        "planned_best_bid": Decimal("0.7000"),
+        "planned_best_ask": Decimal("0.7100"),
+        "diag_reason": "sell_signal",
+        "loss_sell_reason": "",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.5800"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="AGGRESSIVE",
+        tick=Decimal("0.01"),
+    )
+
+    assert out["price"] == Decimal("0.7200")
+    assert "stage=AGGRESSIVE" in out["diag_reason"]
+
+
+def test_profit_cap_gets_tightest_in_taker_stage():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.8000"),
+        "planned_best_bid": Decimal("0.7000"),
+        "planned_best_ask": Decimal("0.7100"),
+        "diag_reason": "sell_signal",
+        "loss_sell_reason": "",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.5800"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="TAKER",
+        tick=Decimal("0.01"),
+    )
+
+    assert out["price"] == Decimal("0.7200")
+    assert "stage=TAKER" in out["diag_reason"]
+
+
+def test_profit_cap_does_not_modify_loss_sell_orders():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.8000"),
+        "planned_best_bid": Decimal("0.7000"),
+        "planned_best_ask": Decimal("0.7100"),
+        "diag_reason": "armed_thesis_bad",
+        "loss_sell_reason": "armed_thesis_bad",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.5800"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="TAKER",
+        tick=Decimal("0.01"),
+    )
+
+    assert out["price"] == Decimal("0.8000")
+    assert out["loss_sell_reason"] == "armed_thesis_bad"

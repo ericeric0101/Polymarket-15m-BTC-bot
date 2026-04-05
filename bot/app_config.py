@@ -160,6 +160,10 @@ class MakerConfig:
     sell_cost_protect_fee_buffer_ps: Decimal
     sell_min_profit_floor_ps: Decimal
     sell_cost_protect_emergency_last_sec: int
+    profitable_sell_cap_enabled: bool
+    profitable_sell_cap_passive_offset_ps: Decimal
+    profitable_sell_cap_aggressive_offset_ps: Decimal
+    profitable_sell_cap_taker_offset_ps: Decimal
     loss_sell_min_hold_sec: float
     loss_sell_reprice_min_interval_sec: float
     high_cost_exit_cooldown_enabled: bool
@@ -571,6 +575,10 @@ class AppConfig:
                 sell_cost_protect_fee_buffer_ps=_env_decimal("MAKER_SELL_COST_PROTECT_FEE_BUFFER_PS", "0.005"),
                 sell_min_profit_floor_ps=_env_decimal("MAKER_SELL_MIN_PROFIT_FLOOR_PS", "0"),
                 sell_cost_protect_emergency_last_sec=max(0, _env_int("MAKER_SELL_COST_PROTECT_EMERGENCY_LAST_SEC", 60)),
+                profitable_sell_cap_enabled=_env_bool("MAKER_PROFITABLE_SELL_CAP_ENABLED", True),
+                profitable_sell_cap_passive_offset_ps=_env_decimal("MAKER_PROFITABLE_SELL_CAP_PASSIVE_OFFSET_PS", "0.02"),
+                profitable_sell_cap_aggressive_offset_ps=_env_decimal("MAKER_PROFITABLE_SELL_CAP_AGGRESSIVE_OFFSET_PS", "0.01"),
+                profitable_sell_cap_taker_offset_ps=_env_decimal("MAKER_PROFITABLE_SELL_CAP_TAKER_OFFSET_PS", "0.005"),
                 loss_sell_min_hold_sec=max(0.0, _env_float("MAKER_LOSS_SELL_MIN_HOLD_SEC", 60.0)),
                 loss_sell_reprice_min_interval_sec=max(
                     0.0,

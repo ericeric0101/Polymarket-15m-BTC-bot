@@ -41,7 +41,8 @@ class ShadowPaperRow:
     slug: str
     ts: datetime
     side: str
-    pnl: float
+    pnl_per_share: float
+    entry_qty: float
     entry_price: float
     exit_price: float
     edge: float
@@ -51,16 +52,27 @@ class ShadowPaperRow:
     close_kind: str
     exit_reason: str
 
+    @property
+    def total_pnl(self) -> float:
+        return self.pnl_per_share * self.entry_qty
+
 
 @dataclass
 class MainBotMarketRow:
     slug: str
+    buy_qty: float
     fill_realized_pnl: float
     settlement_pnl: float
 
     @property
     def combined_pnl(self) -> float:
         return self.fill_realized_pnl + self.settlement_pnl
+
+    @property
+    def pnl_per_buy_share(self) -> Optional[float]:
+        if self.buy_qty <= 0:
+            return None
+        return self.combined_pnl / self.buy_qty
 
 
 def _load_shadow_paper_rows(db_path: Path, cutoff: Optional[datetime], run_id: Optional[str]) -> List[ShadowPaperRow]:
@@ -100,7 +112,8 @@ def _load_shadow_paper_rows(db_path: Path, cutoff: Optional[datetime], run_id: O
                 slug=slug,
                 ts=ts,
                 side=side,
-                pnl=float(realized_pnl),
+                pnl_per_share=float(realized_pnl),
+                entry_qty=float(payload.get("entry_qty") or 1.0),
                 entry_price=float(entry_price),
                 exit_price=float(exit_price),
                 edge=float(payload.get("candidate_edge") or 0.0),
@@ -126,7 +139,7 @@ def _load_main_bot_markets(db_path: Path, cutoff: Optional[datetime]) -> Dict[st
         fill_params.append(cutoff_iso)
     fill_rows = conn.execute(
         f"""
-        SELECT payload_json
+        SELECT side, qty, payload_json
         FROM order_events
         WHERE {' AND '.join(fill_where)}
         """,
@@ -155,8 +168,10 @@ def _load_main_bot_markets(db_path: Path, cutoff: Optional[datetime]) -> Dict[st
         if not slug:
             continue
         realized = float(payload.get("realized_net_usdc") or 0.0)
-        curr = by_slug.setdefault(slug, MainBotMarketRow(slug=slug, fill_realized_pnl=0.0, settlement_pnl=0.0))
+        curr = by_slug.setdefault(slug, MainBotMarketRow(slug=slug, buy_qty=0.0, fill_realized_pnl=0.0, settlement_pnl=0.0))
         curr.fill_realized_pnl += realized
+        if str(row["side"] or "").upper() == "BUY":
+            curr.buy_qty += float(row["qty"] or 0.0)
 
     for row in settlement_rows:
         payload = json.loads(row["payload_json"] or "{}")
@@ -164,7 +179,7 @@ def _load_main_bot_markets(db_path: Path, cutoff: Optional[datetime]) -> Dict[st
         if not slug:
             continue
         settlement_pnl = float(payload.get("settlement_pnl_usdc") or 0.0)
-        curr = by_slug.setdefault(slug, MainBotMarketRow(slug=slug, fill_realized_pnl=0.0, settlement_pnl=0.0))
+        curr = by_slug.setdefault(slug, MainBotMarketRow(slug=slug, buy_qty=0.0, fill_realized_pnl=0.0, settlement_pnl=0.0))
         curr.settlement_pnl += settlement_pnl
 
     return by_slug
@@ -174,8 +189,8 @@ def _summarize_shadow(rows: List[ShadowPaperRow]) -> None:
     if not rows:
         print("shadow_paper: no settled rows")
         return
-    wins = sum(1 for row in rows if row.pnl > 0)
-    total = sum(row.pnl for row in rows)
+    wins = sum(1 for row in rows if row.total_pnl > 0)
+    total = sum(row.total_pnl for row in rows)
     avg_edge = sum(row.edge for row in rows) / len(rows)
     avg_score = sum(row.shadow_score for row in rows) / len(rows)
     avg_entry = sum(row.entry_price for row in rows) / len(rows)
@@ -197,16 +212,25 @@ def _summarize_overlap(rows: List[ShadowPaperRow], main_by_slug: Dict[str, MainB
     if not overlap:
         print("overlap_with_main_bot: no overlapping settled markets")
         return
-    shadow_total = sum(row.pnl for row in overlap)
+    shadow_total = sum(row.total_pnl for row in overlap)
     main_total = sum(main_by_slug[row.slug].combined_pnl for row in overlap)
-    improved = sum(1 for row in overlap if row.pnl > main_by_slug[row.slug].combined_pnl)
-    worsened = sum(1 for row in overlap if row.pnl < main_by_slug[row.slug].combined_pnl)
+    improved = sum(
+        1
+        for row in overlap
+        if main_by_slug[row.slug].pnl_per_buy_share is not None and row.pnl_per_share > main_by_slug[row.slug].pnl_per_buy_share
+    )
+    worsened = sum(
+        1
+        for row in overlap
+        if main_by_slug[row.slug].pnl_per_buy_share is not None and row.pnl_per_share < main_by_slug[row.slug].pnl_per_buy_share
+    )
     tied = len(overlap) - improved - worsened
     print(
         f"overlap_with_main_bot: count={len(overlap)} "
         f"shadow_total={shadow_total:.6f} main_total={main_total:.6f} "
         f"delta={shadow_total - main_total:+.6f}"
     )
+    print("  note: improved/worsened is based on per-buy-share pnl, not raw total pnl.")
     print(f"  improved={improved} worsened={worsened} tied={tied}")
 
 
@@ -257,8 +281,8 @@ def main() -> int:
             main_row = main_by_slug[row.slug]
             print(
                 f"{row.ts.isoformat()} {row.slug} {row.side} "
-                f"shadow_pnl={_fmt(row.pnl,4)} main_combined={_fmt(main_row.combined_pnl,4)} "
-                f"delta={_fmt(row.pnl - main_row.combined_pnl,4)} "
+                f"shadow_total={_fmt(row.total_pnl,4)} main_total={_fmt(main_row.combined_pnl,4)} "
+                f"shadow_pnl/share={_fmt(row.pnl_per_share,4)} main_pnl/share={_fmt(main_row.pnl_per_buy_share,4)} "
                 f"edge={_fmt(row.edge,4)} score={_fmt(row.shadow_score,4)} "
                 f"close={row.close_kind}:{row.exit_reason or '-'} outcome={row.outcome or '-'}"
             )
@@ -269,7 +293,8 @@ def main() -> int:
         for row in sorted(shadow_rows, key=lambda item: item.ts)[-args.show :]:
             print(
                 f"{row.ts.isoformat()} {row.slug} {row.side} "
-                f"entry={_fmt(row.entry_price,4)} exit={_fmt(row.exit_price,4)} pnl={_fmt(row.pnl,4)} "
+                f"entry={_fmt(row.entry_price,4)} qty={_fmt(row.entry_qty,4)} exit={_fmt(row.exit_price,4)} "
+                f"pnl/share={_fmt(row.pnl_per_share,4)} total={_fmt(row.total_pnl,4)} "
                 f"edge={_fmt(row.edge,4)} score={_fmt(row.shadow_score,4)} "
                 f"t_left={_fmt(row.time_left_sec,1)}s close={row.close_kind}:{row.exit_reason or '-'} outcome={row.outcome or '-'}"
             )

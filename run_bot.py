@@ -98,6 +98,7 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
+    apply_time_based_profitable_sell_cap,
     attach_desired_entry_runtime_metadata,
     apply_confirmed_inventory_sell_guard,
     apply_reload_edge_guard,
@@ -1542,6 +1543,19 @@ class IntegratedBTCStrategy(
                     ),
                     robust_net=desired_entry.get("robust_net"),
                     max_robust_net_deficit_usdc=self.trapped_inventory_recovery_max_robust_net_deficit_usdc,
+                )
+                desired_entry = apply_time_based_profitable_sell_cap(
+                    desired_entry=desired_entry,
+                    side=side,
+                    avg_entry=avg_entry,
+                    maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
+                    maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                    profitable_sell_cap_enabled=self.maker_profitable_sell_cap_enabled,
+                    profitable_sell_cap_passive_offset_ps=self.maker_profitable_sell_cap_passive_offset_ps,
+                    profitable_sell_cap_aggressive_offset_ps=self.maker_profitable_sell_cap_aggressive_offset_ps,
+                    profitable_sell_cap_taker_offset_ps=self.maker_profitable_sell_cap_taker_offset_ps,
+                    exit_stage_value=self.exit_policy.stage(time_left_sec_global).value,
+                    tick=quote_ctx.tick,
                 )
                 if side == "buy" and quote_ctx.quote is not None:
                     locked_for_sec = (
