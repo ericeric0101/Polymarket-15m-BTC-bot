@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import threading
 from pathlib import Path
 
 import httpx
@@ -343,8 +344,17 @@ def _install_pyclob_http_overrides() -> None:
     if getattr(pyclob_helpers, "_btc15m_runtime_compat_patched", False):
         return
 
-    if not hasattr(pyclob_helpers, "_http_client_http1"):
-        pyclob_helpers._http_client_http1 = httpx.Client(http2=False)
+    if not hasattr(pyclob_helpers, "_http_client_local"):
+        pyclob_helpers._http_client_local = threading.local()
+
+    def _get_thread_local_client(*, http2: bool) -> httpx.Client:
+        local = pyclob_helpers._http_client_local
+        attr = "http2_client" if http2 else "http1_client"
+        client = getattr(local, attr, None)
+        if client is None:
+            client = httpx.Client(http2=http2)
+            setattr(local, attr, client)
+        return client
 
     def _request_with_client(client: httpx.Client, endpoint: str, method: str, headers: dict, data):
         if isinstance(data, str):
@@ -364,19 +374,25 @@ def _install_pyclob_http_overrides() -> None:
     def request(endpoint: str, method: str, headers=None, data=None):
         try:
             headers = pyclob_helpers.overloadHeaders(method, headers)
-            resp = _request_with_client(pyclob_helpers._http_client, endpoint, method, headers, data)
+            resp = _request_with_client(
+                _get_thread_local_client(http2=True),
+                endpoint,
+                method,
+                headers,
+                data,
+            )
             if resp.status_code != 200:
                 raise PolyApiException(resp)
             try:
                 return resp.json()
             except ValueError:
                 return resp.text
-        except httpx.RequestError:
+        except (httpx.RequestError, RuntimeError):
             try:
                 fallback_headers = dict(pyclob_helpers.overloadHeaders(method, headers))
                 fallback_headers["Connection"] = "close"
                 resp = _request_with_client(
-                    pyclob_helpers._http_client_http1,
+                    _get_thread_local_client(http2=False),
                     endpoint,
                     method,
                     fallback_headers,
@@ -388,10 +404,9 @@ def _install_pyclob_http_overrides() -> None:
                     return resp.json()
                 except ValueError:
                     return resp.text
-            except httpx.RequestError:
+            except (httpx.RequestError, RuntimeError):
                 raise PolyApiException(error_msg="Request exception!")
 
     pyclob_helpers._request_with_client = _request_with_client
     pyclob_helpers.request = request
     pyclob_helpers._btc15m_runtime_compat_patched = True
-

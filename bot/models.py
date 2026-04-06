@@ -69,3 +69,33 @@ class ExitDecision:
     exit_px_effective: Decimal
     confirm_hits: int = 0
     metadata: Dict[str, str] = field(default_factory=dict)
+
+
+class DecisionRegime(Enum):
+    TREND = "TREND"
+    CHOP = "CHOP"
+    BROKEN = "BROKEN"
+
+
+class DecisionPhase(Enum):
+    FLAT = "FLAT"
+    PROBE = "PROBE"
+    HOLD = "HOLD"
+    DE_RISK = "DE_RISK"
+    EXIT = "EXIT"
+
+
+@dataclass(frozen=True)
+class DecisionState:
+    regime: DecisionRegime
+    phase: DecisionPhase
+    pressure: Decimal
+    edge: Decimal
+    persistence: Decimal
+    book_pressure: Decimal
+    drawdown_pressure: Decimal
+    time_pressure: Decimal
+    current_price: Optional[Decimal] = None
+    price_to_beat: Optional[Decimal] = None
+    spot_minus_strike_bps: Optional[Decimal] = None
+    metadata: Dict[str, str] = field(default_factory=dict)

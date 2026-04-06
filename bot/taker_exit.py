@@ -36,6 +36,8 @@ class TakerExitHost(Protocol):
     pending_taker_exit_by_inst: dict[str, Any]
     last_taker_exit_ts_by_inst: dict[str, float]
     current_market_end_timestamp: Any
+    current_market_slug: Any
+    market_strike_cache_by_slug: dict[str, Any]
     maker_reduce_only_no_new_sell_last_sec: int
     taker_exit_disable_stop_loss_last_sec: int
     market_phase: Any
@@ -43,6 +45,8 @@ class TakerExitHost(Protocol):
     side_decision_score: Decimal
     active_side_locked: bool
     side_decision_reason: str
+
+    def _capture_market_open_spot(self) -> Optional[Decimal]: ...
 
     def _maker_quote_instruments(self) -> list[Any]: ...
     def _instrument_key(self, instrument_id: Any) -> str: ...
@@ -309,6 +313,8 @@ class TakerExitMixin:
                 ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
                 ExitDecisionType.TAKER_STOP_LOSS,
             ) and hasattr(self, "position_manager"):
+                _te_current_price = self._capture_market_open_spot() if hasattr(self, "_capture_market_open_spot") else None
+                _te_price_to_beat = self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")) if hasattr(self, "market_strike_cache_by_slug") else None
                 regime = self.position_manager.assess_stop_loss_regime(
                     inst_key=inst_key,
                     now_ts=now_ts,
@@ -319,6 +325,15 @@ class TakerExitMixin:
                     signal_score=signal_decision.score,
                     signal_matches_position=signal_decision.matches_position,
                     force_exit=force_offside_near_close,
+                    current_price=_te_current_price,
+                    price_to_beat=_te_price_to_beat,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    fair=fair,
+                    time_left_sec=time_left_sec,
+                    avg_entry=avg_entry,
+                    peak_bid=position.peak_bid,
+                    peak_fair=position.peak_fair,
                 )
                 if regime.status != "armed":
                     self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
@@ -678,6 +693,12 @@ class TakerExitMixin:
             if hasattr(self, "position_manager"):
                 held_side = self._side_for_instrument_id(inst_id).value if hasattr(self, "_side_for_instrument_id") else "NONE"
                 opened_ts = float(state.get("opened_ts", 0.0))
+                quote = self._get_quote_for_instrument(inst_id)
+                if quote is None:
+                    continue
+                best_bid, best_ask = quote
+                _ue_current_price = self._capture_market_open_spot() if hasattr(self, "_capture_market_open_spot") else None
+                _ue_price_to_beat = self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")) if hasattr(self, "market_strike_cache_by_slug") else None
                 regime = self.position_manager.assess_stop_loss_regime(
                     inst_key=inst_key,
                     now_ts=now_ts,
@@ -688,6 +709,15 @@ class TakerExitMixin:
                     signal_score=self.side_decision_score,
                     signal_matches_position=matches_position,
                     force_exit=False,
+                    current_price=_ue_current_price,
+                    price_to_beat=_ue_price_to_beat,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
+                    fair=None,
+                    time_left_sec=time_left_sec,
+                    avg_entry=avg_entry,
+                    peak_bid=peak_bid,
+                    peak_fair=peak_fair,
                 )
                 if regime.status != "armed":
                     continue

@@ -12,10 +12,11 @@ from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.pricing_runtime import PricingRuntimeMixin
-from bot.models import MarketSnapshot, PositionState, SignalDecision, ExitDecisionType
+from bot.models import DecisionPhase, DecisionRegime, MarketSnapshot, PositionState, SignalDecision, ExitDecisionType
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
+    apply_de_risk_sell_pricing,
     apply_shadow_entry_veto,
     apply_time_based_profitable_sell_cap,
     build_desired_quote_entry,
@@ -27,7 +28,11 @@ from bot.quote_service import (
     retreat_crossing_buy_quote,
 )
 from bot.order_submission import submit_maker_quote
-from bot.shadow_signal import ShadowSignalConfig, build_live_signal_compare_payload
+from bot.shadow_signal import (
+    ShadowSignalConfig,
+    build_live_signal_compare_payload,
+    select_shadow_candidate,
+)
 from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
@@ -112,6 +117,7 @@ class DummyStrategyForFill(FillLedgerMixin):
             }
         }
         self._inventory_delta_shares = Decimal("0")
+        self.live_inventory_cost = {}
         self.inventory_last_update_ts = 0.0
         self.instrument_id = "inst-1"
         self._sell_recovery_required_by_inst = {}
@@ -194,6 +200,122 @@ class DummyStrategyForFill(FillLedgerMixin):
 
     def _instrument_key(self, instrument_id):
         return str(instrument_id) if instrument_id is not None else ""
+
+    def _clear_pending_taker_exit_for_order(self, client_order_id):
+        return None
+
+    def _db_strategy_event(self, event_type, payload):
+        self.strategy_events.append((event_type, payload))
+
+    def _db_order_event(self, **payload):
+        self.order_events.append(payload)
+
+    def _update_terminal_dashboard_snapshot(self):
+        return None
+
+    def _apply_post_fill_followup(self, **kwargs):
+        return None
+
+    def _start_maker_worker(self, *args, **kwargs):
+        return None
+
+    def _increment_order_metric(self, *_args, **_kwargs):
+        self.order_metric_count += 1
+
+    def _update_inventory_metric(self):
+        self.inventory_metric_count += 1
+
+
+def test_position_manager_decision_state_holds_trend_position():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+    now_ts = time.time()
+    state = manager.compute_decision_state(
+        inst_key="inst-up",
+        now_ts=now_ts,
+        qty=Decimal("5.4"),
+        opened_ts=now_ts - 90.0,
+        held_side="UP",
+        active_side="UP",
+        signal_score=Decimal("0.62"),
+        signal_matches_position=True,
+        current_price=Decimal("69260"),
+        price_to_beat=Decimal("69213"),
+        best_bid=Decimal("0.74"),
+        best_ask=Decimal("0.75"),
+        fair=Decimal("0.81"),
+        time_left_sec=420.0,
+        avg_entry=Decimal("0.69"),
+        peak_bid=Decimal("0.76"),
+        peak_fair=Decimal("0.84"),
+    )
+    assert state.regime == DecisionRegime.TREND
+    assert state.phase in {DecisionPhase.HOLD, DecisionPhase.PROBE}
+    assert state.pressure > Decimal("0")
+
+
+def test_position_manager_decision_state_exits_broken_wrong_side_position():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+    now_ts = time.time()
+    state = manager.compute_decision_state(
+        inst_key="inst-up",
+        now_ts=now_ts,
+        qty=Decimal("5.4"),
+        opened_ts=now_ts - 120.0,
+        held_side="UP",
+        active_side="DOWN",
+        signal_score=Decimal("-0.56"),
+        signal_matches_position=False,
+        current_price=Decimal("69100"),
+        price_to_beat=Decimal("69213"),
+        best_bid=Decimal("0.44"),
+        best_ask=Decimal("0.45"),
+        fair=Decimal("0.41"),
+        time_left_sec=480.0,
+        avg_entry=Decimal("0.72"),
+        peak_bid=Decimal("0.78"),
+        peak_fair=Decimal("0.80"),
+    )
+    assert state.regime == DecisionRegime.BROKEN
+    assert state.phase == DecisionPhase.EXIT
+    assert state.pressure < Decimal("0")
 
     def _update_live_inventory_cost_from_fill(self, **kwargs):
         self.live_inventory_fill_calls.append(kwargs)
@@ -1682,6 +1804,60 @@ def test_winner_continuation_holds_when_fair_edge_remains_large():
     assert reason.startswith("winner_continuation")
 
 
+def test_winner_continuation_latch_holds_even_after_short_term_signal_softens():
+    strategy = DummyProfitHoldStrategy()
+    strategy.side_decision_score = Decimal("0.04")
+    strategy.live_inventory_cost["inst-down"]["opened_ts"] = time.time() - 120.0
+    strategy.position_manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+            winner_continuation_min_fair_edge_ps=Decimal("0.04"),
+        )
+    )
+
+    first_hold, first_reason = IntegratedBTCStrategy._should_hold_profitable_position(
+        strategy,
+        instrument_id="inst-down",
+        best_bid=Decimal("0.74"),
+        fair=Decimal("0.80"),
+        avg_entry=Decimal("0.6206"),
+        time_left_sec=420.0,
+        thesis_weakened=False,
+        offside_confirmed=False,
+    )
+
+    second_hold, second_reason = IntegratedBTCStrategy._should_hold_profitable_position(
+        strategy,
+        instrument_id="inst-down",
+        best_bid=Decimal("0.65"),
+        fair=Decimal("0.66"),
+        avg_entry=Decimal("0.6206"),
+        time_left_sec=405.0,
+        thesis_weakened=False,
+        offside_confirmed=False,
+    )
+
+    assert first_hold is True
+    assert first_reason.startswith("winner_continuation")
+    assert second_hold is True
+    assert second_reason.startswith("winner_hold_latch")
+
+
 def test_retreat_crossing_buy_quote_clamps_to_best_bid_for_synthetic_maker():
     info_messages = []
     warning_messages = []
@@ -1866,8 +2042,9 @@ def test_position_manager_requires_persistent_opposite_regime_before_stop_loss_a
         signal_matches_position=False,
         force_exit=False,
     )
-    assert early.status == "hold"
-    assert early.reason.startswith("entry_protection")
+    assert early.status == "pending"
+    assert early.reason.startswith("state_machine_de_risk")
+    assert "legacy(entry=1,thesis=0,pending=1)" in early.reason
 
     pending = manager.assess_stop_loss_regime(
         inst_key="inst-up",
@@ -1916,7 +2093,9 @@ def test_position_manager_requires_persistent_opposite_regime_before_stop_loss_a
         signal_matches_position=False,
         force_exit=False,
     )
-    assert armed.status == "armed"
+    assert armed.status == "pending"
+    assert armed.reason.startswith("state_machine_de_risk")
+    assert "legacy(entry=0,thesis=0,pending=0)" in armed.reason
 
     quick_reset = manager.assess_stop_loss_regime(
         inst_key="inst-up",
@@ -1985,7 +2164,8 @@ def test_position_manager_resets_stop_loss_regime_when_signal_returns_supported(
     )
 
     assert decision.status == "hold"
-    assert decision.reason.startswith("held_thesis_not_opposite")
+    assert decision.reason.startswith("state_machine_hold")
+    assert "legacy(entry=0,thesis=1,pending=0)" in decision.reason
 
 
 def test_continuation_entry_gets_longer_entry_protection():
@@ -2031,8 +2211,9 @@ def test_continuation_entry_gets_longer_entry_protection():
         force_exit=False,
     )
 
-    assert decision.status == "hold"
-    assert "mode=continuation" in decision.reason
+    assert decision.status == "pending"
+    assert decision.reason.startswith("state_machine_de_risk")
+    assert "pending=1" in decision.reason
 
 
 def test_app_config_reads_extended_env(monkeypatch):
@@ -2199,6 +2380,36 @@ def test_shadow_entry_veto_blocks_opposite_candidate():
 
     assert out["should_quote"] is False
     assert out["diag_reason"] == "shadow_veto_opposite_candidate:BUY_DOWN"
+
+
+def test_shadow_candidate_respects_positive_bias_only():
+    side, edge = select_shadow_candidate(
+        shadow_prob_up=0.56,
+        shadow_prob_down=0.44,
+        ask_up=Decimal("0.60"),
+        ask_down=Decimal("0.30"),
+        time_left_sec=300.0,
+        shadow_score=0.20,
+        cfg=ShadowSignalConfig(min_edge=Decimal("0.04")),
+    )
+
+    assert side is None
+    assert edge is None
+
+
+def test_shadow_candidate_respects_negative_bias_only():
+    side, edge = select_shadow_candidate(
+        shadow_prob_up=0.44,
+        shadow_prob_down=0.56,
+        ask_up=Decimal("0.20"),
+        ask_down=Decimal("0.60"),
+        time_left_sec=300.0,
+        shadow_score=-0.20,
+        cfg=ShadowSignalConfig(min_edge=Decimal("0.04")),
+    )
+
+    assert side is None
+    assert edge is None
 
 
 def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_reason():
@@ -2398,7 +2609,8 @@ def test_loss_sell_requires_stop_loss_regime_and_min_hold():
     )
 
     assert desired_entry["should_quote"] is False
-    assert desired_entry["diag_reason"] == "sell_cost_protect sell=0.5000 < min=0.5850"
+    assert desired_entry["diag_reason"].startswith("sell_cost_protect sell=0.5000 < min=0.5850")
+    assert "phase=- regime=-" in desired_entry["diag_reason"]
     assert desired_entry["loss_sell_reason"] == ""
 
 
@@ -2651,7 +2863,113 @@ def test_profit_cap_still_applies_in_aggressive_stage_even_for_winner_continuati
     assert "stage=AGGRESSIVE" in out["diag_reason"]
 
 
-def test_live_shadow_payload_keeps_bias_side_separate_from_candidate_side():
+def test_profit_cap_bypasses_passive_stage_for_de_risk_like_nonordinary_profit_sell():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.7350"),
+        "planned_best_bid": Decimal("0.6500"),
+        "planned_best_ask": Decimal("0.6600"),
+        "diag_reason": "profitable_drawdown_break",
+        "loss_sell_reason": "",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.6508"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="PASSIVE",
+        tick=Decimal("0.01"),
+        nonordinary_profit_candidate=True,
+    )
+
+    assert out["price"] == Decimal("0.7350")
+    assert out["diag_reason"] == "profitable_drawdown_break"
+
+
+def test_profit_cap_bypasses_passive_stage_after_large_peak_profit_run():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.7350"),
+        "planned_best_bid": Decimal("0.6500"),
+        "planned_best_ask": Decimal("0.6600"),
+        "diag_reason": "sell_signal",
+        "loss_sell_reason": "",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.6508"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="PASSIVE",
+        tick=Decimal("0.01"),
+        high_peak_profit_candidate=True,
+    )
+
+    assert out["price"] == Decimal("0.7350")
+    assert out["diag_reason"] == "sell_signal"
+
+
+def test_de_risk_sell_pricing_uses_fair_edge_not_plain_cost_floor():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.6200"),
+        "diag_reason": "unified_de_risk",
+    }
+
+    out = apply_de_risk_sell_pricing(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.6000"),
+        fair=Decimal("0.7354"),
+        best_bid=Decimal("0.6700"),
+        best_ask=Decimal("0.6800"),
+        tick=Decimal("0.01"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
+        exit_decision_reason="unified_de_risk",
+    )
+
+    assert out["price"] == Decimal("0.7300")
+    assert "de_risk_price" in out["diag_reason"]
+
+
+def test_extreme_winner_lock_profit_prices_high_near_market_top():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.7100"),
+        "diag_reason": "extreme_winner_lock_profit",
+    }
+
+    out = apply_de_risk_sell_pricing(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.6900"),
+        fair=Decimal("0.9900"),
+        best_bid=Decimal("0.9800"),
+        best_ask=Decimal("0.9900"),
+        tick=Decimal("0.01"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
+        exit_decision_reason="extreme_winner_lock_profit",
+    )
+
+    assert out["price"] == Decimal("0.9900")
+    assert "extreme_winner_lock_profit" in out["diag_reason"]
+
+
+def test_live_shadow_payload_does_not_emit_opposite_candidate_side():
     payload = build_live_signal_compare_payload(
         slug="btc-updown-15m-test",
         spot=Decimal("100.2"),
@@ -2684,4 +3002,4 @@ def test_live_shadow_payload_keeps_bias_side_separate_from_candidate_side():
     )
 
     assert payload["shadow_bias_side"] == "UP"
-    assert payload["shadow_candidate_side"] == "BUY_DOWN"
+    assert payload["shadow_candidate_side"] is None

@@ -194,25 +194,34 @@ def select_shadow_candidate(
         return None, None
     if abs(shadow_score) < cfg.shadow_score_min_abs:
         return None, None
-    if not (float(cfg.min_prob_band) <= shadow_prob_up <= float(cfg.max_prob_band)):
+
+    bias_side: Optional[str] = None
+    if shadow_score > 0 and shadow_prob_up > shadow_prob_down:
+        bias_side = "UP"
+    elif shadow_score < 0 and shadow_prob_down > shadow_prob_up:
+        bias_side = "DOWN"
+    if bias_side is None:
         return None, None
 
-    best_side: Optional[str] = None
-    best_edge: Optional[Decimal] = None
-
-    if ask_up is not None and ask_up > 0:
+    if bias_side == "UP":
+        if not (float(cfg.min_prob_band) <= shadow_prob_up <= float(cfg.max_prob_band)):
+            return None, None
+        if ask_up is None or ask_up <= 0:
+            return None, None
         edge_up = Decimal(str(shadow_prob_up)) - ask_up
         if edge_up >= cfg.min_edge:
-            best_side = "BUY_UP"
-            best_edge = edge_up
+            return "BUY_UP", edge_up
+        return None, None
 
-    if ask_down is not None and ask_down > 0:
-        edge_down = Decimal(str(shadow_prob_down)) - ask_down
-        if edge_down >= cfg.min_edge and (best_edge is None or edge_down > best_edge):
-            best_side = "BUY_DOWN"
-            best_edge = edge_down
+    if not (float(cfg.min_prob_band) <= shadow_prob_down <= float(cfg.max_prob_band)):
+        return None, None
+    if ask_down is None or ask_down <= 0:
+        return None, None
+    edge_down = Decimal(str(shadow_prob_down)) - ask_down
+    if edge_down >= cfg.min_edge:
+        return "BUY_DOWN", edge_down
 
-    return best_side, best_edge
+    return None, None
 
 
 def build_live_signal_compare_payload(

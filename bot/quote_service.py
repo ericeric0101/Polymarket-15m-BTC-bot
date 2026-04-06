@@ -409,6 +409,8 @@ def apply_time_based_profitable_sell_cap(
     exit_stage_value: str,
     tick: Decimal,
     winner_continuation_candidate: bool = False,
+    nonordinary_profit_candidate: bool = False,
+    high_peak_profit_candidate: bool = False,
 ) -> dict[str, Any]:
     if side != "sell" or not profitable_sell_cap_enabled:
         return desired_entry
@@ -431,7 +433,11 @@ def apply_time_based_profitable_sell_cap(
         return desired_entry
 
     stage = str(exit_stage_value or "PASSIVE").upper()
-    if stage == "PASSIVE" and winner_continuation_candidate:
+    if stage == "PASSIVE" and (
+        winner_continuation_candidate
+        or nonordinary_profit_candidate
+        or high_peak_profit_candidate
+    ):
         return desired_entry
     if stage == "TAKER":
         max_offset = profitable_sell_cap_taker_offset_ps
@@ -457,6 +463,61 @@ def apply_time_based_profitable_sell_cap(
         f"profit_cap stage={stage} old={float(limit_price):.4f} "
         f"cap={float(cap_price):.4f} bid={float(best_bid):.4f} ask={float(best_ask):.4f} "
         f"offset={float(max_offset):.4f}"
+        + (f" prev={prev_reason}" if prev_reason else "")
+    )
+    return desired_entry
+
+
+def apply_de_risk_sell_pricing(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    avg_entry: Decimal,
+    fair: Optional[Decimal],
+    best_bid: Decimal,
+    best_ask: Decimal,
+    tick: Decimal,
+    maker_sell_cost_protect_fee_buffer_ps: Decimal,
+    maker_sell_min_profit_floor_ps: Decimal,
+    exit_decision_reason: str,
+) -> dict[str, Any]:
+    if side != "sell" or not desired_entry.get("should_quote", False):
+        return desired_entry
+    if fair is None or fair <= 0 or best_bid <= 0 or best_ask <= 0 or avg_entry <= 0:
+        return desired_entry
+    if tick <= 0:
+        tick = Decimal("0.01")
+
+    try:
+        limit_price = Decimal(str(desired_entry.get("price", "0")))
+    except Exception:
+        return desired_entry
+    if limit_price <= 0:
+        return desired_entry
+
+    cost_floor = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
+    fair_edge = max(Decimal("0"), fair - best_bid)
+    if fair_edge <= 0:
+        return desired_entry
+
+    # De-risk should monetize a meaningful portion of the currently observed fair edge
+    # instead of snapping back to the generic cost-floor path.
+    target_above_ask = best_ask + max(tick, fair_edge * Decimal("0.75"))
+    fair_ceiling = max(cost_floor, fair - tick)
+    target_price = min(target_above_ask, fair_ceiling)
+    target_price = max(cost_floor, best_bid + tick, target_price)
+    target_price = (target_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+    target_price = max(Decimal("0.01"), min(Decimal("0.99"), target_price))
+    if target_price <= limit_price:
+        return desired_entry
+
+    prev_reason = str(desired_entry.get("diag_reason", "") or "")
+    desired_entry["price"] = target_price
+    desired_entry["diag_reason"] = (
+        f"de_risk_price old={float(limit_price):.4f} "
+        f"new={float(target_price):.4f} fair={float(fair):.4f} "
+        f"bid={float(best_bid):.4f} ask={float(best_ask):.4f} "
+        f"edge={float(fair_edge):.4f} reason={exit_decision_reason}"
         + (f" prev={prev_reason}" if prev_reason else "")
     )
     return desired_entry
@@ -947,6 +1008,9 @@ def build_desired_quote_entry(
     trend_buy_penalty_discount: Decimal = Decimal("0.50"),
     trend_buy_score: Decimal = Decimal("0"),
     trend_buy_size_multiplier: Decimal = Decimal("1"),
+    decision_phase: str = "",
+    decision_regime: str = "",
+    decision_pressure: float | None = None,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -1036,10 +1100,13 @@ def build_desired_quote_entry(
         # HOLD_IN_BAND decisions, causing loss sells when direction was correct.
         #
         _thesis_bad = thesis_weakened or offside_confirmed
+        _state_phase_override = decision_phase in {"DE_RISK", "EXIT"}
         _allow_regime_loss_sell = (
-            _thesis_bad
-            and stop_loss_regime_armed
-            and hold_sec >= float(loss_sell_min_hold_sec)
+            (
+                (_thesis_bad and stop_loss_regime_armed)
+                or _state_phase_override
+            )
+            and (_state_phase_override or hold_sec >= float(loss_sell_min_hold_sec))
         )
         _allow_emergency_with_thesis = emergency_window and _allow_regime_loss_sell
         _allow_absolute_last_resort = (
@@ -1050,7 +1117,11 @@ def build_desired_quote_entry(
         allow_loss_sell = _allow_regime_loss_sell or _allow_emergency_with_thesis or _allow_absolute_last_resort
         # Compute reason tag for observability (visible in diag logs and order payload).
         if allow_loss_sell:
-            if _allow_regime_loss_sell:
+            if decision_phase == "EXIT":
+                _loss_sell_reason = f"state_machine_exit:{decision_regime or 'n/a'}"
+            elif decision_phase == "DE_RISK":
+                _loss_sell_reason = f"state_machine_de_risk:{decision_regime or 'n/a'}"
+            elif _allow_regime_loss_sell:
                 _loss_sell_reason = "armed_thesis_bad"
             elif _allow_absolute_last_resort:
                 _loss_sell_reason = f"absolute_last_resort(<{absolute_last_resort_sec:.0f}s)"
@@ -1082,7 +1153,9 @@ def build_desired_quote_entry(
             should_quote = False
             diag_reason = (
                 f"sell_cost_protect sell={float(limit_price):.4f} "
-                f"< min={float(avg_entry + maker_sell_cost_protect_fee_buffer_ps):.4f}"
+                f"< min={float(avg_entry + maker_sell_cost_protect_fee_buffer_ps):.4f} "
+                f"phase={decision_phase or '-'} regime={decision_regime or '-'}"
+                + (f" pressure={decision_pressure:+.4f}" if decision_pressure is not None else "")
             )
         # Minimum profit floor — block sells that are technically above cost but
         # yield too little profit to justify using a buy quota slot.
@@ -1099,7 +1172,9 @@ def build_desired_quote_entry(
                 f"min_profit_floor sell={float(limit_price):.4f} "
                 f"< min={float(min_sell):.4f} "
                 f"(entry={float(avg_entry):.4f}+fee={float(maker_sell_cost_protect_fee_buffer_ps):.4f}"
-                f"+floor={float(maker_sell_min_profit_floor_ps):.4f})"
+                f"+floor={float(maker_sell_min_profit_floor_ps):.4f}) "
+                f"phase={decision_phase or '-'} regime={decision_regime or '-'}"
+                + (f" pressure={decision_pressure:+.4f}" if decision_pressure is not None else "")
             )
 
     if reduce_only_reason and side == "buy":
