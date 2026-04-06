@@ -312,6 +312,8 @@ class ExitConfig:
     maker_winner_continuation_min_fair_edge_ps: Decimal
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
+    maker_winner_sell_max_offset_ps: Decimal
+    maker_signal_flip_cooldown_cycles: int
 
     def __post_init__(self) -> None:
         if self.taker_exit_stop_loss_confirmations < 1:
@@ -702,6 +704,8 @@ class AppConfig:
                 maker_winner_continuation_min_fair_edge_ps=_env_decimal("MAKER_WINNER_CONTINUATION_MIN_FAIR_EDGE_PS", "0.04"),
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
+                maker_winner_sell_max_offset_ps=_env_decimal("MAKER_WINNER_SELL_MAX_OFFSET_PS", "0.05"),
+                maker_signal_flip_cooldown_cycles=max(1, _env_int("MAKER_SIGNAL_FLIP_COOLDOWN_CYCLES", 2)),
             ),
             risk=RiskConfig(
                 regime_guard_enabled=_env_bool_inverted("REGIME_GUARD_ENABLED", True),

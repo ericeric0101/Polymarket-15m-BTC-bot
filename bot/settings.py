@@ -270,6 +270,8 @@ def initialize_strategy_settings(
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
     strategy.maker_winner_continuation_min_fair_edge_ps = config.exit.maker_winner_continuation_min_fair_edge_ps
+    strategy.maker_winner_sell_max_offset_ps = config.exit.maker_winner_sell_max_offset_ps
+    strategy.maker_signal_flip_cooldown_cycles = config.exit.maker_signal_flip_cooldown_cycles
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
     strategy.maker_implied_sigma_weight = config.maker.implied_sigma_weight
     strategy.exit_policy = ExitPolicy(

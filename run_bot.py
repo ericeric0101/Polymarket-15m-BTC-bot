@@ -15,7 +15,7 @@ from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import math
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -1563,11 +1563,30 @@ class IntegratedBTCStrategy(
                         )
                         _stop_loss_regime_armed = regime.status == "armed"
                         if decision_state is not None:
-                            _thesis_weakened = decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
-                            _offside_confirmed = _offside_confirmed or (
-                                decision_state.phase == DecisionPhase.EXIT and not matches_position
+                            _phase_is_adverse = decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                            # Signal flip cooldown: require N consecutive adverse cycles
+                            # before overriding thesis_weakened, to prevent BTC pulse
+                            # from triggering premature loss sells.
+                            if _phase_is_adverse:
+                                self._maker_signal_flip_hits[inst_key] = (
+                                    self._maker_signal_flip_hits.get(inst_key, 0) + 1
+                                )
+                            else:
+                                self._maker_signal_flip_hits[inst_key] = 0
+                            _flip_confirmed = (
+                                self._maker_signal_flip_hits.get(inst_key, 0)
+                                >= self.maker_signal_flip_cooldown_cycles
                             )
-                            _stop_loss_regime_armed = _stop_loss_regime_armed or decision_state.phase == DecisionPhase.EXIT
+                            if _phase_is_adverse and _flip_confirmed:
+                                _thesis_weakened = True
+                                _offside_confirmed = _offside_confirmed or (
+                                    decision_state.phase == DecisionPhase.EXIT
+                                    and not matches_position
+                                )
+                                _stop_loss_regime_armed = (
+                                    _stop_loss_regime_armed
+                                    or decision_state.phase == DecisionPhase.EXIT
+                                )
                     if quote_ctx.quote is not None:
                         self._update_profit_run_peaks(
                             inst_id,
@@ -1763,9 +1782,38 @@ class IntegratedBTCStrategy(
                                 f"bid={float(best_bid_now):.4f}"
                             )
                         else:
-                            desired_entry["should_quote"] = False
-                            desired_entry["diag_reason"] = unified_sell_exit_decision.reason
-                            desired_entry["force_cancel_existing"] = True
+                            # Safety-net sell: instead of fully blocking, cap the
+                            # sell price at bid + max_offset so a maker order stays
+                            # on the book with realistic fill probability.
+                            sell_price = Decimal(str(desired_entry.get("price", "0")))
+                            max_offset = self.maker_winner_sell_max_offset_ps
+                            tick = quote_ctx.tick if quote_ctx.tick and quote_ctx.tick > 0 else Decimal("0.01")
+                            safety_net_price = best_bid_now + max_offset
+                            cost_floor = (
+                                avg_entry
+                                + self.maker_sell_cost_protect_fee_buffer_ps
+                                + self.maker_sell_min_profit_floor_ps
+                            )
+                            safety_net_price = max(cost_floor, best_bid_now + tick, safety_net_price)
+                            safety_net_price = (
+                                (safety_net_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+                            )
+                            safety_net_price = max(Decimal("0.01"), min(Decimal("0.99"), safety_net_price))
+                            if (
+                                avg_entry > 0
+                                and best_bid_now > avg_entry
+                                and sell_price > safety_net_price
+                            ):
+                                desired_entry["price"] = safety_net_price
+                                desired_entry["diag_reason"] = (
+                                    f"winner_safety_net reason={unified_sell_exit_decision.reason} "
+                                    f"old={float(sell_price):.4f} cap={float(safety_net_price):.4f} "
+                                    f"bid={float(best_bid_now):.4f} offset={float(max_offset):.4f}"
+                                )
+                            else:
+                                desired_entry["should_quote"] = False
+                                desired_entry["diag_reason"] = unified_sell_exit_decision.reason
+                                desired_entry["force_cancel_existing"] = True
                     elif unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK:
                         desired_entry["diag_reason"] = (
                             desired_entry.get("diag_reason")
@@ -1876,8 +1924,8 @@ class IntegratedBTCStrategy(
                     and desired_entry.get("should_quote", False)
                     and (
                         (
-                            unified_sell_exit_decision is not None
-                            and unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK
+                            (unified_sell_exit_decision is not None and unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK)
+                            or (decision_state is not None and decision_state.phase == DecisionPhase.DE_RISK)
                         )
                         or extreme_winner_lock_profit
                     )

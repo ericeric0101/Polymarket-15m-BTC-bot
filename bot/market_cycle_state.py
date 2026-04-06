@@ -28,6 +28,7 @@ class MarketCycleState:
     recent_buy_fill_ts_by_inst: dict[str, float] = field(default_factory=dict)
     side_thesis_weak_hits_by_inst: dict[str, int] = field(default_factory=dict)
     orderbook_levels_cache_by_token: dict[str, Any] = field(default_factory=dict)
+    maker_signal_flip_hits_by_inst: dict[str, int] = field(default_factory=dict)
 
 
 def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
@@ -54,3 +55,4 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy.recent_buy_fill_ts_by_inst = state.recent_buy_fill_ts_by_inst
     strategy.side_thesis_weak_hits_by_inst = state.side_thesis_weak_hits_by_inst
     strategy.orderbook_levels_cache_by_token = state.orderbook_levels_cache_by_token
+    strategy._maker_signal_flip_hits = state.maker_signal_flip_hits_by_inst

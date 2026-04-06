@@ -458,10 +458,10 @@ class PositionManager:
         else:
             if regime == DecisionRegime.BROKEN or state.pressure_ema <= Decimal("-0.45"):
                 phase = DecisionPhase.EXIT
+            elif hold_sec < protection_sec and regime != DecisionRegime.BROKEN and state.pressure_ema > Decimal("-0.30"):
+                phase = DecisionPhase.PROBE
             elif state.pressure_ema <= Decimal("-0.15") or (regime == DecisionRegime.CHOP and state.pressure_ema < Decimal("0.05")):
                 phase = DecisionPhase.DE_RISK
-            elif hold_sec < protection_sec and regime != DecisionRegime.BROKEN and state.pressure_ema > Decimal("-0.10"):
-                phase = DecisionPhase.PROBE
             else:
                 phase = DecisionPhase.HOLD
 

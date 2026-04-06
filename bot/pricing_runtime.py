@@ -246,13 +246,24 @@ class PricingRuntimeMixin:
         min(cache open positions, on-chain conditional balance with safety buffer).
         """
         confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
-        if confirmed_qty <= 0:
-            return Decimal("0")
         local_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
         inst_txt = str(instrument_id or "")
         inst_key = self._instrument_key(instrument_id)
         token_id = self._extract_token_id_from_instrument(inst_txt)
         onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
+
+        if onchain_qty is not None and (onchain_qty - confirmed_qty) >= Decimal("1.0"):
+            recent_buy_ts = float(getattr(self, "recent_buy_fill_ts_by_inst", {}).get(inst_key, 0.0))
+            if time.time() - recent_buy_ts > 15.0:
+                logger.warning(
+                    f"GHOST INVENTORY RECOVERED: internal={float(confirmed_qty):.4f}, onchain={float(onchain_qty):.4f}. "
+                    "A previous sell matched locally but reverted on-chain. Restoring sellable qty."
+                )
+                safe_qty = onchain_qty * (Decimal("1") - getattr(self, "conditional_balance_safety_buffer_pct", Decimal("0.02")))
+                return max(Decimal("0"), safe_qty)
+        
+        if confirmed_qty <= 0:
+            return Decimal("0")
         venue_cap = self._sell_recovery_venue_cap_by_inst.get(inst_key, None) if inst_key else None
         recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0)) if inst_key else 0.0
         after_buy_window_active = (
