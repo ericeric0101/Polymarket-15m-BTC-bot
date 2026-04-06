@@ -408,6 +408,7 @@ def apply_time_based_profitable_sell_cap(
     profitable_sell_cap_taker_offset_ps: Decimal,
     exit_stage_value: str,
     tick: Decimal,
+    winner_continuation_candidate: bool = False,
 ) -> dict[str, Any]:
     if side != "sell" or not profitable_sell_cap_enabled:
         return desired_entry
@@ -430,6 +431,8 @@ def apply_time_based_profitable_sell_cap(
         return desired_entry
 
     stage = str(exit_stage_value or "PASSIVE").upper()
+    if stage == "PASSIVE" and winner_continuation_candidate:
+        return desired_entry
     if stage == "TAKER":
         max_offset = profitable_sell_cap_taker_offset_ps
     elif stage == "AGGRESSIVE":
@@ -510,6 +513,12 @@ def reconcile_unwanted_quotes(
         if bool(desired.get("should_quote", False)):
             gate_block_since_by_order_key.pop(order_key, None)
             gate_block_reason_by_order_key.pop(order_key, None)
+            continue
+        if bool(desired.get("force_cancel_existing", False)):
+            gate_block_reason_by_order_key.pop(order_key, None)
+            gate_block_since_by_order_key.pop(order_key, None)
+            gate_last_cancel_ts_by_order_key[order_key] = now_ts
+            cancel_order_fn(order_key, f"risk:{str(desired.get('diag_reason', 'hold_cancel'))}")
             continue
 
         reason = str(desired.get("diag_reason", "risk") or "risk")

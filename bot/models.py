@@ -22,6 +22,9 @@ class MarketSnapshot:
     exit_stage: ExitStage
     in_reduce_only_tail: bool
     stop_loss_disabled_in_tail: bool
+    fair: Optional[Decimal] = None
+    fair_edge_ps: Optional[Decimal] = None
+    spot_minus_strike_bps: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,9 @@ class PositionState:
     entry_fee_remaining: Decimal
     hold_sec: float
     stop_loss_confirm_hits: int
+    held_side: str = "NONE"
+    peak_bid: Optional[Decimal] = None
+    peak_fair: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,7 @@ class SignalDecision:
 
 class ExitDecisionType(Enum):
     NONE = "NONE"
+    DE_RISK = "DE_RISK"
     HOLD_TO_REDEEM = "HOLD_TO_REDEEM"
     HOLD_IN_BAND = "HOLD_IN_BAND"
     STOP_LOSS_PENDING_CONFIRMATION = "STOP_LOSS_PENDING_CONFIRMATION"

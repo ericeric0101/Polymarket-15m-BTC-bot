@@ -200,9 +200,11 @@ class PositionManager:
         if fair is not None and fair > 0:
             fair_edge_ps = max(Decimal("0"), fair - best_bid)
         if (
-            self.config.winner_continuation_min_fair_edge_ps > 0
-            and best_bid > avg_entry
-            and fair_edge_ps >= self.config.winner_continuation_min_fair_edge_ps
+            self.is_winner_continuation_candidate(
+                best_bid=best_bid,
+                fair=fair,
+                avg_entry=avg_entry,
+            )
         ):
             return True, (
                 f"winner_continuation fair_edge={float(fair_edge_ps):.4f}"
@@ -241,6 +243,22 @@ class PositionManager:
                 f"peak_profit={float(peak_profit_ps):.4f}"
             )
         return False, ""
+
+    def is_winner_continuation_candidate(
+        self,
+        *,
+        best_bid: Decimal,
+        fair: Optional[Decimal],
+        avg_entry: Decimal,
+    ) -> bool:
+        if self.config.winner_continuation_min_fair_edge_ps <= 0:
+            return False
+        if avg_entry <= 0 or best_bid <= avg_entry:
+            return False
+        if fair is None or fair <= 0:
+            return False
+        fair_edge_ps = max(Decimal("0"), fair - best_bid)
+        return fair_edge_ps >= self.config.winner_continuation_min_fair_edge_ps
 
     def reset_stop_loss_regime(self, inst_key: str) -> None:
         state = self.states.get(inst_key)

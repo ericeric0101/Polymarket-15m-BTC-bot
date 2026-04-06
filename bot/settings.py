@@ -294,6 +294,17 @@ def initialize_strategy_settings(
             conviction_stop_loss_multiplier=strategy.exit_conviction_stop_loss_multiplier,
             conviction_extra_confirmations=strategy.exit_conviction_extra_confirmations,
             hold_band_requires_locked=strategy.exit_hold_band_requires_locked,
+            early_profit_hold_enabled=strategy.maker_early_profit_hold_enabled,
+            early_profit_hold_min_hold_sec=strategy.maker_early_profit_hold_min_hold_sec,
+            early_profit_hold_max_profit_ps=strategy.maker_early_profit_hold_max_profit_ps,
+            profit_run_enabled=strategy.maker_profit_run_enabled,
+            profit_run_min_hold_sec=strategy.maker_profit_run_min_hold_sec,
+            profit_run_min_profit_ps=strategy.maker_profit_run_min_profit_ps,
+            profit_run_min_score_abs=strategy.maker_profit_run_min_score_abs,
+            profit_run_trailing_drawdown_ps=strategy.maker_profit_run_trailing_drawdown_ps,
+            profit_run_unlock_profit_ps=strategy.maker_profit_run_unlock_profit_ps,
+            profit_run_unlock_trailing_drawdown_ps=strategy.maker_profit_run_unlock_trailing_drawdown_ps,
+            winner_continuation_min_fair_edge_ps=strategy.maker_winner_continuation_min_fair_edge_ps,
         ),
     )
     strategy.position_manager = PositionManager(

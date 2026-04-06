@@ -131,6 +131,23 @@ class TakerExitMixin:
             spread = max(Decimal("0"), best_ask - best_bid)
             mid = (best_bid + best_ask) / Decimal("2") if (best_bid + best_ask) > 0 else Decimal("0")
             spread_pct = (spread / mid) if mid > 0 else Decimal("0")
+            fair = None
+            if mid > 0 and hasattr(self, "_compute_fair_probability"):
+                try:
+                    fair = await self._compute_fair_probability(mid, instrument_id=inst_id)
+                except Exception:
+                    fair = None
+            fair_edge_ps = (
+                max(Decimal("0"), fair - best_bid)
+                if fair is not None and fair > 0
+                else None
+            )
+            spot_minus_strike_bps = None
+            if hasattr(self, "_spot_minus_strike_bps"):
+                try:
+                    spot_minus_strike_bps = self._spot_minus_strike_bps()
+                except Exception:
+                    spot_minus_strike_bps = None
 
             token_id = self._extract_token_id_from_instrument(inst_key)
             dynamic_fee_rate = await self._get_dynamic_fee_rate(token_id=token_id)
@@ -179,6 +196,9 @@ class TakerExitMixin:
                 exit_stage=exit_stage,
                 in_reduce_only_tail=in_reduce_only_tail,
                 stop_loss_disabled_in_tail=stop_loss_disabled_in_tail,
+                fair=fair,
+                fair_edge_ps=fair_edge_ps,
+                spot_minus_strike_bps=spot_minus_strike_bps,
             )
             position = PositionState(
                 instrument_id=inst_key,
@@ -188,6 +208,9 @@ class TakerExitMixin:
                 entry_fee_remaining=entry_fee_remaining,
                 hold_sec=hold_sec,
                 stop_loss_confirm_hits=int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)),
+                held_side=self._side_for_instrument_id(inst_id).value,
+                peak_bid=getattr(self, "maker_profit_run_peak_bid_by_inst", {}).get(inst_key),
+                peak_fair=getattr(self, "maker_profit_run_peak_fair_by_inst", {}).get(inst_key),
             )
             signal_decision = SignalDecision(
                 active_side=self.active_side.value,
@@ -248,6 +271,38 @@ class TakerExitMixin:
                     )
                     self._logged_hold_redeem_te = True
                     self._last_hold_redeem_te_log = now_ts
+                continue
+
+            if exit_decision.decision_type == ExitDecisionType.DE_RISK:
+                if hasattr(self, "position_manager"):
+                    self.position_manager.reset_stop_loss_regime(inst_key)
+                self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                self._record_exit_policy_decision_throttled(
+                    inst_key=inst_key,
+                    reason_tag="de_risk",
+                    now_ts=now_ts,
+                    payload={
+                        "slug": self.current_market_slug or "",
+                        "instrument_id": inst_key,
+                        "decision_type": exit_decision.decision_type.value,
+                        "reason": exit_decision.reason,
+                        "band": exit_decision.metadata.get("band", "neutral"),
+                        "signal_score": exit_decision.metadata.get("signal_score", str(self.side_decision_score)),
+                        "avg_entry": float(avg_entry),
+                        "qty": float(qty),
+                        "sellable_qty": float(position.sellable_qty),
+                        "time_left_sec": time_left_sec,
+                        "exit_stage": exit_stage.value,
+                        "best_bid": float(best_bid),
+                        "best_ask": float(best_ask),
+                        "fair": float(fair) if fair is not None else None,
+                        "fair_edge_ps": float(fair_edge_ps) if fair_edge_ps is not None else None,
+                        "spot_minus_strike_bps": float(spot_minus_strike_bps) if spot_minus_strike_bps is not None else None,
+                        "gross_if_exit": float(exit_decision.gross_if_exit),
+                        "net_if_exit": float(exit_decision.net_if_exit),
+                        "metadata": exit_decision.metadata,
+                    },
+                )
                 continue
 
             if exit_decision.decision_type in (

@@ -436,6 +436,19 @@ class IntegratedBTCStrategy(
                 return hist_px
         return None
 
+    def _spot_minus_strike_bps(self) -> Optional[Decimal]:
+        slug = str(self.current_market_slug or "")
+        if not slug:
+            return None
+        spot = self._capture_market_open_spot()
+        strike = self.market_strike_cache_by_slug.get(slug)
+        if spot is None or spot <= 0 or strike is None or strike <= 0:
+            return None
+        try:
+            return ((spot / strike) - Decimal("1")) * Decimal("10000")
+        except Exception:
+            return None
+
     def _emit_live_signal_compare_snapshot(self, now_ts: float) -> None:
         if not self.trade_db or not getattr(self, "shadow_signal_enabled", False):
             return
@@ -1583,23 +1596,74 @@ class IntegratedBTCStrategy(
                     now_ts=now_ts,
                     loss_sell_reprice_min_interval_sec=self.maker_loss_sell_reprice_min_interval_sec,
                 )
+                unified_sell_exit_decision = None
                 if (
                     side == "sell"
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                 ):
-                    hold_profit_run, hold_reason = self._should_hold_profitable_position(
-                        instrument_id=inst_id,
-                        best_bid=quote_ctx.quote[0],
-                        fair=quote_ctx.fair,
-                        avg_entry=avg_entry,
-                        time_left_sec=time_left_sec_global,
-                        thesis_weakened=_thesis_weakened,
-                        offside_confirmed=_offside_confirmed,
+                    spread = max(Decimal("0"), quote_ctx.quote[1] - quote_ctx.quote[0])
+                    mid = (
+                        (quote_ctx.quote[0] + quote_ctx.quote[1]) / Decimal("2")
+                        if (quote_ctx.quote[0] + quote_ctx.quote[1]) > 0
+                        else Decimal("0")
                     )
-                    if hold_profit_run:
+                    spread_pct = (spread / mid) if mid > 0 else Decimal("0")
+                    peak_bid = self.maker_profit_run_peak_bid_by_inst.get(inst_key, quote_ctx.quote[0])
+                    peak_fair = self.maker_profit_run_peak_fair_by_inst.get(inst_key, quote_ctx.fair or quote_ctx.quote[0])
+                    held_side = self._side_for_instrument_id(inst_id).value
+                    entry_fee_remaining = Decimal(str(inv_state.get("entry_fee_remaining", "0"))) if inv_state is not None else Decimal("0")
+                    unified_sell_exit_decision = self.exit_policy_engine.evaluate(
+                        MarketSnapshot(
+                            instrument_id=inst_key,
+                            phase=self.market_phase,
+                            time_left_sec=time_left_sec_global,
+                            best_bid=quote_ctx.quote[0],
+                            best_ask=quote_ctx.quote[1],
+                            fee_rate=quote_ctx.fee_rate_val,
+                            spread=spread,
+                            spread_pct=spread_pct,
+                            slippage_buffer_pct=Decimal("0"),
+                            exit_stage=self.exit_policy.stage(time_left_sec_global),
+                            in_reduce_only_tail=bool(reduce_only_reason),
+                            stop_loss_disabled_in_tail=False,
+                            fair=quote_ctx.fair,
+                            fair_edge_ps=(
+                                max(Decimal("0"), quote_ctx.fair - quote_ctx.quote[0])
+                                if quote_ctx.fair is not None and quote_ctx.fair > 0
+                                else None
+                            ),
+                            spot_minus_strike_bps=self._spot_minus_strike_bps(),
+                        ),
+                        PositionState(
+                            instrument_id=inst_key,
+                            qty=current_inst_inventory_qty,
+                            sellable_qty=sellable_qty,
+                            avg_entry_price=avg_entry,
+                            entry_fee_remaining=entry_fee_remaining,
+                            hold_sec=hold_sec,
+                            stop_loss_confirm_hits=0,
+                            held_side=held_side,
+                            peak_bid=peak_bid,
+                            peak_fair=peak_fair,
+                        ),
+                        SignalDecision(
+                            active_side=self.active_side.value,
+                            score=self.side_decision_score,
+                            locked=self.active_side_locked,
+                            reason=self.side_decision_reason,
+                            matches_position=(self._instrument_for_side(self.active_side) == inst_id),
+                        ),
+                    )
+                    if unified_sell_exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND:
                         desired_entry["should_quote"] = False
-                        desired_entry["diag_reason"] = hold_reason
+                        desired_entry["diag_reason"] = unified_sell_exit_decision.reason
+                        desired_entry["force_cancel_existing"] = True
+                    elif unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK:
+                        desired_entry["diag_reason"] = (
+                            desired_entry.get("diag_reason")
+                            or unified_sell_exit_decision.reason
+                        )
 
                 desired_entry = apply_reload_edge_guard(
                     desired_entry=desired_entry,
@@ -1628,6 +1692,17 @@ class IntegratedBTCStrategy(
                 )
                 profit_cap_before_price = desired_entry.get("price")
                 profit_cap_before_reason = desired_entry.get("diag_reason")
+                winner_continuation_candidate = False
+                if (
+                    side == "sell"
+                    and quote_ctx.quote is not None
+                    and hasattr(self, "position_manager")
+                ):
+                    winner_continuation_candidate = self.position_manager.is_winner_continuation_candidate(
+                        best_bid=quote_ctx.quote[0],
+                        fair=quote_ctx.fair,
+                        avg_entry=avg_entry,
+                    )
                 desired_entry = apply_time_based_profitable_sell_cap(
                     desired_entry=desired_entry,
                     side=side,
@@ -1640,6 +1715,7 @@ class IntegratedBTCStrategy(
                     profitable_sell_cap_taker_offset_ps=self.maker_profitable_sell_cap_taker_offset_ps,
                     exit_stage_value=self.exit_policy.stage(time_left_sec_global).value,
                     tick=quote_ctx.tick,
+                    winner_continuation_candidate=winner_continuation_candidate,
                 )
                 if (
                     side == "sell"
