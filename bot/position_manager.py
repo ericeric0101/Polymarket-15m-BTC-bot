@@ -378,8 +378,6 @@ class PositionManager:
         peak_ref = best_bid
         if peak_bid is not None:
             peak_ref = max(peak_ref, peak_bid)
-        if peak_fair is not None:
-            peak_ref = max(peak_ref, peak_fair)
         if qty > 0 and avg_entry > 0:
             if peak_ref > best_bid:
                 drawdown_pressure -= self._clamp((peak_ref - best_bid) / Decimal("0.12"), Decimal("0"), Decimal("1"))
@@ -453,10 +451,17 @@ class PositionManager:
                 or prospective_adverse_hits < self.config.stop_loss_regime_confirmations
             )
         )
+        hard_pressure_exit = (
+            state.pressure_ema <= Decimal("-0.45")
+            and (
+                not signal_matches_position
+                or spot_pressure < Decimal("-0.20")
+            )
+        )
         if qty <= 0:
             phase = DecisionPhase.PROBE if state.pressure_ema >= Decimal("0.20") and regime != DecisionRegime.CHOP else DecisionPhase.FLAT
         else:
-            if regime == DecisionRegime.BROKEN or state.pressure_ema <= Decimal("-0.45"):
+            if regime == DecisionRegime.BROKEN or hard_pressure_exit:
                 phase = DecisionPhase.EXIT
             elif hold_sec < protection_sec and regime != DecisionRegime.BROKEN and state.pressure_ema > Decimal("-0.30"):
                 phase = DecisionPhase.PROBE

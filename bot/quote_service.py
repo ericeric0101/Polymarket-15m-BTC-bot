@@ -1086,12 +1086,14 @@ def build_desired_quote_entry(
                 )
         # Allow loss-selling with thesis-aware logic:
         #
-        # 1) thesis_bad: thesis weakened OR inventory confirmed offside.
-        #    This is always allowed regardless of time.
-        # 2) emergency_with_thesis: we are in the emergency time window (e.g.
+        # 1) urgent_override: EXIT phase or an armed thesis-bad stop-loss.
+        #    This can bypass the minimum hold timer because the thesis is broken.
+        # 2) de_risk_active: DE_RISK phase can loss-sell only after the minimum hold
+        #    timer. It is risk reduction, not a hard stop.
+        # 3) emergency_with_thesis: we are in the emergency time window (e.g.
         #    last 120s) AND thesis is also bad. The emergency window alone is
         #    NOT sufficient — it must be confirmed by signal state.
-        # 3) absolute_last_resort: genuinely final seconds (<60s). We always
+        # 4) absolute_last_resort: genuinely final seconds (<60s). We always
         #    allow loss-selling here to prevent holding a dead position to
         #    settlement, but the window is intentionally narrow.
         #
@@ -1100,13 +1102,11 @@ def build_desired_quote_entry(
         # HOLD_IN_BAND decisions, causing loss sells when direction was correct.
         #
         _thesis_bad = thesis_weakened or offside_confirmed
-        _state_phase_override = decision_phase in {"DE_RISK", "EXIT"}
+        _urgent_override = decision_phase == "EXIT" or (_thesis_bad and stop_loss_regime_armed)
+        _de_risk_active = decision_phase == "DE_RISK"
         _allow_regime_loss_sell = (
-            (
-                (_thesis_bad and stop_loss_regime_armed)
-                or _state_phase_override
-            )
-            and (_state_phase_override or hold_sec >= float(loss_sell_min_hold_sec))
+            (_urgent_override or _de_risk_active)
+            and (_urgent_override or hold_sec >= float(loss_sell_min_hold_sec))
         )
         _allow_emergency_with_thesis = emergency_window and _allow_regime_loss_sell
         _allow_absolute_last_resort = (

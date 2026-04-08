@@ -317,6 +317,55 @@ def test_position_manager_decision_state_exits_broken_wrong_side_position():
     assert state.phase == DecisionPhase.EXIT
     assert state.pressure < Decimal("0")
 
+
+def test_position_manager_decision_state_does_not_exit_winner_pullback_when_thesis_matches():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+    now_ts = time.time()
+    state = manager.compute_decision_state(
+        inst_key="inst-up",
+        now_ts=now_ts,
+        qty=Decimal("5.4"),
+        opened_ts=now_ts - 105.0,
+        held_side="UP",
+        active_side="UP",
+        signal_score=Decimal("-0.04"),
+        signal_matches_position=True,
+        current_price=Decimal("71966.74"),
+        price_to_beat=Decimal("71906.80"),
+        best_bid=Decimal("0.62"),
+        best_ask=Decimal("0.63"),
+        fair=Decimal("0.6643"),
+        time_left_sec=299.0,
+        avg_entry=Decimal("0.66"),
+        peak_bid=Decimal("0.80"),
+        peak_fair=Decimal("0.9059"),
+    )
+
+    assert state.regime == DecisionRegime.CHOP
+    assert state.phase != DecisionPhase.EXIT
+    assert state.spot_minus_strike_bps is not None
+    assert state.spot_minus_strike_bps > Decimal("0")
+
+
     def _update_live_inventory_cost_from_fill(self, **kwargs):
         self.live_inventory_fill_calls.append(kwargs)
         return Decimal("0")
@@ -2042,8 +2091,8 @@ def test_position_manager_requires_persistent_opposite_regime_before_stop_loss_a
         signal_matches_position=False,
         force_exit=False,
     )
-    assert early.status == "pending"
-    assert early.reason.startswith("state_machine_de_risk")
+    assert early.status == "hold"
+    assert early.reason.startswith("state_machine_hold")
     assert "legacy(entry=1,thesis=0,pending=1)" in early.reason
 
     pending = manager.assess_stop_loss_regime(
@@ -2665,6 +2714,118 @@ def test_loss_sell_allows_cost_break_only_when_regime_armed_and_hold_elapsed():
 
     assert desired_entry["should_quote"] is True
     assert desired_entry["loss_sell_reason"] == "armed_thesis_bad"
+
+
+def test_de_risk_loss_sell_respects_min_hold_timer():
+    desired_entry = build_desired_quote_entry(
+        order_key="sell:inst-down",
+        side="sell",
+        inst_id="inst-down",
+        quote_data=(
+            Decimal("0.50"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.020"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("0.020"),
+            Decimal("0.008"),
+            Decimal("0.010"),
+            Decimal("0.050"),
+            Decimal("0.5200"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"),
+        now_ts=120.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=Decimal("5.4"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0.58"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=True,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.005"),
+        maker_sell_min_profit_floor_ps=Decimal("0.010"),
+        thesis_weakened=True,
+        offside_confirmed=False,
+        stop_loss_regime_armed=False,
+        decision_phase="DE_RISK",
+        decision_regime="CHOP",
+        hold_sec=5.0,
+        loss_sell_min_hold_sec=10.0,
+        time_left_sec=600.0,
+    )
+
+    assert desired_entry["should_quote"] is False
+    assert desired_entry["loss_sell_reason"] == ""
+    assert desired_entry["diag_reason"].startswith("sell_cost_protect sell=0.5000 < min=0.5850")
+    assert "phase=DE_RISK regime=CHOP" in desired_entry["diag_reason"]
+
+
+def test_exit_loss_sell_bypasses_min_hold_timer():
+    desired_entry = build_desired_quote_entry(
+        order_key="sell:inst-down",
+        side="sell",
+        inst_id="inst-down",
+        quote_data=(
+            Decimal("0.50"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.020"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("0.020"),
+            Decimal("0.008"),
+            Decimal("0.010"),
+            Decimal("0.050"),
+            Decimal("0.5200"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"),
+        now_ts=120.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=Decimal("5.4"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0.58"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=True,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.005"),
+        maker_sell_min_profit_floor_ps=Decimal("0.010"),
+        thesis_weakened=True,
+        offside_confirmed=True,
+        stop_loss_regime_armed=False,
+        decision_phase="EXIT",
+        decision_regime="BROKEN",
+        hold_sec=5.0,
+        loss_sell_min_hold_sec=10.0,
+        time_left_sec=600.0,
+    )
+
+    assert desired_entry["should_quote"] is True
+    assert desired_entry["loss_sell_reason"] == "state_machine_exit:BROKEN"
 
 
 def test_preserve_recent_loss_sell_order_holds_higher_existing_price():
