@@ -1284,8 +1284,13 @@ def build_desired_quote_entry(
         should_quote = False
         diag_reason = f"reduce_only: {reduce_only_reason}"
     if reduce_only_tail_sell_block and side == "sell":
-        should_quote = False
-        diag_reason = f"reduce_only_tail_guard: <= {reduce_only_no_new_sell_last_sec}s"
+        has_inventory_to_exit = (
+            sellable_qty is not None
+            and sellable_qty > Decimal("0")
+        )
+        if not has_inventory_to_exit:
+            should_quote = False
+            diag_reason = f"reduce_only_tail_guard: <= {reduce_only_no_new_sell_last_sec}s"
     if forced_sell_only and side == "buy":
         should_quote = False
         diag_reason = "balance_forced_sell_only"

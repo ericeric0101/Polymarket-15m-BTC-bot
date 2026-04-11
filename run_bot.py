@@ -1804,6 +1804,7 @@ class IntegratedBTCStrategy(
 
                 winner_take_profit_candidate = False
                 winner_take_profit_armed = False
+                non_adverse_profitable_sell_blocked = False
                 if side == "sell" and quote_ctx.quote is not None and avg_entry > 0:
                     high_price_zone_bid = Decimal("0.95")
                     high_price_zone_fair = Decimal("0.97")
@@ -1869,6 +1870,25 @@ class IntegratedBTCStrategy(
                                             f"winner_trailing_take_profit peak_profit={float(peak_profit_ps):.4f} "
                                             f"drawdown={float(trailing_drawdown_ps):.4f}"
                                         )
+                    limit_price_now = Decimal(str(desired_entry.get("price", "0") or "0"))
+                    min_profit_sell = (
+                        avg_entry
+                        + self.maker_sell_cost_protect_fee_buffer_ps
+                        + self.maker_sell_min_profit_floor_ps
+                    )
+                    if (
+                        desired_entry.get("should_quote", False)
+                        and not winner_take_profit_armed
+                        and not adverse_exit_context
+                        and not str(desired_entry.get("loss_sell_reason", "") or "")
+                        and limit_price_now >= min_profit_sell
+                    ):
+                        non_adverse_profitable_sell_blocked = True
+                        desired_entry["should_quote"] = False
+                        desired_entry["diag_reason"] = (
+                            f"profitable_hold_simple sell={float(limit_price_now):.4f} "
+                            f">= min={float(min_profit_sell):.4f}"
+                        )
 
                 desired_entry = apply_reload_edge_guard(
                     desired_entry=desired_entry,
@@ -1944,6 +1964,12 @@ class IntegratedBTCStrategy(
                     nonordinary_profit_candidate=nonordinary_profit_candidate,
                     high_peak_profit_candidate=high_peak_profit_candidate,
                 )
+                if (
+                    side == "sell"
+                    and non_adverse_profitable_sell_blocked
+                    and not winner_take_profit_armed
+                ):
+                    desired_entry["should_quote"] = False
                 if (
                     side == "sell"
                     and winner_take_profit_armed
