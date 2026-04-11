@@ -76,8 +76,6 @@ class ExitPolicyEngine:
             return "neutral", "", {}
         if snapshot.fair is None or snapshot.fair <= 0:
             return "neutral", "", {}
-        if snapshot.exit_stage.value != "PASSIVE":
-            return "de_risk", "profitable_non_passive_stage", {"exit_intent": "de_risk"}
 
         peak_bid = position.peak_bid if position.peak_bid is not None else snapshot.best_bid
         peak_fair = position.peak_fair if position.peak_fair is not None else (snapshot.fair or snapshot.best_bid)
@@ -110,12 +108,7 @@ class ExitPolicyEngine:
                     "exit_intent": "continue",
                 },
             )
-        if (
-            signal.locked
-            and score_abs >= self.config.hold_band_min_score_abs
-            and fair_edge_ps >= self.config.winner_continuation_min_fair_edge_ps
-            and spot_strike_supports
-        ):
+        if signal.locked and spot_strike_supports:
             return (
                 "continue",
                 "unified_winner_continuation",
@@ -124,55 +117,14 @@ class ExitPolicyEngine:
                     "exit_intent": "continue",
                 },
             )
-        if not self.config.profit_run_enabled:
-            return "de_risk", "profitable_no_profit_run", shared_meta
-        if score_abs < self.config.profit_run_min_score_abs:
-            return "de_risk", "profitable_score_softening", shared_meta
-        if peak_profit_ps < self.config.profit_run_min_profit_ps:
-            return "de_risk", "profitable_below_profit_run_floor", shared_meta
-
-        unlock_active = (
-            self.config.profit_run_unlock_profit_ps > 0
-            and peak_profit_ps >= self.config.profit_run_unlock_profit_ps
-        )
-        trailing_drawdown_ps = self.config.profit_run_trailing_drawdown_ps
-        if unlock_active and self.config.profit_run_unlock_trailing_drawdown_ps > 0:
-            trailing_drawdown_ps = min(
-                trailing_drawdown_ps,
-                self.config.profit_run_unlock_trailing_drawdown_ps,
-            )
-        fair_now = snapshot.fair if snapshot.fair is not None else peak_fair
-        drawdown_bid = max(Decimal("0"), peak_bid - snapshot.best_bid)
-        drawdown_fair = max(Decimal("0"), peak_fair - fair_now)
-        if position.hold_sec < float(self.config.profit_run_min_hold_sec) and not unlock_active:
-            return (
-                "continue",
-                "unified_profit_run_min_hold",
-                {
-                    **shared_meta,
-                    "exit_intent": "continue",
-                    "drawdown_bid": str(drawdown_bid),
-                    "drawdown_fair": str(drawdown_fair),
-                },
-            )
-        if drawdown_bid < trailing_drawdown_ps and drawdown_fair < trailing_drawdown_ps:
-            return (
-                "continue",
-                "unified_profit_run_trailing",
-                {
-                    **shared_meta,
-                    "exit_intent": "continue",
-                    "drawdown_bid": str(drawdown_bid),
-                    "drawdown_fair": str(drawdown_fair),
-                },
-            )
         return (
-            "de_risk",
-            "profitable_drawdown_break",
+            "continue",
+            "profitable_hold_simple",
             {
                 **shared_meta,
-                "drawdown_bid": str(drawdown_bid),
-                "drawdown_fair": str(drawdown_fair),
+                "exit_intent": "continue",
+                "score_abs": str(score_abs),
+                "peak_profit_ps": str(peak_profit_ps),
             },
         )
 
@@ -209,14 +161,13 @@ class ExitPolicyEngine:
         signal_side = str(signal.active_side).upper()
         signal_is_none = signal_side == "NONE"
         explicit_offside = (not signal.matches_position) and not signal_is_none
+        strong_opposite = explicit_offside and abs(signal.score) >= self.config.stop_loss_thesis_min_score_abs
         price_adverse = (
             position.avg_entry_price > 0
             and snapshot.best_bid < position.avg_entry_price
             and gross_if_exit < 0
         )
-        thesis_weakened = explicit_offside or (
-            not signal_is_none and abs(signal.score) < self.config.stop_loss_thesis_min_score_abs
-        )
+        thesis_weakened = strong_opposite
         if signal_is_none and price_adverse:
             thesis_weakened = True
 
@@ -225,7 +176,7 @@ class ExitPolicyEngine:
             position=position,
             signal=signal,
             thesis_weakened=thesis_weakened,
-            offside_confirmed=explicit_offside,
+            offside_confirmed=strong_opposite,
         )
 
         if self.config.stop_loss_hold_on_none_signal and signal_is_none and not price_adverse:

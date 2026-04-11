@@ -535,6 +535,9 @@ class SpotPricerMixin:
                 # blended into fair price — that would create circular calibration
                 # (market price → implied σ → fair ≈ market price → no edge).
                 implied_sigma_used = None
+                sigma_before_implied_floor = sigma
+                implied_sigma_floor = None
+                implied_sigma_floor_applied = False
                 if (
                     getattr(self, "maker_implied_sigma_enabled", False)
                     and strike is not None
@@ -554,9 +557,24 @@ class SpotPricerMixin:
                         # Guardrail only: prevent realized sigma from being
                         # absurdly lower than what the market implies (floor at 60% of implied)
                         sigma_floor_from_implied = imp_sigma * Decimal("0.6")
+                        implied_sigma_floor = sigma_floor_from_implied
                         if sigma < sigma_floor_from_implied:
                             sigma = max(sigma, sigma_floor_from_implied)
                             sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
+                            implied_sigma_floor_applied = sigma > sigma_before_implied_floor
+
+                self.last_digital_pricer_diagnostics = {
+                    "sigma": sigma,
+                    "implied_sigma": implied_sigma_used,
+                    "sigma_before_implied_floor": sigma_before_implied_floor,
+                    "implied_sigma_floor": implied_sigma_floor,
+                    "implied_sigma_floor_applied": implied_sigma_floor_applied,
+                    "strike": strike,
+                    "time_left_sec": time_left_sec,
+                    "outcome": outcome,
+                    "market_mid": market_mid,
+                    "spot": external,
+                }
 
                 if strike is None:
                     if time.time() - self._last_strike_fallback_log_ts >= self.strike_fallback_log_interval_sec:

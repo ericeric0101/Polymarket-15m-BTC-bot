@@ -236,10 +236,11 @@ def apply_quote_plan_guards(
         min_minutes_to_close=min_minutes_to_close,
         no_new_sell_last_sec=reduce_only_no_new_sell_last_sec,
     )
+    has_inventory_to_exit = inventory_delta_shares > 0
     if reduce_only.reason:
         if "buy" in side_plan:
             set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "reduce_only_buy_block")
-        if "sell" in side_plan and reduce_only.tail_sell_block:
+        if "sell" in side_plan and reduce_only.tail_sell_block and not has_inventory_to_exit:
             set_side_should_quote(
                 side_plan,
                 side_disable_reason_by_side,

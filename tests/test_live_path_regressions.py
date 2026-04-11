@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -19,8 +20,10 @@ from bot.quote_service import (
     apply_de_risk_sell_pricing,
     apply_shadow_entry_veto,
     apply_time_based_profitable_sell_cap,
+    apply_winner_trailing_floor,
     build_desired_quote_entry,
     build_directional_snapshot,
+    evaluate_buy_entry_controls,
     maybe_apply_continuation_entry,
     maybe_apply_trapped_inventory_recovery,
     preserve_recent_loss_sell_order,
@@ -364,6 +367,50 @@ def test_position_manager_decision_state_does_not_exit_winner_pullback_when_thes
     assert state.phase != DecisionPhase.EXIT
     assert state.spot_minus_strike_bps is not None
     assert state.spot_minus_strike_bps > Decimal("0")
+
+
+def test_position_manager_marks_near_strike_entry_as_chop_even_with_positive_edge():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+
+    state = manager.compute_decision_state(
+        inst_key="inst-down",
+        now_ts=time.time(),
+        qty=Decimal("0"),
+        opened_ts=0.0,
+        held_side="DOWN",
+        active_side="DOWN",
+        signal_score=Decimal("-0.24"),
+        signal_matches_position=True,
+        current_price=Decimal("71137.04"),
+        price_to_beat=Decimal("71168.86"),
+        best_bid=Decimal("0.58"),
+        best_ask=Decimal("0.59"),
+        fair=Decimal("0.6393"),
+        time_left_sec=780.0,
+        avg_entry=Decimal("0"),
+    )
+
+    assert state.regime == DecisionRegime.CHOP
+    assert state.edge > Decimal("0")
 
 
     def _update_live_inventory_cost_from_fill(self, **kwargs):
@@ -1944,6 +1991,7 @@ def test_continuation_entry_reenables_buy_when_locked_signal_is_strong_and_price
         locked_for_sec=30.0,
         time_left_sec=600.0,
         current_inventory_qty=Decimal("0"),
+        market_buy_count=1,
         best_bid=Decimal("0.58"),
         fair=Decimal("0.6034"),
         continuation_enabled=True,
@@ -1974,6 +2022,7 @@ def test_continuation_entry_stays_blocked_when_market_is_too_expensive():
         locked_for_sec=30.0,
         time_left_sec=580.0,
         current_inventory_qty=Decimal("0"),
+        market_buy_count=1,
         best_bid=Decimal("0.69"),
         fair=Decimal("0.6108"),
         continuation_enabled=True,
@@ -2002,6 +2051,7 @@ def test_continuation_entry_stays_blocked_when_latest_observation_flips_against_
         locked_for_sec=30.0,
         time_left_sec=400.0,
         current_inventory_qty=Decimal("0"),
+        market_buy_count=1,
         best_bid=Decimal("0.42"),
         fair=Decimal("0.50"),
         continuation_enabled=True,
@@ -2493,6 +2543,72 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
             "risk:winner_continuation fair_edge=0.0600>=0.0400 best_bid=0.7400 fair=0.8000",
         )
     ]
+
+
+def test_winner_trailing_floor_prevents_small_profit_de_risk_after_large_peak():
+    desired = {
+        "side": "sell",
+        "should_quote": True,
+        "price": Decimal("0.60"),
+        "diag_reason": "state_machine_de_risk:CHOP",
+    }
+
+    out = apply_winner_trailing_floor(
+        desired_entry=desired,
+        side="sell",
+        avg_entry=Decimal("0.58"),
+        peak_bid=Decimal("0.80"),
+        best_bid=Decimal("0.60"),
+        tick=Decimal("0.01"),
+        is_hard_exit=False,
+    )
+
+    assert out["price"] == Decimal("0.72")
+    assert out["diag_reason"].startswith("winner_trailing_floor old=0.6000 floor=0.7200")
+
+
+def test_winner_trailing_floor_protects_modest_winner_from_falling_back_to_tiny_profit():
+    desired = {
+        "side": "sell",
+        "should_quote": True,
+        "price": Decimal("0.63"),
+        "diag_reason": "state_machine_de_risk:CHOP",
+    }
+
+    out = apply_winner_trailing_floor(
+        desired_entry=desired,
+        side="sell",
+        avg_entry=Decimal("0.61"),
+        peak_bid=Decimal("0.69"),
+        best_bid=Decimal("0.62"),
+        tick=Decimal("0.01"),
+        is_hard_exit=False,
+    )
+
+    assert out["price"] == Decimal("0.65")
+    assert out["diag_reason"].startswith("winner_trailing_floor band=modest old=0.6300 floor=0.6500")
+
+
+def test_winner_trailing_floor_allows_hard_exit_to_break_floor():
+    desired = {
+        "side": "sell",
+        "should_quote": True,
+        "price": Decimal("0.60"),
+        "diag_reason": "state_machine_exit:BROKEN",
+    }
+
+    out = apply_winner_trailing_floor(
+        desired_entry=desired,
+        side="sell",
+        avg_entry=Decimal("0.58"),
+        peak_bid=Decimal("0.80"),
+        best_bid=Decimal("0.60"),
+        tick=Decimal("0.01"),
+        is_hard_exit=True,
+    )
+
+    assert out["price"] == Decimal("0.60")
+    assert out["diag_reason"] == "state_machine_exit:BROKEN"
 
 
 def test_trend_buy_size_multiplier_flows_into_submit_qty():
@@ -2995,6 +3111,35 @@ def test_profit_cap_bypasses_passive_stage_for_winner_continuation_candidate():
     assert out["diag_reason"] == "sell_signal"
 
 
+def test_profit_cap_bypasses_passive_stage_for_modest_winner_candidate():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.6900"),
+        "planned_best_bid": Decimal("0.6200"),
+        "planned_best_ask": Decimal("0.6300"),
+        "diag_reason": "sell_signal",
+        "loss_sell_reason": "",
+    }
+
+    out = apply_time_based_profitable_sell_cap(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.6100"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
+        profitable_sell_cap_enabled=True,
+        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
+        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
+        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
+        exit_stage_value="PASSIVE",
+        tick=Decimal("0.01"),
+        modest_winner_candidate=True,
+    )
+
+    assert out["price"] == Decimal("0.6900")
+    assert out["diag_reason"] == "sell_signal"
+
+
 def test_profit_cap_still_applies_in_aggressive_stage_even_for_winner_continuation_candidate():
     desired_entry = {
         "should_quote": True,
@@ -3164,3 +3309,115 @@ def test_live_shadow_payload_does_not_emit_opposite_candidate_side():
 
     assert payload["shadow_bias_side"] == "UP"
     assert payload["shadow_candidate_side"] is None
+
+
+def test_capture_market_open_spot_prefers_fresh_chainlink_over_stale_latest_external():
+    now_ts = 1_000.0
+    dummy = SimpleNamespace(
+        _polymarket_chainlink_price=Decimal("101.25"),
+        _polymarket_chainlink_price_ts=999.4,
+        _binance_ws_price=Decimal("100.80"),
+        _binance_ws_price_ts=999.7,
+        latest_external_spot=Decimal("99.50"),
+        latest_external_spot_source="binance_ws",
+        latest_external_spot_source_ts=810.0,
+        last_external_spot=Decimal("99.40"),
+        external_spot_history=[],
+    )
+
+    price, source, age = IntegratedBTCStrategy._capture_market_open_spot_detail(dummy, now_ts=now_ts)
+
+    assert price == Decimal("101.25")
+    assert source == "polymarket_chainlink_ws"
+    assert math.isclose(age, 0.6, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
+    out = evaluate_buy_entry_controls(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="DOWN",
+        latest_observation_supports_locked_side=True,
+        side_score=Decimal("-0.21"),
+        directional_entry_min_score_abs_new=Decimal("0.18"),
+        directional_first_entry_min_score_abs_new=Decimal("0.25"),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        maker_reload_min_expected_net_multiplier=Decimal("1.5"),
+        current_inst_inventory_qty=Decimal("0"),
+        maker_reload_inventory_threshold_shares=Decimal("5"),
+        current_slug="btc-updown-15m-test",
+        inst_id="inst-down",
+        market_buy_count=0,
+        trend_buy_enabled=True,
+        trend_buy_min_score=Decimal("0.16"),
+        trend_buy_min_net_usdc=Decimal("0.001"),
+        active_instrument_id="inst-down",
+        time_left_sec=600.0,
+        trend_buy_min_time_left_sec=360.0,
+        best_bid=Decimal("0.55"),
+        fair=Decimal("0.62"),
+        trend_buy_max_price_premium_ps=Decimal("0.018"),
+    )
+
+    assert out.skip is True
+    assert out.event_type == "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE"
+    assert out.reason == "directional_first_entry_gate"
+
+
+def test_continuation_entry_cannot_open_first_position_in_market():
+    desired_entry = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.01",
+        "robust_net": Decimal("0.12"),
+    }
+
+    out = maybe_apply_continuation_entry(
+        desired_entry=desired_entry,
+        side="buy",
+        active_side_locked=True,
+        active_side_value="UP",
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        side_score=Decimal("0.42"),
+        locked_for_sec=40.0,
+        time_left_sec=600.0,
+        current_inventory_qty=Decimal("0"),
+        market_buy_count=0,
+        best_bid=Decimal("0.60"),
+        fair=Decimal("0.78"),
+        continuation_enabled=True,
+        continuation_size_multiplier=Decimal("1.0"),
+    )
+
+    assert out["should_quote"] is False
+    assert out["diag_reason"].startswith("econ_gate")
+
+
+def test_continuation_entry_still_works_after_market_has_prior_buy():
+    desired_entry = {
+        "should_quote": False,
+        "diag_reason": "econ_gate robust_net=-0.01",
+        "robust_net": Decimal("0.12"),
+    }
+
+    out = maybe_apply_continuation_entry(
+        desired_entry=desired_entry,
+        side="buy",
+        active_side_locked=True,
+        active_side_value="UP",
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        side_score=Decimal("0.42"),
+        locked_for_sec=40.0,
+        time_left_sec=600.0,
+        current_inventory_qty=Decimal("0"),
+        market_buy_count=1,
+        best_bid=Decimal("0.60"),
+        fair=Decimal("0.78"),
+        continuation_enabled=True,
+        continuation_size_multiplier=Decimal("1.0"),
+    )
+
+    assert out["should_quote"] is True
+    assert out["entry_mode"] == "continuation"

@@ -234,6 +234,7 @@ class SideDecisionConfig:
     flip_min_score_up_held_new: Decimal
     flip_max_score_down_held_new: Decimal
     directional_entry_min_score_abs_new: Decimal
+    directional_first_entry_min_score_abs_new: Decimal
     side_thesis_weak_score_abs: Decimal
     side_thesis_weak_requires_opposite_side_new: bool
     side_thesis_weak_opposite_score_abs_new: Decimal
@@ -254,6 +255,8 @@ class SideDecisionConfig:
             raise ValueError("SIDE_THESIS_WEAK_CONFIRMATIONS_NEW must be >= 1")
         if self.directional_entry_min_score_abs_new < 0:
             raise ValueError("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
+        if self.directional_first_entry_min_score_abs_new < 0:
+            raise ValueError("DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
         if self.side_thesis_weak_opposite_score_abs_new < 0:
             raise ValueError("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW must be >= 0")
 
@@ -638,6 +641,13 @@ class AppConfig:
                 flip_min_score_up_held_new=_env_decimal("BI_SIDE_FLIP_MIN_SCORE_UP_HELD_NEW", str(held_flip_default)),
                 flip_max_score_down_held_new=_env_decimal("BI_SIDE_FLIP_MAX_SCORE_DOWN_HELD_NEW", str(-held_flip_default)),
                 directional_entry_min_score_abs_new=_env_decimal("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW", str(entry_score_abs_default)),
+                directional_first_entry_min_score_abs_new=min(
+                    _env_decimal(
+                        "DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW",
+                        str(entry_score_abs_default),
+                    ),
+                    max(entry_score_abs_default, Decimal("0.18")),
+                ),
                 side_thesis_weak_score_abs=_env_decimal("SIDE_THESIS_WEAK_SCORE_ABS_NEW", str(entry_score_abs_default)),
                 side_thesis_weak_requires_opposite_side_new=_env_bool_inverted("SIDE_THESIS_WEAK_REQUIRES_OPPOSITE_SIDE_NEW", True),
                 side_thesis_weak_opposite_score_abs_new=_env_decimal("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW", str(held_flip_default)),

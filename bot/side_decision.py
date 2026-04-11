@@ -324,10 +324,20 @@ class SideDecisionMixin:
         reference_spot: Optional[Decimal],
         now_ts: float,
     ) -> None:
-        inputs["reference_spot_source"] = str(getattr(self, "latest_external_spot_source", "") or "")
-        inputs["reference_spot_price"] = float(reference_spot) if reference_spot is not None else None
-        ref_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
-        inputs["reference_spot_age_sec"] = max(0.0, now_ts - ref_ts) if ref_ts > 0 else None
+        selected_spot = None
+        if hasattr(self, "_capture_market_open_spot_detail"):
+            try:
+                selected_spot = self._capture_market_open_spot_detail(now_ts=now_ts)
+            except Exception:
+                selected_spot = None
+        selected_price = selected_spot[0] if selected_spot is not None else reference_spot
+        selected_source = selected_spot[1] if selected_spot is not None else str(getattr(self, "latest_external_spot_source", "") or "")
+        selected_age = selected_spot[2] if selected_spot is not None else None
+        inputs["reference_spot_source"] = selected_source
+        inputs["reference_spot_price"] = float(selected_price) if selected_price is not None else None
+        inputs["reference_spot_age_sec"] = float(selected_age) if selected_age is not None else None
+        inputs["selected_spot_source"] = selected_source
+        inputs["selected_spot_age_sec"] = float(selected_age) if selected_age is not None else None
 
         binance_px = getattr(self, "_binance_ws_price", None)
         binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)

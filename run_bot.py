@@ -102,6 +102,7 @@ from bot.quote_service import (
     apply_de_risk_sell_pricing,
     apply_shadow_entry_veto,
     apply_time_based_profitable_sell_cap,
+    apply_winner_trailing_floor,
     attach_desired_entry_runtime_metadata,
     apply_confirmed_inventory_sell_guard,
     apply_reload_edge_guard,
@@ -419,23 +420,55 @@ class IntegratedBTCStrategy(
         self.instrument_id = target
         self.current_token_id = self._extract_token_id_from_instrument(str(target)) if target is not None else None
 
-    def _capture_market_open_spot(self) -> Optional[Decimal]:
-        if self.latest_external_spot is not None and self.latest_external_spot > 0:
-            src_age = time.time() - float(self.latest_external_spot_source_ts or 0.0)
-            if src_age < 10.0:
-                return self.latest_external_spot
-        spot = self.latest_external_spot or self.last_external_spot
-        if spot is not None and spot > 0:
-            return spot
-        if self._binance_ws_price is not None and self._binance_ws_price > 0:
-            return self._binance_ws_price
-        if self._polymarket_chainlink_price is not None and self._polymarket_chainlink_price > 0:
-            return self._polymarket_chainlink_price
+    def _capture_market_open_spot_detail(self, *, now_ts: Optional[float] = None) -> tuple[Optional[Decimal], str, Optional[float]]:
+        now = float(now_ts or time.time())
+        fresh_sec = 10.0
+
+        def _candidate(price: Optional[Decimal], ts: float, source: str) -> tuple[Optional[Decimal], str, Optional[float]]:
+            if price is None or price <= 0:
+                return (None, source, None)
+            age = max(0.0, now - float(ts or 0.0)) if ts and ts > 0 else None
+            return (price, source, age)
+
+        poly = _candidate(
+            getattr(self, "_polymarket_chainlink_price", None),
+            float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0),
+            "polymarket_chainlink_ws",
+        )
+        binance = _candidate(
+            getattr(self, "_binance_ws_price", None),
+            float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0),
+            "binance_ws",
+        )
+        latest_src = str(getattr(self, "latest_external_spot_source", "") or "latest_external")
+        latest = _candidate(
+            getattr(self, "latest_external_spot", None),
+            float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0),
+            latest_src,
+        )
+
+        for cand in (poly, binance, latest):
+            price, source, age = cand
+            if price is not None and age is not None and age < fresh_sec:
+                return cand
+
+        stale_candidates = [cand for cand in (poly, binance, latest) if cand[0] is not None]
+        if stale_candidates:
+            stale_candidates.sort(key=lambda item: item[2] if item[2] is not None else float("inf"))
+            return stale_candidates[0]
+
+        last_external = getattr(self, "last_external_spot", None)
+        if last_external is not None and last_external > 0:
+            return (last_external, "last_external_spot", None)
         if self.external_spot_history:
-            _, hist_px = self.external_spot_history[-1]
+            hist_ts, hist_px = self.external_spot_history[-1]
             if hist_px > 0:
-                return hist_px
-        return None
+                age = max(0.0, now - float(hist_ts or 0.0)) if hist_ts else None
+                return (hist_px, "external_spot_history", age)
+        return (None, "-", None)
+
+    def _capture_market_open_spot(self) -> Optional[Decimal]:
+        return self._capture_market_open_spot_detail()[0]
 
     def _spot_minus_strike_bps(self) -> Optional[Decimal]:
         slug = str(self.current_market_slug or "")
@@ -506,6 +539,10 @@ class IntegratedBTCStrategy(
         )
         sigma = self._estimate_external_spot_sigma_annualized() or self.maker_digital_sigma_default
         sigma = min(self.maker_digital_sigma_ceiling, max(self.maker_digital_sigma_floor, sigma))
+        pricer_diag = getattr(self, "last_digital_pricer_diagnostics", {}) or {}
+        diag_sigma = pricer_diag.get("sigma")
+        if isinstance(diag_sigma, Decimal):
+            sigma = diag_sigma
         end_ts = getattr(self, "current_market_end_timestamp", None)
         time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
         return build_live_signal_compare_payload(
@@ -513,6 +550,10 @@ class IntegratedBTCStrategy(
             spot=spot,
             strike=strike,
             sigma=sigma,
+            implied_sigma=pricer_diag.get("implied_sigma"),
+            sigma_before_implied_floor=pricer_diag.get("sigma_before_implied_floor"),
+            implied_sigma_floor=pricer_diag.get("implied_sigma_floor"),
+            implied_sigma_floor_applied=bool(pricer_diag.get("implied_sigma_floor_applied", False)),
             time_left_sec=time_left_sec,
             history=self.external_spot_history,
             now_ts=now_ts,
@@ -1342,6 +1383,8 @@ class IntegratedBTCStrategy(
                         )
                         self._logged_reduce_only_tail_sell_block = True
                         self._last_ro_tail_sell_log_ts = time.time()
+                elif "sell" in side_plan:
+                    self._logged_reduce_only_tail_sell_block = False
             elif "buy" in side_plan and getattr(self, "_logged_reduce_only", False):
                 self._logged_reduce_only = False
                 self._logged_extreme_sell_block = False
@@ -1449,12 +1492,14 @@ class IntegratedBTCStrategy(
                     ),
                     side_score=self.side_decision_score,
                     directional_entry_min_score_abs_new=self.directional_entry_min_score_abs_new,
+                    directional_first_entry_min_score_abs_new=self.directional_first_entry_min_score_abs_new,
                     maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
                     maker_reload_min_expected_net_multiplier=self.maker_reload_min_expected_net_multiplier,
                     current_inst_inventory_qty=current_inst_inventory_qty,
                     maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
                     current_slug=current_slug,
                     inst_id=inst_id,
+                    market_buy_count=market_buy_count,
                     # Trend-buy params
                     trend_buy_enabled=self.trend_buy_enabled,
                     trend_buy_min_score=self.trend_buy_min_score,
@@ -1503,7 +1548,7 @@ class IntegratedBTCStrategy(
                         now_ts=now_ts,
                         side_score=self.side_decision_score,
                     )
-                    _thesis_weakened = legacy_thesis_weakened
+                    _thesis_weakened = legacy_thesis_weakened and _offside_confirmed
                     if (
                         hasattr(self, "position_manager")
                         and inv_state is not None
@@ -1633,40 +1678,6 @@ class IntegratedBTCStrategy(
                     trend_buy_score=self.side_decision_score,
                     trend_buy_size_multiplier=self.trend_buy_size_multiplier,
                 )
-                if (
-                    side == "buy"
-                    and desired_entry.get("should_quote", False)
-                    and hasattr(self, "position_manager")
-                    and quote_ctx.quote is not None
-                ):
-                    intended_side = (
-                        self._side_for_instrument_id(inst_id).value
-                        if hasattr(self, "_side_for_instrument_id")
-                        else "NONE"
-                    )
-                    entry_state = self.position_manager.compute_decision_state(
-                        inst_key=inst_key,
-                        now_ts=now_ts,
-                        qty=Decimal("0"),
-                        opened_ts=0.0,
-                        held_side=intended_side,
-                        active_side=intended_side,
-                        signal_score=self.side_decision_score,
-                        signal_matches_position=True,
-                        current_price=self._capture_market_open_spot(),
-                        price_to_beat=self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")),
-                        best_bid=quote_ctx.quote[0],
-                        best_ask=quote_ctx.quote[1],
-                        fair=quote_ctx.fair,
-                        time_left_sec=time_left_sec_global,
-                        avg_entry=Decimal("0"),
-                    )
-                    if entry_state.regime.value == "CHOP" and entry_state.phase == DecisionPhase.FLAT:
-                        desired_entry["should_quote"] = False
-                        desired_entry["diag_reason"] = (
-                            f"state_machine_chop_entry pressure={float(entry_state.pressure):+.4f} "
-                            f"edge={float(entry_state.edge):+.4f}"
-                        )
                 desired_entry = attach_desired_entry_runtime_metadata(
                     desired_entry=desired_entry,
                     dynamic_fee_rate=quote_ctx.dynamic_fee_rate,
@@ -1715,6 +1726,14 @@ class IntegratedBTCStrategy(
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                 ):
+                    adverse_exit_context = bool(
+                        _thesis_weakened
+                        or _offside_confirmed
+                        or (
+                            decision_state is not None
+                            and decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                        )
+                    )
                     spread = max(Decimal("0"), quote_ctx.quote[1] - quote_ctx.quote[0])
                     mid = (
                         (quote_ctx.quote[0] + quote_ctx.quote[1]) / Decimal("2")
@@ -1767,58 +1786,85 @@ class IntegratedBTCStrategy(
                         ),
                     )
                     if unified_sell_exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND:
-                        fair_now = quote_ctx.fair if quote_ctx.fair is not None else Decimal("0")
-                        best_bid_now = quote_ctx.quote[0]
-                        if (
-                            unified_sell_exit_decision.reason == "unified_profit_run_trailing"
-                            and (
-                                fair_now >= Decimal("0.97")
-                                or best_bid_now >= Decimal("0.95")
-                            )
-                        ):
-                            extreme_winner_lock_profit = True
-                            desired_entry["diag_reason"] = (
-                                f"extreme_winner_lock_profit fair={float(fair_now):.4f} "
-                                f"bid={float(best_bid_now):.4f}"
-                            )
-                        else:
-                            # Safety-net sell: instead of fully blocking, cap the
-                            # sell price at bid + max_offset so a maker order stays
-                            # on the book with realistic fill probability.
-                            sell_price = Decimal(str(desired_entry.get("price", "0")))
-                            max_offset = self.maker_winner_sell_max_offset_ps
-                            tick = quote_ctx.tick if quote_ctx.tick and quote_ctx.tick > 0 else Decimal("0.01")
-                            safety_net_price = best_bid_now + max_offset
-                            cost_floor = (
-                                avg_entry
-                                + self.maker_sell_cost_protect_fee_buffer_ps
-                                + self.maker_sell_min_profit_floor_ps
-                            )
-                            safety_net_price = max(cost_floor, best_bid_now + tick, safety_net_price)
-                            safety_net_price = (
-                                (safety_net_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
-                            )
-                            safety_net_price = max(Decimal("0.01"), min(Decimal("0.99"), safety_net_price))
-                            if (
-                                avg_entry > 0
-                                and best_bid_now > avg_entry
-                                and sell_price > safety_net_price
-                            ):
-                                desired_entry["price"] = safety_net_price
-                                desired_entry["diag_reason"] = (
-                                    f"winner_safety_net reason={unified_sell_exit_decision.reason} "
-                                    f"old={float(sell_price):.4f} cap={float(safety_net_price):.4f} "
-                                    f"bid={float(best_bid_now):.4f} offset={float(max_offset):.4f}"
-                                )
-                            else:
-                                desired_entry["should_quote"] = False
-                                desired_entry["diag_reason"] = unified_sell_exit_decision.reason
-                                desired_entry["force_cancel_existing"] = True
-                    elif unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK:
+                        desired_entry["should_quote"] = False
+                        desired_entry["diag_reason"] = unified_sell_exit_decision.reason
+                    elif (
+                        unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK
+                        and adverse_exit_context
+                        and unified_sell_exit_decision.reason == "profitable_thesis_weakened"
+                    ):
                         desired_entry["diag_reason"] = (
                             desired_entry.get("diag_reason")
                             or unified_sell_exit_decision.reason
                         )
+
+                winner_take_profit_candidate = False
+                winner_take_profit_armed = False
+                if side == "sell" and quote_ctx.quote is not None and avg_entry > 0:
+                    high_price_zone_bid = Decimal("0.95")
+                    high_price_zone_fair = Decimal("0.97")
+                    high_price_zone_trailing_drawdown_ps = Decimal("0.02")
+                    adverse_exit_context = bool(
+                        _thesis_weakened
+                        or _offside_confirmed
+                        or (
+                            decision_state is not None
+                            and decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                        )
+                    )
+                    best_bid_now = quote_ctx.quote[0]
+                    peak_profit_ps = max(Decimal("0"), peak_bid - avg_entry) if peak_bid > 0 else Decimal("0")
+                    trailing_drawdown_ps = (
+                        max(Decimal("0"), peak_bid - best_bid_now)
+                        if peak_bid > 0 and best_bid_now > 0
+                        else Decimal("0")
+                    )
+                    in_high_price_zone = (
+                        best_bid_now >= high_price_zone_bid
+                        or (quote_ctx.fair is not None and quote_ctx.fair >= high_price_zone_fair)
+                    )
+                    effective_trailing_drawdown_ps = (
+                        min(
+                            self.maker_profit_run_trailing_drawdown_ps,
+                            high_price_zone_trailing_drawdown_ps,
+                        )
+                        if in_high_price_zone
+                        else self.maker_profit_run_trailing_drawdown_ps
+                    )
+                    winner_take_profit_candidate = (
+                        best_bid_now > avg_entry
+                        and not adverse_exit_context
+                        and not str(desired_entry.get("diag_reason", "")).startswith("sell_pause")
+                    )
+                    if winner_take_profit_candidate:
+                        if peak_profit_ps < self.maker_profit_run_min_profit_ps:
+                            desired_entry["should_quote"] = False
+                            desired_entry["diag_reason"] = (
+                                f"winner_hold_pre_trailing peak_profit={float(peak_profit_ps):.4f} "
+                                f"< enable={float(self.maker_profit_run_min_profit_ps):.4f}"
+                            )
+                        elif not in_high_price_zone and trailing_drawdown_ps < effective_trailing_drawdown_ps:
+                            desired_entry["should_quote"] = False
+                            desired_entry["diag_reason"] = (
+                                f"winner_hold_wait_retrace drawdown={float(trailing_drawdown_ps):.4f} "
+                                f"< trail={float(effective_trailing_drawdown_ps):.4f} "
+                                f"peak_profit={float(peak_profit_ps):.4f}"
+                            )
+                        else:
+                            winner_take_profit_armed = True
+                            if str(desired_entry.get("loss_sell_reason", "") or "") == "":
+                                desired_entry["should_quote"] = True
+                                if not str(desired_entry.get("diag_reason", "") or "").startswith("winner_trailing"):
+                                    if in_high_price_zone:
+                                        desired_entry["diag_reason"] = (
+                                            f"winner_high_zone_take_profit peak_profit={float(peak_profit_ps):.4f} "
+                                            f"bid={float(best_bid_now):.4f} drawdown={float(trailing_drawdown_ps):.4f}"
+                                        )
+                                    else:
+                                        desired_entry["diag_reason"] = (
+                                            f"winner_trailing_take_profit peak_profit={float(peak_profit_ps):.4f} "
+                                            f"drawdown={float(trailing_drawdown_ps):.4f}"
+                                        )
 
                 desired_entry = apply_reload_edge_guard(
                     desired_entry=desired_entry,
@@ -1848,6 +1894,7 @@ class IntegratedBTCStrategy(
                 profit_cap_before_price = desired_entry.get("price")
                 profit_cap_before_reason = desired_entry.get("diag_reason")
                 winner_continuation_candidate = False
+                modest_winner_candidate = False
                 nonordinary_profit_candidate = False
                 high_peak_profit_candidate = False
                 if (
@@ -1872,6 +1919,8 @@ class IntegratedBTCStrategy(
                         nonordinary_profit_candidate = True
                     if avg_entry > 0 and peak_bid > 0:
                         peak_profit_ps = max(Decimal("0"), peak_bid - avg_entry)
+                        if peak_profit_ps >= Decimal("0.03"):
+                            modest_winner_candidate = True
                         if peak_profit_ps >= self.maker_profit_run_unlock_profit_ps:
                             high_peak_profit_candidate = True
                 desired_entry = apply_time_based_profitable_sell_cap(
@@ -1886,33 +1935,48 @@ class IntegratedBTCStrategy(
                     profitable_sell_cap_taker_offset_ps=self.maker_profitable_sell_cap_taker_offset_ps,
                     exit_stage_value=self.exit_policy.stage(time_left_sec_global).value,
                     tick=quote_ctx.tick,
-                    winner_continuation_candidate=winner_continuation_candidate,
+                    winner_continuation_candidate=(winner_continuation_candidate and not winner_take_profit_armed),
+                    modest_winner_candidate=modest_winner_candidate,
                     nonordinary_profit_candidate=nonordinary_profit_candidate,
                     high_peak_profit_candidate=high_peak_profit_candidate,
                 )
                 if (
                     side == "sell"
+                    and winner_take_profit_armed
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
-                    and inv_state is not None
                 ):
-                    hold_sec = max(0.0, now_ts - float(inv_state.get("opened_ts", 0.0))) if float(inv_state.get("opened_ts", 0.0)) > 0 else 0.0
-                    loss_sell_reason = str(desired_entry.get("loss_sell_reason", "") or "")
-                    is_normal_profit_sell = (
-                        not loss_sell_reason
-                        and unified_sell_exit_decision is not None
-                        and unified_sell_exit_decision.decision_type not in {ExitDecisionType.DE_RISK, ExitDecisionType.TAKER_STOP_LOSS}
+                    best_bid_now = quote_ctx.quote[0]
+                    in_high_price_zone = (
+                        best_bid_now >= Decimal("0.95")
+                        or (quote_ctx.fair is not None and quote_ctx.fair >= Decimal("0.97"))
                     )
-                    fresh_profit_embargo_sec = float(self.maker_early_profit_hold_min_hold_sec)
-                    if (
-                        is_normal_profit_sell
-                        and hold_sec < fresh_profit_embargo_sec
-                    ):
-                        desired_entry["should_quote"] = False
-                        desired_entry["force_cancel_existing"] = True
-                        desired_entry["diag_reason"] = (
-                            f"fresh_profit_embargo hold={hold_sec:.1f}s<{fresh_profit_embargo_sec:.1f}s"
-                        )
+                    desired_entry = apply_winner_trailing_floor(
+                        desired_entry=desired_entry,
+                        side=side,
+                        avg_entry=avg_entry,
+                        peak_bid=peak_bid,
+                        best_bid=quote_ctx.quote[0],
+                        tick=quote_ctx.tick,
+                        is_hard_exit=False,
+                        modest_winner_min_peak_profit_ps=self.maker_profit_run_min_profit_ps,
+                        modest_winner_min_lock_profit_ps=self.maker_sell_min_profit_floor_ps,
+                        modest_winner_min_trailing_drawdown_ps=(
+                            min(self.maker_profit_run_trailing_drawdown_ps, Decimal("0.02"))
+                            if in_high_price_zone
+                            else self.maker_profit_run_trailing_drawdown_ps
+                        ),
+                        winner_latch_min_peak_profit_ps=self.maker_profit_run_unlock_profit_ps,
+                        winner_latch_min_lock_profit_ps=max(
+                            self.maker_sell_min_profit_floor_ps,
+                            Decimal("0.04"),
+                        ),
+                        winner_latch_trailing_drawdown_ps=(
+                            min(self.maker_profit_run_unlock_trailing_drawdown_ps, Decimal("0.02"))
+                            if in_high_price_zone
+                            else self.maker_profit_run_unlock_trailing_drawdown_ps
+                        ),
+                    )
                 if side == "sell" and decision_state is not None:
                     desired_entry["decision_pressure"] = decision_state.pressure
                     desired_entry["decision_phase"] = decision_state.phase.value
@@ -1931,22 +1995,49 @@ class IntegratedBTCStrategy(
                     )
                     and quote_ctx.quote is not None
                 ):
-                    desired_entry = apply_de_risk_sell_pricing(
-                        desired_entry=desired_entry,
-                        side=side,
-                        avg_entry=avg_entry,
-                        fair=quote_ctx.fair,
-                        best_bid=quote_ctx.quote[0],
-                        best_ask=quote_ctx.quote[1],
-                        tick=quote_ctx.tick,
-                        maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
-                        maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
-                        exit_decision_reason=(
-                            "extreme_winner_lock_profit"
-                            if extreme_winner_lock_profit
-                            else unified_sell_exit_decision.reason
-                        ),
+                    adverse_exit_context = bool(
+                        _thesis_weakened
+                        or _offside_confirmed
+                        or (
+                            decision_state is not None
+                            and decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                        )
                     )
+                    if not adverse_exit_context and not extreme_winner_lock_profit:
+                        pass
+                    else:
+                        if (
+                            unified_sell_exit_decision is not None
+                            and unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK
+                            and unified_sell_exit_decision.reason != "profitable_thesis_weakened"
+                            and not extreme_winner_lock_profit
+                        ):
+                            pass
+                        else:
+                            desired_entry = apply_de_risk_sell_pricing(
+                                desired_entry=desired_entry,
+                                side=side,
+                                avg_entry=avg_entry,
+                                fair=quote_ctx.fair,
+                                best_bid=quote_ctx.quote[0],
+                                best_ask=quote_ctx.quote[1],
+                                tick=quote_ctx.tick,
+                                maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
+                                maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                                exit_decision_reason=(
+                                    "extreme_winner_lock_profit"
+                                    if extreme_winner_lock_profit
+                                    else (
+                                        unified_sell_exit_decision.reason
+                                        if unified_sell_exit_decision is not None
+                                        else (
+                                            f"state_machine_{decision_state.phase.value.lower()}"
+                                            if decision_state is not None
+                                            else "de_risk"
+                                        )
+                                    )
+                                ),
+                            )
                 if (
                     side == "sell"
                     and desired_entry.get("should_quote", False)
@@ -1984,6 +2075,7 @@ class IntegratedBTCStrategy(
                         locked_for_sec=locked_for_sec,
                         time_left_sec=time_left_sec_global,
                         current_inventory_qty=current_inst_inventory_qty,
+                        market_buy_count=market_buy_count,
                         best_bid=quote_ctx.quote[0],
                         fair=quote_ctx.fair,
                         continuation_enabled=self.continuation_entry_enabled,
@@ -2586,9 +2678,10 @@ class IntegratedBTCStrategy(
         side_reason_txt = self.side_decision_reason if self.bi_side_enabled else "disabled"
         side_locked_txt = "1" if self.active_side_locked else "0"
         side_due_in = max(0.0, self.side_decision_due_ts - now_ts) if self.bi_side_enabled and self.side_decision_due_ts > 0 else 0.0
-        ref_spot_txt = f"{float(self.latest_external_spot):.2f}" if self.latest_external_spot is not None else "None"
-        ref_src_txt = str(self.latest_external_spot_source or "-")
-        ref_age = max(0.0, now_ts - float(self.latest_external_spot_source_ts or 0.0)) if self.latest_external_spot_source_ts > 0 else -1.0
+        selected_ref_spot, selected_ref_src, selected_ref_age = self._capture_market_open_spot_detail(now_ts=now_ts)
+        ref_spot_txt = f"{float(selected_ref_spot):.2f}" if selected_ref_spot is not None else "None"
+        ref_src_txt = str(selected_ref_src or "-")
+        ref_age = float(selected_ref_age) if selected_ref_age is not None else -1.0
         binance_spot_txt = f"{float(self._binance_ws_price):.2f}" if self._binance_ws_price is not None else "None"
         binance_age = max(0.0, now_ts - float(self._binance_ws_price_ts or 0.0)) if self._binance_ws_price_ts > 0 else -1.0
 

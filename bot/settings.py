@@ -260,6 +260,7 @@ def initialize_strategy_settings(
     strategy.maker_urgent_exit_winner_peak_profit_ps = config.exit.maker_urgent_exit_winner_peak_profit_ps
     strategy.maker_urgent_exit_winner_extra_confirmations = config.exit.maker_urgent_exit_winner_extra_confirmations
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
+    strategy.directional_first_entry_min_score_abs_new = config.side.directional_first_entry_min_score_abs_new
     strategy.side_thesis_weak_requires_opposite_side_new = config.side.side_thesis_weak_requires_opposite_side_new
     strategy.side_thesis_weak_opposite_score_abs_new = config.side.side_thesis_weak_opposite_score_abs_new
     strategy.side_thesis_weak_confirmations_new = config.side.side_thesis_weak_confirmations_new

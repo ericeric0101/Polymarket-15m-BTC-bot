@@ -77,12 +77,14 @@ def evaluate_buy_entry_controls(
     latest_observation_supports_locked_side: bool,
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
+    directional_first_entry_min_score_abs_new: Decimal,
     maker_min_expected_net_usdc: Decimal,
     maker_reload_min_expected_net_multiplier: Decimal,
     current_inst_inventory_qty: Decimal,
     maker_reload_inventory_threshold_shares: Decimal,
     current_slug: str,
     inst_id: Any,
+    market_buy_count: int = 0,
     # --- Trend-buy params ---
     trend_buy_enabled: bool = False,
     trend_buy_min_score: Decimal = Decimal("0.20"),
@@ -96,6 +98,7 @@ def evaluate_buy_entry_controls(
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
+    strong_signal_override_abs = Decimal("0.45")
     if side != "buy":
         return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc, entry_mode=entry_mode)
     if (
@@ -103,6 +106,7 @@ def evaluate_buy_entry_controls(
         and active_side_locked
         and str(active_side_value or "NONE").upper() != "NONE"
         and not latest_observation_supports_locked_side
+        and abs(side_score) < strong_signal_override_abs
     ):
         return BuyEntryEvaluation(
             skip=True,
@@ -115,6 +119,25 @@ def evaluate_buy_entry_controls(
                 "instrument_id": str(inst_id),
                 "active_side": active_side_value,
                 "side_score": float(side_score),
+                "engine": "new_signal",
+            },
+        )
+    if (
+        current_inst_inventory_qty <= 0
+        and int(market_buy_count) <= 0
+        and abs(side_score) < directional_first_entry_min_score_abs_new
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE",
+            reason="directional_first_entry_gate",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "side_score": float(side_score),
+                "required_score_abs": float(directional_first_entry_min_score_abs_new),
                 "engine": "new_signal",
             },
         )
@@ -409,6 +432,7 @@ def apply_time_based_profitable_sell_cap(
     exit_stage_value: str,
     tick: Decimal,
     winner_continuation_candidate: bool = False,
+    modest_winner_candidate: bool = False,
     nonordinary_profit_candidate: bool = False,
     high_peak_profit_candidate: bool = False,
 ) -> dict[str, Any]:
@@ -435,6 +459,7 @@ def apply_time_based_profitable_sell_cap(
     stage = str(exit_stage_value or "PASSIVE").upper()
     if stage == "PASSIVE" and (
         winner_continuation_candidate
+        or modest_winner_candidate
         or nonordinary_profit_candidate
         or high_peak_profit_candidate
     ):
@@ -520,6 +545,83 @@ def apply_de_risk_sell_pricing(
         f"edge={float(fair_edge):.4f} reason={exit_decision_reason}"
         + (f" prev={prev_reason}" if prev_reason else "")
     )
+    return desired_entry
+
+
+def apply_winner_trailing_floor(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    avg_entry: Decimal,
+    peak_bid: Decimal,
+    best_bid: Decimal,
+    tick: Decimal,
+    is_hard_exit: bool,
+    modest_winner_min_peak_profit_ps: Decimal = Decimal("0.03"),
+    modest_winner_min_lock_profit_ps: Decimal = Decimal("0.02"),
+    modest_winner_min_trailing_drawdown_ps: Decimal = Decimal("0.03"),
+    winner_latch_min_peak_profit_ps: Decimal = Decimal("0.10"),
+    winner_latch_min_lock_profit_ps: Decimal = Decimal("0.04"),
+    winner_latch_trailing_drawdown_ps: Decimal = Decimal("0.08"),
+) -> dict[str, Any]:
+    if (
+        side != "sell"
+        or not desired_entry.get("should_quote", False)
+        or avg_entry <= 0
+        or peak_bid <= 0
+        or best_bid <= 0
+        or is_hard_exit
+    ):
+        return desired_entry
+    if tick <= 0:
+        tick = Decimal("0.01")
+
+    peak_profit_ps = max(Decimal("0"), peak_bid - avg_entry)
+    if peak_profit_ps < modest_winner_min_peak_profit_ps:
+        return desired_entry
+
+    try:
+        planned_sell_price = Decimal(str(desired_entry.get("price", "0") or "0"))
+    except Exception:
+        return desired_entry
+    if planned_sell_price <= 0:
+        return desired_entry
+
+    full_winner_band = peak_profit_ps >= winner_latch_min_peak_profit_ps
+    if full_winner_band:
+        trailing_floor = max(
+            avg_entry + winner_latch_min_lock_profit_ps,
+            peak_bid - winner_latch_trailing_drawdown_ps,
+            best_bid + tick,
+        )
+    else:
+        modest_drawdown = max(
+            modest_winner_min_trailing_drawdown_ps,
+            peak_profit_ps * Decimal("0.5"),
+        )
+        trailing_floor = max(
+            avg_entry + modest_winner_min_lock_profit_ps,
+            peak_bid - modest_drawdown,
+            best_bid + tick,
+        )
+    trailing_floor = (trailing_floor / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+    trailing_floor = max(Decimal("0.01"), min(Decimal("0.99"), trailing_floor))
+    if planned_sell_price >= trailing_floor:
+        return desired_entry
+
+    desired_entry["price"] = trailing_floor
+    if full_winner_band:
+        desired_entry["diag_reason"] = (
+            f"winner_trailing_floor old={float(planned_sell_price):.4f} "
+            f"floor={float(trailing_floor):.4f} peak_bid={float(peak_bid):.4f} "
+            f"entry={float(avg_entry):.4f} peak_profit={float(peak_profit_ps):.4f}"
+        )
+    else:
+        desired_entry["diag_reason"] = (
+            f"winner_trailing_floor band=modest old={float(planned_sell_price):.4f} "
+            f"floor={float(trailing_floor):.4f} peak_bid={float(peak_bid):.4f} "
+            f"entry={float(avg_entry):.4f} peak_profit={float(peak_profit_ps):.4f}"
+        )
     return desired_entry
 
 
@@ -756,6 +858,7 @@ def maybe_apply_continuation_entry(
     locked_for_sec: float,
     time_left_sec: float | None,
     current_inventory_qty: Decimal,
+    market_buy_count: int,
     best_bid: Decimal,
     fair: Decimal | None,
     continuation_enabled: bool,

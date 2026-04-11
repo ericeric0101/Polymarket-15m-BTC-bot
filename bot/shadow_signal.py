@@ -230,6 +230,10 @@ def build_live_signal_compare_payload(
     spot: Decimal,
     strike: Optional[Decimal],
     sigma: Decimal,
+    implied_sigma: Optional[Decimal] = None,
+    sigma_before_implied_floor: Optional[Decimal] = None,
+    implied_sigma_floor: Optional[Decimal] = None,
+    implied_sigma_floor_applied: bool = False,
     time_left_sec: float,
     history: Sequence[Tuple[float, Decimal]],
     now_ts: float,
@@ -280,6 +284,12 @@ def build_live_signal_compare_payload(
         "spot": float(spot),
         "strike": float(strike) if strike is not None else None,
         "sigma": float(sigma),
+        "implied_sigma": float(implied_sigma) if implied_sigma is not None else None,
+        "sigma_before_implied_floor": (
+            float(sigma_before_implied_floor) if sigma_before_implied_floor is not None else None
+        ),
+        "implied_sigma_floor": float(implied_sigma_floor) if implied_sigma_floor is not None else None,
+        "implied_sigma_floor_applied": bool(implied_sigma_floor_applied),
         "time_left_sec": float(time_left_sec),
         "bid_up": float(bid_up) if bid_up is not None else None,
         "ask_up": float(ask_up) if ask_up is not None else None,

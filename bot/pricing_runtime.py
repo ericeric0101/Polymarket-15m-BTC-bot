@@ -240,26 +240,191 @@ class PricingRuntimeMixin:
         qty = Decimal(str(state.get("qty", "0")))
         return max(Decimal("0"), qty)
 
+    def _reconcile_ghost_inventory(
+        self: PricingRuntimeHost,
+        *,
+        instrument_id: Optional[Any],
+        confirmed_qty: Decimal,
+        onchain_qty: Decimal,
+    ) -> Decimal:
+        inst = instrument_id if instrument_id is not None else self.instrument_id
+        inst_key = self._instrument_key(inst)
+        if not inst_key:
+            return max(Decimal("0"), onchain_qty)
+
+        now_ts = time.time()
+        cooldown_by_inst = getattr(self, "_ghost_inventory_reconcile_ts_by_inst", None)
+        if not isinstance(cooldown_by_inst, dict):
+            cooldown_by_inst = {}
+            setattr(self, "_ghost_inventory_reconcile_ts_by_inst", cooldown_by_inst)
+        last_ts = float(cooldown_by_inst.get(inst_key, 0.0))
+        if last_ts > 0 and (now_ts - last_ts) < 5.0:
+            return max(Decimal("0"), onchain_qty)
+        cooldown_by_inst[inst_key] = now_ts
+
+        state = self.live_inventory_cost.setdefault(
+            inst_key,
+            {
+                "qty": Decimal("0"),
+                "avg_entry_price": Decimal("0"),
+                "entry_fee_remaining": Decimal("0"),
+                "opened_ts": 0.0,
+            },
+        )
+        old_qty = max(Decimal("0"), Decimal(str(state.get("qty", "0"))))
+        avg_entry = max(Decimal("0"), Decimal(str(state.get("avg_entry_price", "0"))))
+        old_fee_remaining = max(Decimal("0"), Decimal(str(state.get("entry_fee_remaining", "0"))))
+        opened_ts = float(state.get("opened_ts", 0.0) or 0.0)
+
+        restored_qty = max(Decimal("0"), onchain_qty)
+        if restored_qty <= old_qty:
+            return restored_qty
+
+        restored_fee_remaining = old_fee_remaining
+        if old_qty > 0 and old_fee_remaining > 0:
+            restored_fee_remaining = old_fee_remaining * (restored_qty / old_qty)
+
+        state["qty"] = restored_qty
+        state["avg_entry_price"] = avg_entry
+        state["entry_fee_remaining"] = max(Decimal("0"), restored_fee_remaining)
+        if opened_ts <= 0:
+            state["opened_ts"] = now_ts
+
+        recovered_delta = restored_qty - old_qty
+        try:
+            self.inventory_delta_shares = max(
+                Decimal("0"),
+                Decimal(str(getattr(self, "inventory_delta_shares", Decimal("0")))) + recovered_delta,
+            )
+        except Exception:
+            pass
+
+        cleared_order_ids: list[str] = []
+        active_orders = getattr(self, "active_maker_orders", None)
+        if isinstance(active_orders, dict):
+            for order_key, order_state in list(active_orders.items()):
+                if str(order_state.get("side", "") or "") != "sell":
+                    continue
+                if str(order_state.get("instrument_id", "") or "") != str(inst):
+                    continue
+                order = order_state.get("order")
+                if order is not None:
+                    client_order_id = str(getattr(order, "client_order_id", "") or "")
+                    if client_order_id:
+                        cleared_order_ids.append(client_order_id)
+                active_orders.pop(order_key, None)
+
+        for attr_name in (
+            "_sell_recovery_required_by_inst",
+            "_sell_recovery_reason_by_inst",
+            "_sell_recovery_venue_cap_by_inst",
+        ):
+            mapping = getattr(self, attr_name, None)
+            if isinstance(mapping, dict):
+                mapping.pop(inst_key, None)
+
+        if hasattr(self, "_clear_profit_run_state"):
+            try:
+                self._clear_profit_run_state(inst)
+            except Exception:
+                pass
+
+        position_manager = getattr(self, "position_manager", None)
+        if position_manager is not None and hasattr(position_manager, "sync_position"):
+            try:
+                thesis_side = "NONE"
+                if hasattr(self, "_side_for_instrument_id"):
+                    detected = self._side_for_instrument_id(inst)
+                    thesis_side = str(getattr(detected, "value", detected) or "NONE")
+                position_manager.sync_position(
+                    inst_key=inst_key,
+                    qty=restored_qty,
+                    opened_ts=float(state.get("opened_ts", now_ts) or now_ts),
+                    thesis_side=thesis_side,
+                    now_ts=now_ts,
+                )
+            except Exception:
+                pass
+
+        setattr(self, "_force_quote_refresh_once", True)
+        setattr(self, "_force_quote_refresh_reason", "ghost_inventory_reconciled")
+
+        if hasattr(self, "_db_strategy_event"):
+            try:
+                self._db_strategy_event(
+                    "GHOST_INVENTORY_RECONCILED",
+                    {
+                        "instrument_id": str(inst),
+                        "confirmed_qty_before": float(confirmed_qty),
+                        "onchain_qty": float(onchain_qty),
+                        "restored_qty": float(restored_qty),
+                        "avg_entry_price": float(avg_entry),
+                        "cleared_sell_orders": cleared_order_ids,
+                    },
+                )
+            except Exception:
+                pass
+
+        logger.warning(
+            "Ghost inventory reconciled: "
+            f"inst={inst_key} confirmed_before={float(old_qty):.4f} "
+            f"onchain={float(onchain_qty):.4f} restored={float(restored_qty):.4f} "
+            f"cleared_sell_orders={len(cleared_order_ids)}"
+        )
+        return restored_qty
+
     def _get_effective_sellable_qty(self, instrument_id: Optional[Any]) -> Decimal:
         """
         Conservative sellable qty:
         min(cache open positions, on-chain conditional balance with safety buffer).
         """
+        sell_fill_balance_sync_grace_sec = 8.0
         confirmed_qty = self._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
         local_qty = self._get_sellable_qty_for_current_instrument(instrument_id=instrument_id)
         inst_txt = str(instrument_id or "")
         inst_key = self._instrument_key(instrument_id)
         token_id = self._extract_token_id_from_instrument(inst_txt)
         onchain_qty = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=False)
+        recent_sell_ts = float(getattr(self, "recent_sell_fill_ts_by_inst", {}).get(inst_key, 0.0)) if inst_key else 0.0
+        recent_sell_elapsed = (time.time() - recent_sell_ts) if recent_sell_ts > 0 else None
+
+        if (
+            onchain_qty is not None
+            and recent_sell_elapsed is not None
+            and recent_sell_elapsed < sell_fill_balance_sync_grace_sec
+            and (onchain_qty - confirmed_qty) >= Decimal("1.0")
+        ):
+            logger.info(
+                "Balance sync grace after SELL fill: "
+                f"inst={inst_key} internal={float(confirmed_qty):.4f} "
+                f"onchain={float(onchain_qty):.4f} elapsed={recent_sell_elapsed:.2f}s"
+            )
+            fallback_qty = min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
+            return max(Decimal("0"), fallback_qty)
 
         if onchain_qty is not None and (onchain_qty - confirmed_qty) >= Decimal("1.0"):
+            if recent_sell_elapsed is not None:
+                refreshed_onchain = self._get_conditional_balance_for_token(token_id=token_id, force_refresh=True)
+                if refreshed_onchain is not None:
+                    onchain_qty = refreshed_onchain
+                if onchain_qty is None or (onchain_qty - confirmed_qty) < Decimal("1.0"):
+                    fallback_qty = min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
+                    return max(Decimal("0"), fallback_qty)
+                if recent_sell_elapsed < sell_fill_balance_sync_grace_sec:
+                    fallback_qty = min(confirmed_qty, local_qty) if local_qty > 0 else confirmed_qty
+                    return max(Decimal("0"), fallback_qty)
             recent_buy_ts = float(getattr(self, "recent_buy_fill_ts_by_inst", {}).get(inst_key, 0.0))
             if time.time() - recent_buy_ts > 15.0:
                 logger.warning(
                     f"GHOST INVENTORY RECOVERED: internal={float(confirmed_qty):.4f}, onchain={float(onchain_qty):.4f}. "
                     "A previous sell matched locally but reverted on-chain. Restoring sellable qty."
                 )
-                safe_qty = onchain_qty * (Decimal("1") - getattr(self, "conditional_balance_safety_buffer_pct", Decimal("0.02")))
+                reconciled_qty = self._reconcile_ghost_inventory(
+                    instrument_id=instrument_id,
+                    confirmed_qty=confirmed_qty,
+                    onchain_qty=onchain_qty,
+                )
+                safe_qty = reconciled_qty * (Decimal("1") - getattr(self, "conditional_balance_safety_buffer_pct", Decimal("0.02")))
                 return max(Decimal("0"), safe_qty)
         
         if confirmed_qty <= 0:

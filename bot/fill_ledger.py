@@ -26,6 +26,7 @@ class FillLedgerHost(Protocol):
     maker_profit_run_peak_bid_by_inst: dict[str, Decimal]
     maker_profit_run_peak_fair_by_inst: dict[str, Decimal]
     recent_buy_fill_ts_by_inst: dict[str, float]
+    recent_sell_fill_ts_by_inst: dict[str, float]
     post_fill_buy_cooldown_sec: float
     buy_cooldown_until_ts: float
     fill_cooldown_policy: Any
@@ -149,6 +150,8 @@ class FillLedgerMixin:
                 self.recent_buy_fill_ts_by_inst[inst_key] = time.time()
             return realized_net
         state = self.live_inventory_cost.get(inst_key, {})
+        if inst_key:
+            self.recent_sell_fill_ts_by_inst[inst_key] = time.time()
         sell_qty = min(fill_qty, pre_qty)
         logger.info(
             f"Inventory realized[{inst_key[:18]}..]: sold={float(sell_qty):.6f} "
@@ -163,6 +166,7 @@ class FillLedgerMixin:
             self._clear_profit_run_state(instrument_id)
             if inst_key:
                 self.recent_buy_fill_ts_by_inst.pop(inst_key, None)
+                self.recent_sell_fill_ts_by_inst.pop(inst_key, None)
         return realized_net
 
     def _record_market_buy_count_if_needed(
