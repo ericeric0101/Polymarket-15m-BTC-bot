@@ -1608,7 +1608,11 @@ class IntegratedBTCStrategy(
                         )
                         _stop_loss_regime_armed = regime.status == "armed"
                         if decision_state is not None:
-                            _phase_is_adverse = decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                            # Keep decision_state as a diagnostic/sizing input, but do not let
+                            # DE_RISK/CHOP alone become an exit authority for fresh/profitable
+                            # positions. Only a confirmed EXIT phase can contribute to
+                            # thesis-weakened escalation here.
+                            _phase_is_adverse = decision_state.phase == DecisionPhase.EXIT
                             # Signal flip cooldown: require N consecutive adverse cycles
                             # before overriding thesis_weakened, to prevent BTC pulse
                             # from triggering premature loss sells.
@@ -1731,7 +1735,7 @@ class IntegratedBTCStrategy(
                         or _offside_confirmed
                         or (
                             decision_state is not None
-                            and decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                            and decision_state.phase == DecisionPhase.EXIT
                         )
                     )
                     spread = max(Decimal("0"), quote_ctx.quote[1] - quote_ctx.quote[0])
@@ -1809,7 +1813,7 @@ class IntegratedBTCStrategy(
                         or _offside_confirmed
                         or (
                             decision_state is not None
-                            and decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                            and decision_state.phase == DecisionPhase.EXIT
                         )
                     )
                     best_bid_now = quote_ctx.quote[0]
@@ -1989,7 +1993,7 @@ class IntegratedBTCStrategy(
                     and (
                         (
                             (unified_sell_exit_decision is not None and unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK)
-                            or (decision_state is not None and decision_state.phase == DecisionPhase.DE_RISK)
+                            or (decision_state is not None and decision_state.phase == DecisionPhase.EXIT)
                         )
                         or extreme_winner_lock_profit
                     )
@@ -2000,7 +2004,7 @@ class IntegratedBTCStrategy(
                         or _offside_confirmed
                         or (
                             decision_state is not None
-                            and decision_state.phase in {DecisionPhase.DE_RISK, DecisionPhase.EXIT}
+                            and decision_state.phase == DecisionPhase.EXIT
                         )
                     )
                     if not adverse_exit_context and not extreme_winner_lock_profit:
