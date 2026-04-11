@@ -9,6 +9,19 @@ from typing import Dict, Optional, Tuple
 from bot.models import DecisionPhase, DecisionRegime, DecisionState
 
 
+# ---------------------------------------------------------------------------
+# Pressure model normalisation constants
+# ---------------------------------------------------------------------------
+_SPOT_PRESSURE_NORM_BPS = Decimal("50")       # BPS range to normalise spot-vs-strike to [-1, +1]
+_EDGE_NORM_PS = Decimal("0.08")               # Fair-vs-executable gap normalisation
+_PERSISTENCE_NORM = Decimal("0.60")            # Score normalisation for persistence component
+_SPREAD_NORM_MULT = Decimal("8")              # Spread-pct multiplier for book_pressure
+_DRAWDOWN_NORM_PS = Decimal("0.12")           # Peak-to-bid drawdown normalisation
+_PNL_NORM_PS = Decimal("0.10")                # Bid-vs-entry PnL normalisation
+_HARD_PRESSURE_EXIT_THRESHOLD = Decimal("-0.45")   # EMA threshold for forced EXIT phase
+_SPOT_PRESSURE_EXIT_THRESHOLD = Decimal("-0.20")   # Spot pressure threshold for confirming EXIT
+
+
 class PositionLifecycle(str, Enum):
     FLAT = "flat"
     ENTRY_PROTECTED = "entry_protected"
@@ -360,19 +373,19 @@ class PositionManager:
 
         spot_pressure = Decimal("0")
         if side == "UP" and spot_minus_strike_bps is not None:
-            spot_pressure = self._clamp(spot_minus_strike_bps / Decimal("50"), Decimal("-1"), Decimal("1"))
+            spot_pressure = self._clamp(spot_minus_strike_bps / _SPOT_PRESSURE_NORM_BPS, Decimal("-1"), Decimal("1"))
         elif side == "DOWN" and spot_minus_strike_bps is not None:
-            spot_pressure = self._clamp((-spot_minus_strike_bps) / Decimal("50"), Decimal("-1"), Decimal("1"))
+            spot_pressure = self._clamp((-spot_minus_strike_bps) / _SPOT_PRESSURE_NORM_BPS, Decimal("-1"), Decimal("1"))
 
         executable_price = best_ask if qty <= 0 else best_bid
         edge = Decimal("0")
         if fair is not None and fair > 0 and executable_price > 0:
-            edge = self._clamp((fair - executable_price) / Decimal("0.08"), Decimal("-1"), Decimal("1"))
+            edge = self._clamp((fair - executable_price) / _EDGE_NORM_PS, Decimal("-1"), Decimal("1"))
 
         spread = max(Decimal("0"), best_ask - best_bid)
         mid = (best_bid + best_ask) / Decimal("2") if (best_bid + best_ask) > 0 else Decimal("0")
         spread_pct = (spread / mid) if mid > 0 else Decimal("0")
-        book_pressure = self._clamp(Decimal("0.20") - (spread_pct * Decimal("8")), Decimal("-0.5"), Decimal("0.2"))
+        book_pressure = self._clamp(Decimal("0.20") - (spread_pct * _SPREAD_NORM_MULT), Decimal("-0.5"), Decimal("0.2"))
 
         drawdown_pressure = Decimal("0")
         peak_ref = best_bid
@@ -380,8 +393,8 @@ class PositionManager:
             peak_ref = max(peak_ref, peak_bid)
         if qty > 0 and avg_entry > 0:
             if peak_ref > best_bid:
-                drawdown_pressure -= self._clamp((peak_ref - best_bid) / Decimal("0.12"), Decimal("0"), Decimal("1"))
-            drawdown_pressure += self._clamp((best_bid - avg_entry) / Decimal("0.10"), Decimal("-1"), Decimal("0.5"))
+                drawdown_pressure -= self._clamp((peak_ref - best_bid) / _DRAWDOWN_NORM_PS, Decimal("0"), Decimal("1"))
+            drawdown_pressure += self._clamp((best_bid - avg_entry) / _PNL_NORM_PS, Decimal("-1"), Decimal("0.5"))
 
         time_pressure = Decimal("0")
         if time_left_sec is not None and time_left_sec > 0:
@@ -398,7 +411,7 @@ class PositionManager:
                     Decimal("0.45"),
                 )
 
-        persistence = self._clamp(signed_score / Decimal("0.60"), Decimal("-1"), Decimal("1"))
+        persistence = self._clamp(signed_score / _PERSISTENCE_NORM, Decimal("-1"), Decimal("1"))
         instant_pressure = self._clamp(
             (spot_pressure * Decimal("0.40"))
             + (edge * Decimal("0.25"))
@@ -409,14 +422,21 @@ class PositionManager:
             Decimal("-1"),
             Decimal("1"),
         )
-        if state.pressure_ema == Decimal("0"):
-            state.pressure_ema = instant_pressure
-        else:
-            state.pressure_ema = self._clamp(
-                (state.pressure_ema * Decimal("0.60")) + (instant_pressure * Decimal("0.40")),
-                Decimal("-1"),
-                Decimal("1"),
-            )
+        # Guard against double-blending: if the EMA was already updated at
+        # this exact timestamp for this position, skip the blend to prevent
+        # callers that invoke compute_decision_state + assess_stop_loss_regime
+        # in the same cycle from double-smoothing the pressure signal.
+        _ema_key = (inst_key, now_ts)
+        if getattr(state, "_ema_updated_key", None) != _ema_key:
+            if state.pressure_ema == Decimal("0"):
+                state.pressure_ema = instant_pressure
+            else:
+                state.pressure_ema = self._clamp(
+                    (state.pressure_ema * Decimal("0.60")) + (instant_pressure * Decimal("0.40")),
+                    Decimal("-1"),
+                    Decimal("1"),
+                )
+            state._ema_updated_key = _ema_key  # type: ignore[attr-defined]
 
         regime = DecisionRegime.TREND
         if (
@@ -452,10 +472,10 @@ class PositionManager:
             )
         )
         hard_pressure_exit = (
-            state.pressure_ema <= Decimal("-0.45")
+            state.pressure_ema <= _HARD_PRESSURE_EXIT_THRESHOLD
             and (
                 not signal_matches_position
-                or spot_pressure < Decimal("-0.20")
+                or spot_pressure < _SPOT_PRESSURE_EXIT_THRESHOLD
             )
         )
         if qty <= 0:

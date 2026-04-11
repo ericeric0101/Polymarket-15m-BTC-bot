@@ -941,6 +941,12 @@ def retreat_crossing_buy_quote(
         tick = Decimal("0.01")
     old_limit_price = limit_price
     passive_cap = best_bid_now if best_bid_now > 0 else (best_ask_now - tick)
+    if passive_cap <= 0:
+        logger_warning_fn(
+            f"Skip BUY quote: passive_cap non-positive "
+            f"(bid={float(best_bid_now):.4f} ask={float(best_ask_now):.4f} tick={float(tick):.4f})"
+        )
+        return None
     if old_limit_price <= passive_cap:
         return old_limit_price
     limit_price = align_price_fn(passive_cap, "buy", instrument)
@@ -1212,13 +1218,18 @@ def build_desired_quote_entry(
     offside_confirmed: bool = False,
     stop_loss_regime_armed: bool = False,
     hold_sec: float = 0.0,
-    loss_sell_min_hold_sec: float = 0.0,
+    loss_sell_min_hold_sec: float = 60.0,
     # Thesis-aware emergency exit: time_left_sec is used to compute the
     # absolute last-resort window. Pass None if unavailable.
     time_left_sec: float | None = None,
-    # Seconds before expiry where loss-selling is always allowed regardless
-    # of thesis state. This is the true safety net of last resort.
+    # Seconds before expiry where loss-selling is thesis-aware: allowed
+    # when thesis is bad (weakened/offside/adverse phase), blocked when
+    # thesis still supports the position direction.
     absolute_last_resort_sec: float = 60.0,
+    # True unconditional last resort: in the genuinely final seconds,
+    # loss-selling is always allowed regardless of thesis to prevent
+    # holding a dead position into settlement.
+    true_last_resort_sec: float = 15.0,
     # --- Trend-buy params (orchestration passes down) ---
     entry_mode: str = "value",
     trend_buy_penalty_discount: Decimal = Decimal("0.50"),
@@ -1325,10 +1336,24 @@ def build_desired_quote_entry(
             and (_urgent_override or hold_sec >= float(loss_sell_min_hold_sec))
         )
         _allow_emergency_with_thesis = emergency_window and _allow_regime_loss_sell
-        _allow_absolute_last_resort = (
+        # Three-stage last-resort logic:
+        # Stage A (60-15s): thesis-aware — only allow loss-sell if thesis
+        #   is bad (weakened/offside) or decision phase is adverse.
+        # Stage B (<15s): unconditional — true safety net, always allow.
+        _thesis_good = (not _thesis_bad) and decision_phase in ("HOLD", "PROBE", "")
+        _in_last_resort_window = (
             time_left_sec is not None
             and absolute_last_resort_sec > 0
             and time_left_sec < absolute_last_resort_sec
+        )
+        _in_true_last_resort = (
+            time_left_sec is not None
+            and true_last_resort_sec > 0
+            and time_left_sec < true_last_resort_sec
+        )
+        _allow_absolute_last_resort = (
+            _in_true_last_resort
+            or (_in_last_resort_window and not _thesis_good)
         )
         allow_loss_sell = _allow_regime_loss_sell or _allow_emergency_with_thesis or _allow_absolute_last_resort
         # Compute reason tag for observability (visible in diag logs and order payload).
@@ -1339,8 +1364,10 @@ def build_desired_quote_entry(
                 _loss_sell_reason = f"state_machine_de_risk:{decision_regime or 'n/a'}"
             elif _allow_regime_loss_sell:
                 _loss_sell_reason = "armed_thesis_bad"
+            elif _in_true_last_resort:
+                _loss_sell_reason = f"true_last_resort(<{true_last_resort_sec:.0f}s)"
             elif _allow_absolute_last_resort:
-                _loss_sell_reason = f"absolute_last_resort(<{absolute_last_resort_sec:.0f}s)"
+                _loss_sell_reason = f"last_resort_thesis_bad(<{absolute_last_resort_sec:.0f}s)"
             else:
                 _loss_sell_reason = "emergency_with_thesis"
         else:

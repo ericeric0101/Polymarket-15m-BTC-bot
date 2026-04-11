@@ -437,6 +437,10 @@ class MakerEngine:
             quote_ask = max(quote_ask, inst_ask)
             
         if quote_bid >= quote_ask:
+            logger.debug(
+                "generate_quote_plan: empty plan (bid=%.4f >= ask=%.4f, inst_bid=%.4f, inst_ask=%.4f, fair=%.4f)",
+                float(quote_bid), float(quote_ask), float(inst_bid), float(inst_ask), float(fair_price),
+            )
             return {}
 
         bid_quote_shares = self._compute_effective_quote_shares(quote_bid)

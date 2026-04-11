@@ -1605,6 +1605,8 @@ class IntegratedBTCStrategy(
                             reason=self.side_decision_reason,
                             matches_position=(self._instrument_for_side(self.active_side) == inst_id),
                         ),
+                        external_thesis_weakened=_thesis_weakened,
+                        external_offside_confirmed=_offside_confirmed,
                     )
                     if unified_sell_exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND:
                         if tail_inventory_exit_context:

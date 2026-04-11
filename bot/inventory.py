@@ -44,7 +44,7 @@ class InventoryLedger:
             new_qty = old_qty + net_fill_qty
             if new_qty <= 0:
                 return None
-            weighted_notional = (old_qty * old_avg) + (fill_qty * fill_price) if old_qty > 0 and old_avg > 0 else (fill_qty * fill_price)
+            weighted_notional = (old_qty * old_avg) + (net_fill_qty * fill_price) if old_qty > 0 and old_avg > 0 else (net_fill_qty * fill_price)
             state["qty"] = new_qty
             state["avg_entry_price"] = weighted_notional / new_qty
             state["entry_fee_remaining"] = Decimal(str(state.get("entry_fee_remaining", "0"))) + max(Decimal("0"), fee_usdc)

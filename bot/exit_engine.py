@@ -146,7 +146,29 @@ class ExitPolicyEngine:
             return signal.score >= abs(min_score_abs)
         return False
 
-    def evaluate(self, snapshot: MarketSnapshot, position: PositionState, signal: SignalDecision) -> ExitDecision:
+    def evaluate(
+        self,
+        snapshot: MarketSnapshot,
+        position: PositionState,
+        signal: SignalDecision,
+        *,
+        external_thesis_weakened: bool | None = None,
+        external_offside_confirmed: bool | None = None,
+    ) -> ExitDecision:
+        """Evaluate exit decision for a held position.
+
+        Parameters
+        ----------
+        external_thesis_weakened : bool | None
+            When provided, overrides the internal instant thesis-weakened
+            check with the strategy-layer multi-confirmation result.
+            This ensures the ExitPolicyEngine is synchronized with the
+            strategy-level ``_assess_thesis_weakened`` + ``confirmed_adverse_exit``
+            pipeline, which uses higher score thresholds and requires consecutive
+            confirmations before declaring the thesis broken.
+        external_offside_confirmed : bool | None
+            When provided, overrides the internal offside check.
+        """
         exit_px_effective = snapshot.best_bid * (Decimal("1") - snapshot.slippage_buffer_pct)
         gross_if_exit = position.qty * (exit_px_effective - position.avg_entry_price)
         exit_fee_est = estimate_taker_fee_usdc(
@@ -185,16 +207,30 @@ class ExitPolicyEngine:
             and snapshot.best_bid < position.avg_entry_price
             and gross_if_exit < 0
         )
-        thesis_weakened = strong_opposite
+        # Internal instant computation (used as fallback and for logging).
+        _instant_thesis_weakened = strong_opposite
         if signal_is_none and price_adverse:
-            thesis_weakened = True
+            _instant_thesis_weakened = True
+        # Prefer the externally-confirmed thesis state when available:
+        # the strategy layer applies multi-confirmation + higher score
+        # thresholds, so its signal is more reliable.
+        thesis_weakened = (
+            external_thesis_weakened
+            if external_thesis_weakened is not None
+            else _instant_thesis_weakened
+        )
+        offside_confirmed = (
+            external_offside_confirmed
+            if external_offside_confirmed is not None
+            else strong_opposite
+        )
 
         profitable_intent, profitable_reason, profitable_meta = self._classify_profitable_exit_intent(
             snapshot=snapshot,
             position=position,
             signal=signal,
             thesis_weakened=thesis_weakened,
-            offside_confirmed=strong_opposite,
+            offside_confirmed=offside_confirmed,
         )
 
         if self.config.stop_loss_hold_on_none_signal and signal_is_none and not price_adverse:
