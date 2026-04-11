@@ -218,6 +218,10 @@ def initialize_strategy_settings(
     strategy.taker_exit_enabled = config.exit.taker_exit_enabled
     strategy.taker_exit_min_net_usdc = config.exit.taker_exit_min_net_usdc
     strategy.taker_exit_stop_loss_usdc = config.exit.taker_exit_stop_loss_usdc
+    strategy.catastrophic_stop_loss_enabled = config.exit.catastrophic_stop_loss_enabled
+    strategy.catastrophic_stop_loss_usdc = config.exit.catastrophic_stop_loss_usdc
+    strategy.catastrophic_stop_loss_min_score_abs = config.exit.catastrophic_stop_loss_min_score_abs
+    strategy.catastrophic_stop_loss_confirmations = config.exit.catastrophic_stop_loss_confirmations
     strategy.taker_exit_max_hold_sec = config.exit.taker_exit_max_hold_sec
     strategy.taker_exit_min_hold_sec = config.exit.taker_exit_min_hold_sec
     strategy.taker_exit_cooldown_sec = config.exit.taker_exit_cooldown_sec
@@ -308,6 +312,10 @@ def initialize_strategy_settings(
             profit_run_unlock_profit_ps=strategy.maker_profit_run_unlock_profit_ps,
             profit_run_unlock_trailing_drawdown_ps=strategy.maker_profit_run_unlock_trailing_drawdown_ps,
             winner_continuation_min_fair_edge_ps=strategy.maker_winner_continuation_min_fair_edge_ps,
+            catastrophic_stop_loss_enabled=strategy.catastrophic_stop_loss_enabled,
+            catastrophic_stop_loss_usdc=strategy.catastrophic_stop_loss_usdc,
+            catastrophic_stop_loss_min_score_abs=strategy.catastrophic_stop_loss_min_score_abs,
+            catastrophic_stop_loss_confirmations=strategy.catastrophic_stop_loss_confirmations,
         ),
     )
     strategy.position_manager = PositionManager(

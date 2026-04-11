@@ -266,6 +266,10 @@ class ExitConfig:
     taker_exit_enabled: bool
     taker_exit_min_net_usdc: Decimal
     taker_exit_stop_loss_usdc: Decimal
+    catastrophic_stop_loss_enabled: bool
+    catastrophic_stop_loss_usdc: Decimal
+    catastrophic_stop_loss_min_score_abs: Decimal
+    catastrophic_stop_loss_confirmations: int
     taker_exit_max_hold_sec: int
     taker_exit_min_hold_sec: int
     taker_exit_cooldown_sec: int
@@ -321,6 +325,8 @@ class ExitConfig:
     def __post_init__(self) -> None:
         if self.taker_exit_stop_loss_confirmations < 1:
             raise ValueError("TAKER_EXIT_STOP_LOSS_CONFIRMATIONS must be >= 1")
+        if self.catastrophic_stop_loss_confirmations < 1:
+            raise ValueError("CATASTROPHIC_STOP_LOSS_CONFIRMATIONS must be >= 1")
         if self.maker_urgent_exit_min_confirmations < 1:
             raise ValueError("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS must be >= 1")
 
@@ -665,6 +671,16 @@ class AppConfig:
                 taker_exit_enabled=_env_bool_inverted("TAKER_EXIT_ENABLED", True),
                 taker_exit_min_net_usdc=_env_decimal("TAKER_EXIT_MIN_NET_USDC", "0.02"),
                 taker_exit_stop_loss_usdc=_env_decimal("TAKER_EXIT_STOP_LOSS_USDC", "0.15"),
+                catastrophic_stop_loss_enabled=_env_bool_inverted("CATASTROPHIC_STOP_LOSS_ENABLED", True),
+                catastrophic_stop_loss_usdc=_env_decimal("CATASTROPHIC_STOP_LOSS_USDC", "0.40"),
+                catastrophic_stop_loss_min_score_abs=_env_decimal(
+                    "CATASTROPHIC_STOP_LOSS_MIN_SCORE_ABS_NEW",
+                    "0.50",
+                ),
+                catastrophic_stop_loss_confirmations=max(
+                    1,
+                    _env_int("CATASTROPHIC_STOP_LOSS_CONFIRMATIONS", 2),
+                ),
                 taker_exit_max_hold_sec=_env_int("TAKER_EXIT_MAX_HOLD_SEC", 120),
                 taker_exit_min_hold_sec=_env_int("TAKER_EXIT_MIN_HOLD_SEC", 20),
                 taker_exit_cooldown_sec=_env_int("TAKER_EXIT_COOLDOWN_SEC", 8),

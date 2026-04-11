@@ -34,6 +34,10 @@ class ExitEngineConfig:
     profit_run_unlock_profit_ps: Decimal = Decimal("0.18")
     profit_run_unlock_trailing_drawdown_ps: Decimal = Decimal("0.02")
     winner_continuation_min_fair_edge_ps: Decimal = Decimal("0.04")
+    catastrophic_stop_loss_enabled: bool = True
+    catastrophic_stop_loss_usdc: Decimal = Decimal("0.40")
+    catastrophic_stop_loss_min_score_abs: Decimal = Decimal("0.50")
+    catastrophic_stop_loss_confirmations: int = 2
 
 
 class ExitPolicyEngine:
@@ -127,6 +131,20 @@ class ExitPolicyEngine:
                 "peak_profit_ps": str(peak_profit_ps),
             },
         )
+
+    def _held_side_strong_opposite(
+        self,
+        *,
+        position: PositionState,
+        signal: SignalDecision,
+        min_score_abs: Decimal,
+    ) -> bool:
+        held_side = str(position.held_side or "NONE").upper()
+        if held_side == "UP":
+            return signal.score <= -abs(min_score_abs)
+        if held_side == "DOWN":
+            return signal.score >= abs(min_score_abs)
+        return False
 
     def evaluate(self, snapshot: MarketSnapshot, position: PositionState, signal: SignalDecision) -> ExitDecision:
         exit_px_effective = snapshot.best_bid * (Decimal("1") - snapshot.slippage_buffer_pct)
@@ -238,14 +256,32 @@ class ExitPolicyEngine:
         if band == "conviction":
             stop_loss_threshold *= max(Decimal("1"), self.config.conviction_stop_loss_multiplier)
             required_confirmations += max(0, self.config.conviction_extra_confirmations)
-        stop_loss_candidate = (
-            not snapshot.stop_loss_disabled_in_tail
+        catastrophic_stop_loss_candidate = (
+            self.config.catastrophic_stop_loss_enabled
+            and not snapshot.stop_loss_disabled_in_tail
             and position.hold_sec >= max(0, self.config.min_hold_sec)
             and price_adverse
-            and net_if_exit <= -stop_loss_threshold
-            and (
-                not self.config.stop_loss_requires_thesis_weakening
-                or thesis_weakened
+            and net_if_exit <= -abs(self.config.catastrophic_stop_loss_usdc)
+            and self._held_side_strong_opposite(
+                position=position,
+                signal=signal,
+                min_score_abs=self.config.catastrophic_stop_loss_min_score_abs,
+            )
+        )
+        if catastrophic_stop_loss_candidate:
+            stop_loss_threshold = abs(self.config.catastrophic_stop_loss_usdc)
+            required_confirmations = max(1, self.config.catastrophic_stop_loss_confirmations)
+        stop_loss_candidate = (
+            catastrophic_stop_loss_candidate
+            or (
+                not snapshot.stop_loss_disabled_in_tail
+                and position.hold_sec >= max(0, self.config.min_hold_sec)
+                and price_adverse
+                and net_if_exit <= -stop_loss_threshold
+                and (
+                    not self.config.stop_loss_requires_thesis_weakening
+                    or thesis_weakened
+                )
             )
         )
         if not stop_loss_candidate:
@@ -260,16 +296,22 @@ class ExitPolicyEngine:
                     **base_metadata,
                     "signal_is_none": "1" if signal_is_none else "0",
                     "thesis_weakened": "1" if thesis_weakened else "0",
+                    "catastrophic_stop_loss_candidate": "1" if catastrophic_stop_loss_candidate else "0",
                     "stop_loss_threshold": str(stop_loss_threshold),
                     "required_confirmations": str(required_confirmations),
                 },
             )
 
         confirm_hits = position.stop_loss_confirm_hits + 1
+        pending_reason = (
+            "catastrophic_stop_loss_confirming"
+            if catastrophic_stop_loss_candidate
+            else "stop_loss_confirming"
+        )
         if confirm_hits < required_confirmations:
             return ExitDecision(
                 decision_type=ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
-                reason="stop_loss_confirming",
+                reason=pending_reason,
                 net_if_exit=net_if_exit,
                 gross_if_exit=gross_if_exit,
                 exit_fee_est=exit_fee_est,
@@ -279,14 +321,20 @@ class ExitPolicyEngine:
                     **base_metadata,
                     "signal_is_none": "1" if signal_is_none else "0",
                     "thesis_weakened": "1" if thesis_weakened else "0",
+                    "catastrophic_stop_loss_candidate": "1" if catastrophic_stop_loss_candidate else "0",
                     "stop_loss_threshold": str(stop_loss_threshold),
                     "required_confirmations": str(required_confirmations),
                 },
             )
 
+        confirmed_reason = (
+            "catastrophic_stop_loss_confirmed"
+            if catastrophic_stop_loss_candidate
+            else "stop_loss_confirmed"
+        )
         return ExitDecision(
             decision_type=ExitDecisionType.TAKER_STOP_LOSS,
-            reason="stop_loss_confirmed",
+            reason=confirmed_reason,
             net_if_exit=net_if_exit,
             gross_if_exit=gross_if_exit,
             exit_fee_est=exit_fee_est,
@@ -296,6 +344,7 @@ class ExitPolicyEngine:
                 **base_metadata,
                 "signal_is_none": "1" if signal_is_none else "0",
                 "thesis_weakened": "1" if thesis_weakened else "0",
+                "catastrophic_stop_loss_candidate": "1" if catastrophic_stop_loss_candidate else "0",
                 "stop_loss_threshold": str(stop_loss_threshold),
                 "required_confirmations": str(required_confirmations),
             },
