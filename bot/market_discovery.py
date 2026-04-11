@@ -76,6 +76,7 @@ def select_primary_btc_15m_slug(slugs: List[str]) -> Optional[str]:
     if not slugs:
         return None
     now_ts = int(datetime.now(timezone.utc).timestamp())
+    min_remaining_sec = 90
     parsed: List[tuple[int, str]] = []
     for slug in slugs:
         try:
@@ -85,7 +86,15 @@ def select_primary_btc_15m_slug(slugs: List[str]) -> Optional[str]:
             continue
     if not parsed:
         return slugs[0]
-    future = [(ts, s) for ts, s in parsed if ts >= now_ts - 900]
+    viable_current = [
+        (ts, s)
+        for ts, s in parsed
+        if ts <= now_ts and (ts + 900 - now_ts) > min_remaining_sec
+    ]
+    if viable_current:
+        viable_current.sort(key=lambda x: x[0], reverse=True)
+        return viable_current[0][1]
+    future = [(ts, s) for ts, s in parsed if ts > now_ts]
     if future:
         future.sort(key=lambda x: x[0])
         return future[0][1]

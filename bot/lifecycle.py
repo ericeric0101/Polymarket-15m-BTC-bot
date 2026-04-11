@@ -139,6 +139,7 @@ def resolve_bi_side_market_selection(
     btc_instruments: list[dict[str, Any]],
     current_timestamp: int,
     extract_outcome: Callable[[Any], str],
+    preferred_slug: str | None = None,
 ) -> tuple[MarketSelection | None, str | None, int, int]:
     filtered = filter_alive_market_candidates(
         btc_instruments=btc_instruments,
@@ -146,7 +147,16 @@ def resolve_bi_side_market_selection(
     )
     current_markets = [item for item in filtered if item["time_diff_minutes"] <= 0 and item["time_diff_minutes"] > -15]
     future_markets = [item for item in filtered if item["time_diff_minutes"] > 0]
-    selected, selection_kind = select_current_or_next_market(filtered)
+    selected = None
+    selection_kind = None
+    preferred_slug_norm = str(preferred_slug or "").strip().lower()
+    if preferred_slug_norm:
+        for item in filtered:
+            if str(item.get("slug") or "") == preferred_slug_norm:
+                selected = item
+                break
+    if selected is None:
+        selected, selection_kind = select_current_or_next_market(filtered)
     if selected is None:
         return None, selection_kind, len(current_markets), len(future_markets)
 

@@ -94,6 +94,11 @@ def find_btc_instrument(strategy: Any) -> bool:
         btc_instruments=btc_instruments,
         current_timestamp=current_timestamp,
         extract_outcome=strategy._extract_outcome_from_instrument,
+        preferred_slug=(
+            str(strategy.selected_slug or "")
+            if not str(strategy.current_market_slug or "")
+            else None
+        ),
     )
     if strategy.startup_verbose:
         logger.info(

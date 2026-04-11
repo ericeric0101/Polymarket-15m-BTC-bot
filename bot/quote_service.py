@@ -68,13 +68,81 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def shadow_opposes_locked_side(
+    *,
+    active_side_value: str,
+    active_side_locked: bool,
+    shadow_payload: dict[str, Any] | None,
+) -> bool:
+    if (
+        not shadow_payload
+        or not active_side_locked
+        or str(active_side_value or "NONE").upper() == "NONE"
+    ):
+        return False
+    shadow_bias_side = str(shadow_payload.get("shadow_bias_side") or "").upper()
+    shadow_score = Decimal(str(shadow_payload.get("shadow_score") or "0"))
+    shadow_min_abs = Decimal(str(shadow_payload.get("shadow_min_score_abs") or "0"))
+    if not shadow_bias_side or abs(shadow_score) < shadow_min_abs:
+        return False
+    return shadow_bias_side != str(active_side_value or "NONE").upper()
+
+
+def locked_thesis_broken(
+    *,
+    active_side_value: str,
+    active_side_locked: bool,
+    side_score: Decimal,
+    shadow_payload: dict[str, Any] | None,
+) -> bool:
+    active_side_txt = str(active_side_value or "NONE").upper()
+    if not active_side_locked or active_side_txt == "NONE":
+        return False
+    if shadow_opposes_locked_side(
+        active_side_value=active_side_txt,
+        active_side_locked=active_side_locked,
+        shadow_payload=shadow_payload,
+    ):
+        return True
+    if active_side_txt == "UP":
+        return side_score <= 0
+    if active_side_txt == "DOWN":
+        return side_score >= 0
+    return False
+
+
+def confirmed_adverse_exit(
+    *,
+    active_side_value: str,
+    active_side_locked: bool,
+    legacy_thesis_weakened: bool,
+    market_consensus: Decimal,
+    shadow_payload: dict[str, Any] | None,
+    adverse_market_threshold: Decimal = Decimal("0.50"),
+) -> bool:
+    active_side_txt = str(active_side_value or "NONE").upper()
+    if not legacy_thesis_weakened or not active_side_locked or active_side_txt == "NONE":
+        return False
+    if shadow_opposes_locked_side(
+        active_side_value=active_side_txt,
+        active_side_locked=active_side_locked,
+        shadow_payload=shadow_payload,
+    ):
+        return True
+    if active_side_txt == "UP":
+        return market_consensus <= -adverse_market_threshold
+    if active_side_txt == "DOWN":
+        return market_consensus >= adverse_market_threshold
+    return False
+
+
 def evaluate_buy_entry_controls(
     *,
     side: str,
     bi_side_enabled: bool,
     active_side_locked: bool,
     active_side_value: str,
-    latest_observation_supports_locked_side: bool,
+    locked_thesis_broken: bool,
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
     directional_first_entry_min_score_abs_new: Decimal,
@@ -98,22 +166,20 @@ def evaluate_buy_entry_controls(
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
-    strong_signal_override_abs = Decimal("0.45")
     if side != "buy":
         return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc, entry_mode=entry_mode)
     if (
         bi_side_enabled
         and active_side_locked
         and str(active_side_value or "NONE").upper() != "NONE"
-        and not latest_observation_supports_locked_side
-        and abs(side_score) < strong_signal_override_abs
+        and locked_thesis_broken
     ):
         return BuyEntryEvaluation(
             skip=True,
             min_expected_net_usdc=min_expected_net_usdc,
             entry_mode=entry_mode,
-            event_type="ORDER_SKIP_DIRECTIONAL_OBSERVATION_MISMATCH",
-            reason="directional_observation_mismatch",
+            event_type="ORDER_SKIP_LOCKED_THESIS_BROKEN",
+            reason="locked_thesis_broken",
             payload={
                 "slug": current_slug,
                 "instrument_id": str(inst_id),
@@ -548,6 +614,53 @@ def apply_de_risk_sell_pricing(
     return desired_entry
 
 
+def apply_winner_retrace_exit_pricing(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    avg_entry: Decimal,
+    best_bid: Decimal,
+    best_ask: Decimal,
+    tick: Decimal,
+    maker_sell_cost_protect_fee_buffer_ps: Decimal,
+    maker_sell_min_profit_floor_ps: Decimal,
+    inside_spread_max_ticks: int = 2,
+) -> dict[str, Any]:
+    if side != "sell" or not desired_entry.get("should_quote", False):
+        return desired_entry
+    if avg_entry <= 0 or best_bid <= 0 or best_ask <= 0:
+        return desired_entry
+    if tick <= 0:
+        tick = Decimal("0.01")
+
+    try:
+        limit_price = Decimal(str(desired_entry.get("price", "0") or "0"))
+    except Exception:
+        return desired_entry
+    if limit_price <= 0:
+        return desired_entry
+
+    cost_floor = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
+    spread = max(Decimal("0"), best_ask - best_bid)
+    inside_cap = tick * Decimal(max(1, inside_spread_max_ticks))
+    retrace_price = best_ask - min(spread * Decimal("0.25"), inside_cap)
+    retrace_price = max(cost_floor, best_bid + tick, retrace_price)
+    retrace_price = (retrace_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+    retrace_price = max(Decimal("0.01"), min(Decimal("0.99"), retrace_price))
+    if retrace_price >= limit_price:
+        return desired_entry
+
+    prev_reason = str(desired_entry.get("diag_reason", "") or "")
+    desired_entry["price"] = retrace_price
+    desired_entry["diag_reason"] = (
+        f"winner_retrace_exit old={float(limit_price):.4f} "
+        f"new={float(retrace_price):.4f} bid={float(best_bid):.4f} "
+        f"ask={float(best_ask):.4f}"
+        + (f" prev={prev_reason}" if prev_reason else "")
+    )
+    return desired_entry
+
+
 def apply_winner_trailing_floor(
     *,
     desired_entry: dict[str, Any],
@@ -612,13 +725,13 @@ def apply_winner_trailing_floor(
     desired_entry["price"] = trailing_floor
     if full_winner_band:
         desired_entry["diag_reason"] = (
-            f"winner_trailing_floor old={float(planned_sell_price):.4f} "
+            f"winner_retrace_floor old={float(planned_sell_price):.4f} "
             f"floor={float(trailing_floor):.4f} peak_bid={float(peak_bid):.4f} "
             f"entry={float(avg_entry):.4f} peak_profit={float(peak_profit_ps):.4f}"
         )
     else:
         desired_entry["diag_reason"] = (
-            f"winner_trailing_floor band=modest old={float(planned_sell_price):.4f} "
+            f"winner_retrace_floor band=modest old={float(planned_sell_price):.4f} "
             f"floor={float(trailing_floor):.4f} peak_bid={float(peak_bid):.4f} "
             f"entry={float(avg_entry):.4f} peak_profit={float(peak_profit_ps):.4f}"
         )
