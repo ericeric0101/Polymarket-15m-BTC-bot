@@ -695,17 +695,6 @@ class TakerExitMixin:
                     continue
                 if peak_dec > avg_entry:
                     peak_profit_ps = max(peak_profit_ps, peak_dec - avg_entry)
-            winner_peak_profit_ps = getattr(
-                self,
-                "maker_urgent_exit_winner_peak_profit_ps",
-                Decimal("0"),
-            )
-            winner_extra_confirms = max(
-                0,
-                int(getattr(self, "maker_urgent_exit_winner_extra_confirmations", 0)),
-            )
-            if winner_extra_confirms > 0 and peak_profit_ps >= winner_peak_profit_ps:
-                min_confirms += winner_extra_confirms
             if self._urgent_exit_confirm_hits[inst_key] < min_confirms:
                 continue
 
@@ -900,7 +889,6 @@ class TakerExitMixin:
                     "confirmations": self._urgent_exit_confirm_hits[inst_key],
                     "required_confirmations": min_confirms,
                     "peak_profit_ps": float(peak_profit_ps),
-                    "winner_peak_profit_ps": float(winner_peak_profit_ps),
                     "ttl_sec": urgent_ttl,
                 },
             )

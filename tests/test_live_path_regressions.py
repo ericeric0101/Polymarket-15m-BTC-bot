@@ -18,7 +18,6 @@ from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
     apply_forced_exit_sell_pricing,
-    apply_recycle_drawdown_floor,
     apply_shadow_entry_veto,
     build_desired_quote_entry,
     build_directional_snapshot,
@@ -29,6 +28,7 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     resolve_quote_intent_state,
     retreat_crossing_buy_quote,
+    should_requote_existing_order,
 )
 from bot.order_submission import submit_maker_quote
 from bot.shadow_signal import (
@@ -370,6 +370,52 @@ def test_position_manager_decision_state_does_not_exit_winner_pullback_when_thes
     assert state.spot_minus_strike_bps > Decimal("0")
 
 
+def test_position_manager_chop_regime_does_not_de_risk_held_position_by_itself():
+    manager = PositionManager(
+        PositionManagerConfig(
+            early_profit_hold_enabled=True,
+            early_profit_hold_min_hold_sec=60,
+            early_profit_hold_max_profit_ps=Decimal("0.08"),
+            early_profit_hold_min_score_abs=Decimal("0.18"),
+            profit_run_enabled=True,
+            profit_run_min_hold_sec=20,
+            profit_run_min_profit_ps=Decimal("0.04"),
+            profit_run_min_score_abs=Decimal("0.12"),
+            profit_run_trailing_drawdown_ps=Decimal("0.05"),
+            profit_run_unlock_profit_ps=Decimal("0.18"),
+            profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
+            stop_loss_entry_protection_sec=45,
+            continuation_entry_protection_sec=60,
+            stop_loss_regime_min_sec=8,
+            stop_loss_regime_confirmations=4,
+            stop_loss_min_opposite_score_abs=Decimal("0.18"),
+        )
+    )
+    now_ts = time.time()
+    state = manager.compute_decision_state(
+        inst_key="inst-up",
+        now_ts=now_ts,
+        qty=Decimal("5.4"),
+        opened_ts=now_ts - 180.0,
+        held_side="UP",
+        active_side="UP",
+        signal_score=Decimal("-0.03"),
+        signal_matches_position=True,
+        current_price=Decimal("71478.40"),
+        price_to_beat=Decimal("71473.53"),
+        best_bid=Decimal("0.57"),
+        best_ask=Decimal("0.58"),
+        fair=Decimal("0.54"),
+        time_left_sec=520.0,
+        avg_entry=Decimal("0.58"),
+        peak_bid=Decimal("0.77"),
+        peak_fair=Decimal("0.69"),
+    )
+
+    assert state.regime == DecisionRegime.CHOP
+    assert state.phase != DecisionPhase.DE_RISK
+
+
 def test_position_manager_marks_near_strike_entry_as_chop_even_with_positive_edge():
     manager = PositionManager(
         PositionManagerConfig(
@@ -677,8 +723,6 @@ class DummyUrgentExitStrategy(TakerExitMixin):
         self.order_factory = SimpleNamespace(limit=lambda **kwargs: kwargs)
         self._urgent_exit_confirm_hits = {}
         self.maker_urgent_exit_min_confirmations = 1
-        self.maker_urgent_exit_winner_peak_profit_ps = Decimal("0.08")
-        self.maker_urgent_exit_winner_extra_confirmations = 2
         self.maker_urgent_exit_min_loss_usdc = Decimal("0.10")
         self.side_decision_score = Decimal("-2")
         self.maker_exchange_min_shares = Decimal("5")
@@ -741,8 +785,6 @@ class DummyUrgentExitMatchedStrategy(TakerExitMixin):
         self.order_factory = SimpleNamespace(limit=lambda **kwargs: kwargs)
         self._urgent_exit_confirm_hits = {}
         self.maker_urgent_exit_min_confirmations = 1
-        self.maker_urgent_exit_winner_peak_profit_ps = Decimal("0.08")
-        self.maker_urgent_exit_winner_extra_confirmations = 2
         self.maker_urgent_exit_min_loss_usdc = Decimal("0.10")
         self.side_decision_score = Decimal("0.18")
         self._signal_engine = SimpleNamespace(is_mid_reversal=lambda holding_up: True)
@@ -1998,7 +2040,7 @@ def test_resolve_quote_intent_state_emits_hard_exit_and_acquire_modes():
         tail_inventory_exit_context=False,
         adverse_exit_context=True,
         stop_loss_pending_active=False,
-        winner_take_profit_armed=False,
+        recycle_sell_ready=False,
         recycle_profit_candidate=False,
         active_side_locked=True,
         active_side_value="UP",
@@ -2012,7 +2054,7 @@ def test_resolve_quote_intent_state_emits_hard_exit_and_acquire_modes():
         tail_inventory_exit_context=False,
         adverse_exit_context=False,
         stop_loss_pending_active=False,
-        winner_take_profit_armed=False,
+        recycle_sell_ready=False,
         recycle_profit_candidate=False,
         active_side_locked=True,
         active_side_value="UP",
@@ -2265,8 +2307,8 @@ def test_position_manager_requires_persistent_opposite_regime_before_stop_loss_a
         signal_matches_position=False,
         force_exit=False,
     )
-    assert armed.status == "pending"
-    assert armed.reason.startswith("state_machine_de_risk")
+    assert armed.status == "hold"
+    assert armed.reason.startswith("state_machine_hold")
     assert "legacy(entry=0,thesis=0,pending=0)" in armed.reason
 
     quick_reset = manager.assess_stop_loss_regime(
@@ -2383,8 +2425,8 @@ def test_continuation_entry_gets_longer_entry_protection():
         force_exit=False,
     )
 
-    assert decision.status == "pending"
-    assert decision.reason.startswith("state_machine_de_risk")
+    assert decision.status == "hold"
+    assert decision.reason.startswith("state_machine_hold")
     assert "pending=1" in decision.reason
 
 
@@ -2616,72 +2658,6 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
             "risk:recycle_locked_side_hold fair_edge=0.0600>=0.0400 best_bid=0.7400 fair=0.8000",
         )
     ]
-
-
-def test_recycle_drawdown_floor_prevents_small_profit_forced_exit_after_large_peak():
-    desired = {
-        "side": "sell",
-        "should_quote": True,
-        "price": Decimal("0.60"),
-        "diag_reason": "state_machine_de_risk:CHOP",
-    }
-
-    out = apply_recycle_drawdown_floor(
-        desired_entry=desired,
-        side="sell",
-        avg_entry=Decimal("0.58"),
-        peak_bid=Decimal("0.80"),
-        best_bid=Decimal("0.60"),
-        tick=Decimal("0.01"),
-        is_hard_exit=False,
-    )
-
-    assert out["price"] == Decimal("0.72")
-    assert out["diag_reason"].startswith("recycle_drawdown_floor old=0.6000 floor=0.7200")
-
-
-def test_recycle_drawdown_floor_protects_modest_winner_from_falling_back_to_tiny_profit():
-    desired = {
-        "side": "sell",
-        "should_quote": True,
-        "price": Decimal("0.63"),
-        "diag_reason": "state_machine_de_risk:CHOP",
-    }
-
-    out = apply_recycle_drawdown_floor(
-        desired_entry=desired,
-        side="sell",
-        avg_entry=Decimal("0.61"),
-        peak_bid=Decimal("0.69"),
-        best_bid=Decimal("0.62"),
-        tick=Decimal("0.01"),
-        is_hard_exit=False,
-    )
-
-    assert out["price"] == Decimal("0.65")
-    assert out["diag_reason"].startswith("recycle_drawdown_floor band=modest old=0.6300 floor=0.6500")
-
-
-def test_recycle_drawdown_floor_allows_hard_exit_to_break_floor():
-    desired = {
-        "side": "sell",
-        "should_quote": True,
-        "price": Decimal("0.60"),
-        "diag_reason": "state_machine_exit:BROKEN",
-    }
-
-    out = apply_recycle_drawdown_floor(
-        desired_entry=desired,
-        side="sell",
-        avg_entry=Decimal("0.58"),
-        peak_bid=Decimal("0.80"),
-        best_bid=Decimal("0.60"),
-        tick=Decimal("0.01"),
-        is_hard_exit=True,
-    )
-
-    assert out["price"] == Decimal("0.60")
-    assert out["diag_reason"] == "state_machine_exit:BROKEN"
 
 
 def test_trend_buy_size_multiplier_flows_into_submit_qty():
@@ -3017,6 +2993,64 @@ def test_exit_loss_sell_bypasses_min_hold_timer():
     assert desired_entry["loss_sell_reason"] == "state_machine_exit:BROKEN"
 
 
+def test_de_risk_without_thesis_bad_stays_cost_protected():
+    desired_entry = build_desired_quote_entry(
+        order_key="sell:inst-up",
+        side="sell",
+        inst_id="inst-up",
+        quote_data=(
+            Decimal("0.6300"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.020"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("0.020"),
+            Decimal("0.008"),
+            Decimal("0.010"),
+            Decimal("0.050"),
+            Decimal("0.6500"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"),
+        now_ts=200.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=Decimal("5.4"),
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0.69"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=True,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.005"),
+        maker_sell_min_profit_floor_ps=Decimal("0.010"),
+        thesis_weakened=False,
+        offside_confirmed=False,
+        spot_still_supports_position=False,
+        stop_loss_pending_active=False,
+        stop_loss_regime_armed=False,
+        decision_phase="DE_RISK",
+        decision_regime="CHOP",
+        hold_sec=120.0,
+        loss_sell_min_hold_sec=90.0,
+        time_left_sec=400.0,
+    )
+
+    assert desired_entry["should_quote"] is False
+    assert desired_entry["loss_sell_reason"] == ""
+    assert desired_entry["diag_reason"].startswith("sell_cost_protect")
+
+
 def test_preserve_recent_loss_sell_order_holds_higher_existing_price():
     desired_entry = {
         "should_quote": True,
@@ -3040,6 +3074,26 @@ def test_preserve_recent_loss_sell_order_holds_higher_existing_price():
 
     assert out["price"] == Decimal("0.50")
     assert "loss_sell_reprice_hold" in out["diag_reason"]
+
+
+def test_should_requote_existing_order_when_loss_exit_recovers():
+    now_ts = time.time()
+    current = {
+        "pending_cancel": False,
+        "target_version": 10,
+        "created_ts": now_ts - 1.0,
+        "loss_sell_reason": "forced_exit_thesis_bad",
+    }
+
+    assert should_requote_existing_order(
+        current=current,
+        target_version=10,
+        now_ts=now_ts,
+        maker_requote_min_age_sec=30.0,
+        side="sell",
+        maker_requote_min_age_sec_sell=30.0,
+        desired_loss_sell_reason="",
+    )
 
 
 

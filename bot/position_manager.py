@@ -481,14 +481,7 @@ class PositionManager:
         if qty <= 0:
             phase = DecisionPhase.PROBE if state.pressure_ema >= Decimal("0.20") and regime != DecisionRegime.CHOP else DecisionPhase.FLAT
         else:
-            if regime == DecisionRegime.BROKEN or hard_pressure_exit:
-                phase = DecisionPhase.EXIT
-            elif hold_sec < protection_sec and regime != DecisionRegime.BROKEN and state.pressure_ema > Decimal("-0.30"):
-                phase = DecisionPhase.PROBE
-            elif state.pressure_ema <= Decimal("-0.15") or (regime == DecisionRegime.CHOP and state.pressure_ema < Decimal("0.05")):
-                phase = DecisionPhase.DE_RISK
-            else:
-                phase = DecisionPhase.HOLD
+            phase = DecisionPhase.EXIT if (regime == DecisionRegime.BROKEN or hard_pressure_exit) else DecisionPhase.HOLD
 
         state.regime = regime.value
         state.phase = phase.value
@@ -603,41 +596,17 @@ class PositionManager:
                 adverse_hits=state.adverse_hits,
             )
 
-        state.lifecycle = PositionLifecycle.ENTRY_PROTECTED if decision_state.phase == DecisionPhase.PROBE else PositionLifecycle.LONG
-        if decision_state.phase in {DecisionPhase.HOLD, DecisionPhase.PROBE}:
-            self.reset_stop_loss_regime(inst_key)
-            return StopLossRegimeDecision(
-                status="hold",
-                reason=(
-                    "state_machine_hold "
-                    f"phase={decision_state.phase.value} "
-                    f"regime={decision_state.regime.value} "
-                    f"pressure={float(decision_state.pressure):+.4f} "
-                    f"legacy(entry={decision_state.metadata.get('would_hold_entry_protection')},"
-                    f"thesis={decision_state.metadata.get('would_hold_thesis_not_opposite')},"
-                    f"pending={decision_state.metadata.get('would_pending_confirmation')})"
-                ),
-            )
-        if decision_state.phase == DecisionPhase.DE_RISK:
-            if state.adverse_since_ts <= 0:
-                state.adverse_since_ts = now_ts
-                state.adverse_hits = 1
-            else:
-                state.adverse_hits += 1
-            state.lifecycle = PositionLifecycle.EXIT_ARMED
-            adverse_sec = max(0.0, now_ts - state.adverse_since_ts)
-            return StopLossRegimeDecision(
-                status="pending",
-                reason=(
-                    "state_machine_de_risk "
-                    f"regime={decision_state.regime.value} "
-                    f"pressure={float(decision_state.pressure):+.4f} "
-                    f"legacy(entry={decision_state.metadata.get('would_hold_entry_protection')},"
-                    f"thesis={decision_state.metadata.get('would_hold_thesis_not_opposite')},"
-                    f"pending={decision_state.metadata.get('would_pending_confirmation')})"
-                ),
-                adverse_sec=adverse_sec,
-                adverse_hits=state.adverse_hits,
-            )
+        state.lifecycle = PositionLifecycle.LONG
         self.reset_stop_loss_regime(inst_key)
-        return StopLossRegimeDecision(status="hold", reason="state_machine_fallback_hold")
+        return StopLossRegimeDecision(
+            status="hold",
+            reason=(
+                "state_machine_hold "
+                f"phase={decision_state.phase.value} "
+                f"regime={decision_state.regime.value} "
+                f"pressure={float(decision_state.pressure):+.4f} "
+                f"legacy(entry={decision_state.metadata.get('would_hold_entry_protection')},"
+                f"thesis={decision_state.metadata.get('would_hold_thesis_not_opposite')},"
+                f"pending={decision_state.metadata.get('would_pending_confirmation')})"
+            ),
+        )

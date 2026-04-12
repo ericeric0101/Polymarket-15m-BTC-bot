@@ -279,6 +279,7 @@ class QuoteRuntimeMixin:
                 maker_requote_min_age_sec=float(self.maker_requote_min_age_sec),
                 side=side,
                 maker_requote_min_age_sec_sell=float(self.maker_requote_min_age_sec_sell),
+                desired_loss_sell_reason=str(desired.get("loss_sell_reason", "") or ""),
             ):
                 if self.requote_bucket_tokens < 1.0:
                     now_ts = time.time()

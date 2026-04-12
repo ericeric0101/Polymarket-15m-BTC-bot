@@ -324,8 +324,6 @@ class ExitConfig:
     maker_urgent_exit_ttl_sec: int
     maker_urgent_exit_cooldown_sec: int
     maker_urgent_exit_min_confirmations: int
-    maker_urgent_exit_winner_peak_profit_ps: Decimal
-    maker_urgent_exit_winner_extra_confirmations: int
     exit_conviction_band_min_score_abs: Decimal
     exit_hold_band_min_score_abs: Decimal
     exit_hold_band_release_min_roi: Decimal
@@ -334,7 +332,6 @@ class ExitConfig:
     maker_recycle_locked_side_min_fair_edge_ps: Decimal
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
-    maker_winner_sell_max_offset_ps: Decimal
     maker_signal_flip_cooldown_cycles: int
 
     def __post_init__(self) -> None:
@@ -747,8 +744,6 @@ class AppConfig:
                 maker_urgent_exit_ttl_sec=max(5, _env_int("MAKER_URGENT_EXIT_TTL_SEC", 15)),
                 maker_urgent_exit_cooldown_sec=max(1, _env_int("MAKER_URGENT_EXIT_COOLDOWN_SEC", 5)),
                 maker_urgent_exit_min_confirmations=max(1, _env_int("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS", 3)),
-                maker_urgent_exit_winner_peak_profit_ps=_env_decimal("MAKER_URGENT_EXIT_WINNER_PEAK_PROFIT_PS", "0.08"),
-                maker_urgent_exit_winner_extra_confirmations=max(0, _env_int("MAKER_URGENT_EXIT_WINNER_EXTRA_CONFIRMATIONS", 2)),
                 exit_conviction_band_min_score_abs=_env_decimal("EXIT_CONVICTION_BAND_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 exit_hold_band_min_score_abs=_env_decimal("EXIT_HOLD_BAND_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 exit_hold_band_release_min_roi=_env_decimal("EXIT_HOLD_BAND_RELEASE_MIN_ROI", "0.15"),
@@ -760,7 +755,6 @@ class AppConfig:
                 ),
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
-                maker_winner_sell_max_offset_ps=_env_decimal("MAKER_WINNER_SELL_MAX_OFFSET_PS", "0.05"),
                 maker_signal_flip_cooldown_cycles=max(1, _env_int("MAKER_SIGNAL_FLIP_COOLDOWN_CYCLES", 2)),
             ),
             risk=RiskConfig(

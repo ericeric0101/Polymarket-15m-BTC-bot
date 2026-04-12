@@ -94,7 +94,7 @@ def compute_loss_sell_policy(
     )
     de_risk_active = decision_phase == "DE_RISK" and not spot_still_supports_position
     allow_regime_loss_sell = (
-        (urgent_override or de_risk_active)
+        (urgent_override or (de_risk_active and thesis_bad))
         and (urgent_override or hold_sec >= float(loss_sell_min_hold_sec))
     )
     allow_emergency_with_thesis = emergency_window and allow_regime_loss_sell
@@ -122,10 +122,8 @@ def compute_loss_sell_policy(
         return False, ""
     if decision_phase == "EXIT":
         return True, f"state_machine_exit:{decision_regime or 'n/a'}"
-    if decision_phase == "DE_RISK":
-        return True, f"state_machine_de_risk:{decision_regime or 'n/a'}"
     if allow_regime_loss_sell:
-        return True, "armed_thesis_bad"
+        return True, "forced_exit_thesis_bad"
     if in_true_last_resort:
         return True, f"true_last_resort(<{true_last_resort_sec:.0f}s)"
     if allow_absolute_last_resort:
@@ -140,7 +138,7 @@ def resolve_quote_intent_state(
     tail_inventory_exit_context: bool,
     adverse_exit_context: bool,
     stop_loss_pending_active: bool,
-    winner_take_profit_armed: bool,
+    recycle_sell_ready: bool,
     recycle_profit_candidate: bool,
     active_side_locked: bool,
     active_side_value: str,
@@ -161,7 +159,7 @@ def resolve_quote_intent_state(
                 sell_intent="FORCED_EXIT",
                 hard_exit_allowed=True,
             )
-        if winner_take_profit_armed or recycle_profit_candidate:
+        if recycle_sell_ready or recycle_profit_candidate:
             return QuoteIntentState(
                 quote_mode=QuoteMode.RECYCLE_LOCKED_SIDE,
                 sell_intent="RECYCLE_PROFIT",
@@ -723,130 +721,6 @@ def apply_locked_side_recycle_sell_pricing(
         f"fair={float(fair):.4f} bid={float(best_bid):.4f} ask={float(best_ask):.4f}"
         + (f" prev={prev_reason}" if prev_reason else "")
     )
-    return desired_entry
-
-
-def apply_recycle_drawdown_exit_pricing(
-    *,
-    desired_entry: dict[str, Any],
-    side: str,
-    avg_entry: Decimal,
-    best_bid: Decimal,
-    best_ask: Decimal,
-    tick: Decimal,
-    maker_sell_cost_protect_fee_buffer_ps: Decimal,
-    maker_sell_min_profit_floor_ps: Decimal,
-    inside_spread_max_ticks: int = 2,
-) -> dict[str, Any]:
-    if side != "sell" or not desired_entry.get("should_quote", False):
-        return desired_entry
-    if avg_entry <= 0 or best_bid <= 0 or best_ask <= 0:
-        return desired_entry
-    if tick <= 0:
-        tick = Decimal("0.01")
-
-    try:
-        limit_price = Decimal(str(desired_entry.get("price", "0") or "0"))
-    except Exception:
-        return desired_entry
-    if limit_price <= 0:
-        return desired_entry
-
-    cost_floor = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
-    spread = max(Decimal("0"), best_ask - best_bid)
-    inside_cap = tick * Decimal(max(1, inside_spread_max_ticks))
-    retrace_price = best_ask - min(spread * Decimal("0.25"), inside_cap)
-    retrace_price = max(cost_floor, best_bid + tick, retrace_price)
-    retrace_price = (retrace_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
-    retrace_price = max(Decimal("0.01"), min(Decimal("0.99"), retrace_price))
-    if retrace_price >= limit_price:
-        return desired_entry
-
-    prev_reason = str(desired_entry.get("diag_reason", "") or "")
-    desired_entry["price"] = retrace_price
-    desired_entry["diag_reason"] = (
-        f"recycle_drawdown_exit old={float(limit_price):.4f} "
-        f"new={float(retrace_price):.4f} bid={float(best_bid):.4f} "
-        f"ask={float(best_ask):.4f}"
-        + (f" prev={prev_reason}" if prev_reason else "")
-    )
-    return desired_entry
-
-
-def apply_recycle_drawdown_floor(
-    *,
-    desired_entry: dict[str, Any],
-    side: str,
-    avg_entry: Decimal,
-    peak_bid: Decimal,
-    best_bid: Decimal,
-    tick: Decimal,
-    is_hard_exit: bool,
-    modest_winner_min_peak_profit_ps: Decimal = Decimal("0.03"),
-    modest_winner_min_lock_profit_ps: Decimal = Decimal("0.02"),
-    modest_winner_min_trailing_drawdown_ps: Decimal = Decimal("0.03"),
-    winner_latch_min_peak_profit_ps: Decimal = Decimal("0.10"),
-    winner_latch_min_lock_profit_ps: Decimal = Decimal("0.04"),
-    winner_latch_trailing_drawdown_ps: Decimal = Decimal("0.08"),
-) -> dict[str, Any]:
-    if (
-        side != "sell"
-        or not desired_entry.get("should_quote", False)
-        or avg_entry <= 0
-        or peak_bid <= 0
-        or best_bid <= 0
-        or is_hard_exit
-    ):
-        return desired_entry
-    if tick <= 0:
-        tick = Decimal("0.01")
-
-    peak_profit_ps = max(Decimal("0"), peak_bid - avg_entry)
-    if peak_profit_ps < modest_winner_min_peak_profit_ps:
-        return desired_entry
-
-    try:
-        planned_sell_price = Decimal(str(desired_entry.get("price", "0") or "0"))
-    except Exception:
-        return desired_entry
-    if planned_sell_price <= 0:
-        return desired_entry
-
-    full_winner_band = peak_profit_ps >= winner_latch_min_peak_profit_ps
-    if full_winner_band:
-        trailing_floor = max(
-            avg_entry + winner_latch_min_lock_profit_ps,
-            peak_bid - winner_latch_trailing_drawdown_ps,
-            best_bid + tick,
-        )
-    else:
-        modest_drawdown = max(
-            modest_winner_min_trailing_drawdown_ps,
-            peak_profit_ps * Decimal("0.5"),
-        )
-        trailing_floor = max(
-            avg_entry + modest_winner_min_lock_profit_ps,
-            peak_bid - modest_drawdown,
-            best_bid + tick,
-        )
-    trailing_floor = (trailing_floor / tick).to_integral_value(rounding=ROUND_CEILING) * tick
-    trailing_floor = max(Decimal("0.01"), min(Decimal("0.99"), trailing_floor))
-    if planned_sell_price >= trailing_floor:
-        return desired_entry
-
-    desired_entry["price"] = trailing_floor
-    if full_winner_band:
-        desired_entry["diag_reason"] = (
-            f"recycle_drawdown_floor old={float(planned_sell_price):.4f} "
-            f"floor={float(trailing_floor):.4f} peak_bid={float(peak_bid):.4f} "
-            f"entry={float(avg_entry):.4f} peak_profit={float(peak_profit_ps):.4f}"
-        )
-    else:
-        desired_entry["diag_reason"] = (
-            f"recycle_drawdown_floor band=modest old={float(planned_sell_price):.4f} "
-            f"floor={float(trailing_floor):.4f} peak_bid={float(peak_bid):.4f} "
-            f"entry={float(avg_entry):.4f} peak_profit={float(peak_profit_ps):.4f}"
-        )
     return desired_entry
 
 
@@ -1430,7 +1304,8 @@ def build_desired_quote_entry(
         # 1) urgent_override: EXIT phase or an armed thesis-bad stop-loss.
         #    This can bypass the minimum hold timer because the thesis is broken.
         # 2) de_risk_active: DE_RISK phase can loss-sell only after the minimum hold
-        #    timer. It is risk reduction, not a hard stop.
+        #    timer AND only when the thesis is also bad. DE_RISK alone should not
+        #    bypass cost protection for a merely noisy/choppy position.
         # 3) emergency_with_thesis: we are in the emergency time window (e.g.
         #    last 120s) AND thesis is also bad. The emergency window alone is
         #    NOT sufficient — it must be confirmed by signal state.
@@ -1577,11 +1452,16 @@ def should_requote_existing_order(
     maker_requote_min_age_sec: float,
     side: str = "",
     maker_requote_min_age_sec_sell: float = 0,
+    desired_loss_sell_reason: str = "",
 ) -> bool:
     if not current:
         return False
     if current.get("pending_cancel"):
         return False
+    current_loss_sell_reason = str(current.get("loss_sell_reason", "") or "")
+    desired_loss_sell_reason = str(desired_loss_sell_reason or "")
+    if current_loss_sell_reason and not desired_loss_sell_reason:
+        return True
     current_target_version = int(current.get("target_version", 0) or 0)
     if current_target_version >= target_version:
         return False

@@ -99,7 +99,14 @@ class ExitPolicyEngine:
             "spot_strike_supports": "1" if spot_strike_supports else "0",
         }
         if locked_side_invalidated or offside_confirmed or thesis_weakened or not signal.matches_position:
-            return "de_risk", "profitable_thesis_weakened", shared_meta
+            return (
+                "continue",
+                "recycle_hold_thesis_softened",
+                {
+                    **shared_meta,
+                    "exit_intent": "continue",
+                },
+            )
         if (
             self.config.early_profit_hold_enabled
             and position.hold_sec < float(self.config.early_profit_hold_min_hold_sec)
@@ -270,20 +277,6 @@ class ExitPolicyEngine:
         if profitable_intent == "continue":
             return ExitDecision(
                 decision_type=ExitDecisionType.HOLD_IN_BAND,
-                reason=profitable_reason,
-                net_if_exit=net_if_exit,
-                gross_if_exit=gross_if_exit,
-                exit_fee_est=exit_fee_est,
-                exit_px_effective=exit_px_effective,
-                metadata={
-                    **base_metadata,
-                    **profitable_meta,
-                },
-            )
-
-        if profitable_intent == "de_risk":
-            return ExitDecision(
-                decision_type=ExitDecisionType.DE_RISK,
                 reason=profitable_reason,
                 net_if_exit=net_if_exit,
                 gross_if_exit=gross_if_exit,

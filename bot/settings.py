@@ -270,8 +270,6 @@ def initialize_strategy_settings(
     strategy.maker_urgent_exit_ttl_sec = config.exit.maker_urgent_exit_ttl_sec
     strategy.maker_urgent_exit_cooldown_sec = config.exit.maker_urgent_exit_cooldown_sec
     strategy.maker_urgent_exit_min_confirmations = config.exit.maker_urgent_exit_min_confirmations
-    strategy.maker_urgent_exit_winner_peak_profit_ps = config.exit.maker_urgent_exit_winner_peak_profit_ps
-    strategy.maker_urgent_exit_winner_extra_confirmations = config.exit.maker_urgent_exit_winner_extra_confirmations
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
     strategy.directional_first_entry_min_score_abs_new = config.side.directional_first_entry_min_score_abs_new
     strategy.side_thesis_weak_requires_opposite_side_new = config.side.side_thesis_weak_requires_opposite_side_new
@@ -284,7 +282,6 @@ def initialize_strategy_settings(
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
     strategy.maker_recycle_locked_side_min_fair_edge_ps = config.exit.maker_recycle_locked_side_min_fair_edge_ps
-    strategy.maker_winner_sell_max_offset_ps = config.exit.maker_winner_sell_max_offset_ps
     strategy.maker_signal_flip_cooldown_cycles = config.exit.maker_signal_flip_cooldown_cycles
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
     strategy.maker_implied_sigma_weight = config.maker.implied_sigma_weight
