@@ -68,6 +68,144 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compute_loss_sell_policy(
+    *,
+    thesis_weakened: bool,
+    offside_confirmed: bool,
+    spot_still_supports_position: bool,
+    stop_loss_pending_active: bool,
+    stop_loss_regime_armed: bool,
+    decision_phase: str,
+    decision_regime: str,
+    hold_sec: float,
+    loss_sell_min_hold_sec: float,
+    emergency_window: bool,
+    time_left_sec: float | None,
+    absolute_last_resort_sec: float,
+    true_last_resort_sec: float,
+) -> tuple[bool, str]:
+    thesis_bad = thesis_weakened or offside_confirmed or stop_loss_pending_active
+    urgent_override = (
+        decision_phase == "EXIT"
+        or stop_loss_pending_active
+        or (thesis_bad and stop_loss_regime_armed)
+    )
+    de_risk_active = decision_phase == "DE_RISK" and not spot_still_supports_position
+    allow_regime_loss_sell = (
+        (urgent_override or de_risk_active)
+        and (urgent_override or hold_sec >= float(loss_sell_min_hold_sec))
+    )
+    allow_emergency_with_thesis = emergency_window and allow_regime_loss_sell
+    thesis_good = (not thesis_bad) and decision_phase in ("HOLD", "PROBE", "")
+    in_last_resort_window = (
+        time_left_sec is not None
+        and absolute_last_resort_sec > 0
+        and time_left_sec < absolute_last_resort_sec
+    )
+    in_true_last_resort = (
+        time_left_sec is not None
+        and true_last_resort_sec > 0
+        and time_left_sec < true_last_resort_sec
+    )
+    allow_absolute_last_resort = (
+        in_true_last_resort
+        or (in_last_resort_window and not thesis_good)
+    )
+    allow_loss_sell = (
+        allow_regime_loss_sell
+        or allow_emergency_with_thesis
+        or allow_absolute_last_resort
+    )
+    if not allow_loss_sell:
+        return False, ""
+    if decision_phase == "EXIT":
+        return True, f"state_machine_exit:{decision_regime or 'n/a'}"
+    if decision_phase == "DE_RISK":
+        return True, f"state_machine_de_risk:{decision_regime or 'n/a'}"
+    if allow_regime_loss_sell:
+        return True, "armed_thesis_bad"
+    if in_true_last_resort:
+        return True, f"true_last_resort(<{true_last_resort_sec:.0f}s)"
+    if allow_absolute_last_resort:
+        return True, f"last_resort_thesis_bad(<{absolute_last_resort_sec:.0f}s)"
+    return True, "emergency_with_thesis"
+
+
+def apply_profitable_exit_fair_protection(
+    *,
+    desired_entry: dict[str, Any],
+    quote: tuple[Decimal, Decimal] | None,
+    fair: Decimal | None,
+    avg_entry: Decimal,
+    tick: Decimal,
+    maker_sell_cost_protect_fee_buffer_ps: Decimal,
+    maker_sell_min_profit_floor_ps: Decimal,
+    maker_profit_run_trailing_drawdown_ps: Decimal,
+    maker_profit_run_fair_veto_min: Decimal,
+    veto_ref_price: Decimal | None,
+    tail_inventory_exit_context: bool,
+    adverse_exit_context: bool,
+    stop_loss_pending_active: bool,
+    loss_sell_reason: str,
+) -> tuple[dict[str, Any], Decimal | None]:
+    if (
+        not desired_entry.get("should_quote", False)
+        or quote is None
+        or avg_entry <= 0
+        or tail_inventory_exit_context
+        or adverse_exit_context
+        or stop_loss_pending_active
+        or str(loss_sell_reason or "")
+    ):
+        return desired_entry, veto_ref_price
+
+    limit_price_now = Decimal(str(desired_entry.get("price", "0") or "0"))
+    min_profit_sell = (
+        avg_entry
+        + maker_sell_cost_protect_fee_buffer_ps
+        + maker_sell_min_profit_floor_ps
+    )
+
+    if fair is not None:
+        high_price_zone_veto_bypass = (
+            quote[0] >= Decimal("0.95")
+            or fair >= Decimal("0.97")
+        )
+        if (
+            not high_price_zone_veto_bypass
+            and limit_price_now >= min_profit_sell
+            and fair >= maker_profit_run_fair_veto_min
+        ):
+            next_veto_ref = veto_ref_price
+            if next_veto_ref is None or limit_price_now > next_veto_ref:
+                next_veto_ref = limit_price_now
+            desired_entry["should_quote"] = False
+            desired_entry["diag_reason"] = (
+                f"profitable_exit_fair_veto fair={float(fair):.4f} "
+                f">= min={float(maker_profit_run_fair_veto_min):.4f} "
+                f"sell={float(limit_price_now):.4f}"
+            )
+            return desired_entry, next_veto_ref
+
+    if veto_ref_price is not None and veto_ref_price > 0:
+        protected_floor = max(
+            min_profit_sell,
+            veto_ref_price - maker_profit_run_trailing_drawdown_ps,
+        )
+        protected_floor = (
+            (protected_floor / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+        )
+        protected_floor = max(Decimal("0.01"), min(Decimal("0.99"), protected_floor))
+        if limit_price_now < protected_floor:
+            desired_entry["price"] = protected_floor
+            desired_entry["diag_reason"] = (
+                f"profitable_exit_veto_floor old={float(limit_price_now):.4f} "
+                f"floor={float(protected_floor):.4f} "
+                f"veto_ref={float(veto_ref_price):.4f}"
+            )
+    return desired_entry, veto_ref_price
+
+
 def shadow_opposes_locked_side(
     *,
     active_side_value: str,
@@ -1218,6 +1356,7 @@ def build_desired_quote_entry(
     maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
     thesis_weakened: bool = False,
     offside_confirmed: bool = False,
+    spot_still_supports_position: bool = False,
     stop_loss_pending_active: bool = False,
     stop_loss_regime_armed: bool = False,
     hold_sec: float = 0.0,
@@ -1331,54 +1470,21 @@ def build_desired_quote_entry(
         # Problem: emergency_window was purely time-based and would override
         # HOLD_IN_BAND decisions, causing loss sells when direction was correct.
         #
-        _thesis_bad = thesis_weakened or offside_confirmed or stop_loss_pending_active
-        _urgent_override = (
-            decision_phase == "EXIT"
-            or stop_loss_pending_active
-            or (_thesis_bad and stop_loss_regime_armed)
+        allow_loss_sell, _loss_sell_reason = compute_loss_sell_policy(
+            thesis_weakened=thesis_weakened,
+            offside_confirmed=offside_confirmed,
+            spot_still_supports_position=spot_still_supports_position,
+            stop_loss_pending_active=stop_loss_pending_active,
+            stop_loss_regime_armed=stop_loss_regime_armed,
+            decision_phase=decision_phase,
+            decision_regime=decision_regime,
+            hold_sec=hold_sec,
+            loss_sell_min_hold_sec=loss_sell_min_hold_sec,
+            emergency_window=emergency_window,
+            time_left_sec=time_left_sec,
+            absolute_last_resort_sec=absolute_last_resort_sec,
+            true_last_resort_sec=true_last_resort_sec,
         )
-        _de_risk_active = decision_phase == "DE_RISK"
-        _allow_regime_loss_sell = (
-            (_urgent_override or _de_risk_active)
-            and (_urgent_override or hold_sec >= float(loss_sell_min_hold_sec))
-        )
-        _allow_emergency_with_thesis = emergency_window and _allow_regime_loss_sell
-        # Three-stage last-resort logic:
-        # Stage A (60-15s): thesis-aware — only allow loss-sell if thesis
-        #   is bad (weakened/offside) or decision phase is adverse.
-        # Stage B (<15s): unconditional — true safety net, always allow.
-        _thesis_good = (not _thesis_bad) and decision_phase in ("HOLD", "PROBE", "")
-        _in_last_resort_window = (
-            time_left_sec is not None
-            and absolute_last_resort_sec > 0
-            and time_left_sec < absolute_last_resort_sec
-        )
-        _in_true_last_resort = (
-            time_left_sec is not None
-            and true_last_resort_sec > 0
-            and time_left_sec < true_last_resort_sec
-        )
-        _allow_absolute_last_resort = (
-            _in_true_last_resort
-            or (_in_last_resort_window and not _thesis_good)
-        )
-        allow_loss_sell = _allow_regime_loss_sell or _allow_emergency_with_thesis or _allow_absolute_last_resort
-        # Compute reason tag for observability (visible in diag logs and order payload).
-        if allow_loss_sell:
-            if decision_phase == "EXIT":
-                _loss_sell_reason = f"state_machine_exit:{decision_regime or 'n/a'}"
-            elif decision_phase == "DE_RISK":
-                _loss_sell_reason = f"state_machine_de_risk:{decision_regime or 'n/a'}"
-            elif _allow_regime_loss_sell:
-                _loss_sell_reason = "armed_thesis_bad"
-            elif _in_true_last_resort:
-                _loss_sell_reason = f"true_last_resort(<{true_last_resort_sec:.0f}s)"
-            elif _allow_absolute_last_resort:
-                _loss_sell_reason = f"last_resort_thesis_bad(<{absolute_last_resort_sec:.0f}s)"
-            else:
-                _loss_sell_reason = "emergency_with_thesis"
-        else:
-            _loss_sell_reason = ""
         if (
             should_quote
             and high_cost_exit_cooldown_enabled

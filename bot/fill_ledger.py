@@ -152,6 +152,7 @@ class FillLedgerMixin:
                 # A new winning run starts from the fresh fill price.
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
+                self.maker_profit_run_veto_price_by_inst.pop(inst_key, None)
                 self.recent_buy_fill_ts_by_inst[inst_key] = time.time()
             return realized_net
         state = self.live_inventory_cost.get(inst_key, {})

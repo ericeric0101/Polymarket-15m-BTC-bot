@@ -15,7 +15,7 @@ from collections import deque
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import math
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -101,6 +101,7 @@ from bot.quoting import (
 )
 from bot.quote_service import (
     apply_de_risk_sell_pricing,
+    apply_profitable_exit_fair_protection,
     apply_shadow_entry_veto,
     apply_time_based_profitable_sell_cap,
     apply_winner_retrace_exit_pricing,
@@ -286,6 +287,7 @@ class IntegratedBTCStrategy(
             return
         self.maker_profit_run_peak_bid_by_inst.pop(inst_key, None)
         self.maker_profit_run_peak_fair_by_inst.pop(inst_key, None)
+        self.maker_profit_run_veto_price_by_inst.pop(inst_key, None)
 
     def _update_profit_run_peaks(
         self,
@@ -1405,6 +1407,7 @@ class IntegratedBTCStrategy(
                         market_consensus=market_consensus_score,
                         shadow_payload=live_shadow_payload,
                     )
+                    spot_still_supports_position = False
                     if (
                         hasattr(self, "position_manager")
                         and inv_state is not None
@@ -1419,6 +1422,16 @@ class IntegratedBTCStrategy(
                         matches_position = self._instrument_for_side(self.active_side) == inst_id
                         current_price = self._capture_market_open_spot()
                         price_to_beat = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+                        if (
+                            matches_position
+                            and current_price is not None
+                            and price_to_beat is not None
+                            and self.active_side is not None
+                        ):
+                            if self.active_side == MarketSide.UP:
+                                spot_still_supports_position = current_price > price_to_beat
+                            elif self.active_side == MarketSide.DOWN:
+                                spot_still_supports_position = current_price < price_to_beat
                         peak_bid = self.maker_profit_run_peak_bid_by_inst.get(inst_key)
                         peak_fair = self.maker_profit_run_peak_fair_by_inst.get(inst_key)
                         if quote_ctx.quote is not None:
@@ -1525,6 +1538,7 @@ class IntegratedBTCStrategy(
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                     thesis_weakened=_thesis_weakened,
                     offside_confirmed=_offside_confirmed,
+                    spot_still_supports_position=spot_still_supports_position,
                     stop_loss_pending_active=stop_loss_pending_active,
                     stop_loss_regime_armed=_stop_loss_regime_armed,
                     decision_phase=decision_state.phase.value if decision_state is not None else "",
@@ -1903,6 +1917,32 @@ class IntegratedBTCStrategy(
                             else self.maker_profit_run_unlock_trailing_drawdown_ps
                         ),
                     )
+                if (
+                    side == "sell"
+                    and desired_entry.get("should_quote", False)
+                    and avg_entry > 0
+                    and quote_ctx.quote is not None
+                ):
+                    desired_entry, next_veto_ref_price = apply_profitable_exit_fair_protection(
+                        desired_entry=desired_entry,
+                        quote=quote_ctx.quote,
+                        fair=quote_ctx.fair,
+                        avg_entry=avg_entry,
+                        tick=quote_ctx.tick,
+                        maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
+                        maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                        maker_profit_run_trailing_drawdown_ps=self.maker_profit_run_trailing_drawdown_ps,
+                        maker_profit_run_fair_veto_min=self.maker_profit_run_fair_veto_min,
+                        veto_ref_price=self.maker_profit_run_veto_price_by_inst.get(inst_key),
+                        tail_inventory_exit_context=tail_inventory_exit_context,
+                        adverse_exit_context=adverse_exit_context,
+                        stop_loss_pending_active=stop_loss_pending_active,
+                        loss_sell_reason=str(desired_entry.get("loss_sell_reason", "") or ""),
+                    )
+                    if next_veto_ref_price is None:
+                        self.maker_profit_run_veto_price_by_inst.pop(inst_key, None)
+                    else:
+                        self.maker_profit_run_veto_price_by_inst[inst_key] = next_veto_ref_price
                 if side == "sell" and decision_state is not None:
                     desired_entry["decision_pressure"] = decision_state.pressure
                     desired_entry["decision_phase"] = decision_state.phase.value

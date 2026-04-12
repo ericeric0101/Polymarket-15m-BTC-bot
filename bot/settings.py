@@ -254,6 +254,7 @@ def initialize_strategy_settings(
     strategy.maker_early_profit_hold_max_profit_ps = config.exit.maker_early_profit_hold_max_profit_ps
     strategy.maker_early_profit_hold_min_score_abs = config.exit.maker_early_profit_hold_min_score_abs
     strategy.maker_profit_run_trailing_drawdown_ps = config.exit.maker_profit_run_trailing_drawdown_ps
+    strategy.maker_profit_run_fair_veto_min = config.exit.maker_profit_run_fair_veto_min
     strategy.maker_profit_run_unlock_profit_ps = config.exit.maker_profit_run_unlock_profit_ps
     strategy.maker_profit_run_unlock_trailing_drawdown_ps = config.exit.maker_profit_run_unlock_trailing_drawdown_ps
     strategy.maker_urgent_exit_enabled = config.exit.maker_urgent_exit_enabled

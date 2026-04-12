@@ -302,6 +302,7 @@ class ExitConfig:
     maker_early_profit_hold_max_profit_ps: Decimal
     maker_early_profit_hold_min_score_abs: Decimal
     maker_profit_run_trailing_drawdown_ps: Decimal
+    maker_profit_run_fair_veto_min: Decimal
     maker_profit_run_unlock_profit_ps: Decimal
     maker_profit_run_unlock_trailing_drawdown_ps: Decimal
     maker_urgent_exit_enabled: bool
@@ -713,6 +714,7 @@ class AppConfig:
                 maker_early_profit_hold_max_profit_ps=_env_decimal("MAKER_EARLY_PROFIT_HOLD_MAX_PROFIT_PS", "0.08"),
                 maker_early_profit_hold_min_score_abs=_env_decimal("MAKER_EARLY_PROFIT_HOLD_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 maker_profit_run_trailing_drawdown_ps=_env_decimal("MAKER_PROFIT_RUN_TRAILING_DRAWDOWN_PS", "0.05"),
+                maker_profit_run_fair_veto_min=_env_decimal("MAKER_PROFIT_RUN_FAIR_VETO_MIN", "0.65"),
                 maker_profit_run_unlock_profit_ps=_env_decimal("MAKER_PROFIT_RUN_UNLOCK_PROFIT_PS", "0.18"),
                 maker_profit_run_unlock_trailing_drawdown_ps=_env_decimal("MAKER_PROFIT_RUN_UNLOCK_TRAILING_DRAWDOWN_PS", "0.02"),
                 maker_urgent_exit_enabled=_env_bool("MAKER_URGENT_EXIT_ENABLED", True),
