@@ -18,8 +18,8 @@ def normalize_quote_mode(raw_mode: str) -> str:
     return mode
 
 
-def initial_side_disable_reasons(quote_mode: str) -> dict[str, str]:
-    if quote_mode == "buy":
+def initial_side_disable_reasons(quote_sides_mode: str) -> dict[str, str]:
+    if quote_sides_mode == "buy":
         return {"sell": "quote_mode_buy_only"}
     return {}
 
@@ -127,7 +127,7 @@ def set_side_should_quote(
 
 def apply_quote_plan_guards(
     side_plan: dict[str, tuple[Any, ...]],
-    quote_mode: str,
+    quote_sides_mode: str,
     phase_value: str,
     inventory_delta_shares: Decimal,
     early_sell_only_sec: float,
@@ -152,7 +152,7 @@ def apply_quote_plan_guards(
     active_side: str = "",
     min_directional_edge_ps_down: Optional[Decimal] = None,
 ) -> QuotePlanGuardOutcome:
-    side_disable_reason_by_side: dict[str, str] = initial_side_disable_reasons(quote_mode)
+    side_disable_reason_by_side: dict[str, str] = initial_side_disable_reasons(quote_sides_mode)
 
     if (
         "buy" in side_plan

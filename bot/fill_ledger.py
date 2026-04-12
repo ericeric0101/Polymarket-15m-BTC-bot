@@ -152,18 +152,43 @@ class FillLedgerMixin:
                 # A new winning run starts from the fresh fill price.
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
-                self.maker_profit_run_veto_price_by_inst.pop(inst_key, None)
                 self.recent_buy_fill_ts_by_inst[inst_key] = time.time()
             return realized_net
         state = self.live_inventory_cost.get(inst_key, {})
         if inst_key:
             self.recent_sell_fill_ts_by_inst[inst_key] = time.time()
         sell_qty = min(fill_qty, pre_qty)
+        opened_ts = float(pre_state.get("opened_ts", 0.0) or 0.0)
+        hold_sec = max(0.0, time.time() - opened_ts) if opened_ts > 0 else 0.0
         logger.info(
             f"Inventory realized[{inst_key[:18]}..]: sold={float(sell_qty):.6f} "
             f"entry={float(pre_avg_entry):.4f} exit={float(fill_price):.4f} "
             f"net_pnl={float(realized_net):+.4f} remaining={float(state['qty']):.6f}"
         )
+        try:
+            metrics = getattr(self, "_baseline_metrics", None)
+            if isinstance(metrics, dict):
+                metrics["realized_exit_count"] = int(metrics.get("realized_exit_count", 0)) + 1
+                metrics["realized_exit_net_sum"] = float(metrics.get("realized_exit_net_sum", 0.0)) + float(realized_net)
+                metrics["realized_exit_hold_sec_sum"] = float(metrics.get("realized_exit_hold_sec_sum", 0.0)) + float(hold_sec)
+                if realized_net > 0:
+                    metrics["realized_win_count"] = int(metrics.get("realized_win_count", 0)) + 1
+                elif realized_net < 0:
+                    metrics["realized_loss_count"] = int(metrics.get("realized_loss_count", 0)) + 1
+            self._db_strategy_event(
+                "EXIT_BASELINE_METRIC",
+                {
+                    "instrument_id": inst_key,
+                    "sell_qty": float(sell_qty),
+                    "entry_price": float(pre_avg_entry),
+                    "exit_price": float(fill_price),
+                    "net_pnl": float(realized_net),
+                    "hold_sec": float(hold_sec),
+                    "remaining_qty": float(state["qty"]),
+                },
+            )
+        except Exception:
+            pass
         try:
             remaining_qty = Decimal(str(state.get("qty", "0")))
         except Exception:

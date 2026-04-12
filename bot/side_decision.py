@@ -261,7 +261,19 @@ class SideDecisionMixin:
         except Exception:
             return False
         min_fair = Decimal(str(getattr(self, "bi_side_flip_min_fair", "0.60")))
-        return fair_dec >= min_fair
+        if fair_dec < min_fair:
+            return False
+        opposing_fair = inputs.get("fair_down") if side == ActiveSide.UP else inputs.get("fair_up")
+        if opposing_fair is None:
+            return True
+        try:
+            opposing_fair_dec = Decimal(str(opposing_fair))
+        except Exception:
+            return True
+        fair_inversion_min_ps = Decimal(
+            str(getattr(self, "bi_side_flip_fair_inversion_min_ps", Decimal("0.03")))
+        )
+        return fair_dec >= (opposing_fair_dec + fair_inversion_min_ps)
 
     def _held_inventory_allows_extra_flip(self, *, proposed_side: ActiveSide) -> bool:
         if not self.active_side_locked or proposed_side in (ActiveSide.NONE, self.active_side):

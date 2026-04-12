@@ -99,6 +99,8 @@ def initialize_strategy_settings(
     strategy.maker_use_post_only = config.maker.use_post_only
     strategy.maker_post_only_strict = config.maker.post_only_strict
     strategy.maker_max_inventory_shares = config.maker.max_inventory_shares
+    strategy.max_locked_side_position = config.maker.max_locked_side_position
+    strategy.inventory_full_behavior = config.maker.inventory_full_behavior
     strategy.maker_kill_switch_reset_on_rollover = config.maker.kill_switch_reset_on_rollover
     strategy.maker_inventory_skew_max = config.maker.inventory_skew_max
     strategy.maker_stale_inventory_sec = config.maker.stale_inventory_sec
@@ -176,6 +178,7 @@ def initialize_strategy_settings(
     strategy._new_signal_confident_score_abs_default = config.side.confident_score_abs_default
     strategy.bi_side_flip_min_score_up_new = config.side.flip_min_score_up_new
     strategy.bi_side_flip_max_score_down_new = config.side.flip_max_score_down_new
+    strategy.bi_side_flip_fair_inversion_min_ps = config.side.flip_fair_inversion_min_ps
     strategy.bi_side_flip_confirmations_held_new = config.side.flip_confirmations_held
     strategy.bi_side_flip_min_persist_sec_held_new = config.side.flip_min_persist_sec_held
     held_flip_default = max(strategy._new_signal_confident_score_abs_default, Decimal("0.18"))
@@ -199,6 +202,12 @@ def initialize_strategy_settings(
     )
     strategy.maker_loss_sell_min_hold_sec = config.maker.loss_sell_min_hold_sec
     strategy.maker_loss_sell_reprice_min_interval_sec = config.maker.loss_sell_reprice_min_interval_sec
+    strategy.maker_side_invalidation_confirm_cycles = config.maker.side_invalidation_confirm_cycles
+    strategy.maker_side_invalidation_spot_buffer_bps = config.maker.side_invalidation_spot_buffer_bps
+    strategy.maker_side_invalidation_fair_flip_min = config.maker.side_invalidation_fair_flip_min
+    strategy.maker_side_force_unlock_last_sec = config.maker.side_force_unlock_last_sec
+    strategy.maker_recycle_buy_discount_ps = config.maker.recycle_buy_discount_ps
+    strategy.maker_recycle_sell_discount_ps = config.maker.recycle_sell_discount_ps
     strategy.side_signal_btc_ema_fast_sec = config.side.btc_ema_fast_sec
     strategy.side_signal_btc_ema_slow_sec = config.side.btc_ema_slow_sec
     strategy.side_signal_mid_ema_fast_sec = config.side.mid_ema_fast_sec
@@ -254,7 +263,6 @@ def initialize_strategy_settings(
     strategy.maker_early_profit_hold_max_profit_ps = config.exit.maker_early_profit_hold_max_profit_ps
     strategy.maker_early_profit_hold_min_score_abs = config.exit.maker_early_profit_hold_min_score_abs
     strategy.maker_profit_run_trailing_drawdown_ps = config.exit.maker_profit_run_trailing_drawdown_ps
-    strategy.maker_profit_run_fair_veto_min = config.exit.maker_profit_run_fair_veto_min
     strategy.maker_profit_run_unlock_profit_ps = config.exit.maker_profit_run_unlock_profit_ps
     strategy.maker_profit_run_unlock_trailing_drawdown_ps = config.exit.maker_profit_run_unlock_trailing_drawdown_ps
     strategy.maker_urgent_exit_enabled = config.exit.maker_urgent_exit_enabled
@@ -275,7 +283,7 @@ def initialize_strategy_settings(
     strategy.exit_hold_band_release_min_roi = config.exit.exit_hold_band_release_min_roi
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
-    strategy.maker_winner_continuation_min_fair_edge_ps = config.exit.maker_winner_continuation_min_fair_edge_ps
+    strategy.maker_recycle_locked_side_min_fair_edge_ps = config.exit.maker_recycle_locked_side_min_fair_edge_ps
     strategy.maker_winner_sell_max_offset_ps = config.exit.maker_winner_sell_max_offset_ps
     strategy.maker_signal_flip_cooldown_cycles = config.exit.maker_signal_flip_cooldown_cycles
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
@@ -312,7 +320,7 @@ def initialize_strategy_settings(
             profit_run_trailing_drawdown_ps=strategy.maker_profit_run_trailing_drawdown_ps,
             profit_run_unlock_profit_ps=strategy.maker_profit_run_unlock_profit_ps,
             profit_run_unlock_trailing_drawdown_ps=strategy.maker_profit_run_unlock_trailing_drawdown_ps,
-            winner_continuation_min_fair_edge_ps=strategy.maker_winner_continuation_min_fair_edge_ps,
+            recycle_locked_side_min_fair_edge_ps=strategy.maker_recycle_locked_side_min_fair_edge_ps,
             catastrophic_stop_loss_enabled=strategy.catastrophic_stop_loss_enabled,
             catastrophic_stop_loss_usdc=strategy.catastrophic_stop_loss_usdc,
             catastrophic_stop_loss_min_score_abs=strategy.catastrophic_stop_loss_min_score_abs,
@@ -352,7 +360,7 @@ def initialize_strategy_settings(
                 int(getattr(strategy, "bi_side_flip_confirmations_held_new", 4)),
             ),
             stop_loss_min_opposite_score_abs=strategy.side_thesis_weak_opposite_score_abs_new,
-            winner_continuation_min_fair_edge_ps=strategy.maker_winner_continuation_min_fair_edge_ps,
+            recycle_locked_side_min_fair_edge_ps=strategy.maker_recycle_locked_side_min_fair_edge_ps,
         )
     )
     strategy.runtime_git_revision = detect_runtime_git_revision_fn(project_root)

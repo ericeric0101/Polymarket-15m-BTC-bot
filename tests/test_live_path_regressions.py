@@ -13,14 +13,13 @@ from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.pricing_runtime import PricingRuntimeMixin
-from bot.models import DecisionPhase, DecisionRegime, MarketSnapshot, PositionState, SignalDecision, ExitDecisionType
+from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
-    apply_de_risk_sell_pricing,
+    apply_forced_exit_sell_pricing,
+    apply_recycle_drawdown_floor,
     apply_shadow_entry_veto,
-    apply_time_based_profitable_sell_cap,
-    apply_winner_trailing_floor,
     build_desired_quote_entry,
     build_directional_snapshot,
     evaluate_buy_entry_controls,
@@ -28,6 +27,7 @@ from bot.quote_service import (
     maybe_apply_trapped_inventory_recovery,
     preserve_recent_loss_sell_order,
     reconcile_unwanted_quotes,
+    resolve_quote_intent_state,
     retreat_crossing_buy_quote,
 )
 from bot.order_submission import submit_maker_quote
@@ -826,6 +826,7 @@ class DummySideFlipStrategy(SideDecisionMixin):
         self.bi_side_flip_max_score_down = Decimal("-2")
         self.bi_side_flip_min_score_up_new = Decimal("0.12")
         self.bi_side_flip_max_score_down_new = Decimal("-0.12")
+        self.bi_side_flip_fair_inversion_min_ps = Decimal("0.03")
         self.bi_side_flip_confirmations_held_new = 4
         self.bi_side_flip_min_persist_sec_held_new = 8.0
         self.bi_side_flip_min_score_up_held_new = Decimal("0.18")
@@ -1158,6 +1159,34 @@ def test_new_signal_flip_uses_new_scale_thresholds():
     assert strategy.strategy_events[-1][0] == "SIDE_MODE_FLIPPED"
 
 
+def test_new_signal_flip_requires_fair_inversion_margin():
+    strategy = DummySideFlipStrategy(held_qty=Decimal("2.0"))
+    strategy.side_decision_engine_new = True
+    strategy.active_side = ActiveSide.DOWN
+    strategy.active_side_locked = True
+    strategy.side_flip_count = 0
+    strategy.bi_side_flip_confirmations = 1
+
+    def _compute_side_decision(_now_ts):
+        return (
+            ActiveSide.UP,
+            Decimal("0.16"),
+            "cs=+0.1600",
+            {
+                "fair_up": 0.61,
+                "fair_down": 0.60,
+            },
+        )
+
+    strategy._compute_side_decision = _compute_side_decision
+
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=100.0, phase=MarketPhase.ACTIVE))
+    asyncio.run(strategy._maybe_finalize_side_decision(now_ts=101.0, phase=MarketPhase.ACTIVE))
+
+    assert strategy.active_side == ActiveSide.DOWN
+    assert strategy.side_flip_count == 0
+
+
 def test_side_change_cancels_stale_buy_orders_for_old_instrument():
     strategy = DummySideFlipStrategy(held_qty=Decimal("2.0"))
     strategy.active_side = ActiveSide.UP
@@ -1257,7 +1286,7 @@ def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
     }
     outcome = apply_quote_plan_guards(
         side_plan=side_plan,
-        quote_mode="both",
+        quote_sides_mode="both",
         phase_value=MarketPhase.ACTIVE.value,
         inventory_delta_shares=Decimal("0"),
         early_sell_only_sec=0.0,
@@ -1304,7 +1333,7 @@ def test_quote_plan_guards_still_blocks_buy_momentum_without_active_side():
     }
     outcome = apply_quote_plan_guards(
         side_plan=side_plan,
-        quote_mode="both",
+        quote_sides_mode="both",
         phase_value=MarketPhase.ACTIVE.value,
         inventory_delta_shares=Decimal("0"),
         early_sell_only_sec=0.0,
@@ -1352,7 +1381,7 @@ def test_quote_plan_guards_never_blocks_inventory_exit_sell_on_momentum():
     }
     outcome = apply_quote_plan_guards(
         side_plan=side_plan,
-        quote_mode="both",
+        quote_sides_mode="both",
         phase_value=MarketPhase.ACTIVE.value,
         inventory_delta_shares=Decimal("5.4"),
         early_sell_only_sec=0.0,
@@ -1710,7 +1739,7 @@ def test_exit_policy_unified_continue_holds_strong_winner_when_fair_edge_is_larg
             profit_run_trailing_drawdown_ps=Decimal("0.05"),
             profit_run_unlock_profit_ps=Decimal("0.18"),
             profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
-            winner_continuation_min_fair_edge_ps=Decimal("0.04"),
+            recycle_locked_side_min_fair_edge_ps=Decimal("0.04"),
         )
     )
     snapshot = MarketSnapshot(
@@ -1753,7 +1782,7 @@ def test_exit_policy_unified_continue_holds_strong_winner_when_fair_edge_is_larg
     decision = engine.evaluate(snapshot, position, signal)
 
     assert decision.decision_type == ExitDecisionType.HOLD_IN_BAND
-    assert decision.reason == "unified_winner_continuation"
+    assert decision.reason == "recycle_locked_side_hold"
     assert decision.metadata["exit_intent"] == "continue"
 
 
@@ -1784,7 +1813,7 @@ def test_exit_policy_unified_de_risk_allows_profitable_soft_winner_to_sell():
             profit_run_trailing_drawdown_ps=Decimal("0.05"),
             profit_run_unlock_profit_ps=Decimal("0.18"),
             profit_run_unlock_trailing_drawdown_ps=Decimal("0.02"),
-            winner_continuation_min_fair_edge_ps=Decimal("0.04"),
+            recycle_locked_side_min_fair_edge_ps=Decimal("0.04"),
         )
     )
     snapshot = MarketSnapshot(
@@ -1867,7 +1896,7 @@ def test_same_side_early_profit_hold_ignores_short_term_score_wobble():
     assert reason.startswith("early_profit_hold")
 
 
-def test_winner_continuation_holds_when_fair_edge_remains_large():
+def test_recycle_locked_side_hold_holds_when_fair_edge_remains_large():
     strategy = DummyProfitHoldStrategy()
     strategy.side_decision_score = Decimal("0.04")
     strategy.live_inventory_cost["inst-down"]["opened_ts"] = time.time() - 120.0
@@ -1889,7 +1918,7 @@ def test_winner_continuation_holds_when_fair_edge_remains_large():
             stop_loss_regime_min_sec=8,
             stop_loss_regime_confirmations=4,
             stop_loss_min_opposite_score_abs=Decimal("0.18"),
-            winner_continuation_min_fair_edge_ps=Decimal("0.04"),
+            recycle_locked_side_min_fair_edge_ps=Decimal("0.04"),
         )
     )
 
@@ -1905,10 +1934,10 @@ def test_winner_continuation_holds_when_fair_edge_remains_large():
     )
 
     assert hold is True
-    assert reason.startswith("winner_continuation")
+    assert reason.startswith("recycle_locked_side_hold")
 
 
-def test_winner_continuation_latch_holds_even_after_short_term_signal_softens():
+def test_recycle_hold_latch_holds_even_after_short_term_signal_softens():
     strategy = DummyProfitHoldStrategy()
     strategy.side_decision_score = Decimal("0.04")
     strategy.live_inventory_cost["inst-down"]["opened_ts"] = time.time() - 120.0
@@ -1930,7 +1959,7 @@ def test_winner_continuation_latch_holds_even_after_short_term_signal_softens():
             stop_loss_regime_min_sec=8,
             stop_loss_regime_confirmations=4,
             stop_loss_min_opposite_score_abs=Decimal("0.18"),
-            winner_continuation_min_fair_edge_ps=Decimal("0.04"),
+            recycle_locked_side_min_fair_edge_ps=Decimal("0.04"),
         )
     )
 
@@ -1957,9 +1986,45 @@ def test_winner_continuation_latch_holds_even_after_short_term_signal_softens():
     )
 
     assert first_hold is True
-    assert first_reason.startswith("winner_continuation")
+    assert first_reason.startswith("recycle_locked_side_hold")
     assert second_hold is True
-    assert second_reason.startswith("winner_hold_latch")
+    assert second_reason.startswith("recycle_hold_latch")
+
+
+def test_resolve_quote_intent_state_emits_hard_exit_and_acquire_modes():
+    hard_exit = resolve_quote_intent_state(
+        side="sell",
+        desired_should_quote=True,
+        tail_inventory_exit_context=False,
+        adverse_exit_context=True,
+        stop_loss_pending_active=False,
+        winner_take_profit_armed=False,
+        recycle_profit_candidate=False,
+        active_side_locked=True,
+        active_side_value="UP",
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        locked_side_entry_blocked=False,
+    )
+    acquire = resolve_quote_intent_state(
+        side="buy",
+        desired_should_quote=True,
+        tail_inventory_exit_context=False,
+        adverse_exit_context=False,
+        stop_loss_pending_active=False,
+        winner_take_profit_armed=False,
+        recycle_profit_candidate=False,
+        active_side_locked=True,
+        active_side_value="UP",
+        inst_id="inst-up",
+        active_instrument_id="inst-up",
+        locked_side_entry_blocked=False,
+    )
+
+    assert hard_exit.quote_mode == QuoteMode.HARD_EXIT
+    assert hard_exit.sell_intent == "FORCED_EXIT"
+    assert hard_exit.hard_exit_allowed is True
+    assert acquire.quote_mode == QuoteMode.ACQUIRE_LOCKED_SIDE
 
 
 def test_retreat_crossing_buy_quote_clamps_to_best_bid_for_synthetic_maker():
@@ -2530,7 +2595,7 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
         desired_quotes={
             "sell:inst-up": {
                 "should_quote": False,
-                "diag_reason": "winner_continuation fair_edge=0.0600>=0.0400 best_bid=0.7400 fair=0.8000",
+                "diag_reason": "recycle_locked_side_hold fair_edge=0.0600>=0.0400 best_bid=0.7400 fair=0.8000",
                 "force_cancel_existing": True,
             }
         },
@@ -2548,12 +2613,12 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
     assert cancels == [
         (
             "sell:inst-up",
-            "risk:winner_continuation fair_edge=0.0600>=0.0400 best_bid=0.7400 fair=0.8000",
+            "risk:recycle_locked_side_hold fair_edge=0.0600>=0.0400 best_bid=0.7400 fair=0.8000",
         )
     ]
 
 
-def test_winner_trailing_floor_prevents_small_profit_de_risk_after_large_peak():
+def test_recycle_drawdown_floor_prevents_small_profit_forced_exit_after_large_peak():
     desired = {
         "side": "sell",
         "should_quote": True,
@@ -2561,7 +2626,7 @@ def test_winner_trailing_floor_prevents_small_profit_de_risk_after_large_peak():
         "diag_reason": "state_machine_de_risk:CHOP",
     }
 
-    out = apply_winner_trailing_floor(
+    out = apply_recycle_drawdown_floor(
         desired_entry=desired,
         side="sell",
         avg_entry=Decimal("0.58"),
@@ -2572,10 +2637,10 @@ def test_winner_trailing_floor_prevents_small_profit_de_risk_after_large_peak():
     )
 
     assert out["price"] == Decimal("0.72")
-    assert out["diag_reason"].startswith("winner_trailing_floor old=0.6000 floor=0.7200")
+    assert out["diag_reason"].startswith("recycle_drawdown_floor old=0.6000 floor=0.7200")
 
 
-def test_winner_trailing_floor_protects_modest_winner_from_falling_back_to_tiny_profit():
+def test_recycle_drawdown_floor_protects_modest_winner_from_falling_back_to_tiny_profit():
     desired = {
         "side": "sell",
         "should_quote": True,
@@ -2583,7 +2648,7 @@ def test_winner_trailing_floor_protects_modest_winner_from_falling_back_to_tiny_
         "diag_reason": "state_machine_de_risk:CHOP",
     }
 
-    out = apply_winner_trailing_floor(
+    out = apply_recycle_drawdown_floor(
         desired_entry=desired,
         side="sell",
         avg_entry=Decimal("0.61"),
@@ -2594,10 +2659,10 @@ def test_winner_trailing_floor_protects_modest_winner_from_falling_back_to_tiny_
     )
 
     assert out["price"] == Decimal("0.65")
-    assert out["diag_reason"].startswith("winner_trailing_floor band=modest old=0.6300 floor=0.6500")
+    assert out["diag_reason"].startswith("recycle_drawdown_floor band=modest old=0.6300 floor=0.6500")
 
 
-def test_winner_trailing_floor_allows_hard_exit_to_break_floor():
+def test_recycle_drawdown_floor_allows_hard_exit_to_break_floor():
     desired = {
         "side": "sell",
         "should_quote": True,
@@ -2605,7 +2670,7 @@ def test_winner_trailing_floor_allows_hard_exit_to_break_floor():
         "diag_reason": "state_machine_exit:BROKEN",
     }
 
-    out = apply_winner_trailing_floor(
+    out = apply_recycle_drawdown_floor(
         desired_entry=desired,
         side="sell",
         avg_entry=Decimal("0.58"),
@@ -2977,272 +3042,16 @@ def test_preserve_recent_loss_sell_order_holds_higher_existing_price():
     assert "loss_sell_reprice_hold" in out["diag_reason"]
 
 
-def test_profit_cap_clamps_profitable_sell_to_realistic_midgame_price():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.8000"),
-        "planned_best_bid": Decimal("0.7000"),
-        "planned_best_ask": Decimal("0.7100"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.5800"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="PASSIVE",
-        tick=Decimal("0.01"),
-    )
-
-    assert out["price"] == Decimal("0.7300")
-    assert "profit_cap" in out["diag_reason"]
-    assert "stage=PASSIVE" in out["diag_reason"]
 
 
-def test_profit_cap_gets_more_aggressive_in_tail_stage():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.8000"),
-        "planned_best_bid": Decimal("0.7000"),
-        "planned_best_ask": Decimal("0.7100"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.5800"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="AGGRESSIVE",
-        tick=Decimal("0.01"),
-    )
-
-    assert out["price"] == Decimal("0.7200")
-    assert "stage=AGGRESSIVE" in out["diag_reason"]
-
-
-def test_profit_cap_gets_tightest_in_taker_stage():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.8000"),
-        "planned_best_bid": Decimal("0.7000"),
-        "planned_best_ask": Decimal("0.7100"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.5800"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="TAKER",
-        tick=Decimal("0.01"),
-    )
-
-    assert out["price"] == Decimal("0.7200")
-    assert "stage=TAKER" in out["diag_reason"]
-
-
-def test_profit_cap_does_not_modify_loss_sell_orders():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.8000"),
-        "planned_best_bid": Decimal("0.7000"),
-        "planned_best_ask": Decimal("0.7100"),
-        "diag_reason": "armed_thesis_bad",
-        "loss_sell_reason": "armed_thesis_bad",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.5800"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="TAKER",
-        tick=Decimal("0.01"),
-    )
-
-    assert out["price"] == Decimal("0.8000")
-    assert out["loss_sell_reason"] == "armed_thesis_bad"
-
-
-def test_profit_cap_bypasses_passive_stage_for_winner_continuation_candidate():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.6450"),
-        "planned_best_bid": Decimal("0.5800"),
-        "planned_best_ask": Decimal("0.5900"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.6100"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="PASSIVE",
-        tick=Decimal("0.01"),
-        winner_continuation_candidate=True,
-    )
-
-    assert out["price"] == Decimal("0.6450")
-    assert out["diag_reason"] == "sell_signal"
-
-
-def test_profit_cap_bypasses_passive_stage_for_modest_winner_candidate():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.6900"),
-        "planned_best_bid": Decimal("0.6200"),
-        "planned_best_ask": Decimal("0.6300"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.6100"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="PASSIVE",
-        tick=Decimal("0.01"),
-        modest_winner_candidate=True,
-    )
-
-    assert out["price"] == Decimal("0.6900")
-    assert out["diag_reason"] == "sell_signal"
-
-
-def test_profit_cap_still_applies_in_aggressive_stage_even_for_winner_continuation_candidate():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.8000"),
-        "planned_best_bid": Decimal("0.7000"),
-        "planned_best_ask": Decimal("0.7100"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.5800"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0100"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="AGGRESSIVE",
-        tick=Decimal("0.01"),
-        winner_continuation_candidate=True,
-    )
-
-    assert out["price"] == Decimal("0.7200")
-    assert "stage=AGGRESSIVE" in out["diag_reason"]
-
-
-def test_profit_cap_bypasses_passive_stage_for_de_risk_like_nonordinary_profit_sell():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.7350"),
-        "planned_best_bid": Decimal("0.6500"),
-        "planned_best_ask": Decimal("0.6600"),
-        "diag_reason": "profitable_drawdown_break",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.6508"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="PASSIVE",
-        tick=Decimal("0.01"),
-        nonordinary_profit_candidate=True,
-    )
-
-    assert out["price"] == Decimal("0.7350")
-    assert out["diag_reason"] == "profitable_drawdown_break"
-
-
-def test_profit_cap_bypasses_passive_stage_after_large_peak_profit_run():
-    desired_entry = {
-        "should_quote": True,
-        "price": Decimal("0.7350"),
-        "planned_best_bid": Decimal("0.6500"),
-        "planned_best_ask": Decimal("0.6600"),
-        "diag_reason": "sell_signal",
-        "loss_sell_reason": "",
-    }
-
-    out = apply_time_based_profitable_sell_cap(
-        desired_entry=desired_entry,
-        side="sell",
-        avg_entry=Decimal("0.6508"),
-        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
-        maker_sell_min_profit_floor_ps=Decimal("0.0150"),
-        profitable_sell_cap_enabled=True,
-        profitable_sell_cap_passive_offset_ps=Decimal("0.0200"),
-        profitable_sell_cap_aggressive_offset_ps=Decimal("0.0100"),
-        profitable_sell_cap_taker_offset_ps=Decimal("0.0050"),
-        exit_stage_value="PASSIVE",
-        tick=Decimal("0.01"),
-        high_peak_profit_candidate=True,
-    )
-
-    assert out["price"] == Decimal("0.7350")
-    assert out["diag_reason"] == "sell_signal"
-
-
-def test_de_risk_sell_pricing_uses_fair_edge_not_plain_cost_floor():
+def test_forced_exit_sell_pricing_uses_fair_edge_not_plain_cost_floor():
     desired_entry = {
         "should_quote": True,
         "price": Decimal("0.6200"),
         "diag_reason": "unified_de_risk",
     }
 
-    out = apply_de_risk_sell_pricing(
+    out = apply_forced_exit_sell_pricing(
         desired_entry=desired_entry,
         side="sell",
         avg_entry=Decimal("0.6000"),
@@ -3256,7 +3065,7 @@ def test_de_risk_sell_pricing_uses_fair_edge_not_plain_cost_floor():
     )
 
     assert out["price"] == Decimal("0.7300")
-    assert "de_risk_price" in out["diag_reason"]
+    assert "forced_exit_price" in out["diag_reason"]
 
 
 def test_extreme_winner_lock_profit_prices_high_near_market_top():
@@ -3266,7 +3075,7 @@ def test_extreme_winner_lock_profit_prices_high_near_market_top():
         "diag_reason": "extreme_winner_lock_profit",
     }
 
-    out = apply_de_risk_sell_pricing(
+    out = apply_forced_exit_sell_pricing(
         desired_entry=desired_entry,
         side="sell",
         avg_entry=Decimal("0.6900"),

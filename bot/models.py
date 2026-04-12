@@ -59,6 +59,20 @@ class ExitDecisionType(Enum):
     TAKER_STOP_LOSS = "TAKER_STOP_LOSS"
 
 
+class QuoteMode(Enum):
+    OBSERVE = "OBSERVE"
+    ACQUIRE_LOCKED_SIDE = "ACQUIRE_LOCKED_SIDE"
+    RECYCLE_LOCKED_SIDE = "RECYCLE_LOCKED_SIDE"
+    HARD_EXIT = "HARD_EXIT"
+
+
+@dataclass(frozen=True)
+class QuoteIntentState:
+    quote_mode: QuoteMode
+    sell_intent: str = "NONE"
+    hard_exit_allowed: bool = False
+
+
 @dataclass(frozen=True)
 class ExitDecision:
     decision_type: ExitDecisionType

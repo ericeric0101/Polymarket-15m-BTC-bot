@@ -33,7 +33,7 @@ class ExitEngineConfig:
     profit_run_trailing_drawdown_ps: Decimal = Decimal("0.05")
     profit_run_unlock_profit_ps: Decimal = Decimal("0.18")
     profit_run_unlock_trailing_drawdown_ps: Decimal = Decimal("0.02")
-    winner_continuation_min_fair_edge_ps: Decimal = Decimal("0.04")
+    recycle_locked_side_min_fair_edge_ps: Decimal = Decimal("0.04")
     catastrophic_stop_loss_enabled: bool = True
     catastrophic_stop_loss_usdc: Decimal = Decimal("0.40")
     catastrophic_stop_loss_min_score_abs: Decimal = Decimal("0.50")
@@ -75,7 +75,7 @@ class ExitPolicyEngine:
         signal: SignalDecision,
         thesis_weakened: bool,
         offside_confirmed: bool,
-        locked_thesis_broken: bool,
+        locked_side_invalidated: bool,
     ) -> tuple[str, str, dict[str, str]]:
         if position.avg_entry_price <= 0 or snapshot.best_bid <= position.avg_entry_price:
             return "neutral", "", {}
@@ -98,7 +98,7 @@ class ExitPolicyEngine:
             "peak_profit_ps": str(peak_profit_ps),
             "spot_strike_supports": "1" if spot_strike_supports else "0",
         }
-        if locked_thesis_broken or offside_confirmed or thesis_weakened or not signal.matches_position:
+        if locked_side_invalidated or offside_confirmed or thesis_weakened or not signal.matches_position:
             return "de_risk", "profitable_thesis_weakened", shared_meta
         if (
             self.config.early_profit_hold_enabled
@@ -107,7 +107,7 @@ class ExitPolicyEngine:
         ):
             return (
                 "continue",
-                "unified_early_profit_hold",
+                "recycle_early_profit_hold",
                 {
                     **shared_meta,
                     "exit_intent": "continue",
@@ -116,7 +116,7 @@ class ExitPolicyEngine:
         if signal.locked and spot_strike_supports:
             return (
                 "continue",
-                "unified_winner_continuation",
+                "recycle_locked_side_hold",
                 {
                     **shared_meta,
                     "exit_intent": "continue",
@@ -124,7 +124,7 @@ class ExitPolicyEngine:
             )
         return (
             "continue",
-            "profitable_hold_simple",
+            "recycle_profit_hold",
             {
                 **shared_meta,
                 "exit_intent": "continue",
@@ -156,7 +156,7 @@ class ExitPolicyEngine:
         external_thesis_weakened: bool | None = None,
         external_offside_confirmed: bool | None = None,
         stop_loss_pending_active: bool = False,
-        locked_thesis_broken: bool = False,
+        locked_side_invalidated: bool = False,
         confirmed_adverse_exit_active: bool = False,
     ) -> ExitDecision:
         """Evaluate exit decision for a held position.
@@ -187,7 +187,7 @@ class ExitPolicyEngine:
             else Decimal("0")
         )
         band = self._classify_band(snapshot, signal)
-        if locked_thesis_broken or stop_loss_pending_active or confirmed_adverse_exit_active:
+        if locked_side_invalidated or stop_loss_pending_active or confirmed_adverse_exit_active:
             band = "neutral"
         hold_band_released = (
             band == "hold"
@@ -204,7 +204,7 @@ class ExitPolicyEngine:
             "hold_band_released": "1" if hold_band_released else "0",
             "hold_band_release_min_roi": str(self.config.hold_band_release_min_roi),
             "stop_loss_pending_active": "1" if stop_loss_pending_active else "0",
-            "locked_thesis_broken": "1" if locked_thesis_broken else "0",
+            "locked_side_invalidated": "1" if locked_side_invalidated else "0",
             "confirmed_adverse_exit_active": "1" if confirmed_adverse_exit_active else "0",
         }
         signal_side = str(signal.active_side).upper()
@@ -240,7 +240,7 @@ class ExitPolicyEngine:
             signal=signal,
             thesis_weakened=thesis_weakened,
             offside_confirmed=offside_confirmed,
-            locked_thesis_broken=locked_thesis_broken,
+            locked_side_invalidated=locked_side_invalidated,
         )
         if stop_loss_pending_active:
             profitable_intent = "neutral"

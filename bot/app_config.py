@@ -87,6 +87,8 @@ class MakerConfig:
     use_post_only: bool
     post_only_strict: bool
     max_inventory_shares: Decimal
+    max_locked_side_position: Decimal
+    inventory_full_behavior: str
     inventory_skew_max: Decimal
     stale_inventory_sec: int
     stale_inventory_multiplier: Decimal
@@ -180,6 +182,12 @@ class MakerConfig:
     loss_pause_sec: float
     gate_block_grace_sec: int
     cancel_ack_dedupe_window_sec: int
+    side_invalidation_confirm_cycles: int
+    side_invalidation_spot_buffer_bps: Decimal
+    side_invalidation_fair_flip_min: Decimal
+    side_force_unlock_last_sec: int
+    recycle_buy_discount_ps: Decimal
+    recycle_sell_discount_ps: Decimal
 
     def __post_init__(self) -> None:
         if self.half_spread < 0:
@@ -198,6 +206,12 @@ class MakerConfig:
             raise ValueError("MAKER_LOSS_SELL_MIN_HOLD_SEC must be >= 0")
         if self.loss_sell_reprice_min_interval_sec < 0:
             raise ValueError("MAKER_LOSS_SELL_REPRICE_MIN_INTERVAL_SEC must be >= 0")
+        if self.max_locked_side_position <= 0:
+            raise ValueError("MAX_LOCKED_SIDE_POSITION must be > 0")
+        if self.inventory_full_behavior not in {"STOP_BUY", "WIDEN_SPREAD"}:
+            raise ValueError("INVENTORY_FULL_BEHAVIOR must be STOP_BUY or WIDEN_SPREAD")
+        if self.side_invalidation_confirm_cycles < 1:
+            raise ValueError("MAKER_SIDE_INVALIDATION_CONFIRM_CYCLES must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -231,6 +245,7 @@ class SideDecisionConfig:
     confident_score_abs_default: Decimal
     flip_min_score_up_new: Decimal
     flip_max_score_down_new: Decimal
+    flip_fair_inversion_min_ps: Decimal
     flip_min_score_up_held_new: Decimal
     flip_max_score_down_held_new: Decimal
     directional_entry_min_score_abs_new: Decimal
@@ -302,7 +317,6 @@ class ExitConfig:
     maker_early_profit_hold_max_profit_ps: Decimal
     maker_early_profit_hold_min_score_abs: Decimal
     maker_profit_run_trailing_drawdown_ps: Decimal
-    maker_profit_run_fair_veto_min: Decimal
     maker_profit_run_unlock_profit_ps: Decimal
     maker_profit_run_unlock_trailing_drawdown_ps: Decimal
     maker_urgent_exit_enabled: bool
@@ -317,7 +331,7 @@ class ExitConfig:
     exit_hold_band_release_min_roi: Decimal
     exit_stop_loss_thesis_min_score_abs: Decimal
     maker_profit_run_min_score_abs: Decimal
-    maker_winner_continuation_min_fair_edge_ps: Decimal
+    maker_recycle_locked_side_min_fair_edge_ps: Decimal
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
     maker_winner_sell_max_offset_ps: Decimal
@@ -502,6 +516,11 @@ class AppConfig:
                 use_post_only=_env_bool("MAKER_POST_ONLY", False),
                 post_only_strict=_env_bool_inverted("MAKER_POST_ONLY_STRICT", True),
                 max_inventory_shares=_env_decimal("MAKER_MAX_INVENTORY_SHARES", "25"),
+                max_locked_side_position=_env_decimal(
+                    "MAX_LOCKED_SIDE_POSITION",
+                    _env_str("MAKER_MAX_INVENTORY_SHARES", "25"),
+                ),
+                inventory_full_behavior=_env_str("INVENTORY_FULL_BEHAVIOR", "STOP_BUY").strip().upper(),
                 inventory_skew_max=_env_decimal("MAKER_INVENTORY_SKEW_MAX", "0.03"),
                 stale_inventory_sec=_env_int("MAKER_STALE_INVENTORY_SEC", 30),
                 stale_inventory_multiplier=_env_decimal("MAKER_STALE_INVENTORY_MULTIPLIER", "2.0"),
@@ -614,6 +633,12 @@ class AppConfig:
                 loss_pause_sec=_env_float("MAKER_LOSS_PAUSE_SEC", 60.0),
                 gate_block_grace_sec=max(0, _env_int("MAKER_GATE_BLOCK_GRACE_SEC", 4)),
                 cancel_ack_dedupe_window_sec=max(1, _env_int("MAKER_CANCEL_ACK_DEDUPE_WINDOW_SEC", 3)),
+                side_invalidation_confirm_cycles=max(1, _env_int("MAKER_SIDE_INVALIDATION_CONFIRM_CYCLES", 2)),
+                side_invalidation_spot_buffer_bps=_env_decimal("MAKER_SIDE_INVALIDATION_SPOT_BUFFER_BPS", "2"),
+                side_invalidation_fair_flip_min=_env_decimal("MAKER_SIDE_INVALIDATION_FAIR_FLIP_MIN", "0.60"),
+                side_force_unlock_last_sec=max(0, _env_int("MAKER_SIDE_FORCE_UNLOCK_LAST_SEC", 90)),
+                recycle_buy_discount_ps=_env_decimal("MAKER_RECYCLE_BUY_DISCOUNT_PS", "0.02"),
+                recycle_sell_discount_ps=_env_decimal("MAKER_RECYCLE_SELL_DISCOUNT_PS", "0.01"),
             ),
             side=SideDecisionConfig(
                 bi_side_enabled=_env_bool("BI_SIDE_ENABLED", False),
@@ -645,6 +670,7 @@ class AppConfig:
                 confident_score_abs_default=confident_score_abs_default,
                 flip_min_score_up_new=_env_decimal("BI_SIDE_FLIP_MIN_SCORE_UP_NEW", str(confident_score_abs_default)),
                 flip_max_score_down_new=_env_decimal("BI_SIDE_FLIP_MAX_SCORE_DOWN_NEW", str(-confident_score_abs_default)),
+                flip_fair_inversion_min_ps=_env_decimal("BI_SIDE_FLIP_FAIR_INVERSION_MIN_PS", "0.03"),
                 flip_min_score_up_held_new=_env_decimal("BI_SIDE_FLIP_MIN_SCORE_UP_HELD_NEW", str(held_flip_default)),
                 flip_max_score_down_held_new=_env_decimal("BI_SIDE_FLIP_MAX_SCORE_DOWN_HELD_NEW", str(-held_flip_default)),
                 directional_entry_min_score_abs_new=_env_decimal("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW", str(entry_score_abs_default)),
@@ -714,7 +740,6 @@ class AppConfig:
                 maker_early_profit_hold_max_profit_ps=_env_decimal("MAKER_EARLY_PROFIT_HOLD_MAX_PROFIT_PS", "0.08"),
                 maker_early_profit_hold_min_score_abs=_env_decimal("MAKER_EARLY_PROFIT_HOLD_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 maker_profit_run_trailing_drawdown_ps=_env_decimal("MAKER_PROFIT_RUN_TRAILING_DRAWDOWN_PS", "0.05"),
-                maker_profit_run_fair_veto_min=_env_decimal("MAKER_PROFIT_RUN_FAIR_VETO_MIN", "0.65"),
                 maker_profit_run_unlock_profit_ps=_env_decimal("MAKER_PROFIT_RUN_UNLOCK_PROFIT_PS", "0.18"),
                 maker_profit_run_unlock_trailing_drawdown_ps=_env_decimal("MAKER_PROFIT_RUN_UNLOCK_TRAILING_DRAWDOWN_PS", "0.02"),
                 maker_urgent_exit_enabled=_env_bool("MAKER_URGENT_EXIT_ENABLED", True),
@@ -729,7 +754,10 @@ class AppConfig:
                 exit_hold_band_release_min_roi=_env_decimal("EXIT_HOLD_BAND_RELEASE_MIN_ROI", "0.15"),
                 exit_stop_loss_thesis_min_score_abs=_env_decimal("EXIT_STOP_LOSS_THESIS_MIN_SCORE_ABS_NEW", str(entry_score_abs_default)),
                 maker_profit_run_min_score_abs=_env_decimal("MAKER_PROFIT_RUN_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
-                maker_winner_continuation_min_fair_edge_ps=_env_decimal("MAKER_WINNER_CONTINUATION_MIN_FAIR_EDGE_PS", "0.04"),
+                maker_recycle_locked_side_min_fair_edge_ps=_env_decimal(
+                    "MAKER_RECYCLE_LOCKED_SIDE_MIN_FAIR_EDGE_PS",
+                    _env_str("MAKER_WINNER_CONTINUATION_MIN_FAIR_EDGE_PS", "0.04"),
+                ),
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
                 maker_winner_sell_max_offset_ps=_env_decimal("MAKER_WINNER_SELL_MAX_OFFSET_PS", "0.05"),

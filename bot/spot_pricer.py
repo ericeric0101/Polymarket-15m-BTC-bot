@@ -45,6 +45,32 @@ class SpotPricerMixin:
         "polymarket_chainlink_live_latch",
     }
 
+    def _maybe_log_strike_pending_state(
+        self,
+        *,
+        slug: str,
+        provisional_strike: Optional[Decimal],
+        provisional_source: str,
+    ) -> None:
+        slug_key = str(slug or "")
+        if not slug_key:
+            return
+        state_key = (
+            f"pending:{provisional_source or 'none'}:"
+            f"{float(provisional_strike):.2f}"
+            if provisional_strike is not None
+            else "pending:none"
+        )
+        last_state = str(getattr(self, "_strike_pending_log_state_by_slug", {}).get(slug_key, ""))
+        if last_state == state_key:
+            return
+        self._strike_pending_log_state_by_slug[slug_key] = state_key
+        logger.info(
+            f"[STRIKE] Opening strike pending for slug={slug_key}; "
+            f"provisional_source={provisional_source or 'none'} "
+            f"provisional={'None' if provisional_strike is None else f'${float(provisional_strike):.2f}'}"
+        )
+
     # ------------------------------------------------------------------
     # Polymarket Chainlink WebSocket
     # ------------------------------------------------------------------
@@ -512,6 +538,7 @@ class SpotPricerMixin:
             self.market_strike_source_by_slug[slug] = "polymarket_chainlink_open"
             self.market_strike_provisional_by_slug.pop(slug, None)
             self.market_strike_provisional_source_by_slug.pop(slug, None)
+            self._strike_pending_log_state_by_slug.pop(slug, None)
             self._record_strike_event(
                 event_type="MARKET_STRIKE_LOCKED",
                 slug=slug,
@@ -535,6 +562,7 @@ class SpotPricerMixin:
             start_ts=int(start_ts),
         )
         if live_latched is not None:
+            self._strike_pending_log_state_by_slug.pop(slug, None)
             await self._maybe_validate_strike_with_gamma(slug, live_latched)
             return live_latched
 
@@ -577,7 +605,11 @@ class SpotPricerMixin:
                     "(not authoritative; trading should wait for Polymarket Chainlink open lock)"
                 )
 
-        logger.debug(f"[STRIKE] Opening strike pending for slug={slug}; provisional={strike}")
+        self._maybe_log_strike_pending_state(
+            slug=slug,
+            provisional_strike=self.market_strike_provisional_by_slug.get(slug),
+            provisional_source=str(self.market_strike_provisional_source_by_slug.get(slug, "") or ""),
+        )
         return None
 
     # ------------------------------------------------------------------

@@ -38,7 +38,7 @@ class PositionRuntimeState:
     entry_protection_until_ts: float = 0.0
     adverse_since_ts: float = 0.0
     adverse_hits: int = 0
-    winner_hold_until_ts: float = 0.0
+    recycle_hold_until_ts: float = 0.0
     last_spot_sign: int = 0
     recent_flip_count: int = 0
     pressure_ema: Decimal = Decimal("0")
@@ -65,7 +65,7 @@ class PositionManagerConfig:
     stop_loss_regime_min_sec: int
     stop_loss_regime_confirmations: int
     stop_loss_min_opposite_score_abs: Decimal
-    winner_continuation_min_fair_edge_ps: Decimal = Decimal("0")
+    recycle_locked_side_min_fair_edge_ps: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -155,7 +155,7 @@ class PositionManager:
                 entry_mode=normalized_entry_mode,
                 entered_ts=now_ts,
                 entry_protection_until_ts=now_ts + float(protection_sec),
-                winner_hold_until_ts=0.0,
+                recycle_hold_until_ts=0.0,
             )
             return
         if remaining_qty <= 0:
@@ -169,7 +169,7 @@ class PositionManager:
                 entry_mode=str(entry_mode or "value").lower(),
                 entered_ts=now_ts,
                 entry_protection_until_ts=now_ts,
-                winner_hold_until_ts=0.0,
+                recycle_hold_until_ts=0.0,
             )
             self.states[inst_key] = state
         else:
@@ -179,7 +179,7 @@ class PositionManager:
             if state.lifecycle == PositionLifecycle.EXIT_ARMED:
                 state.lifecycle = PositionLifecycle.LONG
             if remaining_qty <= 0:
-                state.winner_hold_until_ts = 0.0
+                state.recycle_hold_until_ts = 0.0
 
     def should_hold_profitable_position(
         self,
@@ -222,9 +222,9 @@ class PositionManager:
             thesis_side=active_side,
             now_ts=now_ts,
         )
-        if state.winner_hold_until_ts > now_ts:
+        if state.recycle_hold_until_ts > now_ts:
             return True, (
-                f"winner_hold_latch remaining={state.winner_hold_until_ts - now_ts:.1f}s"
+                f"recycle_hold_latch remaining={state.recycle_hold_until_ts - now_ts:.1f}s"
             )
         hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
         peak_profit_ps = max(peak_bid - avg_entry, peak_fair - avg_entry)
@@ -241,19 +241,19 @@ class PositionManager:
         if fair is not None and fair > 0:
             fair_edge_ps = max(Decimal("0"), fair - best_bid)
         if (
-            self.is_winner_continuation_candidate(
+            self.is_recycle_locked_side_hold_candidate(
                 best_bid=best_bid,
                 fair=fair,
                 avg_entry=avg_entry,
             )
         ):
-            state.winner_hold_until_ts = max(
-                state.winner_hold_until_ts,
+            state.recycle_hold_until_ts = max(
+                state.recycle_hold_until_ts,
                 now_ts + float(self.config.profit_run_min_hold_sec),
             )
             return True, (
-                f"winner_continuation fair_edge={float(fair_edge_ps):.4f}"
-                f">={float(self.config.winner_continuation_min_fair_edge_ps):.4f} "
+                f"recycle_locked_side_hold fair_edge={float(fair_edge_ps):.4f}"
+                f">={float(self.config.recycle_locked_side_min_fair_edge_ps):.4f} "
                 f"best_bid={float(best_bid):.4f} fair={float(fair or best_bid):.4f}"
             )
         if abs(side_decision_score) < self.config.profit_run_min_score_abs:
@@ -289,21 +289,21 @@ class PositionManager:
             )
         return False, ""
 
-    def is_winner_continuation_candidate(
+    def is_recycle_locked_side_hold_candidate(
         self,
         *,
         best_bid: Decimal,
         fair: Optional[Decimal],
         avg_entry: Decimal,
     ) -> bool:
-        if self.config.winner_continuation_min_fair_edge_ps <= 0:
+        if self.config.recycle_locked_side_min_fair_edge_ps <= 0:
             return False
         if avg_entry <= 0 or best_bid <= avg_entry:
             return False
         if fair is None or fair <= 0:
             return False
         fair_edge_ps = max(Decimal("0"), fair - best_bid)
-        return fair_edge_ps >= self.config.winner_continuation_min_fair_edge_ps
+        return fair_edge_ps >= self.config.recycle_locked_side_min_fair_edge_ps
 
     def compute_decision_state(
         self,
@@ -525,7 +525,7 @@ class PositionManager:
         state.adverse_hits = 0
         if state.lifecycle == PositionLifecycle.EXIT_ARMED:
             state.lifecycle = PositionLifecycle.LONG
-        state.winner_hold_until_ts = 0.0
+        state.recycle_hold_until_ts = 0.0
 
     def assess_stop_loss_regime(
         self,
