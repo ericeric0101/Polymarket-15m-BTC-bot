@@ -282,11 +282,40 @@ class SpotPricerMixin:
     def _is_authoritative_strike_source(self, source: str) -> bool:
         return str(source or "") in self._AUTHORITATIVE_STRIKE_SOURCES
 
+    def _record_strike_event(
+        self,
+        *,
+        event_type: str,
+        slug: str,
+        strike: Optional[Decimal],
+        source: str,
+        extra: Optional[dict[str, Any]] = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "slug": str(slug or ""),
+            "strike_source": str(source or ""),
+            "authoritative": bool(self._is_authoritative_strike_source(source)),
+        }
+        if strike is not None:
+            payload["strike"] = float(strike)
+        if extra:
+            payload.update(extra)
+        try:
+            self._db_strategy_event(event_type, payload)
+        except Exception:
+            pass
+
     def _set_provisional_strike(self, *, slug: str, strike: Decimal, source: str) -> None:
         if not slug or strike is None or strike <= 0:
             return
         self.market_strike_provisional_by_slug[slug] = strike
         self.market_strike_provisional_source_by_slug[slug] = str(source or "provisional")
+        self._record_strike_event(
+            event_type="MARKET_STRIKE_PROVISIONAL",
+            slug=slug,
+            strike=strike,
+            source=source,
+        )
 
     def _maybe_latch_opening_strike_from_live_reference(
         self,
@@ -311,6 +340,15 @@ class SpotPricerMixin:
         self.market_strike_source_by_slug[slug] = "polymarket_chainlink_live_latch"
         self.market_strike_provisional_by_slug.pop(slug, None)
         self.market_strike_provisional_source_by_slug.pop(slug, None)
+        self._record_strike_event(
+            event_type="MARKET_STRIKE_LOCKED",
+            slug=slug,
+            strike=price,
+            source="polymarket_chainlink_live_latch",
+            extra={
+                "sample_dt_sec": float(src_ts - float(start_ts)),
+            },
+        )
         logger.info(
             f"[STRIKE] Locked opening strike from Polymarket Chainlink live latch: "
             f"${float(price):.2f} for slug={slug} "
@@ -393,6 +431,16 @@ class SpotPricerMixin:
         if now_ts - last_warn < float(self.market_strike_gamma_mismatch_warn_interval_sec):
             return
         self.market_strike_last_gamma_warn_ts_by_slug[slug] = now_ts
+        self._record_strike_event(
+            event_type="MARKET_STRIKE_VALIDATION_MISMATCH",
+            slug=slug,
+            strike=local_strike,
+            source=self.market_strike_source_by_slug.get(slug, "pending"),
+            extra={
+                "gamma_price_to_beat": float(gamma_ptb),
+                "diff_abs_usd": float(diff_abs),
+            },
+        )
         logger.warning(
             f"Strike validation mismatch for {slug}: "
             f"local={float(local_strike):.2f} gamma_priceToBeat={float(gamma_ptb):.2f} "
@@ -420,6 +468,12 @@ class SpotPricerMixin:
             logger.warning(
                 f"[STRIKE] Ignoring non-authoritative cached strike for {slug}: "
                 f"source={source} value=${float(cached):.2f}. Waiting for Polymarket Chainlink open lock."
+            )
+            self._record_strike_event(
+                event_type="MARKET_STRIKE_CACHE_REJECTED",
+                slug=slug,
+                strike=cached,
+                source=source,
             )
             self._set_provisional_strike(slug=slug, strike=cached, source=source)
             self.market_strike_cache_by_slug.pop(slug, None)
@@ -458,6 +512,15 @@ class SpotPricerMixin:
             self.market_strike_source_by_slug[slug] = "polymarket_chainlink_open"
             self.market_strike_provisional_by_slug.pop(slug, None)
             self.market_strike_provisional_source_by_slug.pop(slug, None)
+            self._record_strike_event(
+                event_type="MARKET_STRIKE_LOCKED",
+                slug=slug,
+                strike=anchor_px,
+                source="polymarket_chainlink_open",
+                extra={
+                    "sample_dt_sec": float(anchor_ts - float(start_ts)),
+                },
+            )
             logger.info(
                 f"[STRIKE] Locked opening strike from Polymarket Chainlink history: "
                 f"${float(anchor_px):.2f} for slug={slug} "
