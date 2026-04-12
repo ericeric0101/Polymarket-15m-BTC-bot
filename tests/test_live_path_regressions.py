@@ -144,6 +144,7 @@ class DummyStrategyForFill(FillLedgerMixin):
         self.side_decision_reason = ""
         self.market_buy_count_by_slug = {}
         self.market_buy_counted_order_ids_by_slug = {}
+        self._thesis_epoch_by_slug = {}
         self.market_max_buy_events_per_market = 2
         self.consecutive_denied_orders = 0
         self.last_quote_update_ts = 123.0
@@ -972,6 +973,13 @@ class DummySellableQtyStrategy(PricingRuntimeMixin):
     def _instrument_key(self, instrument_id):
         return str(instrument_id) if instrument_id is not None else ""
 
+    def _current_thesis_epoch(self, slug):
+        return int(self._thesis_epoch_by_slug.get(str(slug or ""), 0))
+
+    def _market_buy_budget_key(self, slug):
+        slug_key = str(slug or "")
+        return f"{slug_key}:{self._current_thesis_epoch(slug_key)}" if slug_key else ""
+
     def _get_conditional_balance_for_token(self, token_id=None, force_refresh=False):
         return Decimal("0")
 
@@ -1001,8 +1009,8 @@ def test_partial_fills_only_increment_market_buy_count_once():
     IntegratedBTCStrategy.on_order_filled(strategy, first_fill)
     IntegratedBTCStrategy.on_order_filled(strategy, second_fill)
 
-    assert strategy.market_buy_count_by_slug["btc-updown-15m-test"] == 1
-    assert strategy.market_buy_counted_order_ids_by_slug["btc-updown-15m-test"] == {"BUY-1"}
+    assert strategy.market_buy_count_by_slug["btc-updown-15m-test:0"] == 1
+    assert strategy.market_buy_counted_order_ids_by_slug["btc-updown-15m-test:0"] == {"BUY-1"}
     count_events = [evt for evt, _ in strategy.strategy_events if evt == "MARKET_BUY_COUNT_UPDATED"]
     assert count_events == ["MARKET_BUY_COUNT_UPDATED"]
 

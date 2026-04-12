@@ -452,6 +452,8 @@ def initialize_strategy_settings(
     strategy.polymarket_chainlink_history_max = config.market_data.polymarket_chainlink_history_max
     strategy.market_strike_cache_by_slug = {}
     strategy.market_strike_source_by_slug = {}
+    strategy.market_strike_provisional_by_slug = {}
+    strategy.market_strike_provisional_source_by_slug = {}
     strategy.market_start_ts_by_slug = {}
     strategy.market_strike_anchor_max_lag_sec = config.market_data.market_strike_anchor_max_lag_sec
     strategy.market_strike_anchor_near_sec = config.market_data.market_strike_anchor_near_sec

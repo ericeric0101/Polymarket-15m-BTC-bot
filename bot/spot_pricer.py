@@ -40,6 +40,11 @@ from execution.maker_engine import MakerEngine
 class SpotPricerMixin:
     """Mixin providing BTC spot price, Binance WS, and fair probability logic."""
 
+    _AUTHORITATIVE_STRIKE_SOURCES = {
+        "polymarket_chainlink_open",
+        "polymarket_chainlink_live_latch",
+    }
+
     # ------------------------------------------------------------------
     # Polymarket Chainlink WebSocket
     # ------------------------------------------------------------------
@@ -274,6 +279,15 @@ class SpotPricerMixin:
             near_window_sec=float(self.market_strike_anchor_near_sec),
         )
 
+    def _is_authoritative_strike_source(self, source: str) -> bool:
+        return str(source or "") in self._AUTHORITATIVE_STRIKE_SOURCES
+
+    def _set_provisional_strike(self, *, slug: str, strike: Decimal, source: str) -> None:
+        if not slug or strike is None or strike <= 0:
+            return
+        self.market_strike_provisional_by_slug[slug] = strike
+        self.market_strike_provisional_source_by_slug[slug] = str(source or "provisional")
+
     def _maybe_latch_opening_strike_from_live_reference(
         self,
         *,
@@ -295,6 +309,8 @@ class SpotPricerMixin:
             return None
         self.market_strike_cache_by_slug[slug] = price
         self.market_strike_source_by_slug[slug] = "polymarket_chainlink_live_latch"
+        self.market_strike_provisional_by_slug.pop(slug, None)
+        self.market_strike_provisional_source_by_slug.pop(slug, None)
         logger.info(
             f"[STRIKE] Locked opening strike from Polymarket Chainlink live latch: "
             f"${float(price):.2f} for slug={slug} "
@@ -331,6 +347,14 @@ class SpotPricerMixin:
         strike = self.market_strike_cache_by_slug.get(slug_txt)
         source = self.market_strike_source_by_slug.get(slug_txt, "pending")
         if strike is None:
+            provisional = self.market_strike_provisional_by_slug.get(slug_txt)
+            provisional_source = self.market_strike_provisional_source_by_slug.get(slug_txt, "pending")
+            if provisional is not None:
+                logger.info(
+                    f"Strike status: slug={slug_txt} source={source} value=pending "
+                    f"(provisional={provisional_source}:${float(provisional):.2f}; trading should wait for authoritative lock)."
+                )
+                return
             logger.info(
                 f"Strike status: slug={slug_txt} source={source} value=pending "
                 "(digital pricer may fallback to drift until opening anchor is locked)."
@@ -389,8 +413,17 @@ class SpotPricerMixin:
         # 1) Cache hit — fastest path
         if slug and slug in self.market_strike_cache_by_slug:
             cached = self.market_strike_cache_by_slug[slug]
-            await self._maybe_validate_strike_with_gamma(slug, cached)
-            return cached
+            source = self.market_strike_source_by_slug.get(slug, "pending")
+            if self._is_authoritative_strike_source(source):
+                await self._maybe_validate_strike_with_gamma(slug, cached)
+                return cached
+            logger.warning(
+                f"[STRIKE] Ignoring non-authoritative cached strike for {slug}: "
+                f"source={source} value=${float(cached):.2f}. Waiting for Polymarket Chainlink open lock."
+            )
+            self._set_provisional_strike(slug=slug, strike=cached, source=source)
+            self.market_strike_cache_by_slug.pop(slug, None)
+            self.market_strike_source_by_slug.pop(slug, None)
 
         strike = None
 
@@ -423,6 +456,8 @@ class SpotPricerMixin:
             anchor_ts, anchor_px = anchor
             self.market_strike_cache_by_slug[slug] = anchor_px
             self.market_strike_source_by_slug[slug] = "polymarket_chainlink_open"
+            self.market_strike_provisional_by_slug.pop(slug, None)
+            self.market_strike_provisional_source_by_slug.pop(slug, None)
             logger.info(
                 f"[STRIKE] Locked opening strike from Polymarket Chainlink history: "
                 f"${float(anchor_px):.2f} for slug={slug} "
@@ -447,24 +482,22 @@ class SpotPricerMixin:
         question = str(info.get("question", "") or "")
         strike = self._extract_strike_from_question(question)
         if strike is not None and slug:
-            self.market_strike_cache_by_slug[slug] = strike
-            self.market_strike_source_by_slug[slug] = "parsed"
-            logger.info(f"✓ Locked opening strike for {slug} via question parsing: ${strike:,.2f}")
-            return strike
+            self._set_provisional_strike(slug=slug, strike=strike, source="parsed")
+            logger.info(
+                f"[STRIKE] Provisional strike via question parsing for {slug}: ${float(strike):,.2f} "
+                "(not authoritative; waiting for Polymarket Chainlink open lock)"
+            )
 
         # 6) Generic external spot history fallback
         anchor = self._resolve_opening_strike_from_history(start_ts)
         if anchor is not None:
             anchor_ts, anchor_px = anchor
-            self.market_strike_cache_by_slug[slug] = anchor_px
-            self.market_strike_source_by_slug[slug] = "spot_history_open"
+            self._set_provisional_strike(slug=slug, strike=anchor_px, source="spot_history_open")
             logger.info(
-                f"[STRIKE] Locked opening strike from spot history fallback: "
+                f"[STRIKE] Provisional strike from spot history fallback: "
                 f"${float(anchor_px):.2f} for slug={slug} "
-                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
+                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s; not authoritative)"
             )
-            await self._maybe_validate_strike_with_gamma(slug, anchor_px)
-            return anchor_px
 
         # 7) Binance REST backfill as last resort
         import asyncio as _asyncio
@@ -474,17 +507,15 @@ class SpotPricerMixin:
             self.market_strike_rest_last_try_ts_by_slug[slug] = now_ts
             backfilled = await _asyncio.to_thread(self._fetch_binance_open_price_sync, start_ts)
             if backfilled is not None:
-                self.market_strike_cache_by_slug[slug] = backfilled
-                self.market_strike_source_by_slug[slug] = "binance_rest_open"
+                self._set_provisional_strike(slug=slug, strike=backfilled, source="binance_rest_open")
                 logger.info(
-                    f"[STRIKE] Locked opening strike from Binance REST backfill: "
-                    f"${float(backfilled):.2f} for slug={slug}"
+                    f"[STRIKE] Provisional strike from Binance REST backfill: "
+                    f"${float(backfilled):.2f} for slug={slug} "
+                    "(not authoritative; trading should wait for Polymarket Chainlink open lock)"
                 )
-                await self._maybe_validate_strike_with_gamma(slug, backfilled)
-                return backfilled
 
-        logger.debug(f"[STRIKE] Opening strike pending for slug={slug}; fallback={strike}")
-        return strike
+        logger.debug(f"[STRIKE] Opening strike pending for slug={slug}; provisional={strike}")
+        return None
 
     # ------------------------------------------------------------------
     # Fair probability

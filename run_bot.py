@@ -213,6 +213,26 @@ class IntegratedBTCStrategy(
             logger.info("⚠️  TEST MODE ACTIVE - Trading every minute!")
         logger.info("Integrated BTC strategy initialized.")
 
+    def _current_thesis_epoch(self, slug: str) -> int:
+        slug_key = str(slug or "")
+        if not slug_key:
+            return 0
+        return int(self._thesis_epoch_by_slug.get(slug_key, 0))
+
+    def _market_buy_budget_key(self, slug: str) -> str:
+        slug_key = str(slug or "")
+        if not slug_key:
+            return ""
+        return f"{slug_key}:{self._current_thesis_epoch(slug_key)}"
+
+    def _bump_thesis_epoch(self, slug: str) -> int:
+        slug_key = str(slug or "")
+        if not slug_key:
+            return 0
+        next_epoch = int(self._thesis_epoch_by_slug.get(slug_key, 0)) + 1
+        self._thesis_epoch_by_slug[slug_key] = next_epoch
+        return next_epoch
+
     @property
     def inventory_delta_shares(self) -> Decimal:
         return self._inventory_delta_shares
@@ -1182,8 +1202,10 @@ class IntegratedBTCStrategy(
                 order_key = self._order_key_for(side, inst_id)
                 inst_key = self._instrument_key(inst_id)
                 current_slug = str(self.current_market_slug or "")
+                thesis_epoch = self._current_thesis_epoch(current_slug)
+                market_buy_budget_key = self._market_buy_budget_key(current_slug)
                 market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
-                market_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0))
+                market_buy_count = int(self.market_buy_count_by_slug.get(market_buy_budget_key, 0))
                 if (
                     side == "buy"
                     and current_slug
@@ -1216,6 +1238,8 @@ class IntegratedBTCStrategy(
                         reason="market_buy_limit",
                         payload={
                             "slug": current_slug,
+                            "thesis_epoch": thesis_epoch,
+                            "budget_key": market_buy_budget_key,
                             "instrument_id": str(inst_id),
                             "market_buy_count": market_buy_count,
                             "market_max_buy_events_per_market": self.market_max_buy_events_per_market,
@@ -1287,6 +1311,19 @@ class IntegratedBTCStrategy(
                     side_score=self.side_decision_score,
                     shadow_payload=live_shadow_payload,
                 )
+                if locked_side_thesis_broken:
+                    if not self._thesis_broken_freeze_by_slug.get(current_slug, False):
+                        self._bump_thesis_epoch(current_slug)
+                    self._thesis_broken_freeze_by_slug[current_slug] = True
+                    self._thesis_broken_recover_hits_by_slug[current_slug] = 0
+                elif self._thesis_broken_freeze_by_slug.get(current_slug, False):
+                    recover_hits = int(self._thesis_broken_recover_hits_by_slug.get(current_slug, 0)) + 1
+                    if recover_hits >= 2:
+                        self._thesis_broken_freeze_by_slug.pop(current_slug, None)
+                        self._thesis_broken_recover_hits_by_slug.pop(current_slug, None)
+                    else:
+                        self._thesis_broken_recover_hits_by_slug[current_slug] = recover_hits
+                thesis_broken_freeze_active = bool(self._thesis_broken_freeze_by_slug.get(current_slug, False))
                 tail_inventory_exit_context = bool(
                     side == "sell"
                     and current_inst_inventory_qty > 0
@@ -1301,6 +1338,7 @@ class IntegratedBTCStrategy(
                     active_side_locked=self.active_side_locked,
                     active_side_value=self.active_side.value,
                     locked_thesis_broken=locked_side_thesis_broken,
+                    thesis_broken_freeze_active=thesis_broken_freeze_active,
                     side_score=self.side_decision_score,
                     directional_entry_min_score_abs_new=self.directional_entry_min_score_abs_new,
                     directional_first_entry_min_score_abs_new=self.directional_first_entry_min_score_abs_new,
@@ -1341,6 +1379,7 @@ class IntegratedBTCStrategy(
                 _stop_loss_regime_armed = False
                 decision_state = None
                 hold_sec = 0.0
+                stop_loss_pending_active = bool(self._stop_loss_execution_priority_by_inst.get(inst_key, False))
                 if (
                     side == "sell"
                     and self.inventory_delta_shares > 0
@@ -1486,6 +1525,7 @@ class IntegratedBTCStrategy(
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                     thesis_weakened=_thesis_weakened,
                     offside_confirmed=_offside_confirmed,
+                    stop_loss_pending_active=stop_loss_pending_active,
                     stop_loss_regime_armed=_stop_loss_regime_armed,
                     decision_phase=decision_state.phase.value if decision_state is not None else "",
                     decision_regime=decision_state.regime.value if decision_state is not None else "",
@@ -1547,7 +1587,7 @@ class IntegratedBTCStrategy(
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                 ):
-                    adverse_exit_context = bool(
+                    de_risk_diag_context = bool(
                         _thesis_weakened
                         or _offside_confirmed
                         or (
@@ -1607,6 +1647,9 @@ class IntegratedBTCStrategy(
                         ),
                         external_thesis_weakened=_thesis_weakened,
                         external_offside_confirmed=_offside_confirmed,
+                        stop_loss_pending_active=stop_loss_pending_active,
+                        locked_thesis_broken=locked_side_thesis_broken,
+                        confirmed_adverse_exit_active=bool(_thesis_weakened or _offside_confirmed),
                     )
                     if unified_sell_exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND:
                         if tail_inventory_exit_context:
@@ -1617,7 +1660,7 @@ class IntegratedBTCStrategy(
                             desired_entry["diag_reason"] = unified_sell_exit_decision.reason
                     elif (
                         unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK
-                        and adverse_exit_context
+                        and de_risk_diag_context
                         and unified_sell_exit_decision.reason == "profitable_thesis_weakened"
                     ):
                         desired_entry["diag_reason"] = (
@@ -1635,6 +1678,8 @@ class IntegratedBTCStrategy(
                     adverse_exit_context = bool(
                         _thesis_weakened
                         or _offside_confirmed
+                        or locked_side_thesis_broken
+                        or stop_loss_pending_active
                         or (
                             decision_state is not None
                             and decision_state.phase == DecisionPhase.EXIT
@@ -1866,11 +1911,26 @@ class IntegratedBTCStrategy(
                     desired_entry["legacy_thesis_hold"] = decision_state.metadata.get("would_hold_thesis_not_opposite")
                 if (
                     side == "sell"
+                    and stop_loss_pending_active
+                    and quote_ctx.quote is not None
+                    and current_inst_inventory_qty > 0
+                ):
+                    desired_entry["should_quote"] = True
+                    desired_entry["diag_reason"] = (
+                        desired_entry.get("diag_reason")
+                        or "stop_loss_execution_priority"
+                    )
+                    desired_entry["loss_sell_reason"] = (
+                        str(desired_entry.get("loss_sell_reason", "") or "")
+                        or "stop_loss_execution_priority"
+                    )
+                if (
+                    side == "sell"
                     and desired_entry.get("should_quote", False)
                     and (
                         (
-                            (unified_sell_exit_decision is not None and unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK)
-                            or (decision_state is not None and decision_state.phase == DecisionPhase.EXIT)
+                            decision_state is not None
+                            and decision_state.phase == DecisionPhase.EXIT
                         )
                         or extreme_winner_lock_profit
                     )
@@ -1879,6 +1939,8 @@ class IntegratedBTCStrategy(
                     adverse_exit_context = bool(
                         _thesis_weakened
                         or _offside_confirmed
+                        or locked_side_thesis_broken
+                        or stop_loss_pending_active
                         or (
                             decision_state is not None
                             and decision_state.phase == DecisionPhase.EXIT
@@ -1887,38 +1949,26 @@ class IntegratedBTCStrategy(
                     if not adverse_exit_context and not extreme_winner_lock_profit:
                         pass
                     else:
-                        if (
-                            unified_sell_exit_decision is not None
-                            and unified_sell_exit_decision.decision_type == ExitDecisionType.DE_RISK
-                            and unified_sell_exit_decision.reason != "profitable_thesis_weakened"
-                            and not extreme_winner_lock_profit
-                        ):
-                            pass
-                        else:
-                            desired_entry = apply_de_risk_sell_pricing(
-                                desired_entry=desired_entry,
-                                side=side,
-                                avg_entry=avg_entry,
-                                fair=quote_ctx.fair,
-                                best_bid=quote_ctx.quote[0],
-                                best_ask=quote_ctx.quote[1],
-                                tick=quote_ctx.tick,
-                                maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
-                                maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
-                                exit_decision_reason=(
-                                    "extreme_winner_lock_profit"
-                                    if extreme_winner_lock_profit
-                                    else (
-                                        unified_sell_exit_decision.reason
-                                        if unified_sell_exit_decision is not None
-                                        else (
-                                            f"state_machine_{decision_state.phase.value.lower()}"
-                                            if decision_state is not None
-                                            else "de_risk"
-                                        )
-                                    )
-                                ),
-                            )
+                        desired_entry = apply_de_risk_sell_pricing(
+                            desired_entry=desired_entry,
+                            side=side,
+                            avg_entry=avg_entry,
+                            fair=quote_ctx.fair,
+                            best_bid=quote_ctx.quote[0],
+                            best_ask=quote_ctx.quote[1],
+                            tick=quote_ctx.tick,
+                            maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
+                            maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                            exit_decision_reason=(
+                                "extreme_winner_lock_profit"
+                                if extreme_winner_lock_profit
+                                else (
+                                    f"state_machine_{decision_state.phase.value.lower()}"
+                                    if decision_state is not None
+                                    else "exit"
+                                )
+                            ),
+                        )
                 elif (
                     side == "sell"
                     and tail_inventory_exit_context

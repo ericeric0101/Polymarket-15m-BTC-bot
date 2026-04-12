@@ -75,6 +75,7 @@ class ExitPolicyEngine:
         signal: SignalDecision,
         thesis_weakened: bool,
         offside_confirmed: bool,
+        locked_thesis_broken: bool,
     ) -> tuple[str, str, dict[str, str]]:
         if position.avg_entry_price <= 0 or snapshot.best_bid <= position.avg_entry_price:
             return "neutral", "", {}
@@ -97,7 +98,7 @@ class ExitPolicyEngine:
             "peak_profit_ps": str(peak_profit_ps),
             "spot_strike_supports": "1" if spot_strike_supports else "0",
         }
-        if offside_confirmed or thesis_weakened or not signal.matches_position:
+        if locked_thesis_broken or offside_confirmed or thesis_weakened or not signal.matches_position:
             return "de_risk", "profitable_thesis_weakened", shared_meta
         if (
             self.config.early_profit_hold_enabled
@@ -154,6 +155,9 @@ class ExitPolicyEngine:
         *,
         external_thesis_weakened: bool | None = None,
         external_offside_confirmed: bool | None = None,
+        stop_loss_pending_active: bool = False,
+        locked_thesis_broken: bool = False,
+        confirmed_adverse_exit_active: bool = False,
     ) -> ExitDecision:
         """Evaluate exit decision for a held position.
 
@@ -183,6 +187,8 @@ class ExitPolicyEngine:
             else Decimal("0")
         )
         band = self._classify_band(snapshot, signal)
+        if locked_thesis_broken or stop_loss_pending_active or confirmed_adverse_exit_active:
+            band = "neutral"
         hold_band_released = (
             band == "hold"
             and self.config.hold_band_release_min_roi > 0
@@ -197,6 +203,9 @@ class ExitPolicyEngine:
             "net_exit_roi": str(net_exit_roi),
             "hold_band_released": "1" if hold_band_released else "0",
             "hold_band_release_min_roi": str(self.config.hold_band_release_min_roi),
+            "stop_loss_pending_active": "1" if stop_loss_pending_active else "0",
+            "locked_thesis_broken": "1" if locked_thesis_broken else "0",
+            "confirmed_adverse_exit_active": "1" if confirmed_adverse_exit_active else "0",
         }
         signal_side = str(signal.active_side).upper()
         signal_is_none = signal_side == "NONE"
@@ -231,9 +240,19 @@ class ExitPolicyEngine:
             signal=signal,
             thesis_weakened=thesis_weakened,
             offside_confirmed=offside_confirmed,
+            locked_thesis_broken=locked_thesis_broken,
         )
+        if stop_loss_pending_active:
+            profitable_intent = "neutral"
+            profitable_reason = ""
+            profitable_meta = {}
 
-        if self.config.stop_loss_hold_on_none_signal and signal_is_none and not price_adverse:
+        if (
+            self.config.stop_loss_hold_on_none_signal
+            and signal_is_none
+            and not price_adverse
+            and not stop_loss_pending_active
+        ):
             return ExitDecision(
                 decision_type=ExitDecisionType.NONE,
                 reason="signal_none_hold",

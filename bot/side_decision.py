@@ -55,6 +55,8 @@ class SideDecisionHost(Protocol):
     def _instrument_for_side(self, side: ActiveSide) -> Any: ...
     def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
     def _primary_instrument_for_market(self) -> Any: ...
+    def _bump_thesis_epoch(self, slug: str) -> int: ...
+    def _current_thesis_epoch(self, slug: str) -> int: ...
     def _db_strategy_event(self, event_type: str, payload: Dict[str, Any]) -> None: ...
 
 
@@ -525,7 +527,9 @@ class SideDecisionMixin:
                 start_ts = parsed_start
                 self.market_start_ts_by_slug[slug] = parsed_start
         if start_ts is not None:
-            anchor = self._resolve_opening_strike_from_history(int(start_ts))
+            anchor = self._resolve_opening_strike_from_polymarket_history(int(start_ts))
+            if anchor is None:
+                anchor = self._resolve_opening_strike_from_history(int(start_ts))
             if anchor is not None:
                 _anchor_ts, anchor_px = anchor
                 self.current_market_open_spot = anchor_px
@@ -662,10 +666,13 @@ class SideDecisionMixin:
             self.side_pending_flip_since_ts = 0.0
             self._sync_active_instrument()
             if old_side != side:
+                thesis_epoch = self._bump_thesis_epoch(str(self.current_market_slug or ""))
                 self._cancel_stale_buy_orders_after_side_change(
                     old_side=old_side,
                     new_side=side,
                 )
+            else:
+                thesis_epoch = self._current_thesis_epoch(str(self.current_market_slug or ""))
             if self.active_side_locked and side != ActiveSide.NONE:
                 self._force_quote_refresh_once = True
                 self._force_quote_refresh_reason = f"locked_flip:{old_side.value}->{side.value}"
@@ -679,6 +686,7 @@ class SideDecisionMixin:
                     "decision_ts": now_ts,
                     "flip_count": self.side_flip_count,
                     "extra_flip_for_held_inventory": bool(extra_flip_for_held_inventory),
+                    "thesis_epoch": int(thesis_epoch),
                 }
             )
             self._db_strategy_event("SIDE_MODE_FLIPPED", payload)
@@ -713,10 +721,13 @@ class SideDecisionMixin:
             self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
         self._sync_active_instrument()
         if old_side != side:
+            thesis_epoch = self._bump_thesis_epoch(str(self.current_market_slug or ""))
             self._cancel_stale_buy_orders_after_side_change(
                 old_side=old_side,
                 new_side=side,
             )
+        else:
+            thesis_epoch = self._current_thesis_epoch(str(self.current_market_slug or ""))
         event_name = "SIDE_MODE_CHANGED" if old_side != side else "SIDE_DECISION"
         payload = dict(inputs)
         payload.update(
@@ -726,6 +737,7 @@ class SideDecisionMixin:
                 "score": float(score),
                 "reason": reason,
                 "decision_ts": now_ts,
+                "thesis_epoch": int(thesis_epoch),
             }
         )
         self._db_strategy_event(event_name, payload)

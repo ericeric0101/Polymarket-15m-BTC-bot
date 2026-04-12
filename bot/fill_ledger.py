@@ -33,10 +33,15 @@ class FillLedgerHost(Protocol):
     market_cycle_realized_net_usdc: Decimal
     recent_fill_pnl_results: list[Any]
     quote_pause_until_ts: float
+    market_buy_count_by_slug: dict[str, int]
+    market_buy_counted_order_ids_by_slug: dict[str, set[str]]
+    market_max_buy_events_per_market: int
 
     def _instrument_key(self, instrument_id: Any) -> str: ...
     def _normalize_side_text(self, side: str) -> str: ...
     def _clear_profit_run_state(self, instrument_id: Any) -> None: ...
+    def _market_buy_budget_key(self, slug: str) -> str: ...
+    def _current_thesis_epoch(self, slug: str) -> int: ...
     def _db_strategy_event(self, event_type: str, payload: dict[str, Any]) -> None: ...
 
 
@@ -180,16 +185,20 @@ class FillLedgerMixin:
     ) -> None:
         if side_for_ledger != "buy" or not current_slug:
             return
-        counted_ids = self.market_buy_counted_order_ids_by_slug.setdefault(current_slug, set())
+        budget_key = self._market_buy_budget_key(current_slug)
+        thesis_epoch = self._current_thesis_epoch(current_slug)
+        counted_ids = self.market_buy_counted_order_ids_by_slug.setdefault(budget_key, set())
         if not filled_id or filled_id in counted_ids:
             return
         counted_ids.add(filled_id)
-        new_buy_count = int(self.market_buy_count_by_slug.get(current_slug, 0)) + 1
-        self.market_buy_count_by_slug[current_slug] = new_buy_count
+        new_buy_count = int(self.market_buy_count_by_slug.get(budget_key, 0)) + 1
+        self.market_buy_count_by_slug[budget_key] = new_buy_count
         self._db_strategy_event(
             "MARKET_BUY_COUNT_UPDATED",
             {
                 "slug": current_slug,
+                "thesis_epoch": thesis_epoch,
+                "budget_key": budget_key,
                 "count": new_buy_count,
                 "max_per_market": int(self.market_max_buy_events_per_market),
                 "instrument_id": str(filled_inst) if filled_inst else None,

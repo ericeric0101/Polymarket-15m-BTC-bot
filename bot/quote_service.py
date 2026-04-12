@@ -143,6 +143,7 @@ def evaluate_buy_entry_controls(
     active_side_locked: bool,
     active_side_value: str,
     locked_thesis_broken: bool,
+    thesis_broken_freeze_active: bool,
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
     directional_first_entry_min_score_abs_new: Decimal,
@@ -172,19 +173,20 @@ def evaluate_buy_entry_controls(
         bi_side_enabled
         and active_side_locked
         and str(active_side_value or "NONE").upper() != "NONE"
-        and locked_thesis_broken
+        and (locked_thesis_broken or thesis_broken_freeze_active)
     ):
         return BuyEntryEvaluation(
             skip=True,
             min_expected_net_usdc=min_expected_net_usdc,
             entry_mode=entry_mode,
             event_type="ORDER_SKIP_LOCKED_THESIS_BROKEN",
-            reason="locked_thesis_broken",
+            reason="locked_thesis_broken_freeze" if thesis_broken_freeze_active else "locked_thesis_broken",
             payload={
                 "slug": current_slug,
                 "instrument_id": str(inst_id),
                 "active_side": active_side_value,
                 "side_score": float(side_score),
+                "freeze_active": bool(thesis_broken_freeze_active),
                 "engine": "new_signal",
             },
         )
@@ -1216,6 +1218,7 @@ def build_desired_quote_entry(
     maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
     thesis_weakened: bool = False,
     offside_confirmed: bool = False,
+    stop_loss_pending_active: bool = False,
     stop_loss_regime_armed: bool = False,
     hold_sec: float = 0.0,
     loss_sell_min_hold_sec: float = 60.0,
@@ -1328,8 +1331,12 @@ def build_desired_quote_entry(
         # Problem: emergency_window was purely time-based and would override
         # HOLD_IN_BAND decisions, causing loss sells when direction was correct.
         #
-        _thesis_bad = thesis_weakened or offside_confirmed
-        _urgent_override = decision_phase == "EXIT" or (_thesis_bad and stop_loss_regime_armed)
+        _thesis_bad = thesis_weakened or offside_confirmed or stop_loss_pending_active
+        _urgent_override = (
+            decision_phase == "EXIT"
+            or stop_loss_pending_active
+            or (_thesis_bad and stop_loss_regime_armed)
+        )
         _de_risk_active = decision_phase == "DE_RISK"
         _allow_regime_loss_sell = (
             (_urgent_override or _de_risk_active)

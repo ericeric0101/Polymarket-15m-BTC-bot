@@ -32,6 +32,7 @@ class TakerExitHost(Protocol):
     taker_exit_reject_cooldown_until_by_inst: dict[str, float]
     taker_exit_tail_attempted_by_inst: dict[str, Any]
     taker_exit_last_eval_ts_by_inst: dict[str, float]
+    _stop_loss_execution_priority_by_inst: dict[str, bool]
     live_inventory_cost: dict[str, Any]
     pending_taker_exit_by_inst: dict[str, Any]
     last_taker_exit_ts_by_inst: dict[str, float]
@@ -223,7 +224,22 @@ class TakerExitMixin:
                 reason=self.side_decision_reason,
                 matches_position=(self._instrument_for_side(self.active_side) == inst_id),
             )
-            exit_decision = self.exit_policy_engine.evaluate(snapshot, position, signal_decision)
+            stop_loss_pending_active = bool(
+                self._stop_loss_execution_priority_by_inst.get(inst_key, False)
+                or int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)) > 0
+            )
+            locked_thesis_broken = (
+                (not signal_decision.matches_position)
+                and str(signal_decision.active_side or "NONE").upper() != "NONE"
+            )
+            exit_decision = self.exit_policy_engine.evaluate(
+                snapshot,
+                position,
+                signal_decision,
+                stop_loss_pending_active=stop_loss_pending_active,
+                locked_thesis_broken=locked_thesis_broken,
+                confirmed_adverse_exit_active=locked_thesis_broken,
+            )
             net_if_exit = exit_decision.net_if_exit
             force_offside_near_close = (
                 not signal_decision.matches_position
@@ -236,7 +252,9 @@ class TakerExitMixin:
             if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
                 if hasattr(self, "position_manager"):
                     self.position_manager.reset_stop_loss_regime(inst_key)
-                self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                if not stop_loss_pending_active:
+                    self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                    self._stop_loss_execution_priority_by_inst.pop(inst_key, None)
                 hold_reason_tag = "hold_band" if exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND else "hold_to_redeem"
                 self._record_exit_policy_decision_throttled(
                     inst_key=inst_key,
@@ -278,9 +296,6 @@ class TakerExitMixin:
                 continue
 
             if exit_decision.decision_type == ExitDecisionType.DE_RISK:
-                if hasattr(self, "position_manager"):
-                    self.position_manager.reset_stop_loss_regime(inst_key)
-                self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
                 self._record_exit_policy_decision_throttled(
                     inst_key=inst_key,
                     reason_tag="de_risk",
@@ -337,6 +352,7 @@ class TakerExitMixin:
                 )
                 if regime.status != "armed":
                     self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                    self._stop_loss_execution_priority_by_inst.pop(inst_key, None)
                     self._log_taker_exit_skip_throttled(
                         inst_key=inst_key,
                         reason_tag=f"position_manager_{regime.status}",
@@ -351,6 +367,7 @@ class TakerExitMixin:
 
             if exit_decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION:
                 self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
+                self._stop_loss_execution_priority_by_inst[inst_key] = True
                 self._record_exit_policy_decision_throttled(
                     inst_key=inst_key,
                     reason_tag="stop_loss_confirming",
@@ -397,8 +414,10 @@ class TakerExitMixin:
                 if hasattr(self, "position_manager"):
                     self.position_manager.reset_stop_loss_regime(inst_key)
                 self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                self._stop_loss_execution_priority_by_inst.pop(inst_key, None)
                 continue
             self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
+            self._stop_loss_execution_priority_by_inst[inst_key] = True
             trigger = "offside_near_close" if force_offside_near_close else "stop_loss"
 
             # Avoid paying taker costs into a wide spread unless it's an emergency path.

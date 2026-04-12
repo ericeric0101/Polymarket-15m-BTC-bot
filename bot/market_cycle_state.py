@@ -11,10 +11,14 @@ class MarketCycleState:
     taker_exit_last_eval_ts_by_inst: dict[str, float] = field(default_factory=dict)
     taker_exit_reject_cooldown_until_by_inst: dict[str, float] = field(default_factory=dict)
     taker_exit_stop_loss_hits_by_inst: dict[str, Any] = field(default_factory=dict)
+    stop_loss_execution_priority_by_inst: dict[str, bool] = field(default_factory=dict)
     stop_loss_reentry_pause_until_by_inst: dict[str, float] = field(default_factory=dict)
     side_stop_loss_penalty_until_by_market_side: dict[str, float] = field(default_factory=dict)
     market_stop_loss_count_by_slug: dict[str, int] = field(default_factory=dict)
     market_buy_count_by_slug: dict[str, int] = field(default_factory=dict)
+    thesis_epoch_by_slug: dict[str, int] = field(default_factory=dict)
+    thesis_broken_freeze_by_slug: dict[str, bool] = field(default_factory=dict)
+    thesis_broken_recover_hits_by_slug: dict[str, int] = field(default_factory=dict)
     market_buy_counted_order_ids_by_slug: dict[str, set[str]] = field(default_factory=dict)
     taker_exit_reason_by_client_order_id: dict[str, str] = field(default_factory=dict)
     taker_exit_skip_log_ts_by_key: dict[str, float] = field(default_factory=dict)
@@ -39,10 +43,14 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy.taker_exit_last_eval_ts_by_inst = state.taker_exit_last_eval_ts_by_inst
     strategy.taker_exit_reject_cooldown_until_by_inst = state.taker_exit_reject_cooldown_until_by_inst
     strategy.taker_exit_stop_loss_hits_by_inst = state.taker_exit_stop_loss_hits_by_inst
+    strategy._stop_loss_execution_priority_by_inst = state.stop_loss_execution_priority_by_inst
     strategy.stop_loss_reentry_pause_until_by_inst = state.stop_loss_reentry_pause_until_by_inst
     strategy.side_stop_loss_penalty_until_by_market_side = state.side_stop_loss_penalty_until_by_market_side
     strategy.market_stop_loss_count_by_slug = state.market_stop_loss_count_by_slug
     strategy.market_buy_count_by_slug = state.market_buy_count_by_slug
+    strategy._thesis_epoch_by_slug = state.thesis_epoch_by_slug
+    strategy._thesis_broken_freeze_by_slug = state.thesis_broken_freeze_by_slug
+    strategy._thesis_broken_recover_hits_by_slug = state.thesis_broken_recover_hits_by_slug
     strategy.market_buy_counted_order_ids_by_slug = state.market_buy_counted_order_ids_by_slug
     strategy.taker_exit_reason_by_client_order_id = state.taker_exit_reason_by_client_order_id
     strategy._taker_exit_skip_log_ts_by_key = state.taker_exit_skip_log_ts_by_key
