@@ -20,6 +20,7 @@ from bot.quote_service import (
     apply_forced_exit_sell_pricing,
     apply_shadow_entry_veto,
     build_desired_quote_entry,
+    compute_loss_sell_policy,
     build_directional_snapshot,
     evaluate_buy_entry_controls,
     maybe_apply_continuation_entry,
@@ -3122,6 +3123,53 @@ def test_forced_exit_sell_pricing_uses_fair_edge_not_plain_cost_floor():
     assert "forced_exit_price" in out["diag_reason"]
 
 
+def test_forced_exit_sell_pricing_can_exit_below_cost_floor_when_invalidation_confirmed():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.3900"),
+        "diag_reason": "confirmed_locked_side_invalidation",
+    }
+
+    out = apply_forced_exit_sell_pricing(
+        desired_entry=desired_entry,
+        side="sell",
+        avg_entry=Decimal("0.7700"),
+        fair=Decimal("0.0610"),
+        best_bid=Decimal("0.0500"),
+        best_ask=Decimal("0.0600"),
+        tick=Decimal("0.01"),
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0.0050"),
+        maker_sell_min_profit_floor_ps=Decimal("0.0400"),
+        exit_decision_reason="confirmed_locked_side_invalidation",
+        allow_loss_exit_below_cost_floor=True,
+    )
+
+    assert out["price"] == Decimal("0.0600")
+    assert "below_cost=1" in out["diag_reason"]
+
+
+def test_confirmed_adverse_exit_allows_loss_sell_without_exit_phase():
+    allow_loss_sell, reason = compute_loss_sell_policy(
+        thesis_weakened=False,
+        offside_confirmed=True,
+        confirmed_adverse_exit_active=True,
+        spot_still_supports_position=False,
+        stop_loss_pending_active=False,
+        stop_loss_regime_armed=False,
+        decision_phase="HOLD",
+        decision_regime="TREND",
+        hold_sec=5.0,
+        loss_sell_min_hold_sec=60.0,
+        emergency_window=False,
+        time_left_sec=420.0,
+        absolute_last_resort_sec=60.0,
+        true_last_resort_sec=15.0,
+    )
+
+    assert allow_loss_sell is True
+    assert reason == "confirmed_adverse_exit"
+
+
 def test_extreme_winner_lock_profit_prices_high_near_market_top():
     desired_entry = {
         "should_quote": True,
@@ -3144,6 +3192,75 @@ def test_extreme_winner_lock_profit_prices_high_near_market_top():
 
     assert out["price"] == Decimal("0.9900")
     assert "extreme_winner_lock_profit" in out["diag_reason"]
+
+
+def test_exit_engine_does_not_hold_profitable_position_after_confirmed_invalidation():
+    engine = ExitPolicyEngine(
+        ExitEngineConfig(
+            min_hold_sec=8,
+            stop_loss_usdc=Decimal("0.20"),
+            stop_loss_confirmations=2,
+            stop_loss_requires_thesis_weakening=True,
+            stop_loss_thesis_min_score_abs=Decimal("0.18"),
+            stop_loss_hold_on_none_signal=True,
+            conviction_band_min_price=Decimal("0.75"),
+            hold_band_min_price=Decimal("0.60"),
+            conviction_band_min_score_abs=Decimal("0.30"),
+            hold_band_min_score_abs=Decimal("0.15"),
+            hold_band_release_min_roi=Decimal("0"),
+            conviction_stop_loss_multiplier=Decimal("1.5"),
+            conviction_extra_confirmations=1,
+            hold_band_requires_locked=True,
+        )
+    )
+    snapshot = MarketSnapshot(
+        instrument_id="inst-up",
+        phase="ACTIVE",
+        time_left_sec=420.0,
+        best_bid=Decimal("0.82"),
+        best_ask=Decimal("0.83"),
+        fee_rate=Decimal("0.00"),
+        spread=Decimal("0.01"),
+        spread_pct=Decimal("0.0122"),
+        fair=Decimal("0.84"),
+        slippage_buffer_pct=Decimal("0.02"),
+        exit_stage=ExitStage.PASSIVE,
+        in_reduce_only_tail=False,
+        fair_edge_ps=Decimal("0.02"),
+        spot_minus_strike_bps=Decimal("-15"),
+        stop_loss_disabled_in_tail=False,
+    )
+    position = PositionState(
+        instrument_id="inst-up",
+        qty=Decimal("5.4"),
+        sellable_qty=Decimal("5.4"),
+        avg_entry_price=Decimal("0.68"),
+        entry_fee_remaining=Decimal("0.03"),
+        held_side="UP",
+        hold_sec=180.0,
+        peak_bid=Decimal("0.90"),
+        peak_fair=Decimal("0.92"),
+        stop_loss_confirm_hits=0,
+    )
+    signal = SignalDecision(
+        active_side=ActiveSide.UP,
+        score=Decimal("-0.28"),
+        locked=True,
+        reason="confirmed_offside",
+        matches_position=False,
+    )
+
+    decision = engine.evaluate(
+        snapshot,
+        position,
+        signal,
+        external_thesis_weakened=True,
+        external_offside_confirmed=True,
+        locked_side_invalidated=True,
+        confirmed_adverse_exit_active=True,
+    )
+
+    assert decision.decision_type != ExitDecisionType.HOLD_IN_BAND
 
 
 def test_live_shadow_payload_does_not_emit_opposite_candidate_side():

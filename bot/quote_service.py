@@ -74,6 +74,7 @@ def compute_loss_sell_policy(
     *,
     thesis_weakened: bool,
     offside_confirmed: bool,
+    confirmed_adverse_exit_active: bool,
     spot_still_supports_position: bool,
     stop_loss_pending_active: bool,
     stop_loss_regime_armed: bool,
@@ -86,9 +87,15 @@ def compute_loss_sell_policy(
     absolute_last_resort_sec: float,
     true_last_resort_sec: float,
 ) -> tuple[bool, str]:
-    thesis_bad = thesis_weakened or offside_confirmed or stop_loss_pending_active
+    thesis_bad = (
+        thesis_weakened
+        or offside_confirmed
+        or stop_loss_pending_active
+        or confirmed_adverse_exit_active
+    )
     urgent_override = (
         decision_phase == "EXIT"
+        or confirmed_adverse_exit_active
         or stop_loss_pending_active
         or (thesis_bad and stop_loss_regime_armed)
     )
@@ -122,6 +129,8 @@ def compute_loss_sell_policy(
         return False, ""
     if decision_phase == "EXIT":
         return True, f"state_machine_exit:{decision_regime or 'n/a'}"
+    if confirmed_adverse_exit_active:
+        return True, "confirmed_adverse_exit"
     if allow_regime_loss_sell:
         return True, "forced_exit_thesis_bad"
     if in_true_last_resort:
@@ -634,6 +643,7 @@ def apply_forced_exit_sell_pricing(
     maker_sell_cost_protect_fee_buffer_ps: Decimal,
     maker_sell_min_profit_floor_ps: Decimal,
     exit_decision_reason: str,
+    allow_loss_exit_below_cost_floor: bool = False,
 ) -> dict[str, Any]:
     if side != "sell" or not desired_entry.get("should_quote", False):
         return desired_entry
@@ -651,18 +661,22 @@ def apply_forced_exit_sell_pricing(
 
     cost_floor = avg_entry + maker_sell_cost_protect_fee_buffer_ps + maker_sell_min_profit_floor_ps
     fair_edge = max(Decimal("0"), fair - best_bid)
-    if fair_edge <= 0:
-        return desired_entry
-
-    # Forced exit should monetize a meaningful portion of the currently observed fair edge
-    # instead of snapping back to the generic cost-floor path.
-    target_above_ask = best_ask + max(tick, fair_edge * Decimal("0.75"))
-    fair_ceiling = max(cost_floor, fair - tick)
-    target_price = min(target_above_ask, fair_ceiling)
-    target_price = max(cost_floor, best_bid + tick, target_price)
+    if allow_loss_exit_below_cost_floor:
+        target_floor = max(Decimal("0.01"), best_bid + tick)
+        target_ceiling = min(best_ask, max(Decimal("0.01"), fair))
+        target_price = max(target_floor, target_ceiling)
+    else:
+        if fair_edge <= 0:
+            return desired_entry
+        # Tail exits can still be patient enough to monetize the observed edge,
+        # but they should not fall back to generic recycle pricing.
+        target_above_ask = best_ask + max(tick, fair_edge * Decimal("0.75"))
+        fair_ceiling = max(cost_floor, fair - tick)
+        target_price = min(target_above_ask, fair_ceiling)
+        target_price = max(cost_floor, best_bid + tick, target_price)
     target_price = (target_price / tick).to_integral_value(rounding=ROUND_CEILING) * tick
     target_price = max(Decimal("0.01"), min(Decimal("0.99"), target_price))
-    if target_price <= limit_price:
+    if target_price == limit_price:
         return desired_entry
 
     prev_reason = str(desired_entry.get("diag_reason", "") or "")
@@ -672,6 +686,7 @@ def apply_forced_exit_sell_pricing(
         f"new={float(target_price):.4f} fair={float(fair):.4f} "
         f"bid={float(best_bid):.4f} ask={float(best_ask):.4f} "
         f"edge={float(fair_edge):.4f} reason={exit_decision_reason}"
+        f" below_cost={'1' if allow_loss_exit_below_cost_floor else '0'}"
         + (f" prev={prev_reason}" if prev_reason else "")
     )
     return desired_entry
@@ -1202,6 +1217,7 @@ def build_desired_quote_entry(
     maker_sell_min_profit_floor_ps: Decimal = Decimal("0"),
     thesis_weakened: bool = False,
     offside_confirmed: bool = False,
+    confirmed_adverse_exit_active: bool = False,
     spot_still_supports_position: bool = False,
     stop_loss_pending_active: bool = False,
     stop_loss_regime_armed: bool = False,
@@ -1320,6 +1336,7 @@ def build_desired_quote_entry(
         allow_loss_sell, _loss_sell_reason = compute_loss_sell_policy(
             thesis_weakened=thesis_weakened,
             offside_confirmed=offside_confirmed,
+            confirmed_adverse_exit_active=confirmed_adverse_exit_active,
             spot_still_supports_position=spot_still_supports_position,
             stop_loss_pending_active=stop_loss_pending_active,
             stop_loss_regime_armed=stop_loss_regime_armed,

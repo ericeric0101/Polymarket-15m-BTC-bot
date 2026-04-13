@@ -529,7 +529,20 @@ def main():
     enable_grafana = not args.no_grafana
     test_mode = args.test_mode
     enable_terminal_dashboard = args.terminal_dashboard
-    compatibility = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard).compatibility
+    app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
+    if not enable_terminal_dashboard and app_config.bot.terminal_dashboard_enabled:
+        enable_terminal_dashboard = True
+
+    if enable_terminal_dashboard:
+        logger.remove()
+        log_dir = Path("logs/bot")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger.add(str(log_dir / "terminal_bot.log"), rotation="20 MB", retention="5 days", level="DEBUG")
+        print(f"\n[INFO] Terminal dashboard enabled.")
+        print(f"[INFO] Background logs are re-routed to: {log_dir}/terminal_bot.log")
+        print(f"[INFO] Tip: Run 'tail -f {log_dir}/terminal_bot.log' in another terminal to view live logs.\n")
+
+    compatibility = app_config.compatibility
     apply_compatibility_patches(
         project_root=Path(__file__).resolve().parent.parent,
         enabled=compatibility.auto_apply_patches,

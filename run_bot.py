@@ -920,15 +920,34 @@ class IntegratedBTCStrategy(
         if not self.terminal_dashboard:
             return
         try:
+            buy_order_str = None
+            sell_order_str = None
+            for key, state in self.active_maker_orders.items():
+                side = state.get("side")
+                qty = state.get("token_qty", 0.0)
+                price = state.get("limit_price", 0.0)
+                if side == "buy":
+                    buy_order_str = f"Buy {float(qty):.2f} @ ${float(price):.4f}"
+                elif side == "sell":
+                    sell_order_str = f"Sell {float(qty):.2f} @ ${float(price):.4f}"
+
+            slug_str = self.current_market_slug or self.selected_slug or "-"
+            strike_val = self.market_strike_cache_by_slug.get(str(slug_str))
+            spot_val = self._capture_market_open_spot()
+
             self.terminal_dashboard.update(
                 phase=self.market_phase.value,
-                slug=self.current_market_slug or self.selected_slug or "-",
+                slug=slug_str,
                 active_side=self.active_side.value,
                 inventory_shares=float(self.inventory_delta_shares),
                 wallet_balance_usdc=(
                     float(self._cached_usdc_balance) if self._cached_usdc_balance is not None else None
                 ),
                 active_orders=len(self.active_maker_orders),
+                current_buy_order=buy_order_str,
+                current_sell_order=sell_order_str,
+                strike=float(strike_val) if strike_val is not None else None,
+                spot=float(spot_val) if spot_val is not None else None,
             )
         except Exception as e:
             logger.debug(f"Failed to update terminal dashboard snapshot: {e}")
@@ -1709,6 +1728,9 @@ class IntegratedBTCStrategy(
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                     thesis_weakened=_thesis_weakened,
                     offside_confirmed=_offside_confirmed,
+                    confirmed_adverse_exit_active=bool(
+                        locked_side_runtime.invalidation_confirmed or _offside_confirmed
+                    ),
                     spot_still_supports_position=spot_still_supports_position,
                     stop_loss_pending_active=stop_loss_pending_active,
                     stop_loss_regime_armed=_stop_loss_regime_armed,
@@ -1839,10 +1861,12 @@ class IntegratedBTCStrategy(
                             # Do not let legacy hold-band / recycle-hold reasons suppress
                             # passive sell quotes after we have already determined a valid
                             # same-side inventory exit price.
-                            desired_entry["diag_reason"] = unified_sell_exit_decision.reason
+                            if desired_entry.get("should_quote", False):
+                                desired_entry["diag_reason"] = unified_sell_exit_decision.reason
                             desired_entry["exit_policy_hold_reason"] = unified_sell_exit_decision.reason
                 recycle_profit_candidate = False
                 adverse_exit_context = False
+                was_econ_gated = False
                 if side == "sell" and quote_ctx.quote is not None and avg_entry > 0:
                     adverse_exit_context = bool(
                         _thesis_weakened
@@ -1860,18 +1884,22 @@ class IntegratedBTCStrategy(
                         + self.maker_sell_cost_protect_fee_buffer_ps
                         + self.maker_sell_min_profit_floor_ps
                     )
+                    was_econ_gated = str(desired_entry.get("diag_reason", "")).startswith("econ_gate")
+                    is_hold_in_band = (unified_sell_exit_decision is not None and unified_sell_exit_decision.decision_type == ExitDecisionType.HOLD_IN_BAND)
                     if (
-                        desired_entry.get("should_quote", False)
+                        (desired_entry.get("should_quote", False) or was_econ_gated)
                         and not adverse_exit_context
                         and not tail_inventory_exit_context
                         and not str(desired_entry.get("loss_sell_reason", "") or "")
                         and limit_price_now >= min_profit_sell
+                        and not is_hold_in_band
                     ):
                         recycle_profit_candidate = True
-                        if not str(desired_entry.get("diag_reason", "") or "").startswith("sell_pause"):
+                        if was_econ_gated or not str(desired_entry.get("diag_reason", "") or "").startswith("sell_pause"):
                             desired_entry["diag_reason"] = (
                                 f"recycle_profit_candidate sell={float(limit_price_now):.4f} "
                                 f">= min={float(min_profit_sell):.4f}"
+                                + (f" (bypassed {desired_entry.get('diag_reason')})" if was_econ_gated else "")
                             )
                 if side == "sell":
                     quote_intent_state = resolve_quote_intent_state(
@@ -1910,6 +1938,11 @@ class IntegratedBTCStrategy(
                 if side == "sell" and not quote_intent_state.hard_exit_allowed:
                     desired_entry["loss_sell_reason"] = ""
 
+                if side == "sell" and was_econ_gated:
+                    # Ungate Maker passive sell boundary check if only blocked by econ_gate,
+                    # because closing inventory shouldn't require the strict entry edge minimum.
+                    desired_entry["should_quote"] = True
+
                 desired_entry = apply_reload_edge_guard(
                     desired_entry=desired_entry,
                     side=side,
@@ -1938,9 +1971,9 @@ class IntegratedBTCStrategy(
                 if (
                     side == "sell"
                     and sell_intent == "RECYCLE_PROFIT"
-                    and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                 ):
+                    desired_entry["should_quote"] = True
                     desired_entry = apply_locked_side_recycle_sell_pricing(
                         desired_entry=desired_entry,
                         side=side,
@@ -1976,35 +2009,44 @@ class IntegratedBTCStrategy(
                     )
                 if (
                     side == "sell"
-                    and desired_entry.get("should_quote", False)
-                    and (
-                        (
-                            decision_state is not None
-                            and decision_state.phase == DecisionPhase.EXIT
-                        )
+                    and sell_intent == "FORCED_EXIT"
+                    and quote_ctx.quote is not None
+                    and current_inst_inventory_qty > 0
+                ):
+                    desired_entry["should_quote"] = True
+                    desired_entry["diag_reason"] = (
+                        desired_entry.get("diag_reason")
+                        or "forced_exit_execution_priority"
                     )
+                if (
+                    side == "sell"
+                    and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                     and sell_intent == "FORCED_EXIT"
                 ):
-                    if not adverse_exit_context:
-                        pass
-                    else:
-                        desired_entry = apply_forced_exit_sell_pricing(
-                            desired_entry=desired_entry,
-                            side=side,
-                            avg_entry=avg_entry,
-                            fair=quote_ctx.fair,
-                            best_bid=quote_ctx.quote[0],
-                            best_ask=quote_ctx.quote[1],
-                            tick=quote_ctx.tick,
-                            maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
-                            maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
-                            exit_decision_reason=(
+                    desired_entry = apply_forced_exit_sell_pricing(
+                        desired_entry=desired_entry,
+                        side=side,
+                        avg_entry=avg_entry,
+                        fair=quote_ctx.fair,
+                        best_bid=quote_ctx.quote[0],
+                        best_ask=quote_ctx.quote[1],
+                        tick=quote_ctx.tick,
+                        maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
+                        maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
+                        exit_decision_reason=(
+                            "confirmed_locked_side_invalidation"
+                            if locked_side_runtime.invalidation_confirmed
+                            else (
                                 f"state_machine_{decision_state.phase.value.lower()}"
                                 if decision_state is not None
-                                else "exit"
-                            ),
-                        )
+                                else "forced_exit"
+                            )
+                        ),
+                        allow_loss_exit_below_cost_floor=bool(
+                            locked_side_runtime.invalidation_confirmed or _offside_confirmed
+                        ),
+                    )
                 elif (
                     side == "sell"
                     and sell_intent == "TAIL_EXIT"
@@ -2022,6 +2064,7 @@ class IntegratedBTCStrategy(
                         maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                         maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                         exit_decision_reason="tail_inventory_exit",
+                        allow_loss_exit_below_cost_floor=False,
                     )
                 if (
                     side == "sell"
@@ -2355,6 +2398,8 @@ class IntegratedBTCStrategy(
                     )
                     return
                 self._last_redeem_run_ts = now_ts
+                if self.terminal_dashboard:
+                    self.terminal_dashboard.increment_redeem()
                 run_auto_redeem_script(
                     repo_root=Path(__file__).parent,
                     reason=reason,

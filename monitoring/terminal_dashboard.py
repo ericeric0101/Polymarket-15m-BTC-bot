@@ -46,6 +46,9 @@ class TerminalDashboard:
             "last_fill": "-",
             "last_cycle": "-",
             "last_update": datetime.now(timezone.utc),
+            "current_buy_order": None,
+            "current_sell_order": None,
+            "redeem_runs": 0,
         }
 
     def start(self) -> None:
@@ -63,6 +66,11 @@ class TerminalDashboard:
     def update(self, **kwargs: Any) -> None:
         with self._lock:
             self._state.update(kwargs)
+            self._state["last_update"] = datetime.now(timezone.utc)
+
+    def increment_redeem(self) -> None:
+        with self._lock:
+            self._state["redeem_runs"] += 1
             self._state["last_update"] = datetime.now(timezone.utc)
 
     def increment_fill(
@@ -115,57 +123,48 @@ class TerminalDashboard:
         with self._lock:
             snapshot = dict(self._state)
 
-        session_table = Table(show_header=False, box=None, pad_edge=False)
-        session_table.add_column("k", style="bold cyan", width=14)
-        session_table.add_column("v", style="white")
-        session_table.add_row("Phase", str(snapshot["phase"]))
-        session_table.add_row("Slug", str(snapshot["slug"]))
-        session_table.add_row("Active Side", str(snapshot["active_side"]))
-        session_table.add_row("Inventory", f"{float(snapshot['inventory_shares']):.4f}")
-        wallet_balance = snapshot["wallet_balance_usdc"]
-        session_table.add_row(
-            "USDC.e",
-            "-" if wallet_balance is None else f"{float(wallet_balance):.4f}",
-        )
-        session_table.add_row("Active Orders", str(snapshot["active_orders"]))
+        # Left panel: Orders and Slug
+        left_grid = Table.grid(expand=True, padding=(0, 0))
+        left_grid.add_column()
+        
+        buy_text = snapshot.get("current_buy_order") or "None"
+        sell_text = snapshot.get("current_sell_order") or ""
+        slug = str(snapshot["slug"])
+        
+        left_grid.add_row(Panel(buy_text, title="Current Buy Order", border_style="cyan"))
+        if sell_text:
+            left_grid.add_row(Panel(sell_text, title="Current Sell Order", border_style="magenta"))
+        strike_val = snapshot.get("strike")
+        spot_val = snapshot.get("spot")
+        strike_str = f"${strike_val:,.2f}" if strike_val else "..."
+        spot_str = f"${spot_val:,.2f}" if spot_val else "..."
+        market_text = f"{slug}\nStrike: [bold]{strike_str}[/bold] | Spot: [bold]{spot_str}[/bold]"
+        
+        left_grid.add_row(Panel(market_text, title="Market", border_style="blue"))
 
+        # Right panel: Stats
         stats_table = Table(show_header=False, box=None, pad_edge=False)
-        stats_table.add_column("k", style="bold green", width=18)
+        stats_table.add_column("k", style="bold green", width=16)
         stats_table.add_column("v", style="white")
-        stats_table.add_row("Fills", str(snapshot["fills_total"]))
-        stats_table.add_row("Maker Fills", str(snapshot["maker_fills"]))
-        stats_table.add_row("Taker Fills", str(snapshot["taker_fills"]))
-        stats_table.add_row("Maker Buy", str(snapshot["maker_buy_fills"]))
-        stats_table.add_row("Maker Sell", str(snapshot["maker_sell_fills"]))
-        stats_table.add_row("Taker Exit", str(snapshot["taker_exit_fills"]))
-        stats_table.add_row("Fees Paid", f"{float(snapshot['fees_paid_usdc']):.4f}")
-        cycle_total = int(snapshot["cycle_total"])
-        cycle_wins = int(snapshot["cycle_wins"])
-        cycle_win_rate = (cycle_wins / cycle_total * 100.0) if cycle_total > 0 else 0.0
-        stats_table.add_row("Cycle Win Rate", f"{cycle_win_rate:.1f}%")
-        stats_table.add_row("Cycle PnL", f"{float(snapshot['cycle_pnl_usdc']):+.4f}")
-        stats_table.add_row("Closed Trades", str(snapshot["round_trips_closed"]))
-        stats_table.add_row("Trade Win Rate", f"{float(snapshot['position_win_rate']):.1f}%")
+        stats_table.add_row("Inventory", f"{float(snapshot.get('inventory_shares', 0.0)):.4f}")
+        stats_table.add_row("Total Trades", str(snapshot["fills_total"]))
+        stats_table.add_row("Buys", str(snapshot["maker_buy_fills"]))
+        stats_table.add_row("Sells", str(int(snapshot.get("maker_sell_fills", 0)) + int(snapshot.get("taker_exit_fills", 0))))
+        stats_table.add_row("Redeems", str(snapshot.get("redeem_runs", 0)))
+        stats_table.add_row("Live PnL", f"{float(snapshot['cycle_pnl_usdc']):+.4f} USDC")
+        wallet_balance = snapshot["wallet_balance_usdc"]
+        stats_table.add_row("Wallet", "..." if wallet_balance is None else f"{float(wallet_balance):.4f} USDC")
 
-        latest_table = Table(show_header=False, box=None, pad_edge=False)
-        latest_table.add_column("k", style="bold yellow", width=12)
-        latest_table.add_column("v", style="white", overflow="fold")
-        latest_table.add_row("Last Fill", str(snapshot["last_fill"]))
-        latest_table.add_row("Last Cycle", str(snapshot["last_cycle"]))
-        latest_table.add_row(
-            "Updated",
-            snapshot["last_update"].astimezone().strftime("%H:%M:%S"),
-        )
-        latest_table.add_row(
-            "Started",
-            snapshot["started_at"].astimezone().strftime("%H:%M:%S"),
+        # Split layout
+        grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(ratio=1)
+        grid.add_column(ratio=1)
+        grid.add_row(
+            Panel(left_grid, title="Orders", border_style="cyan"),
+            Panel(stats_table, title="Stats", border_style="green")
         )
 
-        return Group(
-            Panel(session_table, title=f"{self.title} Session", border_style="cyan"),
-            Panel(stats_table, title="Trading Stats", border_style="green"),
-            Panel(latest_table, title="Latest", border_style="yellow"),
-        )
+        return Panel(grid, title=f"{self.title} Live", border_style="yellow")
 
     def _run(self) -> None:
         with Live(

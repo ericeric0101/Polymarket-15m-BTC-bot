@@ -251,13 +251,14 @@ python run_bot.py --live
 ### 實盤 + 內嵌 terminal dashboard
 
 ```bash
-python run_bot.py --live --terminal-dashboard
+python run_bot.py --live --terminal-dashboard # （或者在 .env 加上 TERMINAL_DASHBOARD=1）
 ```
 
 說明：
 
-- `--terminal-dashboard` 是**內嵌版**，跟 bot 同 process
-- 若你只是想在另一個 terminal 監看，建議不要用這個，而是開獨立 viewer
+- `--terminal-dashboard` 是**內嵌版**，跟 bot 在同個 process 裡執行。
+- **全新防破圖機制**：為避免背景 Log 印在畫面上干擾 Dashboard 版面，當此模式啟用時，程式會將背景 Log 自動攔截並改道輸出至 `logs/bot/terminal_bot.log`。
+- 若你想同時監看原始日誌，可以在另一個 terminal 執行：`tail -f logs/bot/terminal_bot.log`
 
 ### 舊版監控輸出
 

@@ -228,21 +228,26 @@ class TakerExitMixin:
                 self._stop_loss_execution_priority_by_inst.get(inst_key, False)
                 or int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)) > 0
             )
-            locked_side_invalidated = (
-                (not signal_decision.matches_position)
-                and str(signal_decision.active_side or "NONE").upper() != "NONE"
+            confirmed_locked_side_invalidated = bool(
+                getattr(self, "_side_invalidation_confirmed_by_slug", {}).get(
+                    str(self.current_market_slug or ""),
+                    False,
+                )
             )
             exit_decision = self.exit_policy_engine.evaluate(
                 snapshot,
                 position,
                 signal_decision,
                 stop_loss_pending_active=stop_loss_pending_active,
-                locked_side_invalidated=locked_side_invalidated,
-                confirmed_adverse_exit_active=locked_side_invalidated,
+                locked_side_invalidated=confirmed_locked_side_invalidated,
+                confirmed_adverse_exit_active=confirmed_locked_side_invalidated,
             )
             net_if_exit = exit_decision.net_if_exit
             force_offside_near_close = (
-                not signal_decision.matches_position
+                (
+                    confirmed_locked_side_invalidated
+                    or not signal_decision.matches_position
+                )
                 and time_left_sec is not None
                 and self.taker_exit_max_hold_near_close_sec > 0
                 and time_left_sec <= float(self.taker_exit_max_hold_near_close_sec)

@@ -99,14 +99,7 @@ class ExitPolicyEngine:
             "spot_strike_supports": "1" if spot_strike_supports else "0",
         }
         if locked_side_invalidated or offside_confirmed or thesis_weakened or not signal.matches_position:
-            return (
-                "continue",
-                "recycle_hold_thesis_softened",
-                {
-                    **shared_meta,
-                    "exit_intent": "continue",
-                },
-            )
+            return "neutral", "", {}
         if (
             self.config.early_profit_hold_enabled
             and position.hold_sec < float(self.config.early_profit_hold_min_hold_sec)
