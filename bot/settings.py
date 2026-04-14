@@ -283,6 +283,9 @@ def initialize_strategy_settings(
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
     strategy.maker_recycle_locked_side_min_fair_edge_ps = config.exit.maker_recycle_locked_side_min_fair_edge_ps
     strategy.maker_signal_flip_cooldown_cycles = config.exit.maker_signal_flip_cooldown_cycles
+    strategy.absolute_max_loss_enabled = config.exit.absolute_max_loss_enabled
+    strategy.absolute_max_loss_usdc = config.exit.absolute_max_loss_usdc
+    strategy.absolute_max_loss_min_hold_sec = config.exit.absolute_max_loss_min_hold_sec
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
     strategy.maker_implied_sigma_weight = config.maker.implied_sigma_weight
     strategy.exit_policy = ExitPolicy(
@@ -322,6 +325,9 @@ def initialize_strategy_settings(
             catastrophic_stop_loss_usdc=strategy.catastrophic_stop_loss_usdc,
             catastrophic_stop_loss_min_score_abs=strategy.catastrophic_stop_loss_min_score_abs,
             catastrophic_stop_loss_confirmations=strategy.catastrophic_stop_loss_confirmations,
+            absolute_max_loss_enabled=strategy.absolute_max_loss_enabled,
+            absolute_max_loss_usdc=strategy.absolute_max_loss_usdc,
+            absolute_max_loss_min_hold_sec=strategy.absolute_max_loss_min_hold_sec,
         ),
     )
     strategy.position_manager = PositionManager(

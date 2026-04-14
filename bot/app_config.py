@@ -333,6 +333,9 @@ class ExitConfig:
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
     maker_signal_flip_cooldown_cycles: int
+    absolute_max_loss_enabled: bool = True
+    absolute_max_loss_usdc: Decimal = Decimal("1.50")
+    absolute_max_loss_min_hold_sec: int = 60
 
     def __post_init__(self) -> None:
         if self.taker_exit_stop_loss_confirmations < 1:
@@ -756,6 +759,9 @@ class AppConfig:
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
                 maker_signal_flip_cooldown_cycles=max(1, _env_int("MAKER_SIGNAL_FLIP_COOLDOWN_CYCLES", 2)),
+                absolute_max_loss_enabled=_env_bool_inverted("ABSOLUTE_MAX_LOSS_ENABLED", True),
+                absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "1.50"),
+                absolute_max_loss_min_hold_sec=max(0, _env_int("ABSOLUTE_MAX_LOSS_MIN_HOLD_SEC", 60)),
             ),
             risk=RiskConfig(
                 regime_guard_enabled=_env_bool_inverted("REGIME_GUARD_ENABLED", True),

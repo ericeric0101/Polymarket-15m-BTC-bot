@@ -117,7 +117,7 @@ def compute_loss_sell_policy(
         and time_left_sec < true_last_resort_sec
     )
     allow_absolute_last_resort = (
-        in_true_last_resort
+        (in_true_last_resort and not thesis_good)
         or (in_last_resort_window and not thesis_good)
     )
     allow_loss_sell = (

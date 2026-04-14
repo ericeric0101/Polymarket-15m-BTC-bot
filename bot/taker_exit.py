@@ -333,42 +333,51 @@ class TakerExitMixin:
                 ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
                 ExitDecisionType.TAKER_STOP_LOSS,
             ) and hasattr(self, "position_manager"):
-                _te_current_price = self._capture_market_open_spot() if hasattr(self, "_capture_market_open_spot") else None
-                _te_price_to_beat = self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")) if hasattr(self, "market_strike_cache_by_slug") else None
-                regime = self.position_manager.assess_stop_loss_regime(
-                    inst_key=inst_key,
-                    now_ts=now_ts,
-                    qty=qty,
-                    opened_ts=opened_ts,
-                    held_side=held_side,
-                    signal_active_side=signal_decision.active_side,
-                    signal_score=signal_decision.score,
-                    signal_matches_position=signal_decision.matches_position,
-                    force_exit=force_offside_near_close,
-                    current_price=_te_current_price,
-                    price_to_beat=_te_price_to_beat,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    fair=fair,
-                    time_left_sec=time_left_sec,
-                    avg_entry=avg_entry,
-                    peak_bid=position.peak_bid,
-                    peak_fair=position.peak_fair,
+                # The unconditional circuit breaker must bypass the position_manager
+                # gate entirely. By design, it fires when the signal is healthy
+                # (locked + matching + thesis good) but the loss exceeds the
+                # absolute max. The position_manager would return "hold" in this
+                # exact scenario, silently blocking the breaker.
+                _is_absolute_breaker = (
+                    exit_decision.reason == "absolute_max_loss_breaker"
                 )
-                if regime.status != "armed":
-                    self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
-                    self._stop_loss_execution_priority_by_inst.pop(inst_key, None)
-                    self._log_taker_exit_skip_throttled(
+                if not _is_absolute_breaker:
+                    _te_current_price = self._capture_market_open_spot() if hasattr(self, "_capture_market_open_spot") else None
+                    _te_price_to_beat = self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")) if hasattr(self, "market_strike_cache_by_slug") else None
+                    regime = self.position_manager.assess_stop_loss_regime(
                         inst_key=inst_key,
-                        reason_tag=f"position_manager_{regime.status}",
-                        message=(
-                            "Skip taker exit: position manager gate "
-                            f"({regime.reason}) best_bid={float(best_bid):.4f} "
-                            f"avg_entry={float(avg_entry):.4f} est_net={float(net_if_exit):+.4f}"
-                        ),
                         now_ts=now_ts,
+                        qty=qty,
+                        opened_ts=opened_ts,
+                        held_side=held_side,
+                        signal_active_side=signal_decision.active_side,
+                        signal_score=signal_decision.score,
+                        signal_matches_position=signal_decision.matches_position,
+                        force_exit=force_offside_near_close,
+                        current_price=_te_current_price,
+                        price_to_beat=_te_price_to_beat,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        fair=fair,
+                        time_left_sec=time_left_sec,
+                        avg_entry=avg_entry,
+                        peak_bid=position.peak_bid,
+                        peak_fair=position.peak_fair,
                     )
-                    continue
+                    if regime.status != "armed":
+                        self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                        self._stop_loss_execution_priority_by_inst.pop(inst_key, None)
+                        self._log_taker_exit_skip_throttled(
+                            inst_key=inst_key,
+                            reason_tag=f"position_manager_{regime.status}",
+                            message=(
+                                "Skip taker exit: position manager gate "
+                                f"({regime.reason}) best_bid={float(best_bid):.4f} "
+                                f"avg_entry={float(avg_entry):.4f} est_net={float(net_if_exit):+.4f}"
+                            ),
+                            now_ts=now_ts,
+                        )
+                        continue
 
             if exit_decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION:
                 self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
