@@ -9,6 +9,7 @@ from execution.rebate_model import estimate_taker_fee_usdc
 
 @dataclass(frozen=True)
 class ExitEngineConfig:
+    hold_to_redeem_enabled: bool
     min_hold_sec: int
     stop_loss_usdc: Decimal
     stop_loss_confirmations: int
@@ -282,6 +283,16 @@ class ExitPolicyEngine:
             "locked_side_invalidated": "1" if locked_side_invalidated else "0",
             "confirmed_adverse_exit_active": "1" if confirmed_adverse_exit_active else "0",
         }
+        if self.config.hold_to_redeem_enabled and position.qty > 0:
+            return ExitDecision(
+                decision_type=ExitDecisionType.HOLD_TO_REDEEM,
+                reason="hold_to_redeem_enabled",
+                net_if_exit=net_if_exit,
+                gross_if_exit=gross_if_exit,
+                exit_fee_est=exit_fee_est,
+                exit_px_effective=exit_px_effective,
+                metadata=base_metadata,
+            )
         signal_side = str(signal.active_side).upper()
         signal_is_none = signal_side == "NONE"
         explicit_offside = (not signal.matches_position) and not signal_is_none

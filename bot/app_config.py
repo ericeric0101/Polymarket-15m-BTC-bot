@@ -278,6 +278,7 @@ class SideDecisionConfig:
 
 @dataclass(frozen=True)
 class ExitConfig:
+    hold_to_redeem_enabled: bool
     taker_exit_enabled: bool
     taker_exit_min_net_usdc: Decimal
     taker_exit_stop_loss_usdc: Decimal
@@ -695,6 +696,7 @@ class AppConfig:
                 skip_log_interval_sec=max(2.0, _env_float("BI_SIDE_SKIP_LOG_INTERVAL_SEC", 10.0)),
             ),
             exit=ExitConfig(
+                hold_to_redeem_enabled=_env_bool("HOLD_TO_REDEEM", False),
                 taker_exit_enabled=_env_bool_inverted("TAKER_EXIT_ENABLED", True),
                 taker_exit_min_net_usdc=_env_decimal("TAKER_EXIT_MIN_NET_USDC", "0.02"),
                 taker_exit_stop_loss_usdc=_env_decimal("TAKER_EXIT_STOP_LOSS_USDC", "0.15"),

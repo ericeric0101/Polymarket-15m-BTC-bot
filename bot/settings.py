@@ -225,6 +225,7 @@ def initialize_strategy_settings(
     strategy.maker_digital_sigma_time_decay_ref_sec = config.maker.digital_sigma_time_decay_ref_sec
     strategy.maker_digital_sigma_time_decay_min = config.maker.digital_sigma_time_decay_min
     strategy.taker_exit_enabled = config.exit.taker_exit_enabled
+    strategy.hold_to_redeem_enabled = config.exit.hold_to_redeem_enabled
     strategy.taker_exit_min_net_usdc = config.exit.taker_exit_min_net_usdc
     strategy.taker_exit_stop_loss_usdc = config.exit.taker_exit_stop_loss_usdc
     strategy.catastrophic_stop_loss_enabled = config.exit.catastrophic_stop_loss_enabled
@@ -296,6 +297,7 @@ def initialize_strategy_settings(
     )
     strategy.exit_policy_engine = ExitPolicyEngine(
         ExitEngineConfig(
+            hold_to_redeem_enabled=strategy.hold_to_redeem_enabled,
             min_hold_sec=strategy.taker_exit_min_hold_sec,
             stop_loss_usdc=strategy.taker_exit_stop_loss_usdc,
             stop_loss_confirmations=strategy.taker_exit_stop_loss_confirmations,

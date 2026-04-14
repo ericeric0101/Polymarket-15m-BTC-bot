@@ -261,6 +261,7 @@ class IntegratedBTCStrategy(
             f"quote_sides={self.maker_quote_sides} "
             f"pricer={self.maker_fair_pricer_mode} "
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
+            f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -1767,6 +1768,13 @@ class IntegratedBTCStrategy(
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                 )
+                if (
+                    side == "sell"
+                    and getattr(self, "hold_to_redeem_enabled", False)
+                    and current_inst_inventory_qty > 0
+                ):
+                    desired_entry["should_quote"] = False
+                    desired_entry["diag_reason"] = "hold_to_redeem_enabled"
                 unified_sell_exit_decision = None
                 sell_intent = "NONE"
                 quote_intent_state = QuoteIntentState(quote_mode=QuoteMode.OBSERVE)
