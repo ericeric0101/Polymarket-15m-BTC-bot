@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -43,6 +44,61 @@ CTF_REDEEM_ABI = [
         "type": "function",
     },
 ]
+
+
+def _gwei_to_wei(w3, value: float | int) -> int:
+    return int(w3.to_wei(value, "gwei"))
+
+
+def _build_eip1559_fees(w3, *, bump_multiplier: float = 1.0) -> dict[str, int]:
+    try:
+        latest_block = w3.eth.get_block("latest")
+        base_fee = int(latest_block.get("baseFeePerGas") or 0)
+    except Exception:
+        base_fee = 0
+    try:
+        priority_fee = int(w3.eth.max_priority_fee)
+    except Exception:
+        priority_fee = 0
+
+    # Polygon often needs materially higher tips than vanilla defaults.
+    priority_floor = _gwei_to_wei(w3, float(os.getenv("AUTO_REDEEM_PRIORITY_FEE_GWEI", "35")))
+    priority_fee = max(priority_fee, priority_floor)
+    max_fee = max(priority_fee * 2, (base_fee * 2) + priority_fee)
+
+    if bump_multiplier > 1.0:
+        priority_fee = int(priority_fee * bump_multiplier)
+        max_fee = int(max(max_fee, (base_fee * 2) + priority_fee) * bump_multiplier)
+
+    return {
+        "maxPriorityFeePerGas": priority_fee,
+        "maxFeePerGas": max_fee,
+    }
+
+
+def _estimate_redeem_gas(tx_func, tx_params: dict[str, Any]) -> int:
+    estimate = int(tx_func.estimate_gas(tx_params))
+    return max(estimate, int(estimate * 1.2))
+
+
+def _wait_for_receipt_with_replacement_check(w3, txh, owner: str, nonce: int, *, timeout_sec: int) -> Any:
+    from web3.exceptions import TimeExhausted, TransactionNotFound
+
+    started = time.time()
+    while time.time() - started < timeout_sec:
+        try:
+            receipt = w3.eth.get_transaction_receipt(txh)
+            if receipt is not None:
+                return receipt
+        except TransactionNotFound:
+            pass
+        current_nonce = int(w3.eth.get_transaction_count(owner, "latest"))
+        if current_nonce > nonce:
+            raise RuntimeError(
+                f"nonce_advanced_without_receipt current_nonce={current_nonce} nonce={nonce} tx={txh.hex()}"
+            )
+        time.sleep(3)
+    raise TimeExhausted(f"Transaction {txh.hex()} not confirmed within {timeout_sec}s")
 
 
 def _is_hex_address(v: str | None) -> bool:
@@ -135,6 +191,8 @@ def _redeem_conditions(
     owner = Web3.to_checksum_address(owner_address)
     contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_REDEEM_ABI)
     nonce = w3.eth.get_transaction_count(owner, "pending")
+    max_attempts = max(1, int(os.getenv("AUTO_REDEEM_MAX_SEND_ATTEMPTS", "3")))
+    receipt_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_RECEIPT_TIMEOUT_SEC", "120")))
 
     for cid in condition_ids:
         cid_txt = str(cid).strip()
@@ -142,22 +200,66 @@ def _redeem_conditions(
             print(f"Skip invalid conditionId: {cid_txt}")
             continue
 
-        tx = contract.functions.redeemPositions(
+        tx_func = contract.functions.redeemPositions(
             Web3.to_checksum_address(USDC_ADDRESS),
             b"\x00" * 32,
             Web3.to_bytes(hexstr=cid_txt),
             [1, 2],
-        ).build_transaction(
-            {
+        )
+
+        last_error: Exception | None = None
+        receipt = None
+        for attempt in range(1, max_attempts + 1):
+            fee_params = _build_eip1559_fees(w3, bump_multiplier=1.0 + (attempt - 1) * 0.20)
+            tx_params = {
                 "chainId": chain_id,
                 "from": owner,
                 "nonce": nonce,
+                **fee_params,
             }
-        )
-        signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
-        txh = w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=600)
-        print(f"redeemPositions condition={cid_txt} tx={txh.hex()} status={receipt.status}")
+            tx_params["gas"] = _estimate_redeem_gas(tx_func, tx_params)
+            tx = tx_func.build_transaction(tx_params)
+            signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
+            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+            print(
+                "submit redeemPositions "
+                f"condition={cid_txt} attempt={attempt}/{max_attempts} tx={txh.hex()} "
+                f"nonce={nonce} gas={tx_params['gas']} "
+                f"maxFeePerGas={tx_params['maxFeePerGas']} "
+                f"maxPriorityFeePerGas={tx_params['maxPriorityFeePerGas']}"
+            )
+            try:
+                receipt = _wait_for_receipt_with_replacement_check(
+                    w3,
+                    txh,
+                    owner,
+                    nonce,
+                    timeout_sec=receipt_timeout_sec,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                latest_nonce = int(w3.eth.get_transaction_count(owner, "latest"))
+                print(
+                    "redeem wait timeout/retry "
+                    f"condition={cid_txt} attempt={attempt}/{max_attempts} "
+                    f"tx={txh.hex()} latest_nonce={latest_nonce} error={exc}"
+                )
+                if latest_nonce > nonce:
+                    raise RuntimeError(
+                        f"nonce advanced for redeem tx but no receipt was found. "
+                        f"condition={cid_txt} nonce={nonce} latest_nonce={latest_nonce}"
+                    ) from exc
+                if attempt >= max_attempts:
+                    raise
+                time.sleep(2)
+
+        if receipt is None:
+            raise RuntimeError(
+                f"Failed to confirm redeem tx for condition={cid_txt}"
+            ) from last_error
+
+        print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
         nonce += 1
 
 

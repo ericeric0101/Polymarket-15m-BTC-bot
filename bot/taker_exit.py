@@ -27,6 +27,7 @@ from bot.models import (
 
 class TakerExitHost(Protocol):
     taker_exit_enabled: bool
+    hold_to_redeem_enabled: bool
     taker_exit_cooldown_sec: int
     taker_exit_eval_interval_sec: float
     taker_exit_reject_cooldown_until_by_inst: dict[str, float]
@@ -67,6 +68,8 @@ class TakerExitMixin:
 
     async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
+            return
+        if getattr(self, "hold_to_redeem_enabled", False):
             return
         if self.taker_exit_cooldown_sec < 0:
             return
@@ -550,6 +553,16 @@ class TakerExitMixin:
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
         self.taker_exit_reason_by_client_order_id[str(coid)] = reason
+        if getattr(self, "terminal_dashboard", None):
+            token_side = getattr(self._side_for_instrument_id(inst), "value", "NONE")
+            self.terminal_dashboard.record_order_submitted(
+                side="sell",
+                token_side=token_side,
+                qty=float(qty_dec),
+                price=float(best_bid),
+                client_order_id=str(coid),
+                is_taker=True,
+            )
         logger.warning(
             "TAKER EXIT submit: "
             f"reason={reason} inst={inst_key} qty={float(qty_dec):.6f} "

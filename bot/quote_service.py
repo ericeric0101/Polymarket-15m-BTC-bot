@@ -285,6 +285,15 @@ def evaluate_buy_entry_controls(
     best_bid: Decimal | None = None,
     fair: Decimal | None = None,
     trend_buy_max_price_premium_ps: Decimal = Decimal("0.02"),
+    candidate_entry_price: Decimal | None = None,
+    spot_minus_strike_avg: Decimal | None = None,
+    entry_spot_strike_avg_min_abs: Decimal = Decimal("0"),
+    entry_fair_edge_min_ps: Decimal = Decimal("0"),
+    robust_net_usdc: Decimal | None = None,
+    down_high_price_threshold: Decimal = Decimal("1"),
+    down_high_price_min_score_abs: Decimal = Decimal("0"),
+    down_high_price_min_robust_net_usdc: Decimal = Decimal("0"),
+    down_high_price_spot_strike_avg_max: Decimal = Decimal("0"),
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
@@ -362,8 +371,91 @@ def evaluate_buy_entry_controls(
                 "engine": "new_signal",
             },
         )
+    active_side_txt = str(active_side_value or "NONE").upper()
+    if (
+        active_side_txt in {"UP", "DOWN"}
+        and spot_minus_strike_avg is not None
+        and entry_spot_strike_avg_min_abs >= 0
+    ):
+        spot_avg_supports = (
+            spot_minus_strike_avg >= entry_spot_strike_avg_min_abs
+            if active_side_txt == "UP"
+            else spot_minus_strike_avg <= -entry_spot_strike_avg_min_abs
+        )
+        if not spot_avg_supports:
+            return BuyEntryEvaluation(
+                skip=True,
+                min_expected_net_usdc=min_expected_net_usdc,
+                entry_mode=entry_mode,
+                event_type="ORDER_SKIP_ENTRY_SPOT_STRIKE_AVG_GATE",
+                reason="entry_spot_strike_avg_gate",
+                payload={
+                    "slug": current_slug,
+                    "instrument_id": str(inst_id),
+                    "active_side": active_side_txt,
+                    "spot_minus_strike_avg": float(spot_minus_strike_avg),
+                    "required_abs": float(entry_spot_strike_avg_min_abs),
+                    "engine": "entry_context",
+                },
+            )
+    if (
+        candidate_entry_price is not None
+        and fair is not None
+        and candidate_entry_price > 0
+        and fair > 0
+        and (fair - candidate_entry_price) < entry_fair_edge_min_ps
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_ENTRY_FAIR_EDGE_GATE",
+            reason="entry_fair_edge_gate",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "active_side": active_side_txt,
+                "entry_price": float(candidate_entry_price),
+                "fair": float(fair),
+                "fair_minus_entry": float(fair - candidate_entry_price),
+                "required_min": float(entry_fair_edge_min_ps),
+                "engine": "entry_context",
+            },
+        )
+    if (
+        active_side_txt == "DOWN"
+        and candidate_entry_price is not None
+        and candidate_entry_price >= down_high_price_threshold
+        and (
+            abs(side_score) < down_high_price_min_score_abs
+            or robust_net_usdc is None
+            or robust_net_usdc < down_high_price_min_robust_net_usdc
+            or spot_minus_strike_avg is None
+            or spot_minus_strike_avg > down_high_price_spot_strike_avg_max
+        )
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_DOWN_HIGH_PRICE_GATE",
+            reason="down_high_price_gate",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "entry_price": float(candidate_entry_price),
+                "entry_threshold": float(down_high_price_threshold),
+                "side_score": float(side_score),
+                "required_score_abs": float(down_high_price_min_score_abs),
+                "robust_net_usdc": float(robust_net_usdc) if robust_net_usdc is not None else None,
+                "required_robust_net_usdc": float(down_high_price_min_robust_net_usdc),
+                "spot_minus_strike_avg": float(spot_minus_strike_avg) if spot_minus_strike_avg is not None else None,
+                "required_spot_minus_strike_avg_max": float(down_high_price_spot_strike_avg_max),
+                "engine": "entry_context",
+            },
+        )
     # --- Trend-buy mode detection ---
-    _active_side_txt = str(active_side_value or "NONE").upper()
+    _active_side_txt = active_side_txt
     if (
         current_inst_inventory_qty >= max_locked_side_position
         and str(inventory_full_behavior or "STOP_BUY").upper() == "WIDEN_SPREAD"

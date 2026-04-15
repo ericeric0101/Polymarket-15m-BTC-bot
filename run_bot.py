@@ -519,6 +519,28 @@ class IntegratedBTCStrategy(
         except Exception:
             return None
 
+    def _spot_minus_strike_avg(self, lookback_sec: int) -> Optional[Decimal]:
+        slug = str(self.current_market_slug or "")
+        if not slug or lookback_sec <= 0:
+            return None
+        strike = self.market_strike_cache_by_slug.get(slug)
+        if strike is None or strike <= 0:
+            return None
+        now_ts = time.time()
+        samples: list[Decimal] = []
+        try:
+            for ts, spot in reversed(self.external_spot_history):
+                if now_ts - float(ts) > float(lookback_sec):
+                    break
+                if spot is None or spot <= 0:
+                    continue
+                samples.append(Decimal(str(spot)) - strike)
+        except Exception:
+            return None
+        if not samples:
+            return None
+        return sum(samples, Decimal("0")) / Decimal(len(samples))
+
     def _spot_still_supports_side(
         self,
         side: ActiveSide,
@@ -935,6 +957,12 @@ class IntegratedBTCStrategy(
             slug_str = self.current_market_slug or self.selected_slug or "-"
             strike_val = self.market_strike_cache_by_slug.get(str(slug_str))
             spot_val = self._capture_market_open_spot()
+            spot_minus_strike = None
+            if strike_val is not None and spot_val is not None:
+                try:
+                    spot_minus_strike = float(spot_val) - float(strike_val)
+                except Exception:
+                    spot_minus_strike = None
 
             self.terminal_dashboard.update(
                 phase=self.market_phase.value,
@@ -949,6 +977,7 @@ class IntegratedBTCStrategy(
                 current_sell_order=sell_order_str,
                 strike=float(strike_val) if strike_val is not None else None,
                 spot=float(spot_val) if spot_val is not None else None,
+                spot_minus_strike=spot_minus_strike,
             )
         except Exception as e:
             logger.debug(f"Failed to update terminal dashboard snapshot: {e}")
@@ -1555,6 +1584,15 @@ class IntegratedBTCStrategy(
                     best_bid=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
                     fair=quote_ctx.fair,
                     trend_buy_max_price_premium_ps=self.trend_buy_max_price_premium_ps,
+                    candidate_entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
+                    spot_minus_strike_avg=self._spot_minus_strike_avg(int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0)),
+                    entry_spot_strike_avg_min_abs=getattr(self, "entry_spot_strike_avg_min_abs", Decimal("0")),
+                    entry_fair_edge_min_ps=getattr(self, "entry_fair_edge_min_ps", Decimal("0")),
+                    robust_net_usdc=desired_entry.get("robust_net"),
+                    down_high_price_threshold=getattr(self, "down_high_price_threshold", Decimal("1")),
+                    down_high_price_min_score_abs=getattr(self, "down_high_price_min_score_abs", Decimal("0")),
+                    down_high_price_min_robust_net_usdc=getattr(self, "down_high_price_min_robust_net_usdc", Decimal("0")),
+                    down_high_price_spot_strike_avg_max=getattr(self, "down_high_price_spot_strike_avg_max", Decimal("0")),
                 )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
@@ -1778,6 +1816,11 @@ class IntegratedBTCStrategy(
                 unified_sell_exit_decision = None
                 sell_intent = "NONE"
                 quote_intent_state = QuoteIntentState(quote_mode=QuoteMode.OBSERVE)
+                hold_to_redeem_sell_block = bool(
+                    side == "sell"
+                    and getattr(self, "hold_to_redeem_enabled", False)
+                    and current_inst_inventory_qty > 0
+                )
                 peak_bid = (
                     self.maker_profit_run_peak_bid_by_inst.get(inst_key, quote_ctx.quote[0])
                     if side == "sell" and quote_ctx.quote is not None
@@ -1945,8 +1988,16 @@ class IntegratedBTCStrategy(
                 desired_entry["hard_exit_allowed"] = quote_intent_state.hard_exit_allowed
                 if side == "sell" and not quote_intent_state.hard_exit_allowed:
                     desired_entry["loss_sell_reason"] = ""
+                if hold_to_redeem_sell_block:
+                    sell_intent = "NONE"
+                    quote_intent_state = QuoteIntentState(quote_mode=QuoteMode.OBSERVE)
+                    desired_entry["quote_mode"] = quote_intent_state.quote_mode.value
+                    desired_entry["hard_exit_allowed"] = False
+                    desired_entry["should_quote"] = False
+                    desired_entry["loss_sell_reason"] = ""
+                    desired_entry["diag_reason"] = "hold_to_redeem_enabled"
 
-                if side == "sell" and was_econ_gated:
+                if side == "sell" and was_econ_gated and not hold_to_redeem_sell_block:
                     # Ungate Maker passive sell boundary check if only blocked by econ_gate,
                     # because closing inventory shouldn't require the strict entry edge minimum.
                     desired_entry["should_quote"] = True
@@ -1980,6 +2031,7 @@ class IntegratedBTCStrategy(
                     side == "sell"
                     and sell_intent == "RECYCLE_PROFIT"
                     and quote_ctx.quote is not None
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry["should_quote"] = True
                     desired_entry = apply_locked_side_recycle_sell_pricing(
@@ -2005,6 +2057,7 @@ class IntegratedBTCStrategy(
                     and stop_loss_pending_active
                     and quote_ctx.quote is not None
                     and current_inst_inventory_qty > 0
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry["should_quote"] = True
                     desired_entry["diag_reason"] = (
@@ -2020,6 +2073,7 @@ class IntegratedBTCStrategy(
                     and sell_intent == "FORCED_EXIT"
                     and quote_ctx.quote is not None
                     and current_inst_inventory_qty > 0
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry["should_quote"] = True
                     desired_entry["diag_reason"] = (
@@ -2031,6 +2085,7 @@ class IntegratedBTCStrategy(
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                     and sell_intent == "FORCED_EXIT"
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry = apply_forced_exit_sell_pricing(
                         desired_entry=desired_entry,
@@ -2060,6 +2115,7 @@ class IntegratedBTCStrategy(
                     and sell_intent == "TAIL_EXIT"
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry = apply_forced_exit_sell_pricing(
                         desired_entry=desired_entry,
@@ -2078,6 +2134,7 @@ class IntegratedBTCStrategy(
                     side == "sell"
                     and quote_intent_state.hard_exit_allowed
                     and desired_entry.get("should_quote", False)
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry = preserve_recent_loss_sell_order(
                         desired_entry=desired_entry,

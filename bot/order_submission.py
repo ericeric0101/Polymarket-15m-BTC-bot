@@ -264,6 +264,16 @@ def submit_maker_quote(
         target_version=int(target_version or 0),
         loss_sell_reason=loss_sell_reason,
     )
+    if strategy.terminal_dashboard:
+        token_side = getattr(strategy._side_for_instrument_id(instrument_id), "value", "NONE")
+        strategy.terminal_dashboard.record_order_submitted(
+            side=side,
+            token_side=token_side,
+            qty=float(token_qty),
+            price=float(limit_price),
+            client_order_id=str(order.client_order_id),
+            is_taker=False,
+        )
     if side == "sell":
         inst_key = strategy._instrument_key(instrument_id)
         if inst_key:
