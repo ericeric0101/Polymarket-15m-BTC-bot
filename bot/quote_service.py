@@ -432,10 +432,11 @@ def evaluate_buy_entry_controls(
         and candidate_entry_price >= down_high_price_threshold
         and (
             abs(side_score) < down_high_price_min_score_abs
-            or robust_net_usdc is None
-            or robust_net_usdc < down_high_price_min_robust_net_usdc
-            or spot_minus_strike_avg is None
-            or spot_minus_strike_avg > down_high_price_spot_strike_avg_max
+            and (robust_net_usdc is None or robust_net_usdc < down_high_price_min_robust_net_usdc)
+            and (
+                spot_minus_strike_avg is None
+                or spot_minus_strike_avg > down_high_price_spot_strike_avg_max
+            )
         )
     ):
         return BuyEntryEvaluation(
