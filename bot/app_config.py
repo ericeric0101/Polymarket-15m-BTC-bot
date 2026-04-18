@@ -453,7 +453,7 @@ class AppConfig:
         )
         maker_min_directional_edge_ps_conservative = _env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS_CONSERVATIVE", "0.03")
         fee_rate_default_decimal = _env_decimal("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
-        if fee_rate_default_decimal <= 0:
+        if fee_rate_default_decimal < 0:
             fee_rate_default_decimal = CRYPTO_FEE_CURVE.fee_rate
         econ_fee_rate_decimal = _env_decimal("MAKER_ECON_FEE_RATE_DECIMAL", "0")
         if econ_fee_rate_decimal < 0:

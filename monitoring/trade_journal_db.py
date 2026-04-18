@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -212,3 +213,42 @@ class TradeJournalDB:
                 conn.commit()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_order_event failed: {e}")
+
+    def load_latest_locked_strike(self, slug: str) -> Optional[Dict[str, Any]]:
+        if not slug:
+            return None
+        sql = """
+        SELECT ts, payload_json
+        FROM strategy_events
+        WHERE event_type = 'MARKET_STRIKE_LOCKED'
+        ORDER BY id DESC
+        LIMIT 200
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(sql).fetchall()
+            for ts, payload_json in rows:
+                try:
+                    payload = json.loads(payload_json or "{}")
+                except Exception:
+                    continue
+                if str(payload.get("slug") or "") != str(slug):
+                    continue
+                strike = payload.get("strike")
+                source = str(payload.get("strike_source") or "")
+                if strike is None or not source:
+                    continue
+                strike_dec = Decimal(str(strike))
+                if strike_dec <= 0:
+                    continue
+                return {
+                    "ts": str(ts or ""),
+                    "slug": str(slug),
+                    "strike": strike_dec,
+                    "strike_source": source,
+                    "authoritative": bool(payload.get("authoritative", False)),
+                    "sample_dt_sec": payload.get("sample_dt_sec"),
+                }
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_latest_locked_strike failed: {e}")
+        return None

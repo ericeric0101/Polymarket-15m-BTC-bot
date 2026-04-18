@@ -488,6 +488,8 @@ def initialize_strategy_settings(
     strategy._last_strike_slug_log_ts = 0.0
     strategy.no_quote_diag_interval_sec = config.observability.no_quote_diag_interval_sec
     strategy._last_no_quote_diag_ts_by_inst = {}
+    strategy.buy_observe_diag_interval_sec = max(5.0, float(config.observability.no_quote_diag_interval_sec))
+    strategy._last_buy_observe_diag_ts_by_key = {}
     strategy._last_sellable_skip_log_ts_by_inst = {}
     strategy.sellable_fallback_after_buy_sec = config.operations.sellable_fallback_after_buy_sec
     strategy.sellable_after_buy_buffer_shares = config.operations.sellable_after_buy_buffer_shares

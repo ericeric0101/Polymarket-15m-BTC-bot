@@ -83,7 +83,7 @@ class PricingRuntimeMixin:
 
             text = f"{str(info.get('market_slug', '')).lower()} {str(info.get('question', '')).lower()} {fee_type}"
             if "crypto_15" in fee_type or "crypto_5" in fee_type or "btc-updown" in text:
-                return Decimal("0.25")
+                return Decimal("0.001")
             if "ncaab" in text or "serie a" in text or "serie_a" in text:
                 return Decimal("0.0175")
         except Exception:
@@ -104,7 +104,7 @@ class PricingRuntimeMixin:
             cached_rate = local_cached.get("fee_rate")
             if (
                 isinstance(cached_rate, Decimal)
-                and cached_rate > 0
+                and cached_rate >= 0
                 and cached_ts > 0
                 and (now_ts - cached_ts) < self.fee_rate_fetch_interval_sec
             ):
@@ -112,13 +112,13 @@ class PricingRuntimeMixin:
 
         fee_rate = await self.fee_rate_client.get_fee_rate_decimal(token)
         source = "clob_fee_rate"
-        if fee_rate is None or fee_rate <= 0:
+        if fee_rate is None or fee_rate < 0:
             fee_rate = self._infer_market_fee_rate_default()
             source = "market_type_default"
-            if (fee_rate is None or fee_rate <= 0) and self.maker_fee_rate_legacy_bps_default > 0:
+            if (fee_rate is None or fee_rate < 0) and self.maker_fee_rate_legacy_bps_default > 0:
                 fee_rate = bps_to_fee_rate(self.maker_fee_rate_legacy_bps_default)
                 source = "legacy_bps_default"
-        if fee_rate is None or fee_rate <= 0:
+        if fee_rate is None or fee_rate < 0:
             return None
         self._fee_rate_local_cache_by_token[token] = {"fee_rate": fee_rate, "ts": now_ts}
         fee_bps_value = int((fee_rate * Decimal("10000")).quantize(Decimal("1")))

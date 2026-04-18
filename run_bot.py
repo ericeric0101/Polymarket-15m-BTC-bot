@@ -856,6 +856,101 @@ class IntegratedBTCStrategy(
             payload=payload_out,
         )
 
+    def _recover_market_strike_from_trade_db_on_startup(self) -> None:
+        if not self.trade_db or not self.current_market_slug:
+            return
+        slug = str(self.current_market_slug or "")
+        cached = self.market_strike_cache_by_slug.get(slug)
+        if isinstance(cached, Decimal) and cached > 0:
+            return
+        recovered = self.trade_db.load_latest_locked_strike(slug)
+        if not recovered:
+            return
+        strike = recovered.get("strike")
+        if not isinstance(strike, Decimal) or strike <= 0:
+            return
+        strike_source = str(recovered.get("strike_source") or "trade_db_recovered")
+        self.market_strike_cache_by_slug[slug] = strike
+        self.market_strike_source_by_slug[slug] = strike_source
+        self.market_strike_provisional_by_slug.pop(slug, None)
+        self.market_strike_provisional_source_by_slug.pop(slug, None)
+        if self.current_market_open_spot is None or Decimal(str(self.current_market_open_spot or "0")) <= 0:
+            self.current_market_open_spot = strike
+        sample_dt_sec = recovered.get("sample_dt_sec")
+        logger.info(
+            "Recovered authoritative market strike from trade journal: "
+            f"slug={slug} strike=${float(strike):.2f} source={strike_source} "
+            f"logged_at={recovered.get('ts')}"
+        )
+        self._db_strategy_event(
+            "MARKET_STRIKE_RECOVERED",
+            {
+                "slug": slug,
+                "strike": float(strike),
+                "strike_source": strike_source,
+                "authoritative": bool(recovered.get("authoritative", False)),
+                "recovered_from_ts": recovered.get("ts"),
+                "sample_dt_sec": sample_dt_sec,
+            },
+        )
+
+    def _emit_buy_observe_diagnostic(
+        self,
+        *,
+        inst_id: Any,
+        desired_entry: Dict[str, Any],
+        quote_intent_state: Any,
+        locked_side_runtime: Any,
+        current_inst_inventory_qty: Decimal,
+        market_buy_count: int,
+        time_left_sec: float | None,
+    ) -> None:
+        if not self.trade_db:
+            return
+        reason = str(desired_entry.get("diag_reason", "") or "")
+        if not reason and str(getattr(quote_intent_state, "quote_mode", "") or "") != "QuoteMode.OBSERVE":
+            return
+        if not reason:
+            if locked_side_runtime.entry_blocked:
+                reason = str(locked_side_runtime.entry_block_reason or "locked_side_entry_blocked")
+            else:
+                reason = "quote_mode_observe"
+        slug = str(self.current_market_slug or "")
+        inst_txt = str(inst_id)
+        throttle_key = f"{slug}|{inst_txt}|{reason}"
+        now_ts = time.time()
+        last_ts = float(self._last_buy_observe_diag_ts_by_key.get(throttle_key, 0.0))
+        if now_ts - last_ts < float(self.buy_observe_diag_interval_sec):
+            return
+        self._last_buy_observe_diag_ts_by_key[throttle_key] = now_ts
+        self._db_order_event(
+            event_type="ORDER_OBSERVE_BUY_BLOCKED",
+            side="BUY",
+            status="OBSERVE",
+            reason=reason,
+            price=float(desired_entry.get("price")) if desired_entry.get("price") is not None else None,
+            expected_net_usdc=float(desired_entry.get("min_expected_net_usdc")) if desired_entry.get("min_expected_net_usdc") is not None else None,
+            payload={
+                "slug": slug,
+                "instrument_id": inst_txt,
+                "active_side": self.active_side.value,
+                "side_score": float(self.side_decision_score),
+                "diag_reason": reason,
+                "quote_mode": str(getattr(quote_intent_state, "quote_mode", "") or ""),
+                "should_quote": bool(desired_entry.get("should_quote", False)),
+                "entry_mode": str(desired_entry.get("entry_mode", "") or ""),
+                "price": float(desired_entry.get("price")) if desired_entry.get("price") is not None else None,
+                "p_fair": float(desired_entry.get("p_fair")) if desired_entry.get("p_fair") is not None else None,
+                "robust_net_usdc": float(desired_entry.get("robust_net")) if desired_entry.get("robust_net") is not None else None,
+                "directional_edge_ps": float(desired_entry.get("directional_edge_ps")) if desired_entry.get("directional_edge_ps") is not None else None,
+                "market_buy_count": int(market_buy_count),
+                "inventory_qty": float(current_inst_inventory_qty),
+                "locked_side_entry_blocked": bool(locked_side_runtime.entry_blocked),
+                "locked_side_entry_block_reason": str(locked_side_runtime.entry_block_reason or ""),
+                "time_left_sec": float(time_left_sec) if time_left_sec is not None else None,
+            },
+        )
+
     def _increment_order_metric(self, status: str) -> None:
         """
         Increment order counters on Grafana exporter when available.
@@ -2177,6 +2272,15 @@ class IntegratedBTCStrategy(
                         down_instrument_id=self.current_down_instrument_id,
                         shadow_payload=live_shadow_payload,
                     )
+                    self._emit_buy_observe_diagnostic(
+                        inst_id=inst_id,
+                        desired_entry=desired_entry,
+                        quote_intent_state=quote_intent_state,
+                        locked_side_runtime=locked_side_runtime,
+                        current_inst_inventory_qty=current_inst_inventory_qty,
+                        market_buy_count=market_buy_count,
+                        time_left_sec=time_left_sec_global,
+                    )
                 desired_quotes[order_key] = desired_entry
 
         return desired_quotes, diag_context_by_inst
@@ -2243,6 +2347,7 @@ class IntegratedBTCStrategy(
 
         # Recover local inventory tracking if the strategy restarted mid-market.
         self._rehydrate_inventory_state_on_startup()
+        self._recover_market_strike_from_trade_db_on_startup()
 
         log_strategy_run_start(
             trade_db=self.trade_db,
