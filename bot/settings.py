@@ -72,6 +72,8 @@ def initialize_strategy_settings(
     strategy.shadow_signal_config = DEFAULT_SHADOW_SIGNAL_CONFIG
     strategy._last_shadow_live_candidate_signature = None
     strategy._last_main_live_candidate_signature = None
+    strategy._last_entry_regime_observation_signature = None
+    strategy._last_entry_regime_observation_ts = 0.0
 
     strategy.test_mode = test_mode
     strategy.maker_mode = config.maker.maker_mode

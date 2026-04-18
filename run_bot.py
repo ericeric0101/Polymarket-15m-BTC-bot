@@ -124,7 +124,7 @@ from bot.quote_service import (
     resolve_quote_intent_state,
     should_requote_existing_order,
 )
-from bot.shadow_signal import build_live_signal_compare_payload
+from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.market_discovery import (
@@ -691,6 +691,7 @@ class IntegratedBTCStrategy(
         if payload is None:
             return
         self._db_strategy_event("LIVE_SIGNAL_COMPARE", payload)
+        self._emit_entry_regime_observation(payload, now_ts)
 
         main_sig = json.dumps(
             {
@@ -717,6 +718,35 @@ class IntegratedBTCStrategy(
         if shadow_sig != getattr(self, "_last_shadow_live_candidate_signature", None):
             self._last_shadow_live_candidate_signature = shadow_sig
             self._db_strategy_event("SHADOW_SIGNAL_CANDIDATE_LIVE", payload)
+
+    def _emit_entry_regime_observation(self, payload: Dict[str, Any], now_ts: float) -> None:
+        observation = build_entry_regime_observation_payload(payload)
+        if observation is None:
+            return
+        signature = json.dumps(
+            {
+                "slug": payload.get("slug") or "",
+                "regime_tag": observation.get("regime_tag"),
+                "main_candidate_outcome": observation.get("main_candidate_outcome"),
+                "time_left_sec": round(float(observation.get("time_left_sec") or 0.0), 1),
+                "signed_spot_minus_strike": round(
+                    float(observation.get("signed_spot_minus_strike") or 0.0),
+                    2,
+                ),
+                "main_score": round(float(observation.get("main_score") or 0.0), 3),
+            },
+            sort_keys=True,
+        )
+        last_sig = getattr(self, "_last_entry_regime_observation_signature", None)
+        last_ts = float(getattr(self, "_last_entry_regime_observation_ts", 0.0))
+        if signature == last_sig and (now_ts - last_ts) < 30.0:
+            return
+        self._last_entry_regime_observation_signature = signature
+        self._last_entry_regime_observation_ts = now_ts
+        observation_payload = dict(payload)
+        observation_payload.update(observation)
+        observation_payload["observation_ts"] = float(now_ts)
+        self._db_strategy_event("ENTRY_REGIME_OBSERVATION", observation_payload)
 
     def _build_live_signal_compare_payload(self, now_ts: float) -> Optional[Dict[str, Any]]:
         if not getattr(self, "shadow_signal_enabled", False):
