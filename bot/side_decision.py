@@ -47,6 +47,8 @@ class SideDecisionHost(Protocol):
     market_strike_source_by_slug: Dict[str, str]
     external_spot_history: List[Any]
     active_maker_orders: Dict[str, Any]
+    live_inventory_cost: Dict[str, Any]
+    market_buy_count_by_slug: Dict[str, int]
     _signal_engine: SignalEngine
 
     def _normalize_active_side(self, value: Any) -> ActiveSide: ...
@@ -332,6 +334,25 @@ class SideDecisionMixin:
             return False
         return (now_ts - pending_since) >= min_persist
 
+    def _pre_entry_flip_allowed(self, *, proposed_side: ActiveSide) -> bool:
+        if not self.active_side_locked or proposed_side in (ActiveSide.NONE, self.active_side):
+            return False
+        if int(getattr(self, "side_flip_count", 0) or 0) >= 1:
+            return False
+        slug = str(getattr(self, "current_market_slug", "") or "")
+        market_buy_count = int(getattr(self, "market_buy_count_by_slug", {}).get(slug, 0) or 0)
+        if market_buy_count > 0:
+            return False
+        try:
+            live_inventory_cost = getattr(self, "live_inventory_cost", {}) or {}
+            for state in live_inventory_cost.values():
+                qty = Decimal(str((state or {}).get("qty", "0")))
+                if qty > 0:
+                    return False
+        except Exception:
+            return False
+        return True
+
     def _populate_spot_source_inputs(
         self,
         inputs: Dict[str, Any],
@@ -566,11 +587,6 @@ class SideDecisionMixin:
             return
         flip_max_per_market = int(getattr(self, "bi_side_flip_max_per_market", 1))
         allow_intramarket_flip = bool(getattr(self, "bi_side_allow_intramarket_flip", False))
-        can_attempt_flip = (
-            self.active_side_locked
-            and allow_intramarket_flip
-            and self.side_flip_count < flip_max_per_market
-        )
         if phase in (MarketPhase.WAITING, MarketPhase.SETTLING):
             return
         time_left_sec = None
@@ -609,6 +625,7 @@ class SideDecisionMixin:
                 )
 
         side, score, reason, inputs = self._compute_side_decision(now_ts)
+        pre_entry_flip_allowed = self._pre_entry_flip_allowed(proposed_side=side)
         if reason in {"spot_unavailable", "strike_unavailable"}:
             self.side_decision_score = score
             self.side_decision_reason = reason
@@ -632,6 +649,16 @@ class SideDecisionMixin:
             self.side_decision_reason = reason
             self.side_decision_ts = now_ts
             self.side_decision_inputs = dict(inputs)
+            can_attempt_flip = bool(
+                self.active_side_locked
+                and (
+                    (
+                        allow_intramarket_flip
+                        and self.side_flip_count < flip_max_per_market
+                    )
+                    or pre_entry_flip_allowed
+                )
+            )
             extra_flip_for_held_inventory = (
                 not can_attempt_flip
                 and self._held_inventory_allows_extra_flip(proposed_side=side)
@@ -700,6 +727,7 @@ class SideDecisionMixin:
                     "decision_ts": now_ts,
                     "flip_count": self.side_flip_count,
                     "extra_flip_for_held_inventory": bool(extra_flip_for_held_inventory),
+                    "pre_entry_flip_allowed": bool(pre_entry_flip_allowed),
                     "thesis_epoch": int(thesis_epoch),
                 }
             )
