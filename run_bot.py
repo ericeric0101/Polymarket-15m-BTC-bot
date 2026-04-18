@@ -1778,6 +1778,11 @@ class IntegratedBTCStrategy(
                 unified_sell_exit_decision = None
                 sell_intent = "NONE"
                 quote_intent_state = QuoteIntentState(quote_mode=QuoteMode.OBSERVE)
+                hold_to_redeem_sell_block = bool(
+                    side == "sell"
+                    and getattr(self, "hold_to_redeem_enabled", False)
+                    and current_inst_inventory_qty > 0
+                )
                 peak_bid = (
                     self.maker_profit_run_peak_bid_by_inst.get(inst_key, quote_ctx.quote[0])
                     if side == "sell" and quote_ctx.quote is not None
@@ -1945,8 +1950,16 @@ class IntegratedBTCStrategy(
                 desired_entry["hard_exit_allowed"] = quote_intent_state.hard_exit_allowed
                 if side == "sell" and not quote_intent_state.hard_exit_allowed:
                     desired_entry["loss_sell_reason"] = ""
+                if hold_to_redeem_sell_block:
+                    sell_intent = "NONE"
+                    quote_intent_state = QuoteIntentState(quote_mode=QuoteMode.OBSERVE)
+                    desired_entry["quote_mode"] = quote_intent_state.quote_mode.value
+                    desired_entry["hard_exit_allowed"] = False
+                    desired_entry["should_quote"] = False
+                    desired_entry["loss_sell_reason"] = ""
+                    desired_entry["diag_reason"] = "hold_to_redeem_enabled"
 
-                if side == "sell" and was_econ_gated:
+                if side == "sell" and was_econ_gated and not hold_to_redeem_sell_block:
                     # Ungate Maker passive sell boundary check if only blocked by econ_gate,
                     # because closing inventory shouldn't require the strict entry edge minimum.
                     desired_entry["should_quote"] = True
@@ -1980,6 +1993,7 @@ class IntegratedBTCStrategy(
                     side == "sell"
                     and sell_intent == "RECYCLE_PROFIT"
                     and quote_ctx.quote is not None
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry["should_quote"] = True
                     desired_entry = apply_locked_side_recycle_sell_pricing(
@@ -2005,6 +2019,7 @@ class IntegratedBTCStrategy(
                     and stop_loss_pending_active
                     and quote_ctx.quote is not None
                     and current_inst_inventory_qty > 0
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry["should_quote"] = True
                     desired_entry["diag_reason"] = (
@@ -2020,6 +2035,7 @@ class IntegratedBTCStrategy(
                     and sell_intent == "FORCED_EXIT"
                     and quote_ctx.quote is not None
                     and current_inst_inventory_qty > 0
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry["should_quote"] = True
                     desired_entry["diag_reason"] = (
@@ -2031,6 +2047,7 @@ class IntegratedBTCStrategy(
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
                     and sell_intent == "FORCED_EXIT"
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry = apply_forced_exit_sell_pricing(
                         desired_entry=desired_entry,
@@ -2060,6 +2077,7 @@ class IntegratedBTCStrategy(
                     and sell_intent == "TAIL_EXIT"
                     and desired_entry.get("should_quote", False)
                     and quote_ctx.quote is not None
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry = apply_forced_exit_sell_pricing(
                         desired_entry=desired_entry,
@@ -2078,6 +2096,7 @@ class IntegratedBTCStrategy(
                     side == "sell"
                     and quote_intent_state.hard_exit_allowed
                     and desired_entry.get("should_quote", False)
+                    and not hold_to_redeem_sell_block
                 ):
                     desired_entry = preserve_recent_loss_sell_order(
                         desired_entry=desired_entry,

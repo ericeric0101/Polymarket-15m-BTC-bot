@@ -27,6 +27,7 @@ from bot.models import (
 
 class TakerExitHost(Protocol):
     taker_exit_enabled: bool
+    hold_to_redeem_enabled: bool
     taker_exit_cooldown_sec: int
     taker_exit_eval_interval_sec: float
     taker_exit_reject_cooldown_until_by_inst: dict[str, float]
@@ -67,6 +68,8 @@ class TakerExitMixin:
 
     async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
+            return
+        if getattr(self, "hold_to_redeem_enabled", False):
             return
         if self.taker_exit_cooldown_sec < 0:
             return
