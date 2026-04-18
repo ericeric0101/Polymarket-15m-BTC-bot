@@ -612,6 +612,8 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_event_ts_ms = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
+    strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd
+    strategy.active_side_lock_score_abs = Decimal("0")
     from bot.signal_engine import SignalEngine, SignalEngineConfig
     strategy._signal_engine = SignalEngine(SignalEngineConfig(
         btc_ema_fast_sec=strategy.side_signal_btc_ema_fast_sec,

@@ -266,6 +266,7 @@ def evaluate_buy_entry_controls(
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
     directional_first_entry_min_score_abs_new: Decimal,
+    locked_side_score_abs: Decimal = Decimal("0"),
     maker_min_expected_net_usdc: Decimal,
     maker_reload_min_expected_net_multiplier: Decimal,
     current_inst_inventory_qty: Decimal,
@@ -340,7 +341,7 @@ def evaluate_buy_entry_controls(
     if (
         current_inst_inventory_qty <= 0
         and int(market_buy_count) <= 0
-        and abs(side_score) < directional_first_entry_min_score_abs_new
+        and max(abs(side_score), abs(locked_side_score_abs)) < directional_first_entry_min_score_abs_new
     ):
         return BuyEntryEvaluation(
             skip=True,
@@ -352,6 +353,7 @@ def evaluate_buy_entry_controls(
                 "slug": current_slug,
                 "instrument_id": str(inst_id),
                 "side_score": float(side_score),
+                "locked_side_score_abs": float(abs(locked_side_score_abs)),
                 "required_score_abs": float(directional_first_entry_min_score_abs_new),
                 "engine": "new_signal",
             },
@@ -375,7 +377,7 @@ def evaluate_buy_entry_controls(
     if (
         active_side_txt in {"UP", "DOWN"}
         and spot_minus_strike_avg is not None
-        and entry_spot_strike_avg_min_abs >= 0
+        and entry_spot_strike_avg_min_abs > 0
     ):
         spot_avg_supports = (
             spot_minus_strike_avg >= entry_spot_strike_avg_min_abs
@@ -403,6 +405,7 @@ def evaluate_buy_entry_controls(
         and fair is not None
         and candidate_entry_price > 0
         and fair > 0
+        and entry_fair_edge_min_ps > 0
         and (fair - candidate_entry_price) < entry_fair_edge_min_ps
     ):
         return BuyEntryEvaluation(
@@ -425,6 +428,7 @@ def evaluate_buy_entry_controls(
     if (
         active_side_txt == "DOWN"
         and candidate_entry_price is not None
+        and down_high_price_threshold < 1
         and candidate_entry_price >= down_high_price_threshold
         and (
             abs(side_score) < down_high_price_min_score_abs

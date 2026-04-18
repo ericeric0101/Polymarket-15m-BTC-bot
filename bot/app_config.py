@@ -379,6 +379,7 @@ class MarketDataConfig:
     external_spot_max_failures: int
     external_spot_history_max: int
     polymarket_chainlink_history_max: int
+    external_spot_source_delta_abs_max_usd: Decimal
     market_strike_anchor_max_lag_sec: int
     market_strike_anchor_near_sec: int
     market_strike_rest_retry_sec: int
@@ -699,10 +700,10 @@ class AppConfig:
                     ),
                     max(entry_score_abs_default, Decimal("0.18")),
                 ),
-                entry_spot_strike_lookback_sec=max(0, _env_int("ENTRY_SPOT_STRIKE_LOOKBACK_SEC", 120)),
+                entry_spot_strike_lookback_sec=max(0, _env_int("ENTRY_SPOT_STRIKE_LOOKBACK_SEC", 0)),
                 entry_spot_strike_avg_min_abs=_env_decimal("ENTRY_SPOT_STRIKE_AVG_MIN_ABS", "0"),
-                entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0.05"),
-                down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "0.65"),
+                entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0"),
+                down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "1"),
                 down_high_price_min_score_abs=_env_decimal("DOWN_HIGH_PRICE_MIN_SCORE_ABS", "0.25"),
                 down_high_price_min_robust_net_usdc=_env_decimal("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC", "0.15"),
                 down_high_price_spot_strike_avg_max=_env_decimal("DOWN_HIGH_PRICE_SPOT_STRIKE_AVG_MAX", "-10"),
@@ -803,6 +804,10 @@ class AppConfig:
                 polymarket_chainlink_history_max=max(
                     60,
                     _env_int("POLYMARKET_CHAINLINK_HISTORY_MAX", external_spot_history_max),
+                ),
+                external_spot_source_delta_abs_max_usd=max(
+                    Decimal("0"),
+                    _env_decimal("EXTERNAL_SPOT_SOURCE_DELTA_ABS_MAX_USD", "40"),
                 ),
                 market_strike_anchor_max_lag_sec=max(10, _env_int("MARKET_STRIKE_ANCHOR_MAX_LAG_SEC", 180)),
                 market_strike_anchor_near_sec=max(5, _env_int("MARKET_STRIKE_ANCHOR_NEAR_SEC", 30)),

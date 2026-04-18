@@ -49,6 +49,7 @@ from bot.side_decision import SideDecisionMixin
 from bot.spot_pricer import SpotPricerMixin
 from bot.taker_exit import TakerExitMixin
 from bot.fill_ledger import FillLedgerMixin
+from bot.db_runtime import StrategyDBRuntimeMixin
 from bot.order_runtime import OrderRuntimeMixin
 from bot.order_events import (
     handle_order_canceled,
@@ -179,6 +180,7 @@ class IntegratedBTCStrategy(
     SpotPricerMixin,
     TakerExitMixin,
     FillLedgerMixin,
+    StrategyDBRuntimeMixin,
     OrderRuntimeMixin,
     PricingRuntimeMixin,
     QuoteRuntimeMixin,
@@ -792,164 +794,6 @@ class IntegratedBTCStrategy(
         )
 
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
-
-    def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
-        if not self.trade_db:
-            return
-        payload_out: Dict[str, Any] = dict(payload or {})
-        if self.current_market_slug and "slug" not in payload_out:
-            payload_out["slug"] = self.current_market_slug
-        if self.current_market_slug and "market_slug" not in payload_out:
-            payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
-            payload_out["instrument_id"] = str(self.instrument_id)
-        self.trade_db.log_strategy_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            payload=payload_out,
-        )
-
-    def _db_order_event(
-        self,
-        event_type: str,
-        client_order_id: Optional[str] = None,
-        venue_order_id: Optional[str] = None,
-        side: Optional[str] = None,
-        price: Optional[float] = None,
-        qty: Optional[float] = None,
-        status: Optional[str] = None,
-        reason: Optional[str] = None,
-        commission_usdc: Optional[float] = None,
-        expected_net_usdc: Optional[float] = None,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if not self.trade_db:
-            return
-        payload_out: Dict[str, Any] = dict(payload or {})
-        if self.current_market_slug and "slug" not in payload_out:
-            payload_out["slug"] = self.current_market_slug
-        if self.current_market_slug and "market_slug" not in payload_out:
-            payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
-            payload_out["instrument_id"] = str(self.instrument_id)
-
-        side_out = side
-        if side_out:
-            side_norm = self._normalize_side_text(side_out)
-            if side_norm:
-                side_out = side_norm.upper()
-        self.trade_db.log_order_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            client_order_id=client_order_id,
-            venue_order_id=venue_order_id,
-            side=side_out,
-            price=price,
-            qty=qty,
-            status=status,
-            reason=reason,
-            instrument_id=str(self.instrument_id) if self.instrument_id else None,
-            token_id=self.current_token_id,
-            fee_rate_bps=self.last_observed_fee_rate_bps,
-            expected_net_usdc=expected_net_usdc,
-            commission_usdc=commission_usdc,
-            payload=payload_out,
-        )
-
-    def _recover_market_strike_from_trade_db_on_startup(self) -> None:
-        if not self.trade_db or not self.current_market_slug:
-            return
-        slug = str(self.current_market_slug or "")
-        cached = self.market_strike_cache_by_slug.get(slug)
-        if isinstance(cached, Decimal) and cached > 0:
-            return
-        recovered = self.trade_db.load_latest_locked_strike(slug)
-        if not recovered:
-            return
-        strike = recovered.get("strike")
-        if not isinstance(strike, Decimal) or strike <= 0:
-            return
-        strike_source = str(recovered.get("strike_source") or "trade_db_recovered")
-        self.market_strike_cache_by_slug[slug] = strike
-        self.market_strike_source_by_slug[slug] = strike_source
-        self.market_strike_provisional_by_slug.pop(slug, None)
-        self.market_strike_provisional_source_by_slug.pop(slug, None)
-        if self.current_market_open_spot is None or Decimal(str(self.current_market_open_spot or "0")) <= 0:
-            self.current_market_open_spot = strike
-        sample_dt_sec = recovered.get("sample_dt_sec")
-        logger.info(
-            "Recovered authoritative market strike from trade journal: "
-            f"slug={slug} strike=${float(strike):.2f} source={strike_source} "
-            f"logged_at={recovered.get('ts')}"
-        )
-        self._db_strategy_event(
-            "MARKET_STRIKE_RECOVERED",
-            {
-                "slug": slug,
-                "strike": float(strike),
-                "strike_source": strike_source,
-                "authoritative": bool(recovered.get("authoritative", False)),
-                "recovered_from_ts": recovered.get("ts"),
-                "sample_dt_sec": sample_dt_sec,
-            },
-        )
-
-    def _emit_buy_observe_diagnostic(
-        self,
-        *,
-        inst_id: Any,
-        desired_entry: Dict[str, Any],
-        quote_intent_state: Any,
-        locked_side_runtime: Any,
-        current_inst_inventory_qty: Decimal,
-        market_buy_count: int,
-        time_left_sec: float | None,
-    ) -> None:
-        if not self.trade_db:
-            return
-        reason = str(desired_entry.get("diag_reason", "") or "")
-        if not reason and str(getattr(quote_intent_state, "quote_mode", "") or "") != "QuoteMode.OBSERVE":
-            return
-        if not reason:
-            if locked_side_runtime.entry_blocked:
-                reason = str(locked_side_runtime.entry_block_reason or "locked_side_entry_blocked")
-            else:
-                reason = "quote_mode_observe"
-        slug = str(self.current_market_slug or "")
-        inst_txt = str(inst_id)
-        throttle_key = f"{slug}|{inst_txt}|{reason}"
-        now_ts = time.time()
-        last_ts = float(self._last_buy_observe_diag_ts_by_key.get(throttle_key, 0.0))
-        if now_ts - last_ts < float(self.buy_observe_diag_interval_sec):
-            return
-        self._last_buy_observe_diag_ts_by_key[throttle_key] = now_ts
-        self._db_order_event(
-            event_type="ORDER_OBSERVE_BUY_BLOCKED",
-            side="BUY",
-            status="OBSERVE",
-            reason=reason,
-            price=float(desired_entry.get("price")) if desired_entry.get("price") is not None else None,
-            expected_net_usdc=float(desired_entry.get("min_expected_net_usdc")) if desired_entry.get("min_expected_net_usdc") is not None else None,
-            payload={
-                "slug": slug,
-                "instrument_id": inst_txt,
-                "active_side": self.active_side.value,
-                "side_score": float(self.side_decision_score),
-                "diag_reason": reason,
-                "quote_mode": str(getattr(quote_intent_state, "quote_mode", "") or ""),
-                "should_quote": bool(desired_entry.get("should_quote", False)),
-                "entry_mode": str(desired_entry.get("entry_mode", "") or ""),
-                "price": float(desired_entry.get("price")) if desired_entry.get("price") is not None else None,
-                "p_fair": float(desired_entry.get("p_fair")) if desired_entry.get("p_fair") is not None else None,
-                "robust_net_usdc": float(desired_entry.get("robust_net")) if desired_entry.get("robust_net") is not None else None,
-                "directional_edge_ps": float(desired_entry.get("directional_edge_ps")) if desired_entry.get("directional_edge_ps") is not None else None,
-                "market_buy_count": int(market_buy_count),
-                "inventory_qty": float(current_inst_inventory_qty),
-                "locked_side_entry_blocked": bool(locked_side_runtime.entry_blocked),
-                "locked_side_entry_block_reason": str(locked_side_runtime.entry_block_reason or ""),
-                "time_left_sec": float(time_left_sec) if time_left_sec is not None else None,
-            },
-        )
 
     def _increment_order_metric(self, status: str) -> None:
         """
@@ -1660,6 +1504,7 @@ class IntegratedBTCStrategy(
                     side_score=self.side_decision_score,
                     directional_entry_min_score_abs_new=self.directional_entry_min_score_abs_new,
                     directional_first_entry_min_score_abs_new=self.directional_first_entry_min_score_abs_new,
+                    locked_side_score_abs=Decimal(str(getattr(self, "active_side_lock_score_abs", Decimal("0")))),
                     maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
                     maker_reload_min_expected_net_multiplier=self.maker_reload_min_expected_net_multiplier,
                     current_inst_inventory_qty=current_inst_inventory_qty,
@@ -1680,7 +1525,11 @@ class IntegratedBTCStrategy(
                     fair=quote_ctx.fair,
                     trend_buy_max_price_premium_ps=self.trend_buy_max_price_premium_ps,
                     candidate_entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
-                    spot_minus_strike_avg=self._spot_minus_strike_avg(int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0)),
+                    spot_minus_strike_avg=(
+                        self._spot_minus_strike_avg(int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0))
+                        if int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0) > 0
+                        else None
+                    ),
                     entry_spot_strike_avg_min_abs=getattr(self, "entry_spot_strike_avg_min_abs", Decimal("0")),
                     entry_fair_edge_min_ps=getattr(self, "entry_fair_edge_min_ps", Decimal("0")),
                     robust_net_usdc=desired_entry.get("robust_net"),
@@ -1691,12 +1540,13 @@ class IntegratedBTCStrategy(
                 )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
-                    self._db_order_event(
+                    diag_payload = buy_entry_eval.payload or {}
+                    self._db_buy_path_diagnostic(
                         event_type=buy_entry_eval.event_type,
                         side=side.upper(),
                         status="SKIPPED",
                         reason=buy_entry_eval.reason,
-                        payload=buy_entry_eval.payload or {},
+                        payload=diag_payload,
                     )
                     continue
                 # Determine if the directional thesis has weakened against our position.

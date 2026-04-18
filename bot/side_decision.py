@@ -71,6 +71,7 @@ class SideDecisionMixin:
         self.active_side = ActiveSide.UP if not self.bi_side_enabled else self._normalize_active_side(self.bi_side_default_mode)
         self.active_side_locked = False
         self.active_side_locked_since_ts = 0.0
+        self.active_side_lock_score_abs = Decimal("0")
         self.side_decision_ts = 0.0
         self.side_decision_score = Decimal("0")
         self.side_decision_reason = "market_reset"
@@ -673,6 +674,7 @@ class SideDecisionMixin:
             self.side_flip_count += 1
             if self.active_side_locked and side != ActiveSide.NONE and old_side != side:
                 self.active_side_locked_since_ts = now_ts
+                self.active_side_lock_score_abs = abs(score)
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
             self.side_pending_flip_since_ts = 0.0
@@ -722,6 +724,7 @@ class SideDecisionMixin:
             self.active_side_locked = True
             if old_side != side or self.active_side_locked_since_ts <= 0:
                 self.active_side_locked_since_ts = now_ts
+                self.active_side_lock_score_abs = abs(score)
             self.side_pending_flip_side = ActiveSide.NONE
             self.side_pending_flip_count = 0
             self.side_pending_flip_since_ts = 0.0
@@ -730,6 +733,7 @@ class SideDecisionMixin:
                 self._force_quote_refresh_reason = f"locked_entry:{old_side.value}->{side.value}"
         elif side == ActiveSide.NONE:
             self.active_side_locked_since_ts = 0.0
+            self.active_side_lock_score_abs = Decimal("0")
             self.side_decision_due_ts = now_ts + float(self.bi_side_reeval_interval_sec)
         self._sync_active_instrument()
         if old_side != side:

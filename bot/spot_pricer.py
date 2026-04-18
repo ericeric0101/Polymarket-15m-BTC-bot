@@ -228,11 +228,37 @@ class SpotPricerMixin:
         Fallback: Binance WS.
         Last resort: Coinbase HTTP.
         """
+        max_delta_abs = Decimal(
+            str(getattr(self, "external_spot_source_delta_abs_max_usd", Decimal("0")) or "0")
+        )
+        binance_fresh = False
+        binance_price = None
+        if self._binance_ws_price is not None:
+            binance_age = time.time() - self._binance_ws_price_ts
+            if binance_age < 10.0:
+                binance_fresh = True
+                binance_price = self._binance_ws_price
         # Primary: Polymarket Chainlink WS if fresh.
         if self._polymarket_chainlink_price is not None:
             age = time.time() - self._polymarket_chainlink_price_ts
             if age < 10.0:
                 price = self._polymarket_chainlink_price
+                if (
+                    binance_fresh
+                    and binance_price is not None
+                    and max_delta_abs > 0
+                    and abs(price - binance_price) > max_delta_abs
+                ):
+                    last_warn_ts = float(getattr(self, "_last_spot_source_delta_warn_ts", 0.0) or 0.0)
+                    now_ts = time.time()
+                    if now_ts - last_warn_ts >= 30.0:
+                        logger.warning(
+                            "Reference spot source delta exceeded guard; using Polymarket Chainlink as primary: "
+                            f"chainlink={float(price):.2f} binance={float(binance_price):.2f} "
+                            f"delta={float(price - binance_price):+.2f} "
+                            f"guard={float(max_delta_abs):.2f}"
+                        )
+                        self._last_spot_source_delta_warn_ts = now_ts
                 self.latest_external_spot_source = "polymarket_chainlink_ws"
                 self.latest_external_spot_source_ts = self._polymarket_chainlink_price_ts
                 if not getattr(self, "_logged_first_spot", False):
