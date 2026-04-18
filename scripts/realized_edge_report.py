@@ -29,6 +29,7 @@ SIGNAL_EVENT_TYPES = (
     "SIDE_DECISION",
     "NO_TRADE_ACTIVE_SIDE_NONE",
 )
+REGIME_EVENT_TYPE = "ENTRY_REGIME_OBSERVATION"
 
 
 def _to_iso_utc(hours: int) -> Optional[str]:
@@ -229,6 +230,21 @@ class SignalSnapshot:
     ask_down: Optional[float]
 
 
+@dataclass
+class RegimeObservation:
+    ts: str
+    ts_epoch: float
+    slug: str
+    regime_tag: str
+    main_candidate_outcome: str
+    main_score: Optional[float]
+    main_score_abs: Optional[float]
+    time_left_sec: Optional[float]
+    spot_minus_strike: Optional[float]
+    signed_spot_minus_strike: Optional[float]
+    token_price: Optional[float]
+
+
 def _iter_buy_fills(conn: sqlite3.Connection, run_id: Optional[str], cutoff_iso: Optional[str]) -> Iterable[FillRow]:
     where: List[str] = ["event_type='ORDER_FILLED'"]
     params: List[object] = []
@@ -411,6 +427,63 @@ def _load_signal_snapshots(
     return out
 
 
+def _load_regime_observations(
+    conn: sqlite3.Connection,
+    run_id: Optional[str],
+    cutoff_iso: Optional[str],
+) -> Dict[str, List[RegimeObservation]]:
+    where: List[str] = ["event_type=?"]
+    params: List[object] = [REGIME_EVENT_TYPE]
+    if run_id:
+        where.append("run_id=?")
+        params.append(run_id)
+    if cutoff_iso:
+        where.append("ts>=?")
+        params.append(cutoff_iso)
+
+    sql = f"""
+        SELECT ts, payload_json
+        FROM strategy_events
+        WHERE {" AND ".join(where)}
+        ORDER BY ts ASC
+    """
+    out: Dict[str, List[RegimeObservation]] = {}
+    for row in conn.execute(sql, tuple(params)).fetchall():
+        payload = _safe_json_loads(row["payload_json"])
+        if not isinstance(payload, dict):
+            continue
+        slug = str(payload.get("slug") or payload.get("market_slug") or "")
+        regime_tag = str(payload.get("regime_tag") or "")
+        if not slug or not regime_tag:
+            continue
+        out.setdefault(slug, []).append(
+            RegimeObservation(
+                ts=str(row["ts"]),
+                ts_epoch=_parse_ts_epoch(str(row["ts"])),
+                slug=slug,
+                regime_tag=regime_tag,
+                main_candidate_outcome=_norm_outcome(payload.get("main_candidate_outcome")),
+                main_score=(float(payload["main_score"]) if payload.get("main_score") is not None else None),
+                main_score_abs=(
+                    float(payload["main_score_abs"]) if payload.get("main_score_abs") is not None else None
+                ),
+                time_left_sec=(
+                    float(payload["time_left_sec"]) if payload.get("time_left_sec") is not None else None
+                ),
+                spot_minus_strike=(
+                    float(payload["spot_minus_strike"]) if payload.get("spot_minus_strike") is not None else None
+                ),
+                signed_spot_minus_strike=(
+                    float(payload["signed_spot_minus_strike"])
+                    if payload.get("signed_spot_minus_strike") is not None
+                    else None
+                ),
+                token_price=(float(payload["token_price"]) if payload.get("token_price") is not None else None),
+            )
+        )
+    return out
+
+
 def _latest_snapshot_before(
     snapshots_by_slug: Dict[str, List[SignalSnapshot]],
     slug: str,
@@ -428,6 +501,25 @@ def _latest_snapshot_before(
     if fill_ts_epoch - snap.ts_epoch > max_age_sec:
         return None
     return snap
+
+
+def _latest_regime_observation_before(
+    observations_by_slug: Dict[str, List[RegimeObservation]],
+    slug: str,
+    fill_ts_epoch: float,
+    max_age_sec: float,
+) -> Optional[RegimeObservation]:
+    observations = observations_by_slug.get(slug)
+    if not observations:
+        return None
+    epochs = [o.ts_epoch for o in observations]
+    idx = bisect.bisect_right(epochs, fill_ts_epoch) - 1
+    if idx < 0:
+        return None
+    obs = observations[idx]
+    if fill_ts_epoch - obs.ts_epoch > max_age_sec:
+        return None
+    return obs
 
 
 def _infer_token_outcome(fill: FillRow, settlement: SettlementRow, snapshot: Optional[SignalSnapshot]) -> str:
@@ -570,6 +662,12 @@ def _aggregate_market_rows(rows_out: List[dict]) -> List[dict]:
                         side_score=(float(first["side_score"]) if first["side_score"] is not None else None),
                     )
                 ),
+                "observed_target_regime": int(first.get("observed_target_regime", 0)),
+                "observed_regime_tag": first.get("observed_regime_tag") or "",
+                "observed_regime_ts": first.get("observed_regime_ts") or "",
+                "observed_regime_time_left_sec": first.get("observed_regime_time_left_sec"),
+                "observed_regime_signed_spot_minus_strike": first.get("observed_regime_signed_spot_minus_strike"),
+                "observed_regime_token_price": first.get("observed_regime_token_price"),
             }
         )
     return sorted(market_rows, key=lambda r: r["first_fill_ts"])
@@ -591,6 +689,11 @@ def main() -> int:
         help="Output CSV path for per-market rows",
     )
     parser.add_argument(
+        "--regime-csv-out",
+        default="./logs/reports/regime_attribution_markets.csv",
+        help="Output CSV path for markets that hit observation regimes",
+    )
+    parser.add_argument(
         "--snapshot-max-age-sec",
         type=float,
         default=180.0,
@@ -609,6 +712,7 @@ def main() -> int:
 
     settlements = _load_settlements(conn, args.run_id, cutoff_iso)
     snapshots_by_slug = _load_signal_snapshots(conn, args.run_id, cutoff_iso)
+    regime_observations_by_slug = _load_regime_observations(conn, args.run_id, cutoff_iso)
     fills = list(_iter_buy_fills(conn, args.run_id, cutoff_iso))
     conn.close()
 
@@ -630,6 +734,12 @@ def main() -> int:
             continue
         snapshot = _latest_snapshot_before(
             snapshots_by_slug=snapshots_by_slug,
+            slug=fill.slug,
+            fill_ts_epoch=fill.ts_epoch,
+            max_age_sec=float(args.snapshot_max_age_sec),
+        )
+        regime_observation = _latest_regime_observation_before(
+            observations_by_slug=regime_observations_by_slug,
             slug=fill.slug,
             fill_ts_epoch=fill.ts_epoch,
             max_age_sec=float(args.snapshot_max_age_sec),
@@ -714,6 +824,18 @@ def main() -> int:
                 "spread_bucket": _bucket_spread(spread),
                 "is_high_price_continuation": int(is_high_price_cont),
                 "is_near_strike_moderate_price": int(is_near_strike_mod),
+                "observed_target_regime": int(regime_observation is not None),
+                "observed_regime_tag": regime_observation.regime_tag if regime_observation is not None else "",
+                "observed_regime_ts": regime_observation.ts if regime_observation is not None else "",
+                "observed_regime_time_left_sec": (
+                    regime_observation.time_left_sec if regime_observation is not None else None
+                ),
+                "observed_regime_signed_spot_minus_strike": (
+                    regime_observation.signed_spot_minus_strike if regime_observation is not None else None
+                ),
+                "observed_regime_token_price": (
+                    regime_observation.token_price if regime_observation is not None else None
+                ),
             }
         )
 
@@ -732,6 +854,14 @@ def main() -> int:
             writer = csv.DictWriter(f, fieldnames=list(market_rows[0].keys()))
             writer.writeheader()
             writer.writerows(market_rows)
+    regime_rows = [r for r in market_rows if int(r.get("observed_target_regime", 0)) == 1]
+    regime_out_path = Path(args.regime_csv_out)
+    regime_out_path.parent.mkdir(parents=True, exist_ok=True)
+    if regime_rows:
+        with regime_out_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(regime_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(regime_rows)
 
     if not rows_out:
         print("No aligned fill rows after settlement/signal matching.")
@@ -760,6 +890,7 @@ def main() -> int:
     print(f"avg_realized_edge_usdc: {_fmt(avg_edge)}")
     print(f"csv_out: {out_path}")
     print(f"market_csv_out: {market_out_path}")
+    print(f"regime_csv_out: {regime_out_path}")
     print("")
     print(
         f"alignment: missing_settlement={missing_settlement} "
@@ -776,11 +907,13 @@ def main() -> int:
 
     high_price_rows = [r for r in rows_out if int(r["is_high_price_continuation"]) == 1]
     near_strike_rows = [r for r in rows_out if int(r["is_near_strike_moderate_price"]) == 1]
+    observed_regime_rows = [r for r in rows_out if int(r["observed_target_regime"]) == 1]
 
     print("Custom regime buckets:")
     for label, subset in [
         ("high_price_continuation", high_price_rows),
         ("near_strike_moderate_price", near_strike_rows),
+        ("observed_target_regime", observed_regime_rows),
     ]:
         n = len(subset)
         wins = sum(int(r["won"]) for r in subset)
@@ -817,10 +950,12 @@ def main() -> int:
 
         market_high_price_rows = [r for r in market_rows if int(r["is_high_price_continuation"]) == 1]
         market_near_strike_rows = [r for r in market_rows if int(r["is_near_strike_moderate_price"]) == 1]
+        market_observed_regime_rows = [r for r in market_rows if int(r["observed_target_regime"]) == 1]
         print("Market-level custom regime buckets:")
         for label, subset in [
             ("high_price_continuation", market_high_price_rows),
             ("near_strike_moderate_price", market_near_strike_rows),
+            ("observed_target_regime", market_observed_regime_rows),
         ]:
             n = len(subset)
             wins = sum(int(r["won"]) for r in subset)
@@ -832,6 +967,26 @@ def main() -> int:
                 f"avg_edge_usdc={_fmt(avg_edge):>8} sum_edge_usdc={_fmt(sum_edge):>9}"
             )
         print("")
+
+        if market_observed_regime_rows:
+            _print_bucket_summary(
+                market_observed_regime_rows,
+                "fair_minus_entry_bucket",
+                "Observed regime markets by fair-entry bucket:",
+                pnl_key="market_realized_edge_usdc",
+            )
+            _print_bucket_summary(
+                market_observed_regime_rows,
+                "side_score_bucket",
+                "Observed regime markets by |side_score| bucket:",
+                pnl_key="market_realized_edge_usdc",
+            )
+            _print_bucket_summary(
+                market_observed_regime_rows,
+                "token_price_bucket",
+                "Observed regime markets by token-price bucket:",
+                pnl_key="market_realized_edge_usdc",
+            )
 
     return 0
 
