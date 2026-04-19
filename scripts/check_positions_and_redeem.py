@@ -45,6 +45,8 @@ CTF_REDEEM_ABI = [
     },
 ]
 
+GWEI = 10**9
+
 
 def _gwei_to_wei(w3, value: float | int) -> int:
     return int(w3.to_wei(value, "gwei"))
@@ -185,6 +187,50 @@ def _redeem_conditions(
         print("No redeemable condition IDs found.")
         return
 
+    def _safe_int(v: Any, default: int = 0) -> int:
+        try:
+            if v is None:
+                return default
+            return int(v)
+        except Exception:
+            return default
+
+    def _build_fee_params(w3: Any) -> dict[str, int]:
+        min_priority_fee_gwei = float(os.getenv("AUTO_REDEEM_MIN_PRIORITY_FEE_GWEI", "25"))
+        max_priority_fee_gwei = float(os.getenv("AUTO_REDEEM_MAX_PRIORITY_FEE_GWEI", "60"))
+        fee_buffer_gwei = float(os.getenv("AUTO_REDEEM_MAX_FEE_BUFFER_GWEI", "5"))
+
+        min_priority_fee_wei = int(max(0.0, min_priority_fee_gwei) * GWEI)
+        max_priority_fee_wei = int(max(min_priority_fee_gwei, max_priority_fee_gwei) * GWEI)
+        fee_buffer_wei = int(max(0.0, fee_buffer_gwei) * GWEI)
+
+        rpc_priority_fee_wei = 0
+        try:
+            rpc_priority_fee_wei = _safe_int(w3.eth.max_priority_fee, 0)
+        except Exception:
+            rpc_priority_fee_wei = 0
+
+        priority_fee_wei = max(min_priority_fee_wei, rpc_priority_fee_wei)
+        priority_fee_wei = min(priority_fee_wei, max_priority_fee_wei)
+
+        latest_block = w3.eth.get_block("latest")
+        base_fee_wei = _safe_int(latest_block.get("baseFeePerGas"), 0)
+
+        if base_fee_wei > 0:
+            max_fee_wei = max((base_fee_wei * 2) + priority_fee_wei + fee_buffer_wei, priority_fee_wei)
+            return {
+                "maxPriorityFeePerGas": priority_fee_wei,
+                "maxFeePerGas": max_fee_wei,
+            }
+
+        gas_price_wei = 0
+        try:
+            gas_price_wei = _safe_int(w3.eth.gas_price, 0)
+        except Exception:
+            gas_price_wei = 0
+        gas_price_wei = max(gas_price_wei, priority_fee_wei)
+        return {"gasPrice": gas_price_wei}
+
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
@@ -200,6 +246,13 @@ def _redeem_conditions(
             print(f"Skip invalid conditionId: {cid_txt}")
             continue
 
+        tx_base = {
+            "chainId": chain_id,
+            "from": owner,
+            "nonce": nonce,
+        }
+        tx_base.update(_build_fee_params(w3))
+
         tx_func = contract.functions.redeemPositions(
             Web3.to_checksum_address(USDC_ADDRESS),
             b"\x00" * 32,
@@ -210,13 +263,18 @@ def _redeem_conditions(
         last_error: Exception | None = None
         receipt = None
         for attempt in range(1, max_attempts + 1):
-            fee_params = _build_eip1559_fees(w3, bump_multiplier=1.0 + (attempt - 1) * 0.20)
-            tx_params = {
-                "chainId": chain_id,
-                "from": owner,
-                "nonce": nonce,
-                **fee_params,
-            }
+            tx_params = dict(tx_base)
+            fee_params = _build_fee_params(w3)
+            if "maxPriorityFeePerGas" in fee_params and "maxFeePerGas" in fee_params:
+                bump_multiplier = 1.0 + (attempt - 1) * 0.20
+                fee_params["maxPriorityFeePerGas"] = int(fee_params["maxPriorityFeePerGas"] * bump_multiplier)
+                fee_params["maxFeePerGas"] = max(
+                    int(fee_params["maxFeePerGas"] * bump_multiplier),
+                    fee_params["maxPriorityFeePerGas"],
+                )
+            elif "gasPrice" in fee_params:
+                fee_params["gasPrice"] = int(fee_params["gasPrice"] * (1.0 + (attempt - 1) * 0.20))
+            tx_params.update(fee_params)
             tx_params["gas"] = _estimate_redeem_gas(tx_func, tx_params)
             tx = tx_func.build_transaction(tx_params)
             signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
@@ -225,8 +283,12 @@ def _redeem_conditions(
                 "submit redeemPositions "
                 f"condition={cid_txt} attempt={attempt}/{max_attempts} tx={txh.hex()} "
                 f"nonce={nonce} gas={tx_params['gas']} "
-                f"maxFeePerGas={tx_params['maxFeePerGas']} "
-                f"maxPriorityFeePerGas={tx_params['maxPriorityFeePerGas']}"
+                + (
+                    f"maxFeePerGas={tx_params['maxFeePerGas']} "
+                    f"maxPriorityFeePerGas={tx_params['maxPriorityFeePerGas']}"
+                    if "maxFeePerGas" in tx_params
+                    else f"gasPrice={tx_params['gasPrice']}"
+                )
             )
             try:
                 receipt = _wait_for_receipt_with_replacement_check(

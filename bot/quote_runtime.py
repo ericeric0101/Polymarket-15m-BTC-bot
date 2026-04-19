@@ -306,6 +306,7 @@ class QuoteRuntimeMixin:
                 directional_snapshot=directional_snapshot,
                 target_version=target_version,
                 loss_sell_reason=desired.get("loss_sell_reason", ""),
+                target_qty_override=desired.get("target_qty_override"),
             )
 
         log_no_quote_diagnostics(

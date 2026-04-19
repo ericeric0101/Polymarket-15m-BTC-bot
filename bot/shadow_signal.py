@@ -38,6 +38,81 @@ class ShadowSignalConfig:
 DEFAULT_SHADOW_SIGNAL_CONFIG = ShadowSignalConfig()
 
 
+def _entry_candidate_outcome(payload: Dict[str, Any]) -> Optional[str]:
+    candidate_side = str(payload.get("main_candidate_side") or "").upper()
+    if candidate_side == "BUY_UP":
+        return "UP"
+    if candidate_side == "BUY_DOWN":
+        return "DOWN"
+
+    active_side = str(payload.get("main_active_side") or "").upper()
+    if active_side in {"UP", "DOWN"}:
+        return active_side
+    return None
+
+
+def _signed_spot_minus_strike_for_outcome(
+    outcome: Optional[str],
+    spot_minus_strike: Optional[float],
+) -> Optional[float]:
+    if outcome is None or spot_minus_strike is None:
+        return None
+    if outcome == "UP":
+        return float(spot_minus_strike)
+    if outcome == "DOWN":
+        return -float(spot_minus_strike)
+    return None
+
+
+def build_entry_regime_observation_payload(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    outcome = _entry_candidate_outcome(payload)
+    if outcome is None:
+        return None
+
+    time_left_sec_raw = payload.get("time_left_sec")
+    spot_minus_strike_raw = payload.get("spot_minus_strike")
+    main_score_raw = payload.get("main_score")
+    if time_left_sec_raw is None or spot_minus_strike_raw is None or main_score_raw is None:
+        return None
+
+    try:
+        time_left_sec = float(time_left_sec_raw)
+        spot_minus_strike = float(spot_minus_strike_raw)
+        main_score = float(main_score_raw)
+    except Exception:
+        return None
+
+    signed_spot_minus_strike = _signed_spot_minus_strike_for_outcome(outcome, spot_minus_strike)
+    if signed_spot_minus_strike is None:
+        return None
+
+    if not (300.0 <= time_left_sec < 600.0 and 10.0 <= signed_spot_minus_strike < 30.0):
+        return None
+
+    token_price_raw = payload.get("ask_up") if outcome == "UP" else payload.get("ask_down")
+    token_price = None
+    if token_price_raw is not None:
+        try:
+            token_price = float(token_price_raw)
+        except Exception:
+            token_price = None
+
+    return {
+        "probe_kind": "entry_regime_observation",
+        "regime_tag": "mid_late_signed_spot_10_30",
+        "observation_only": True,
+        "main_candidate_outcome": outcome,
+        "main_score": main_score,
+        "main_score_abs": abs(main_score),
+        "time_left_sec": time_left_sec,
+        "spot_minus_strike": spot_minus_strike,
+        "signed_spot_minus_strike": signed_spot_minus_strike,
+        "token_price": token_price,
+        "regime_time_bucket": "300_600",
+        "regime_signed_spot_bucket": "10_30",
+    }
+
+
 def _spot_at_or_before(
     history: Sequence[Tuple[float, Decimal]],
     cutoff_ts: float,

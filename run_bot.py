@@ -125,7 +125,7 @@ from bot.quote_service import (
     resolve_quote_intent_state,
     should_requote_existing_order,
 )
-from bot.shadow_signal import build_live_signal_compare_payload
+from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.market_discovery import (
@@ -264,6 +264,7 @@ class IntegratedBTCStrategy(
             f"pricer={self.maker_fair_pricer_mode} "
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
+            f"tail_tp={'on' if getattr(self, 'tail_protect_tp_enabled', False) else 'off'} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -715,6 +716,7 @@ class IntegratedBTCStrategy(
         if payload is None:
             return
         self._db_strategy_event("LIVE_SIGNAL_COMPARE", payload)
+        self._emit_entry_regime_observation(payload, now_ts)
 
         main_sig = json.dumps(
             {
@@ -741,6 +743,35 @@ class IntegratedBTCStrategy(
         if shadow_sig != getattr(self, "_last_shadow_live_candidate_signature", None):
             self._last_shadow_live_candidate_signature = shadow_sig
             self._db_strategy_event("SHADOW_SIGNAL_CANDIDATE_LIVE", payload)
+
+    def _emit_entry_regime_observation(self, payload: Dict[str, Any], now_ts: float) -> None:
+        observation = build_entry_regime_observation_payload(payload)
+        if observation is None:
+            return
+        signature = json.dumps(
+            {
+                "slug": payload.get("slug") or "",
+                "regime_tag": observation.get("regime_tag"),
+                "main_candidate_outcome": observation.get("main_candidate_outcome"),
+                "time_left_sec": round(float(observation.get("time_left_sec") or 0.0), 1),
+                "signed_spot_minus_strike": round(
+                    float(observation.get("signed_spot_minus_strike") or 0.0),
+                    2,
+                ),
+                "main_score": round(float(observation.get("main_score") or 0.0), 3),
+            },
+            sort_keys=True,
+        )
+        last_sig = getattr(self, "_last_entry_regime_observation_signature", None)
+        last_ts = float(getattr(self, "_last_entry_regime_observation_ts", 0.0))
+        if signature == last_sig and (now_ts - last_ts) < 30.0:
+            return
+        self._last_entry_regime_observation_signature = signature
+        self._last_entry_regime_observation_ts = now_ts
+        observation_payload = dict(payload)
+        observation_payload.update(observation)
+        observation_payload["observation_ts"] = float(now_ts)
+        self._db_strategy_event("ENTRY_REGIME_OBSERVATION", observation_payload)
 
     def _build_live_signal_compare_payload(self, now_ts: float) -> Optional[Dict[str, Any]]:
         if not getattr(self, "shadow_signal_enabled", False):
@@ -1751,10 +1782,44 @@ class IntegratedBTCStrategy(
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                 )
+                tail_protect_tp_active = False
+                tail_protect_tp_qty = Decimal("0")
+                if (
+                    side == "sell"
+                    and getattr(self, "hold_to_redeem_enabled", False)
+                    and getattr(self, "tail_protect_tp_enabled", False)
+                    and current_inst_inventory_qty > 0
+                    and avg_entry >= getattr(self, "tail_protect_tp_min_entry_price", Decimal("1"))
+                ):
+                    tp_fraction = max(
+                        Decimal("0"),
+                        min(Decimal("1"), Decimal(str(getattr(self, "tail_protect_tp_fraction", Decimal("0"))))),
+                    )
+                    tail_protect_tp_qty = current_inst_inventory_qty * tp_fraction
+                    if tail_protect_tp_qty + Decimal("0.000001") >= self.maker_exchange_min_shares:
+                        tail_protect_tp_active = True
+                        desired_entry["should_quote"] = True
+                        desired_entry["price"] = self._align_price_to_tick(
+                            Decimal(str(getattr(self, "tail_protect_tp_price", Decimal("0.95")))),
+                            side,
+                            quote_ctx.instrument,
+                        )
+                        desired_entry["diag_reason"] = (
+                            f"tail_protect_tp price={float(desired_entry['price']):.4f} "
+                            f"qty={float(tail_protect_tp_qty):.6f} "
+                            f"entry={float(avg_entry):.4f}"
+                        )
+                        desired_entry["loss_sell_reason"] = (
+                            f"tail_protect_tp:{float(tail_protect_tp_qty):.6f}"
+                        )
+                        desired_entry["target_qty_override"] = tail_protect_tp_qty
+                        desired_entry["tail_protect_tp"] = True
+                        desired_entry["tail_protect_tp_price"] = desired_entry["price"]
                 if (
                     side == "sell"
                     and getattr(self, "hold_to_redeem_enabled", False)
                     and current_inst_inventory_qty > 0
+                    and not tail_protect_tp_active
                 ):
                     desired_entry["should_quote"] = False
                     desired_entry["diag_reason"] = "hold_to_redeem_enabled"
@@ -1765,6 +1830,7 @@ class IntegratedBTCStrategy(
                     side == "sell"
                     and getattr(self, "hold_to_redeem_enabled", False)
                     and current_inst_inventory_qty > 0
+                    and not tail_protect_tp_active
                 )
                 peak_bid = (
                     self.maker_profit_run_peak_bid_by_inst.get(inst_key, quote_ctx.quote[0])
@@ -1941,6 +2007,10 @@ class IntegratedBTCStrategy(
                     desired_entry["should_quote"] = False
                     desired_entry["loss_sell_reason"] = ""
                     desired_entry["diag_reason"] = "hold_to_redeem_enabled"
+                elif side == "sell" and tail_protect_tp_active:
+                    sell_intent = "TAIL_PROTECT_TP"
+                    desired_entry["quote_mode"] = QuoteMode.RECYCLE_LOCKED_SIDE.value
+                    desired_entry["hard_exit_allowed"] = False
 
                 if side == "sell" and was_econ_gated and not hold_to_redeem_sell_block:
                     # Ungate Maker passive sell boundary check if only blocked by econ_gate,
@@ -2171,6 +2241,7 @@ class IntegratedBTCStrategy(
         directional_snapshot: Optional[Dict[str, Any]] = None,
         target_version: Optional[int] = None,
         loss_sell_reason: str = "",
+        target_qty_override: Optional[Decimal] = None,
     ) -> None:
         submit_maker_quote(
             self,
@@ -2182,6 +2253,7 @@ class IntegratedBTCStrategy(
             directional_snapshot=directional_snapshot,
             target_version=target_version,
             loss_sell_reason=loss_sell_reason,
+            target_qty_override=target_qty_override,
         )
     
     def on_start(self):

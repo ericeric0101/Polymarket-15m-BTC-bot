@@ -296,6 +296,10 @@ class SideDecisionConfig:
 @dataclass(frozen=True)
 class ExitConfig:
     hold_to_redeem_enabled: bool
+    tail_protect_tp_enabled: bool
+    tail_protect_tp_price: Decimal
+    tail_protect_tp_fraction: Decimal
+    tail_protect_tp_min_entry_price: Decimal
     taker_exit_enabled: bool
     taker_exit_min_net_usdc: Decimal
     taker_exit_stop_loss_usdc: Decimal
@@ -356,6 +360,12 @@ class ExitConfig:
     absolute_max_loss_min_hold_sec: int = 60
 
     def __post_init__(self) -> None:
+        if self.tail_protect_tp_price <= 0 or self.tail_protect_tp_price > Decimal("1"):
+            raise ValueError("TAIL_PROTECT_TP_PRICE must be in (0, 1]")
+        if self.tail_protect_tp_fraction <= 0 or self.tail_protect_tp_fraction > Decimal("1"):
+            raise ValueError("TAIL_PROTECT_TP_FRACTION must be in (0, 1]")
+        if self.tail_protect_tp_min_entry_price < 0 or self.tail_protect_tp_min_entry_price > Decimal("1"):
+            raise ValueError("TAIL_PROTECT_TP_MIN_ENTRY_PRICE must be in [0, 1]")
         if self.taker_exit_stop_loss_confirmations < 1:
             raise ValueError("TAKER_EXIT_STOP_LOSS_CONFIRMATIONS must be >= 1")
         if self.catastrophic_stop_loss_confirmations < 1:
@@ -722,6 +732,10 @@ class AppConfig:
             ),
             exit=ExitConfig(
                 hold_to_redeem_enabled=_env_bool("HOLD_TO_REDEEM", False),
+                tail_protect_tp_enabled=_env_bool("TAIL_PROTECT_TP_ENABLED", False),
+                tail_protect_tp_price=_env_decimal("TAIL_PROTECT_TP_PRICE", "0.95"),
+                tail_protect_tp_fraction=_env_decimal("TAIL_PROTECT_TP_FRACTION", "0.50"),
+                tail_protect_tp_min_entry_price=_env_decimal("TAIL_PROTECT_TP_MIN_ENTRY_PRICE", "0.75"),
                 taker_exit_enabled=_env_bool_inverted("TAKER_EXIT_ENABLED", True),
                 taker_exit_min_net_usdc=_env_decimal("TAKER_EXIT_MIN_NET_USDC", "0.02"),
                 taker_exit_stop_loss_usdc=_env_decimal("TAKER_EXIT_STOP_LOSS_USDC", "0.15"),

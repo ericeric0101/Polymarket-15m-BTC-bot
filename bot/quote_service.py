@@ -67,6 +67,9 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "planned_quote_ts": desired.get("planned_quote_ts"),
         "entry_mode": desired.get("entry_mode", "value"),
         "size_multiplier": desired.get("size_multiplier", Decimal("1")),
+        "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
+        "tail_protect_tp_price": desired.get("tail_protect_tp_price"),
+        "target_qty_override": desired.get("target_qty_override"),
     }
 
 
@@ -1575,6 +1578,8 @@ def should_requote_existing_order(
     current_loss_sell_reason = str(current.get("loss_sell_reason", "") or "")
     desired_loss_sell_reason = str(desired_loss_sell_reason or "")
     if current_loss_sell_reason and not desired_loss_sell_reason:
+        return True
+    if current_loss_sell_reason and desired_loss_sell_reason and current_loss_sell_reason != desired_loss_sell_reason:
         return True
     current_target_version = int(current.get("target_version", 0) or 0)
     if current_target_version >= target_version:

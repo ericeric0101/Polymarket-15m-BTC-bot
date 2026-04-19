@@ -34,6 +34,7 @@ from bot.quote_service import (
 from bot.order_submission import submit_maker_quote
 from bot.shadow_signal import (
     ShadowSignalConfig,
+    build_entry_regime_observation_payload,
     build_live_signal_compare_payload,
     select_shadow_candidate,
 )
@@ -3297,6 +3298,49 @@ def test_live_shadow_payload_does_not_emit_opposite_candidate_side():
 
     assert payload["shadow_bias_side"] == "UP"
     assert payload["shadow_candidate_side"] is None
+
+
+def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():
+    payload = {
+        "slug": "btc-updown-15m-test",
+        "main_candidate_side": "BUY_UP",
+        "main_active_side": "UP",
+        "main_score": 0.41,
+        "time_left_sec": 420.0,
+        "spot_minus_strike": 18.5,
+        "ask_up": 0.67,
+        "ask_down": 0.35,
+    }
+
+    observation = build_entry_regime_observation_payload(payload)
+
+    assert observation is not None
+    assert observation["regime_tag"] == "mid_late_signed_spot_10_30"
+    assert observation["main_candidate_outcome"] == "UP"
+    assert math.isclose(observation["signed_spot_minus_strike"], 18.5, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(observation["token_price"], 0.67, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_entry_regime_observation_payload_inverts_down_side_and_skips_outside_regime():
+    in_regime = {
+        "slug": "btc-updown-15m-test",
+        "main_candidate_side": "BUY_DOWN",
+        "main_active_side": "DOWN",
+        "main_score": -0.33,
+        "time_left_sec": 480.0,
+        "spot_minus_strike": -14.0,
+        "ask_up": 0.42,
+        "ask_down": 0.58,
+    }
+    observation = build_entry_regime_observation_payload(in_regime)
+    assert observation is not None
+    assert observation["main_candidate_outcome"] == "DOWN"
+    assert math.isclose(observation["signed_spot_minus_strike"], 14.0, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(observation["token_price"], 0.58, rel_tol=0.0, abs_tol=1e-9)
+
+    outside_regime = dict(in_regime)
+    outside_regime["time_left_sec"] = 610.0
+    assert build_entry_regime_observation_payload(outside_regime) is None
 
 
 def test_capture_market_open_spot_prefers_fresh_chainlink_over_stale_latest_external():
