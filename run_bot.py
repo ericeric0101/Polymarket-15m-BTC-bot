@@ -262,6 +262,7 @@ class IntegratedBTCStrategy(
             f"pricer={self.maker_fair_pricer_mode} "
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
+            f"tail_tp={'on' if getattr(self, 'tail_protect_tp_enabled', False) else 'off'} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -1798,10 +1799,44 @@ class IntegratedBTCStrategy(
                     maker_sell_cost_protect_fee_buffer_ps=self.maker_sell_cost_protect_fee_buffer_ps,
                     maker_sell_min_profit_floor_ps=self.maker_sell_min_profit_floor_ps,
                 )
+                tail_protect_tp_active = False
+                tail_protect_tp_qty = Decimal("0")
+                if (
+                    side == "sell"
+                    and getattr(self, "hold_to_redeem_enabled", False)
+                    and getattr(self, "tail_protect_tp_enabled", False)
+                    and current_inst_inventory_qty > 0
+                    and avg_entry >= getattr(self, "tail_protect_tp_min_entry_price", Decimal("1"))
+                ):
+                    tp_fraction = max(
+                        Decimal("0"),
+                        min(Decimal("1"), Decimal(str(getattr(self, "tail_protect_tp_fraction", Decimal("0"))))),
+                    )
+                    tail_protect_tp_qty = current_inst_inventory_qty * tp_fraction
+                    if tail_protect_tp_qty + Decimal("0.000001") >= self.maker_exchange_min_shares:
+                        tail_protect_tp_active = True
+                        desired_entry["should_quote"] = True
+                        desired_entry["price"] = self._align_price_to_tick(
+                            Decimal(str(getattr(self, "tail_protect_tp_price", Decimal("0.95")))),
+                            side,
+                            quote_ctx.instrument,
+                        )
+                        desired_entry["diag_reason"] = (
+                            f"tail_protect_tp price={float(desired_entry['price']):.4f} "
+                            f"qty={float(tail_protect_tp_qty):.6f} "
+                            f"entry={float(avg_entry):.4f}"
+                        )
+                        desired_entry["loss_sell_reason"] = (
+                            f"tail_protect_tp:{float(tail_protect_tp_qty):.6f}"
+                        )
+                        desired_entry["target_qty_override"] = tail_protect_tp_qty
+                        desired_entry["tail_protect_tp"] = True
+                        desired_entry["tail_protect_tp_price"] = desired_entry["price"]
                 if (
                     side == "sell"
                     and getattr(self, "hold_to_redeem_enabled", False)
                     and current_inst_inventory_qty > 0
+                    and not tail_protect_tp_active
                 ):
                     desired_entry["should_quote"] = False
                     desired_entry["diag_reason"] = "hold_to_redeem_enabled"
@@ -1812,6 +1847,7 @@ class IntegratedBTCStrategy(
                     side == "sell"
                     and getattr(self, "hold_to_redeem_enabled", False)
                     and current_inst_inventory_qty > 0
+                    and not tail_protect_tp_active
                 )
                 peak_bid = (
                     self.maker_profit_run_peak_bid_by_inst.get(inst_key, quote_ctx.quote[0])
@@ -1988,6 +2024,10 @@ class IntegratedBTCStrategy(
                     desired_entry["should_quote"] = False
                     desired_entry["loss_sell_reason"] = ""
                     desired_entry["diag_reason"] = "hold_to_redeem_enabled"
+                elif side == "sell" and tail_protect_tp_active:
+                    sell_intent = "TAIL_PROTECT_TP"
+                    desired_entry["quote_mode"] = QuoteMode.RECYCLE_LOCKED_SIDE.value
+                    desired_entry["hard_exit_allowed"] = False
 
                 if side == "sell" and was_econ_gated and not hold_to_redeem_sell_block:
                     # Ungate Maker passive sell boundary check if only blocked by econ_gate,
@@ -2209,6 +2249,7 @@ class IntegratedBTCStrategy(
         directional_snapshot: Optional[Dict[str, Any]] = None,
         target_version: Optional[int] = None,
         loss_sell_reason: str = "",
+        target_qty_override: Optional[Decimal] = None,
     ) -> None:
         submit_maker_quote(
             self,
@@ -2220,6 +2261,7 @@ class IntegratedBTCStrategy(
             directional_snapshot=directional_snapshot,
             target_version=target_version,
             loss_sell_reason=loss_sell_reason,
+            target_qty_override=target_qty_override,
         )
     
     def on_start(self):

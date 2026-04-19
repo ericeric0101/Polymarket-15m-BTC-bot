@@ -88,6 +88,17 @@ def build_fill_order_event_payload(
             if filled_directional_snapshot.get("robust_net_usdc") is not None
             else None
         ),
+        "tail_protect_tp_submit": bool(filled_directional_snapshot.get("tail_protect_tp", False)),
+        "tail_protect_tp_price_submit": (
+            float(filled_directional_snapshot.get("tail_protect_tp_price"))
+            if filled_directional_snapshot.get("tail_protect_tp_price") is not None
+            else None
+        ),
+        "target_qty_override_submit": (
+            float(filled_directional_snapshot.get("target_qty_override"))
+            if filled_directional_snapshot.get("target_qty_override") is not None
+            else None
+        ),
         "realized_net_usdc": (float(realized_net_usdc) if realized_net_usdc is not None else None),
     }
 

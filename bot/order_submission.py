@@ -29,12 +29,14 @@ def submit_maker_quote(
     directional_snapshot: Optional[Dict[str, Any]] = None,
     target_version: Optional[int] = None,
     loss_sell_reason: str = "",
+    target_qty_override: Optional[Decimal] = None,
 ) -> None:
     instrument_id = strategy._normalize_instrument_id(instrument_id)
     instrument = strategy.cache.instrument(instrument_id) if instrument_id else None
     limit_price = strategy._align_price_to_tick(limit_price, side, instrument)
     expected_net_usdc = Decimal(str(getattr(econ, "expected_net_usdc", "0")))
-    if expected_net_usdc <= Decimal("0"):
+    tail_protect_tp = bool((directional_snapshot or {}).get("tail_protect_tp", False))
+    if expected_net_usdc <= Decimal("0") and not tail_protect_tp:
         strategy._db_order_event(
             event_type="ORDER_SKIP_EXPECTED_NET",
             side=side.upper(),
@@ -66,7 +68,10 @@ def submit_maker_quote(
             return
 
     precision = int(getattr(instrument, "size_precision", 6)) if instrument is not None else 6
-    qty_dec = strategy._compute_maker_order_qty(limit_price, precision)
+    if target_qty_override is not None:
+        qty_dec = Decimal(str(target_qty_override))
+    else:
+        qty_dec = strategy._compute_maker_order_qty(limit_price, precision)
     if side == "buy":
         entry_mode = str((directional_snapshot or {}).get("entry_mode", "value") or "value").lower()
         if entry_mode in {"continuation", "topup", "trend"}:
@@ -88,6 +93,8 @@ def submit_maker_quote(
             )
             min_buy_qty = max(strategy.maker_min_shares, strategy.maker_exchange_min_shares)
             qty_dec = max(qty_dec * size_multiplier, min_buy_qty)
+    if qty_dec <= 0:
+        return
     if side == "buy":
         inst_key = strategy._instrument_key(instrument_id)
         reentry_pause_until = float(strategy.stop_loss_reentry_pause_until_by_inst.get(inst_key, 0.0))
@@ -314,6 +321,21 @@ def submit_maker_quote(
             "robust_net_usdc": (
                 float(directional_snapshot.get("robust_net_usdc"))
                 if directional_snapshot and directional_snapshot.get("robust_net_usdc") is not None
+                else None
+            ),
+            "tail_protect_tp": (
+                bool(directional_snapshot.get("tail_protect_tp", False))
+                if directional_snapshot
+                else False
+            ),
+            "tail_protect_tp_price": (
+                float(directional_snapshot.get("tail_protect_tp_price"))
+                if directional_snapshot and directional_snapshot.get("tail_protect_tp_price") is not None
+                else None
+            ),
+            "target_qty_override": (
+                float(directional_snapshot.get("target_qty_override"))
+                if directional_snapshot and directional_snapshot.get("target_qty_override") is not None
                 else None
             ),
             "entry_mode": (

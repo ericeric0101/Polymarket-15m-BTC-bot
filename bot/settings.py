@@ -228,6 +228,10 @@ def initialize_strategy_settings(
     strategy.maker_digital_sigma_time_decay_min = config.maker.digital_sigma_time_decay_min
     strategy.taker_exit_enabled = config.exit.taker_exit_enabled
     strategy.hold_to_redeem_enabled = config.exit.hold_to_redeem_enabled
+    strategy.tail_protect_tp_enabled = config.exit.tail_protect_tp_enabled
+    strategy.tail_protect_tp_price = config.exit.tail_protect_tp_price
+    strategy.tail_protect_tp_fraction = config.exit.tail_protect_tp_fraction
+    strategy.tail_protect_tp_min_entry_price = config.exit.tail_protect_tp_min_entry_price
     strategy.taker_exit_min_net_usdc = config.exit.taker_exit_min_net_usdc
     strategy.taker_exit_stop_loss_usdc = config.exit.taker_exit_stop_loss_usdc
     strategy.catastrophic_stop_loss_enabled = config.exit.catastrophic_stop_loss_enabled
