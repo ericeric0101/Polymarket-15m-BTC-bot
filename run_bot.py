@@ -2497,7 +2497,6 @@ class IntegratedBTCStrategy(
     def _preload_history_sync(self):
         """Synchronous wrapper for history preload."""
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._preload_price_history())
         finally:
