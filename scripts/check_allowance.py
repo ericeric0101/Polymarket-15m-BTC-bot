@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Check or refresh Polymarket allowance on Polygon using py-clob-client.
+Check or refresh Polymarket allowance on Polygon using py-clob-client-v2.
 
 Examples:
   venv/bin/python scripts/check_allowance.py --check-only
@@ -17,11 +17,13 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 SPENDERS = [
-    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-    "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "0xE111180000d2663C0091e4f400237545B87B996B",
+    "0xe2222d279d744050d28e00520010520000310F59",
     "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
 ]
 
@@ -87,21 +89,32 @@ def _onchain_approve_all(
     # Polygon PoS blocks require POA extraData middleware in web3.py
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
     owner = Web3.to_checksum_address(owner_address)
-    usdc = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=ERC20_APPROVE_ABI)
+    usdce = w3.eth.contract(address=Web3.to_checksum_address(USDCE_ADDRESS), abi=ERC20_APPROVE_ABI)
+    pusd = w3.eth.contract(address=Web3.to_checksum_address(PUSD_ADDRESS), abi=ERC20_APPROVE_ABI)
     ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=ERC1155_SET_APPROVAL_ABI)
 
     nonce = w3.eth.get_transaction_count(owner, "pending")
 
+    onramp_cs = Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS)
+    tx0 = usdce.functions.approve(onramp_cs, int(MAX_INT, 16)).build_transaction(
+        {"chainId": chain_id, "from": owner, "nonce": nonce},
+    )
+    signed0 = w3.eth.account.sign_transaction(tx0, private_key=private_key)
+    txh0 = w3.eth.send_raw_transaction(signed0.raw_transaction)
+    rcpt0 = w3.eth.wait_for_transaction_receipt(txh0, timeout=600)
+    print(f"USDC.e approve -> onramp {onramp_cs}: tx={txh0.hex()} status={rcpt0.status}")
+    nonce += 1
+
     for spender in SPENDERS:
         spender_cs = Web3.to_checksum_address(spender)
 
-        tx1 = usdc.functions.approve(spender_cs, int(MAX_INT, 16)).build_transaction(
+        tx1 = pusd.functions.approve(spender_cs, int(MAX_INT, 16)).build_transaction(
             {"chainId": chain_id, "from": owner, "nonce": nonce},
         )
         signed1 = w3.eth.account.sign_transaction(tx1, private_key=private_key)
         txh1 = w3.eth.send_raw_transaction(signed1.raw_transaction)
         rcpt1 = w3.eth.wait_for_transaction_receipt(txh1, timeout=600)
-        print(f"USDC approve -> {spender_cs}: tx={txh1.hex()} status={rcpt1.status}")
+        print(f"pUSD approve -> {spender_cs}: tx={txh1.hex()} status={rcpt1.status}")
         nonce += 1
 
         tx2 = ctf.functions.setApprovalForAll(spender_cs, True).build_transaction(
@@ -191,22 +204,20 @@ def main() -> int:
     signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
 
     try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.client import ClobClient
+        from py_clob_client_v2.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
     except Exception as e:
-        print(f"py-clob-client import failed: {e}")
+        print(f"py-clob-client-v2 import failed: {e}")
         print("Run with the project virtualenv, e.g. venv/bin/python ...")
         return 2
 
     kwargs: dict[str, Any] = {
-        "host": host,
         "key": private_key,
-        "chain_id": chain_id,
         "signature_type": signature_type,
     }
     if funder:
         kwargs["funder"] = funder
-    client = ClobClient(**kwargs)
+    client = ClobClient(host, chain_id, **kwargs)
 
     # Some endpoints require L2 API credentials.
     api_key = os.getenv("POLYMARKET_API_KEY")
@@ -222,7 +233,10 @@ def main() -> int:
                 ),
             )
         else:
-            derived = client.create_or_derive_api_creds()
+            try:
+                derived = client.create_api_key()
+            except Exception:
+                derived = client.derive_api_key()
             client.set_api_creds(derived)
     except Exception as e:
         print(f"Failed to set API credentials for allowance endpoint: {e}")

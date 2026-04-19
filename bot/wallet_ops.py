@@ -13,8 +13,8 @@ def ensure_balance_clob_client(
     if current_client is not None:
         return current_client
 
-    from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import ApiCreds
+    from py_clob_client_v2.client import ClobClient
+    from py_clob_client_v2.clob_types import ApiCreds
 
     clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
     pk = os.getenv("POLYMARKET_PK")
@@ -22,9 +22,9 @@ def ensure_balance_clob_client(
         return None
 
     client = ClobClient(
-        host=clob_base,
+        clob_base,
+        int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
         key=pk,
-        chain_id=int(os.getenv("POLYMARKET_CHAIN_ID", "137")),
         signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
         funder=os.getenv("POLYMARKET_FUNDER") or None,
     )
@@ -41,7 +41,10 @@ def ensure_balance_clob_client(
         )
     else:
         try:
-            derived = client.create_or_derive_api_creds()
+            try:
+                derived = client.create_api_key()
+            except Exception:
+                derived = client.derive_api_key()
             client.set_api_creds(derived)
             logger_info_fn("Balance cache: derived API creds from private key")
         except Exception as exc:
@@ -66,7 +69,7 @@ def refresh_collateral_balance(
         return current_client, cached_balance
 
     try:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         params = BalanceAllowanceParams(
             asset_type=AssetType.COLLATERAL,
@@ -112,7 +115,7 @@ def fetch_conditional_balance(
         return current_client, (Decimal(str(cached_entry.get("balance"))) if cached_entry and cached_entry.get("balance") is not None else None), cached_entry
 
     try:
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         params = BalanceAllowanceParams(
             asset_type=AssetType.CONDITIONAL,

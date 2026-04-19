@@ -6,9 +6,9 @@ import threading
 from pathlib import Path
 
 import httpx
-import py_clob_client.http_helpers.helpers as pyclob_helpers
+import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 from loguru import logger
-from py_clob_client.exceptions import PolyApiException
+from py_clob_client_v2.exceptions import PolyApiException
 
 
 def install_runtime_compatibility_overrides() -> None:

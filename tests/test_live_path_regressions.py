@@ -2453,7 +2453,7 @@ def test_runtime_compatibility_overrides_install():
 
     from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
     from nautilus_trader.adapters.polymarket.execution import PolymarketExecutionClient
-    import py_clob_client.http_helpers.helpers as pyclob_helpers
+    import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 
     assert getattr(PolymarketDataClient, "_btc15m_runtime_compat_patched", False) is True
     assert getattr(PolymarketExecutionClient, "_btc15m_runtime_compat_patched", False) is True

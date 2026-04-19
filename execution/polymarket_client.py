@@ -10,9 +10,9 @@ from typing import Optional, Dict, Any, List
 from loguru import logger
 import httpx
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import ApiCreds, OrderArgs, OrderPayload, OrderType as PolyOrderType
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 POLYMARKET_AVAILABLE = True
 
 
@@ -71,14 +71,14 @@ class PolymarketClient:
         
         # Check if SDK available
         if not POLYMARKET_AVAILABLE:
-            logger.error("Polymarket SDK not available. Install: pip install py-clob-client")
+            logger.error("Polymarket SDK not available. Install: pip install py-clob-client-v2")
             return
         
         # Validate credentials
         if not self.private_key:
             logger.error("POLYMARKET_PK not found in environment")
         if not (self.api_key and self.api_secret and self.api_passphrase):
-            logger.warning("L2 API credentials not fully set; will try create_or_derive from POLYMARKET_PK")
+            logger.warning("L2 API credentials not fully set; will try create/derive from POLYMARKET_PK")
         
         mode = "TESTNET" if testnet else "MAINNET"
         logger.info(f"Initialized Polymarket Client [{mode}] Chain ID: {chain_id}")
@@ -100,17 +100,24 @@ class PolymarketClient:
         
         try:
             # Initialize CLOB client
+            clob_host = os.getenv(
+                "POLYMARKET_CLOB_BASE_URL",
+                "https://clob-v2.polymarket.com" if self.testnet else "https://clob.polymarket.com",
+            )
             self.client = ClobClient(
-                host="https://clob.polymarket.com" if not self.testnet else "https://clob-testnet.polymarket.com",
+                clob_host,
+                self.chain_id,
                 key=self.private_key,
-                chain_id=self.chain_id,
                 signature_type=self.signature_type,
-                funder=self.funder,  # Optional funder address
+                funder=self.funder,
             )
 
             if not (self.api_key and self.api_secret and self.api_passphrase):
                 logger.info("API credentials missing; deriving L2 creds from private key")
-                derived = self.client.create_or_derive_api_creds()
+                try:
+                    derived = self.client.create_api_key()
+                except Exception:
+                    derived = self.client.derive_api_key()
                 self.api_key = derived.api_key if hasattr(derived, "api_key") else derived.get("api_key")
                 self.api_secret = derived.api_secret if hasattr(derived, "api_secret") else derived.get("api_secret")
                 self.api_passphrase = (
@@ -118,11 +125,11 @@ class PolymarketClient:
                 )
             
             # Set API credentials for authenticated endpoints
-            self.client.set_api_creds(
+            self.client.set_api_creds(ApiCreds(
                 api_key=self.api_key,
                 api_secret=self.api_secret,
                 api_passphrase=self.api_passphrase,
-            )
+            ))
             
             # Test connection
             balance = await self._get_balance_internal()
@@ -306,12 +313,18 @@ class PolymarketClient:
                     price = book["bids"][0]["price"] if book["bids"] else Decimal("0.5")
             
             # Create order arguments
+            builder_code = os.getenv(
+                "POLY_BUILDER_CODE",
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+            )
             order_args = OrderArgs(
                 token_id=token_id,
                 price=float(price),
                 size=float(size),
                 side=poly_side,
-                fee_rate_bps=0,  # Fee in basis points
+                expiration=0,
+                builder_code=builder_code,
+                metadata="0x0000000000000000000000000000000000000000000000000000000000000000",
             )
             
             # Build and sign order
@@ -353,7 +366,7 @@ class PolymarketClient:
             return False
         
         try:
-            response = self.client.cancel_order(order_id)
+            response = self.client.cancel_order(OrderPayload(orderID=order_id))
             
             if response:
                 logger.info(f"Order cancelled: {order_id}")
@@ -376,7 +389,7 @@ class PolymarketClient:
             return []
         
         try:
-            orders = self.client.get_orders()
+            orders = self.client.get_open_orders()
             
             open_orders = []
             for order in orders:

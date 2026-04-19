@@ -27,7 +27,8 @@ import requests
 from dotenv import load_dotenv
 
 DATA_API = "https://data-api.polymarket.com"
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 CTF_REDEEM_ABI = [
@@ -39,6 +40,30 @@ CTF_REDEEM_ABI = [
             {"internalType": "uint256[]", "name": "indexSets", "type": "uint256[]"},
         ],
         "name": "redeemPositions",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+ERC20_APPROVE_ABI = [
+    {
+        "constant": False,
+        "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "payable": False,
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+COLLATERAL_ONRAMP_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "_asset", "type": "address"},
+            {"internalType": "address", "name": "_to", "type": "address"},
+            {"internalType": "uint256", "name": "_amount", "type": "uint256"},
+        ],
+        "name": "wrap",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
@@ -179,6 +204,7 @@ def _redeem_conditions(
     chain_id: int,
     rpc_url: str,
     condition_ids: list[str],
+    condition_sizes: dict[str, float],
 ) -> None:
     from web3 import Web3
     from web3.middleware import ExtraDataToPOAMiddleware
@@ -236,6 +262,11 @@ def _redeem_conditions(
 
     owner = Web3.to_checksum_address(owner_address)
     contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_REDEEM_ABI)
+    usdce = w3.eth.contract(address=Web3.to_checksum_address(USDCE_ADDRESS), abi=ERC20_APPROVE_ABI)
+    onramp = w3.eth.contract(
+        address=Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
+        abi=COLLATERAL_ONRAMP_ABI,
+    )
     nonce = w3.eth.get_transaction_count(owner, "pending")
     max_attempts = max(1, int(os.getenv("AUTO_REDEEM_MAX_SEND_ATTEMPTS", "3")))
     receipt_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_RECEIPT_TIMEOUT_SEC", "120")))
@@ -254,7 +285,7 @@ def _redeem_conditions(
         tx_base.update(_build_fee_params(w3))
 
         tx_func = contract.functions.redeemPositions(
-            Web3.to_checksum_address(USDC_ADDRESS),
+            Web3.to_checksum_address(USDCE_ADDRESS),
             b"\x00" * 32,
             Web3.to_bytes(hexstr=cid_txt),
             [1, 2],
@@ -323,6 +354,40 @@ def _redeem_conditions(
 
         print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
         nonce += 1
+
+        amount_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
+        if amount_base_units > 0:
+            approve_tx = usdce.functions.approve(
+                Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
+                amount_base_units,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": nonce,
+            })
+            approve_signed = w3.eth.account.sign_transaction(approve_tx, private_key=private_key)
+            approve_hash = w3.eth.send_raw_transaction(approve_signed.raw_transaction)
+            approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=120)
+            print(f"wrapApprove condition={cid_txt} tx={approve_hash.hex()} status={approve_receipt.status}")
+            nonce += 1
+
+            wrap_tx = onramp.functions.wrap(
+                Web3.to_checksum_address(USDCE_ADDRESS),
+                owner,
+                amount_base_units,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": nonce,
+            })
+            wrap_signed = w3.eth.account.sign_transaction(wrap_tx, private_key=private_key)
+            wrap_hash = w3.eth.send_raw_transaction(wrap_signed.raw_transaction)
+            wrap_receipt = w3.eth.wait_for_transaction_receipt(wrap_hash, timeout=120)
+            print(
+                f"wrapToPUSD condition={cid_txt} amount={amount_base_units / 1_000_000:.6f} "
+                f"tx={wrap_hash.hex()} status={wrap_receipt.status}"
+            )
+            nonce += 1
 
 
 def main() -> int:
@@ -498,6 +563,7 @@ def main() -> int:
         chain_id=chain_id,
         rpc_url=rpc_url,
         condition_ids=filtered_redeemable_conditions,
+        condition_sizes=redeemable_condition_sizes,
     )
     print("Redeem flow complete.")
     return 0
