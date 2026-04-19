@@ -306,7 +306,6 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
 
 def maker_quote_sync(strategy: Any, bid_price: float, ask_price: float) -> None:
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
             strategy._quote_maker_orders(
