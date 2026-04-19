@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,23 @@ from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.market_data import fetch_gamma_market_by_slug
+
+
+def _run_async_safe(coro):
+    """Run an async coroutine in a guaranteed-fresh event loop.
+
+    asyncio.run() reuses (or fails to recreate) the process-global loop
+    after Nautilus/tokio disposes it, raising [Errno 2].  Creating a
+    private loop avoids that entirely.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
 
 
 def build_btc_15m_slug_candidates(lookback: int = 1, lookahead: int = 4) -> List[str]:
@@ -56,11 +74,21 @@ def resolve_btc_15m_market_slugs() -> List[str]:
     candidates = build_btc_15m_slug_candidates(lookback=lookback, lookahead=lookahead)
     if not candidates:
         return []
-    try:
-        existing = asyncio.run(discover_existing_btc_15m_slugs(candidates))
-    except Exception as e:
-        logger.warning(f"Gamma discovery failed, using deterministic candidates: {e}")
-        existing = []
+
+    max_retries = int(os.getenv("GAMMA_DISCOVERY_RETRIES", "3"))
+    existing: List[str] = []
+    for attempt in range(1, max_retries + 1):
+        try:
+            existing = _run_async_safe(discover_existing_btc_15m_slugs(candidates))
+            break
+        except Exception as e:
+            logger.warning(
+                f"Gamma discovery attempt {attempt}/{max_retries} failed: {e}"
+            )
+            if attempt < max_retries:
+                time.sleep(min(2 ** attempt, 8))
+            existing = []
+
     if existing:
         logger.info(f"Resolved BTC 15-min slugs from Gamma API: {existing}")
         return existing
@@ -172,18 +200,26 @@ def extract_instrument_ids_from_gamma_market(market: Dict[str, Any]) -> List[Ins
 
 
 def resolve_primary_btc_15m_instrument_ids(slug: str) -> List[InstrumentId]:
-    try:
-        market = asyncio.run(fetch_gamma_market_by_slug(slug))
-    except Exception as e:
-        logger.warning(f"Failed to fetch Gamma market for slug {slug}: {e}")
-        return []
+    max_retries = int(os.getenv("GAMMA_DISCOVERY_RETRIES", "3"))
+    market = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            market = _run_async_safe(fetch_gamma_market_by_slug(slug))
+            break
+        except Exception as e:
+            logger.warning(
+                f"Failed to fetch Gamma market for slug {slug} "
+                f"(attempt {attempt}/{max_retries}): {e}"
+            )
+            if attempt < max_retries:
+                time.sleep(min(2 ** attempt, 8))
     if not market:
         logger.warning(f"No Gamma market found for slug: {slug}")
         return []
     instrument_ids = extract_instrument_ids_from_gamma_market(market)
     if not instrument_ids:
         try:
-            hydrated = asyncio.run(hydrate_gamma_market_details(market))
+            hydrated = _run_async_safe(hydrate_gamma_market_details(market))
         except Exception:
             hydrated = market
         instrument_ids = extract_instrument_ids_from_gamma_market(hydrated)
