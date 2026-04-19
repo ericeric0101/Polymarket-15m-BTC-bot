@@ -32,6 +32,10 @@ sys.path.insert(0, str(project_root))
 
 # Now import Nautilus
 from nautilus_trader.adapters.polymarket import POLYMARKET
+from nautilus_trader.adapters.polymarket.factories import get_polymarket_http_client
+from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProvider
+from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProviderConfig
+from nautilus_trader.common.component import LiveClock
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, ClientOrderId
 from nautilus_trader.model.enums import OrderSide, TimeInForce
@@ -288,6 +292,99 @@ class IntegratedBTCStrategy(
                 f"dir_edge_min={float(self.maker_min_directional_edge_ps):.4f} "
                 f"regime_guard={'on' if self.regime_guard_enabled else 'off'}"
             )
+
+    def _bootstrap_btc_instruments_into_cache(self) -> int:
+        """
+        Prime the strategy cache if startup races ahead of the data client.
+
+        This uses the same BTC 15m slug discovery and Polymarket instrument provider
+        configuration as the launcher, then inserts any loaded instruments into the
+        strategy cache so the normal startup path can continue.
+        """
+        result: Dict[str, Any] = {"loaded": 0, "error": None}
+
+        def _worker() -> None:
+            try:
+                load_slug_count = max(1, int(os.getenv("BTC_MARKET_LOAD_SLUG_COUNT", "3")))
+                btc_slugs = resolve_btc_15m_market_slugs()
+                ordered_slugs: List[str] = []
+                if self.selected_slug:
+                    ordered_slugs.append(str(self.selected_slug))
+                ordered_slugs.extend([slug for slug in btc_slugs if slug not in ordered_slugs])
+                slugs_to_load = ordered_slugs[:load_slug_count]
+
+                seen_ids: Set[str] = set()
+                instrument_ids: List[InstrumentId] = []
+                for slug in slugs_to_load:
+                    ids = resolve_primary_btc_15m_instrument_ids(slug)
+                    if not ids:
+                        continue
+                    for inst_id in ids:
+                        if inst_id.value in seen_ids:
+                            continue
+                        seen_ids.add(inst_id.value)
+                        instrument_ids.append(inst_id)
+
+                if not instrument_ids:
+                    result["error"] = "Instrument bootstrap fallback found no BTC 15m instrument IDs."
+                    return
+
+                now_utc = datetime.now(timezone.utc)
+                window_back_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_BACK_MINUTES", "5"))
+                window_forward_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_FORWARD_MINUTES", "120"))
+                instrument_cfg = PolymarketInstrumentProviderConfig(
+                    load_all=False,
+                    load_ids=frozenset(instrument_ids),
+                    filters={
+                        "active": True,
+                        "closed": False,
+                        "archived": False,
+                        "end_date_min": (now_utc - timedelta(minutes=window_back_minutes)).isoformat(),
+                        "end_date_max": (now_utc + timedelta(minutes=window_forward_minutes)).isoformat(),
+                        "limit": 25,
+                    },
+                    use_gamma_markets=True,
+                )
+
+                provider = PolymarketInstrumentProvider(
+                    client=get_polymarket_http_client(
+                        private_key=os.getenv("POLYMARKET_PK"),
+                        signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                        funder=os.getenv("POLYMARKET_FUNDER") or None,
+                        api_key=os.getenv("POLYMARKET_API_KEY"),
+                        api_secret=os.getenv("POLYMARKET_API_SECRET"),
+                        passphrase=os.getenv("POLYMARKET_PASSPHRASE"),
+                        base_url=os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com"),
+                    ),
+                    clock=LiveClock(),
+                    config=instrument_cfg,
+                )
+                asyncio.run(provider.initialize(reload=True))
+
+                loaded = 0
+                for instrument in provider.get_all().values():
+                    self.cache.add_instrument(instrument)
+                    loaded += 1
+                result["loaded"] = loaded
+            except Exception as exc:
+                result["error"] = str(exc)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join(timeout=30)
+        if thread.is_alive():
+            logger.warning("Instrument bootstrap fallback timed out after 30s.")
+            return 0
+        if result["error"]:
+            logger.warning(str(result["error"]))
+            return 0
+        if result["loaded"]:
+            logger.warning(
+                f"Instrument bootstrap fallback loaded {result['loaded']} BTC 15m instruments into cache.",
+            )
+        else:
+            logger.warning("Instrument bootstrap fallback completed but returned zero instruments.")
+        return int(result["loaded"])
 
     def _max_inventory_avg_entry(self) -> Decimal:
         return InventoryLedger.max_avg_entry(self.live_inventory_cost)
