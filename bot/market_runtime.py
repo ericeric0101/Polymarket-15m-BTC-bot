@@ -207,9 +207,18 @@ def find_btc_instrument(strategy: Any) -> bool:
 def wait_for_btc_instrument(strategy: Any, timeout_sec: int = 60, poll_interval_sec: int = 2) -> bool:
     """Wait for instruments to arrive in cache during startup."""
     deadline = time.time() + timeout_sec
+    bootstrap_attempted = False
     while time.time() < deadline:
         if find_btc_instrument(strategy):
             return True
+        if not bootstrap_attempted and hasattr(strategy, "_bootstrap_btc_instruments_into_cache"):
+            bootstrap_attempted = True
+            try:
+                loaded = int(strategy._bootstrap_btc_instruments_into_cache())
+            except Exception:
+                loaded = 0
+            if loaded > 0 and find_btc_instrument(strategy):
+                return True
         time.sleep(poll_interval_sec)
     return False
 
