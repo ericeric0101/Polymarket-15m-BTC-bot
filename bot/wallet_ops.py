@@ -14,7 +14,7 @@ def ensure_balance_clob_client(
         return current_client
 
     from py_clob_client_v2.client import ClobClient
-    from py_clob_client_v2.clob_types import ApiCreds
+    from py_clob_client_v2.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
 
     clob_base = os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")
     pk = os.getenv("POLYMARKET_PK")
@@ -31,25 +31,37 @@ def ensure_balance_clob_client(
     api_key = os.getenv("POLYMARKET_API_KEY")
     api_secret = os.getenv("POLYMARKET_API_SECRET")
     passphrase = os.getenv("POLYMARKET_PASSPHRASE")
+
+    probe_params = BalanceAllowanceParams(
+        asset_type=AssetType.COLLATERAL,
+        signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+    )
+
     if api_key and api_secret and passphrase:
-        client.set_api_creds(
-            ApiCreds(
-                api_key=api_key,
-                api_secret=api_secret,
-                api_passphrase=passphrase,
-            )
+        creds = ApiCreds(
+            api_key=api_key,
+            api_secret=api_secret,
+            api_passphrase=passphrase,
         )
-    else:
+        client.set_api_creds(creds)
         try:
-            try:
-                derived = client.create_api_key()
-            except Exception:
-                derived = client.derive_api_key()
-            client.set_api_creds(derived)
-            logger_info_fn("Balance cache: derived API creds from private key")
+            client.get_balance_allowance(probe_params)
+            return client
         except Exception as exc:
-            logger_warning_fn(f"Balance cache: failed to derive API creds: {exc}")
-            return None
+            logger_warning_fn(f"Balance cache: configured L2 creds rejected, retrying derive/create: {exc}")
+
+    try:
+        try:
+            derived = client.create_api_key()
+            logger_info_fn("Balance cache: derived API creds from create_api_key()")
+        except Exception:
+            derived = client.derive_api_key()
+            logger_info_fn("Balance cache: derived API creds from derive_api_key()")
+        client.set_api_creds(derived)
+        client.get_balance_allowance(probe_params)
+    except Exception as exc:
+        logger_warning_fn(f"Balance cache: failed to derive valid API creds: {exc}")
+        return None
     return client
 
 
