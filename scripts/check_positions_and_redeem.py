@@ -44,6 +44,8 @@ CTF_REDEEM_ABI = [
     },
 ]
 
+GWEI = 10**9
+
 
 def _is_hex_address(v: str | None) -> bool:
     if not v:
@@ -129,6 +131,50 @@ def _redeem_conditions(
         print("No redeemable condition IDs found.")
         return
 
+    def _safe_int(v: Any, default: int = 0) -> int:
+        try:
+            if v is None:
+                return default
+            return int(v)
+        except Exception:
+            return default
+
+    def _build_fee_params(w3: Any) -> dict[str, int]:
+        min_priority_fee_gwei = float(os.getenv("AUTO_REDEEM_MIN_PRIORITY_FEE_GWEI", "25"))
+        max_priority_fee_gwei = float(os.getenv("AUTO_REDEEM_MAX_PRIORITY_FEE_GWEI", "60"))
+        fee_buffer_gwei = float(os.getenv("AUTO_REDEEM_MAX_FEE_BUFFER_GWEI", "5"))
+
+        min_priority_fee_wei = int(max(0.0, min_priority_fee_gwei) * GWEI)
+        max_priority_fee_wei = int(max(min_priority_fee_gwei, max_priority_fee_gwei) * GWEI)
+        fee_buffer_wei = int(max(0.0, fee_buffer_gwei) * GWEI)
+
+        rpc_priority_fee_wei = 0
+        try:
+            rpc_priority_fee_wei = _safe_int(w3.eth.max_priority_fee, 0)
+        except Exception:
+            rpc_priority_fee_wei = 0
+
+        priority_fee_wei = max(min_priority_fee_wei, rpc_priority_fee_wei)
+        priority_fee_wei = min(priority_fee_wei, max_priority_fee_wei)
+
+        latest_block = w3.eth.get_block("latest")
+        base_fee_wei = _safe_int(latest_block.get("baseFeePerGas"), 0)
+
+        if base_fee_wei > 0:
+            max_fee_wei = max((base_fee_wei * 2) + priority_fee_wei + fee_buffer_wei, priority_fee_wei)
+            return {
+                "maxPriorityFeePerGas": priority_fee_wei,
+                "maxFeePerGas": max_fee_wei,
+            }
+
+        gas_price_wei = 0
+        try:
+            gas_price_wei = _safe_int(w3.eth.gas_price, 0)
+        except Exception:
+            gas_price_wei = 0
+        gas_price_wei = max(gas_price_wei, priority_fee_wei)
+        return {"gasPrice": gas_price_wei}
+
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
@@ -142,22 +188,31 @@ def _redeem_conditions(
             print(f"Skip invalid conditionId: {cid_txt}")
             continue
 
+        tx_base = {
+            "chainId": chain_id,
+            "from": owner,
+            "nonce": nonce,
+        }
+        tx_base.update(_build_fee_params(w3))
+
         tx = contract.functions.redeemPositions(
             Web3.to_checksum_address(USDC_ADDRESS),
             b"\x00" * 32,
             Web3.to_bytes(hexstr=cid_txt),
             [1, 2],
-        ).build_transaction(
-            {
-                "chainId": chain_id,
-                "from": owner,
-                "nonce": nonce,
-            }
-        )
+        ).build_transaction(tx_base)
+        if "gas" not in tx:
+            gas_estimate = w3.eth.estimate_gas(tx)
+            tx["gas"] = int(gas_estimate * 1.20)
         signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
         txh = w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=600)
-        print(f"redeemPositions condition={cid_txt} tx={txh.hex()} status={receipt.status}")
+        fee_msg = (
+            f"maxFeePerGas={tx.get('maxFeePerGas')} maxPriorityFeePerGas={tx.get('maxPriorityFeePerGas')}"
+            if "maxFeePerGas" in tx
+            else f"gasPrice={tx.get('gasPrice')}"
+        )
+        print(f"redeemPositions condition={cid_txt} tx={txh.hex()} status={receipt.status} {fee_msg}")
         nonce += 1
 
 
