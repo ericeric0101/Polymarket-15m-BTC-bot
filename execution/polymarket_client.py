@@ -156,14 +156,14 @@ class PolymarketClient:
                     self._ensure_valid_api_creds()
                     continue
                 if (
-                    side.lower() == "buy"
-                    and "not enough balance / allowance" in lower
+                    "not enough balance / allowance" in lower
                     and attempt < max_attempts
                 ):
                     logger.warning(
-                        "Order post hit transient balance/allowance rejection; waiting briefly and retrying once"
+                        "Order post hit transient balance/allowance rejection on %s; waiting briefly and retrying once",
+                        side.upper(),
                     )
-                    time.sleep(1.0)
+                    time.sleep(2.0)
                     continue
                 raise
         if last_exc is not None:
@@ -287,13 +287,10 @@ class PolymarketClient:
             return None
         
         try:
-            # Get order book
-            book = self.client.get_order_book(token_id)
-            
-            if book and "bids" in book and len(book["bids"]) > 0:
-                # Best bid price
-                best_bid = Decimal(str(book["bids"][0]["price"]))
-                return best_bid
+            book = await self.get_orderbook(token_id)
+
+            if book and book["bids"]:
+                return book["bids"][0]["price"]
             
             return None
             
@@ -316,24 +313,33 @@ class PolymarketClient:
         
         try:
             book = self.client.get_order_book(token_id)
-            
-            return {
-                "timestamp": datetime.now(),
-                "token_id": token_id,
-                "bids": [
+            bids = sorted(
+                (
                     {
                         "price": Decimal(str(bid["price"])),
                         "size": Decimal(str(bid["size"])),
                     }
                     for bid in book.get("bids", [])
-                ],
-                "asks": [
+                ),
+                key=lambda level: level["price"],
+                reverse=True,
+            )
+            asks = sorted(
+                (
                     {
                         "price": Decimal(str(ask["price"])),
                         "size": Decimal(str(ask["size"])),
                     }
                     for ask in book.get("asks", [])
-                ],
+                ),
+                key=lambda level: level["price"],
+            )
+
+            return {
+                "timestamp": datetime.now(),
+                "token_id": token_id,
+                "bids": bids,
+                "asks": asks,
             }
             
         except Exception as e:
