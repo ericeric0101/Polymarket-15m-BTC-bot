@@ -55,9 +55,14 @@ def _is_hex_address(v: str | None) -> bool:
 
 
 def _to_checksum_address(addr: str) -> str:
-    from web3 import Web3
+    s = addr.strip()
+    try:
+        from web3 import Web3
 
-    return Web3.to_checksum_address(addr)
+        return Web3.to_checksum_address(s)
+    except Exception:
+        # Allow read-only position checks even when web3 is not installed.
+        return s
 
 
 def _address_from_private_key(private_key: str) -> str:

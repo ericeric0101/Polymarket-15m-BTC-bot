@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import os
 import threading
 import time
@@ -40,6 +41,18 @@ from bot.market_discovery import (
 from run_bot import (
     IntegratedBTCStrategy,
 )
+
+
+def _install_fresh_main_thread_event_loop() -> None:
+    try:
+        current_loop = asyncio.get_event_loop_policy().get_event_loop()
+    except Exception:
+        current_loop = None
+
+    if current_loop is not None and not current_loop.is_closed():
+        return
+
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def _request_clob_l2_api_creds_direct(*, client, clob_host: str) -> Optional[Dict[str, str]]:
@@ -284,6 +297,7 @@ def run_integrated_bot(
         raise RuntimeError("Cannot resolve Polymarket auth (provide PK or full API credentials).")
 
     def _build_node_for_cycle(cycle_index: int) -> tuple[TradingNode, str]:
+        _install_fresh_main_thread_event_loop()
         btc_slugs = resolve_btc_15m_market_slugs()
         if not btc_slugs:
             raise RuntimeError("No BTC 15-min market slugs resolved. Refusing to start.")
@@ -453,6 +467,7 @@ def run_integrated_bot(
                     node.dispose()
                 except Exception as e:
                     logger.warning(f"Node dispose raised: {e}")
+            _install_fresh_main_thread_event_loop()
             logger.info(f"Bot cycle {cycle_idx} stopped")
 
         try:
