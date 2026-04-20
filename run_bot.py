@@ -105,6 +105,7 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
+    apply_entry_quality_quote_placement,
     apply_forced_exit_sell_pricing,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
@@ -1665,6 +1666,10 @@ class IntegratedBTCStrategy(
                     down_high_price_min_score_abs=getattr(self, "down_high_price_min_score_abs", Decimal("0")),
                     down_high_price_min_robust_net_usdc=getattr(self, "down_high_price_min_robust_net_usdc", Decimal("0")),
                     down_high_price_spot_strike_avg_max=getattr(self, "down_high_price_spot_strike_avg_max", Decimal("0")),
+                    shadow_payload=live_shadow_payload,
+                    entry_quality_allow_size_down=bool(
+                        getattr(self, "entry_quality_allow_size_down", False)
+                    ),
                 )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
@@ -1857,6 +1862,14 @@ class IntegratedBTCStrategy(
                     trend_buy_penalty_discount=self.trend_buy_penalty_discount,
                     trend_buy_score=self.side_decision_score,
                     trend_buy_size_multiplier=self.trend_buy_size_multiplier,
+                    entry_size_multiplier=buy_entry_eval.size_multiplier,
+                    entry_quality=buy_entry_eval.payload,
+                )
+                desired_entry = apply_entry_quality_quote_placement(
+                    desired_entry=desired_entry,
+                    side=side,
+                    quote=quote_ctx.quote,
+                    tick=quote_ctx.tick,
                 )
                 desired_entry = attach_desired_entry_runtime_metadata(
                     desired_entry=desired_entry,

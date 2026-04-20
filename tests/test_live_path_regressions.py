@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from bot.adapter_overrides import install_runtime_compatibility_overrides
 from bot.app_config import AppConfig
+from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
@@ -18,6 +19,7 @@ from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
     apply_forced_exit_sell_pricing,
+    apply_entry_quality_quote_placement,
     apply_shadow_entry_veto,
     build_desired_quote_entry,
     compute_loss_sell_policy,
@@ -2723,6 +2725,112 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty():
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
     assert submitted_qty == Decimal("8.100000")
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "trend"
+
+
+def test_entry_quality_adjustment_soft_sizes_high_price_chase_risk():
+    adjustment = evaluate_entry_quality_adjustment(
+        candidate_entry_price=Decimal("0.85"),
+        side_score=Decimal("0.72"),
+        fair=Decimal("0.87"),
+        robust_net_usdc=Decimal("0.03"),
+        spot_minus_strike_avg=Decimal("12"),
+        active_side_value="UP",
+        shadow_payload={
+            "spot_minus_strike": 8.0,
+            "ret_30_bps": 6.2,
+            "breakout_persistence_60s": 0.15,
+        },
+    )
+
+    assert adjustment.size_multiplier < Decimal("1")
+    assert adjustment.min_expected_net_uplift_usdc > Decimal("0")
+    assert adjustment.label in {"moderate_chase_risk", "high_chase_risk"}
+    assert "high_price" in adjustment.reasons
+
+
+def test_value_entry_size_multiplier_flows_into_submit_qty():
+    desired_entry = build_desired_quote_entry(
+        order_key="buy:inst-up",
+        side="buy",
+        inst_id="inst-up",
+        quote_data=(
+            Decimal("0.64"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.007"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("-0.031"),
+            Decimal("0.030"),
+            Decimal("0.010"),
+            Decimal("0.054"),
+            Decimal("0.6244"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={"buy": "econ_gate"},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("-0.005"),
+        now_ts=0.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=None,
+        maker_exchange_min_shares=Decimal("1.0"),
+        avg_entry=Decimal("0"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+        entry_mode="value",
+        entry_size_multiplier=Decimal("0.60"),
+        entry_quality={"entry_quality_label": "moderate_chase_risk"},
+    )
+    snapshot = build_directional_snapshot(desired_entry)
+    strategy = DummyTrendSubmitStrategy()
+    strategy.maker_min_shares = Decimal("1.0")
+    strategy.maker_exchange_min_shares = Decimal("1.0")
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=desired_entry["econ"],
+        directional_snapshot=snapshot,
+    )
+
+    assert strategy.submitted_orders, "expected submit_order to be called"
+    submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
+    assert submitted_qty == Decimal("3.240000")
+    assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.6
+
+
+def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.74"),
+        "entry_quality": {
+            "entry_quality_quote_placement_mode": "join_bid",
+        },
+    }
+
+    out = apply_entry_quality_quote_placement(
+        desired_entry=desired_entry,
+        side="buy",
+        quote=(Decimal("0.70"), Decimal("0.75")),
+        tick=Decimal("0.01"),
+    )
+
+    assert out["price"] == Decimal("0.70")
+    assert out["entry_quality_quote_price_cap"] == Decimal("0.70")
+    assert "entry_quality_quote_placement join_bid 0.7400->0.7000" in out["diag_reason"]
 
 
 def test_reduce_only_overrides_trend_buy_quote():

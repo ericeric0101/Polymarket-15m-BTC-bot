@@ -77,6 +77,17 @@ def _gwei_to_wei(w3, value: float | int) -> int:
     return int(w3.to_wei(value, "gwei"))
 
 
+def _to_checksum_address(addr: str) -> str:
+    s = addr.strip()
+    try:
+        from web3 import Web3
+
+        return Web3.to_checksum_address(s)
+    except Exception:
+        # Allow read-only position checks even when web3 is not installed.
+        return s
+
+
 def _build_eip1559_fees(w3, *, bump_multiplier: float = 1.0) -> dict[str, int]:
     try:
         latest_block = w3.eth.get_block("latest")
@@ -133,12 +144,6 @@ def _is_hex_address(v: str | None) -> bool:
         return False
     s = v.strip()
     return s.startswith("0x") and len(s) == 42
-
-
-def _to_checksum_address(addr: str) -> str:
-    from web3 import Web3
-
-    return Web3.to_checksum_address(addr)
 
 
 def _address_from_private_key(private_key: str) -> str:
