@@ -828,7 +828,7 @@ class AppConfig:
                     min(Decimal("0.05"), _env_decimal("CONDITIONAL_BALANCE_SAFETY_BUFFER_PCT", "0.001")),
                 ),
                 sell_recovery_qty_buffer_shares=max(Decimal("0"), _env_decimal("SELL_RECOVERY_QTY_BUFFER_SHARES", "0.01")),
-                sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 3.0)),
+                sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 10.0)),
                 sell_balance_retry_pause_sec=max(1.0, _env_float("SELL_BALANCE_RETRY_PAUSE_SEC", 3.0)),
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
                 trade_db_path=_env_str("TRADE_DB_PATH", "./logs/trade_journal.db"),

@@ -20,6 +20,7 @@ from loguru import logger
 
 from bot.enums import ActiveSide, MarketPhase
 from bot.market_data import extract_market_start_ts_from_slug
+from bot.post_entry_decay import record_post_entry_signal_sample
 from bot.signal_engine import SignalEngine
 from execution.maker_engine import MakerEngine
 
@@ -618,6 +619,24 @@ class SideDecisionMixin:
             self._db_strategy_event("SIDE_DECISION_SKIPPED", payload)
             self._log_side_decision_skip_throttled(reason=reason, now_ts=now_ts, inputs=inputs, phase=phase)
             return
+        try:
+            record_post_entry_signal_sample(
+                trackers=getattr(self, "_post_entry_decay_trackers_by_inst", {}),
+                slug=str(self.current_market_slug or ""),
+                now_ts=now_ts,
+                score=score,
+                proposed_side=side.value,
+                reason=reason,
+                inputs=inputs,
+                side_invalidation_confirmed_by_slug=getattr(
+                    self,
+                    "_side_invalidation_confirmed_by_slug",
+                    {},
+                ),
+                strategy_event_fn=self._db_strategy_event,
+            )
+        except Exception as exc:
+            logger.debug(f"Post-entry decay sample failed: {exc}")
         if self.side_decision_due_ts > 0 and now_ts < self.side_decision_due_ts:
             self.side_decision_score = score
             self.side_decision_reason = reason
