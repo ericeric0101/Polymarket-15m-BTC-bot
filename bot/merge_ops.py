@@ -5,9 +5,12 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any, Callable
 
+from bot.collateral_tokens import (
+    COLLATERAL_ONRAMP_ADDRESS,
+    USDCE_ADDRESS,
+    get_ctf_collateral,
+)
 
-USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 ERC20_APPROVE_ABI = [
     {
         "constant": False,
@@ -119,8 +122,10 @@ def execute_merge_on_chain(
         acct = Account.from_key(pk)
         owner = w3.to_checksum_address(acct.address)
         contract = w3.eth.contract(address=w3.to_checksum_address(ctf_address), abi=ctf_merge_abi)
+        ctf_collateral = get_ctf_collateral()
+        ctf_collateral_address = w3.to_checksum_address(ctf_collateral.address)
         tx = contract.functions.mergePositions(
-            w3.to_checksum_address(USDCE_ADDRESS),
+            ctf_collateral_address,
             b"\x00" * 32,
             Web3.to_bytes(hexstr=condition_id),
             [1, 2],
@@ -136,9 +141,10 @@ def execute_merge_on_chain(
         usdc_recovered = amount / 1_000_000
         logger_info_fn(
             f"✓ Merge SUCCESS: condition={condition_id[:16]}... "
-            f"recovered={usdc_recovered:.4f} USDC.e tx={txh.hex()} status={receipt.status}"
+            f"recovered={usdc_recovered:.4f} {ctf_collateral.symbol} "
+            f"tx={txh.hex()} status={receipt.status}"
         )
-        if receipt.status == 1:
+        if receipt.status == 1 and ctf_collateral.is_usdce:
             _wrap_usdce_to_pusd(
                 w3=w3,
                 private_key=pk,

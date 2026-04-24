@@ -21,14 +21,23 @@ import os
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import requests
 from dotenv import load_dotenv
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from bot.collateral_tokens import (
+    COLLATERAL_ONRAMP_ADDRESS,
+    USDCE_ADDRESS,
+    get_ctf_collateral,
+)
+
 DATA_API = "https://data-api.polymarket.com"
-USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 CTF_REDEEM_ABI = [
@@ -267,6 +276,8 @@ def _redeem_conditions(
 
     owner = Web3.to_checksum_address(owner_address)
     contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_REDEEM_ABI)
+    ctf_collateral = get_ctf_collateral()
+    ctf_collateral_address = Web3.to_checksum_address(ctf_collateral.address)
     usdce = w3.eth.contract(address=Web3.to_checksum_address(USDCE_ADDRESS), abi=ERC20_APPROVE_ABI)
     onramp = w3.eth.contract(
         address=Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
@@ -290,7 +301,7 @@ def _redeem_conditions(
         tx_base.update(_build_fee_params(w3))
 
         tx_func = contract.functions.redeemPositions(
-            Web3.to_checksum_address(USDCE_ADDRESS),
+            ctf_collateral_address,
             b"\x00" * 32,
             Web3.to_bytes(hexstr=cid_txt),
             [1, 2],
@@ -361,7 +372,7 @@ def _redeem_conditions(
         nonce += 1
 
         amount_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
-        if amount_base_units > 0:
+        if amount_base_units > 0 and ctf_collateral.is_usdce:
             approve_tx = usdce.functions.approve(
                 Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
                 amount_base_units,
@@ -393,6 +404,11 @@ def _redeem_conditions(
                 f"tx={wrap_hash.hex()} status={wrap_receipt.status}"
             )
             nonce += 1
+        elif amount_base_units > 0:
+            print(
+                f"wrapToPUSD skipped condition={cid_txt} "
+                f"ctf_collateral={ctf_collateral.symbol} amount={amount_base_units / 1_000_000:.6f}"
+            )
 
 
 def main() -> int:
@@ -545,6 +561,8 @@ def main() -> int:
     print(f"Owner: {owner}")
     print(f"Chain ID: {chain_id}")
     print(f"RPC URL: {rpc_url}")
+    ctf_collateral = get_ctf_collateral()
+    print(f"CTF collateral: {ctf_collateral.symbol} {ctf_collateral.address}")
     print(f"Min condition size: {min_condition_size:.6f}")
     print(f"Min total size: {min_total_size:.6f}")
     print(f"Redeemable conditions (raw): {json.dumps(redeemable_conditions)}")

@@ -94,8 +94,8 @@ def submit_maker_quote(
         qty_dec = max(qty_dec * size_multiplier, min_buy_qty)
     if qty_dec <= 0:
         return
+    inst_key = strategy._instrument_key(instrument_id)
     if side == "buy":
-        inst_key = strategy._instrument_key(instrument_id)
         reentry_pause_until = float(strategy.stop_loss_reentry_pause_until_by_inst.get(inst_key, 0.0))
         if time.time() < reentry_pause_until:
             cooldown_left = reentry_pause_until - time.time()
@@ -118,9 +118,33 @@ def submit_maker_quote(
             return
 
     if side == "sell" and not strategy._is_dry_run_mode():
+        recent_buy_ts = float(getattr(strategy, "recent_buy_fill_ts_by_inst", {}).get(inst_key, 0.0))
+        sell_delay_sec = float(getattr(strategy, "sell_delay_after_buy_sec", 0.0) or 0.0)
+        if recent_buy_ts > 0 and sell_delay_sec > 0:
+            now_ts = time.time()
+            pause_left = (recent_buy_ts + sell_delay_sec) - now_ts
+            if pause_left > 0:
+                logger.info(
+                    "Skip maker SELL quote: waiting for post-BUY venue balance sync "
+                    f"(inst={inst_key}, pause_left={pause_left:.1f}s)"
+                )
+                strategy._db_order_event(
+                    event_type="ORDER_SKIP_SELL_DELAY_AFTER_BUY",
+                    side=side.upper(),
+                    price=float(limit_price),
+                    qty=float(qty_dec),
+                    status="SKIPPED",
+                    reason="sell_delay_after_buy",
+                    payload={
+                        "instrument_id": str(instrument_id),
+                        "recent_buy_ts": recent_buy_ts,
+                        "sell_delay_after_buy_sec": sell_delay_sec,
+                        "pause_left_sec": pause_left,
+                    },
+                )
+                return
         sellable_qty = strategy._get_effective_sellable_qty(instrument_id=instrument_id)
         confirmed_qty = strategy._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
-        inst_key = strategy._instrument_key(instrument_id)
         venue_cap = strategy._sell_recovery_venue_cap_by_inst.get(inst_key, None) if inst_key else None
         if venue_cap is not None and venue_cap > 0:
             sellable_qty = min(sellable_qty, venue_cap)

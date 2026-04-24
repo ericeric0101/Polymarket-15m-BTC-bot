@@ -482,6 +482,10 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
         if reject_result.rejected_side == "sell":
             inst_key = strategy._instrument_key(reject_result.rejected_inst)
             if inst_key:
+                recent_buy_ts = float(getattr(strategy, "recent_buy_fill_ts_by_inst", {}).get(inst_key, 0.0))
+                sell_delay_sec = float(getattr(strategy, "sell_delay_after_buy_sec", 0.0) or 0.0)
+                if recent_buy_ts > 0 and sell_delay_sec > 0:
+                    pause_sec = max(pause_sec, max(0.0, (recent_buy_ts + sell_delay_sec) - now_ts))
                 strategy._sell_reject_pause_until_by_inst[inst_key] = max(
                     float(strategy._sell_reject_pause_until_by_inst.get(inst_key, 0.0)),
                     now_ts + pause_sec,
