@@ -83,6 +83,10 @@ def initialize_strategy_settings(
     strategy.maker_min_shares = config.maker.min_shares
     strategy.maker_exchange_min_shares = config.maker.exchange_min_shares
     strategy.maker_fixed_shares = config.maker.fixed_shares
+    strategy.maker_weak_pfair_size_adjust_enabled = config.maker.weak_pfair_size_adjust_enabled
+    strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
+    strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
+    strategy.maker_weak_pfair_size_adjust_multiplier = config.maker.weak_pfair_size_adjust_multiplier
     raw_quote_mode = config.maker.quote_sides
     strategy.maker_quote_sides = config.maker.quote_sides
     if raw_quote_mode in {"sell", "both_buy"}:

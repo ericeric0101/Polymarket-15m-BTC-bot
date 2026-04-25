@@ -67,10 +67,57 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "planned_quote_ts": desired.get("planned_quote_ts"),
         "entry_mode": desired.get("entry_mode", "value"),
         "size_multiplier": desired.get("size_multiplier", Decimal("1")),
+        "weak_pfair_size_adjustment": desired.get("weak_pfair_size_adjustment"),
         "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
         "tail_protect_tp_price": desired.get("tail_protect_tp_price"),
         "target_qty_override": desired.get("target_qty_override"),
     }
+
+
+def apply_weak_pfair_size_adjustment(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    enabled: bool,
+    lower: Decimal,
+    upper: Decimal,
+    multiplier: Decimal,
+) -> dict[str, Any]:
+    if side != "buy" or not enabled or not desired_entry.get("should_quote", False):
+        return desired_entry
+    if multiplier <= 0 or multiplier >= 1:
+        return desired_entry
+    p_fair_raw = desired_entry.get("p_fair")
+    if p_fair_raw is None:
+        return desired_entry
+    try:
+        p_fair = Decimal(str(p_fair_raw))
+    except Exception:
+        return desired_entry
+    if not (lower <= p_fair <= upper):
+        return desired_entry
+
+    prior_multiplier = Decimal(str(desired_entry.get("size_multiplier", Decimal("1")) or "1"))
+    adjusted_multiplier = max(Decimal("0"), prior_multiplier * multiplier)
+    desired_entry["size_multiplier"] = adjusted_multiplier
+    desired_entry["weak_pfair_size_adjustment"] = {
+        "p_fair": p_fair,
+        "lower": lower,
+        "upper": upper,
+        "multiplier": multiplier,
+        "prior_size_multiplier": prior_multiplier,
+        "adjusted_size_multiplier": adjusted_multiplier,
+    }
+    diag_reason = str(desired_entry.get("diag_reason", "") or "")
+    adjustment_reason = (
+        f"weak_pfair_size_adjust p_fair={float(p_fair):.4f} "
+        f"in [{float(lower):.2f},{float(upper):.2f}] "
+        f"size_mult={float(prior_multiplier):.3f}->{float(adjusted_multiplier):.3f}"
+    )
+    desired_entry["diag_reason"] = (
+        f"{diag_reason}; {adjustment_reason}" if diag_reason else adjustment_reason
+    )
+    return desired_entry
 
 
 def compute_loss_sell_policy(

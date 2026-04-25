@@ -74,6 +74,10 @@ class MakerConfig:
     min_shares: Decimal
     exchange_min_shares: Decimal
     fixed_shares: Decimal
+    weak_pfair_size_adjust_enabled: bool
+    weak_pfair_size_adjust_lower: Decimal
+    weak_pfair_size_adjust_upper: Decimal
+    weak_pfair_size_adjust_multiplier: Decimal
     quote_sides: str
     directional_edge_gate_enabled: bool
     min_directional_edge_ps: Decimal
@@ -508,6 +512,10 @@ class AppConfig:
                 min_shares=maker_min_shares,
                 exchange_min_shares=maker_exchange_min_shares,
                 fixed_shares=maker_fixed_shares,
+                weak_pfair_size_adjust_enabled=_env_bool("MAKER_WEAK_PFAIR_SIZE_ADJUST_ENABLED", True),
+                weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
+                weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
+                weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
                 quote_sides=normalize_quote_mode(quote_sides_raw),
                 directional_edge_gate_enabled=_env_bool("MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", False),
                 min_directional_edge_ps=_env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"),

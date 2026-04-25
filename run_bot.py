@@ -107,6 +107,7 @@ from bot.quote_service import (
     apply_forced_exit_sell_pricing,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
+    apply_weak_pfair_size_adjustment,
     attach_desired_entry_runtime_metadata,
     apply_confirmed_inventory_sell_guard,
     apply_reload_edge_guard,
@@ -2305,6 +2306,14 @@ class IntegratedBTCStrategy(
                         up_instrument_id=self.current_up_instrument_id,
                         down_instrument_id=self.current_down_instrument_id,
                         shadow_payload=live_shadow_payload,
+                    )
+                    desired_entry = apply_weak_pfair_size_adjustment(
+                        desired_entry=desired_entry,
+                        side=side,
+                        enabled=bool(getattr(self, "maker_weak_pfair_size_adjust_enabled", True)),
+                        lower=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_lower", Decimal("0.47")))),
+                        upper=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_upper", Decimal("0.53")))),
+                        multiplier=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_multiplier", Decimal("0.5")))),
                     )
                 desired_quotes[order_key] = desired_entry
 
