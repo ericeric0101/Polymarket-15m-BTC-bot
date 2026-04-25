@@ -367,6 +367,21 @@ def submit_maker_quote(
                 if directional_snapshot
                 else "value"
             ),
+            "size_multiplier": (
+                float(directional_snapshot.get("size_multiplier"))
+                if directional_snapshot and directional_snapshot.get("size_multiplier") is not None
+                else 1.0
+            ),
+            "external_entry_confirmation": (
+                directional_snapshot.get("external_entry_confirmation")
+                if directional_snapshot
+                else None
+            ),
+            "external_entry_confirmation_size_adjustment": (
+                directional_snapshot.get("external_entry_confirmation_size_adjustment")
+                if directional_snapshot
+                else None
+            ),
             "sell_recovery_required": (
                 bool(strategy._sell_recovery_required_by_inst.get(strategy._instrument_key(instrument_id), 0.0))
                 if side == "sell"

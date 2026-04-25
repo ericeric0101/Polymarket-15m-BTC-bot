@@ -78,6 +78,11 @@ class MakerConfig:
     weak_pfair_size_adjust_lower: Decimal
     weak_pfair_size_adjust_upper: Decimal
     weak_pfair_size_adjust_multiplier: Decimal
+    external_entry_confirmation_enabled: bool
+    external_entry_confirmation_shadow_enabled: bool
+    external_entry_confirmation_book_mid_threshold_ps: Decimal
+    external_entry_confirmation_conflict_size_multiplier: Decimal
+    external_entry_confirmation_skip_strong_conflict: bool
     quote_sides: str
     directional_edge_gate_enabled: bool
     min_directional_edge_ps: Decimal
@@ -516,6 +521,20 @@ class AppConfig:
                 weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
                 weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
                 weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
+                external_entry_confirmation_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_ENABLED", False),
+                external_entry_confirmation_shadow_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_SHADOW_ENABLED", True),
+                external_entry_confirmation_book_mid_threshold_ps=_env_decimal(
+                    "EXTERNAL_ENTRY_CONFIRMATION_BOOK_MID_THRESHOLD_PS",
+                    "0.02",
+                ),
+                external_entry_confirmation_conflict_size_multiplier=_env_decimal(
+                    "EXTERNAL_ENTRY_CONFIRMATION_CONFLICT_SIZE_MULTIPLIER",
+                    "0.5",
+                ),
+                external_entry_confirmation_skip_strong_conflict=_env_bool(
+                    "EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT",
+                    False,
+                ),
                 quote_sides=normalize_quote_mode(quote_sides_raw),
                 directional_edge_gate_enabled=_env_bool("MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", False),
                 min_directional_edge_ps=_env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"),

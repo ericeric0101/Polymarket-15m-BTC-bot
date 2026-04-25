@@ -68,6 +68,8 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "entry_mode": desired.get("entry_mode", "value"),
         "size_multiplier": desired.get("size_multiplier", Decimal("1")),
         "weak_pfair_size_adjustment": desired.get("weak_pfair_size_adjustment"),
+        "external_entry_confirmation": desired.get("external_entry_confirmation"),
+        "external_entry_confirmation_size_adjustment": desired.get("external_entry_confirmation_size_adjustment"),
         "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
         "tail_protect_tp_price": desired.get("tail_protect_tp_price"),
         "target_qty_override": desired.get("target_qty_override"),
