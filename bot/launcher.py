@@ -545,8 +545,6 @@ def main():
     test_mode = args.test_mode
     enable_terminal_dashboard = args.terminal_dashboard
     app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
-    if not enable_terminal_dashboard and app_config.observability.terminal_dashboard_enabled:
-        enable_terminal_dashboard = True
 
     if enable_terminal_dashboard:
         logger.remove()

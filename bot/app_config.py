@@ -434,7 +434,7 @@ class AppConfig:
     @classmethod
     def from_env(cls, *, enable_terminal_dashboard: bool) -> "AppConfig":
         startup_verbose = _env_bool("STARTUP_VERBOSE", False)
-        terminal_dashboard_enabled = enable_terminal_dashboard or _env_bool("TERMINAL_DASHBOARD", False)
+        terminal_dashboard_enabled = bool(enable_terminal_dashboard)
         terminal_dashboard_refresh_sec = max(0.5, _env_float("TERMINAL_DASHBOARD_REFRESH_SEC", 1.0))
         quote_sides_raw = _env_str("MAKER_QUOTE_SIDES", "both").strip().lower()
         default_mode = _env_str("BI_SIDE_DEFAULT_MODE", "NONE").strip().upper()

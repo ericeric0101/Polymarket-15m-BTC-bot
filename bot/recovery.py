@@ -219,6 +219,16 @@ class StrategyRecoveryMixin:
                 self._prom_wallet_balance.set(float(self._cached_usdc_balance))
             except Exception:
                 pass
+            try:
+                self._db_strategy_event(
+                    "ACCOUNT_SUMMARY",
+                    {
+                        "usdc_balance": float(self._cached_usdc_balance),
+                        "pol_balance": float(getattr(self, "_cached_pol_balance", 0.0) or 0.0),
+                    },
+                )
+            except Exception:
+                pass
             self._update_terminal_dashboard_snapshot()
         return self._cached_usdc_balance
 
