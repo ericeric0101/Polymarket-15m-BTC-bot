@@ -16,6 +16,7 @@ class TradeRecord:
     exit_price: Optional[float]
     redeem_amount: Optional[float]
     is_settled: bool
+    expected_redeem_amount: Optional[float] = None
 
 
 @dataclass
@@ -32,6 +33,20 @@ class DashboardState:
     usdc_balance: float
     pol_balance: float
     account_last_updated: datetime
+    market_phase: str = "—"
+    active_side: Optional[str] = None
+    time_left_sec: Optional[float] = None
+    decision_updated_at: Optional[datetime] = None
+    side_score: Optional[float] = None
+    p_fair: Optional[float] = None
+    book_bid: Optional[float] = None
+    book_ask: Optional[float] = None
+    book_mid: Optional[float] = None
+    robust_net_usdc: Optional[float] = None
+    last_block_reason: Optional[str] = None
+    pending_redeem_count: int = 0
+    pending_redeem_usdc: float = 0.0
+    open_exposure_usdc: float = 0.0
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _callbacks: List[Callable[[], None]] = field(default_factory=list, init=False, repr=False)
@@ -61,6 +76,20 @@ class DashboardState:
                 usdc_balance=self.usdc_balance,
                 pol_balance=self.pol_balance,
                 account_last_updated=self.account_last_updated,
+                market_phase=self.market_phase,
+                active_side=self.active_side,
+                time_left_sec=self.time_left_sec,
+                decision_updated_at=self.decision_updated_at,
+                side_score=self.side_score,
+                p_fair=self.p_fair,
+                book_bid=self.book_bid,
+                book_ask=self.book_ask,
+                book_mid=self.book_mid,
+                robust_net_usdc=self.robust_net_usdc,
+                last_block_reason=self.last_block_reason,
+                pending_redeem_count=self.pending_redeem_count,
+                pending_redeem_usdc=self.pending_redeem_usdc,
+                open_exposure_usdc=self.open_exposure_usdc,
                 updated_at=self.updated_at,
             )
 
