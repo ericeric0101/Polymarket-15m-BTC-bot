@@ -386,6 +386,16 @@ def submit_maker_quote(
                 if directional_snapshot
                 else None
             ),
+            "external_entry_confirmation": (
+                directional_snapshot.get("external_entry_confirmation")
+                if directional_snapshot
+                else None
+            ),
+            "external_entry_confirmation_size_adjustment": (
+                directional_snapshot.get("external_entry_confirmation_size_adjustment")
+                if directional_snapshot
+                else None
+            ),
             "entry_quality_quote_price_cap": (
                 float(directional_snapshot.get("entry_quality_quote_price_cap"))
                 if directional_snapshot and directional_snapshot.get("entry_quality_quote_price_cap") is not None

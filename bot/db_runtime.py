@@ -185,6 +185,7 @@ class StrategyDBRuntimeMixin:
             "p_fair": float(desired_entry.get("p_fair")) if desired_entry.get("p_fair") is not None else None,
             "robust_net_usdc": float(desired_entry.get("robust_net")) if desired_entry.get("robust_net") is not None else None,
             "directional_edge_ps": float(desired_entry.get("directional_edge_ps")) if desired_entry.get("directional_edge_ps") is not None else None,
+            "external_entry_confirmation": desired_entry.get("external_entry_confirmation"),
             "market_buy_count": int(market_buy_count),
             "inventory_qty": float(current_inst_inventory_qty),
             "locked_side_entry_blocked": bool(locked_side_runtime.entry_blocked),

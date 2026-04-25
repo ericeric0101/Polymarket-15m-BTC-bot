@@ -131,6 +131,7 @@ from bot.quote_service import (
     resolve_quote_intent_state,
     should_requote_existing_order,
 )
+from bot.entry_confirmation import apply_entry_confirmation_adjustment
 from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
@@ -2303,6 +2304,69 @@ class IntegratedBTCStrategy(
                         down_instrument_id=self.current_down_instrument_id,
                         shadow_payload=live_shadow_payload,
                     )
+                    entry_confirmation_engine = getattr(self, "entry_confirmation_engine", None)
+                    entry_confirmation_config = (
+                        getattr(entry_confirmation_engine, "config", None)
+                        if entry_confirmation_engine is not None
+                        else None
+                    )
+                    if (
+                        entry_confirmation_engine is not None
+                        and entry_confirmation_config is not None
+                        and (
+                            bool(getattr(entry_confirmation_config, "enabled", False))
+                            or bool(getattr(entry_confirmation_config, "shadow_enabled", True))
+                        )
+                    ):
+                        ref_spot, ref_spot_source, ref_spot_age = self._capture_market_open_spot_detail(now_ts=now_ts)
+                        binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)
+                        binance_age = max(0.0, now_ts - binance_ts) if binance_ts > 0 else None
+                        entry_confirmation_signal = entry_confirmation_engine.evaluate(
+                            active_side=self.active_side.value,
+                            p_fair=desired_entry.get("p_fair"),
+                            fair=quote_ctx.fair,
+                            best_bid=quote_ctx.quote[0],
+                            best_ask=quote_ctx.quote[1],
+                            ref_spot=ref_spot,
+                            ref_spot_source=ref_spot_source,
+                            ref_spot_age_sec=ref_spot_age,
+                            strike=self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")),
+                            binance_spot=getattr(self, "_binance_ws_price", None),
+                            binance_age_sec=binance_age,
+                        )
+                        desired_entry = apply_entry_confirmation_adjustment(
+                            desired_entry=desired_entry,
+                            side=side,
+                            signal=entry_confirmation_signal,
+                            config=entry_confirmation_config,
+                        )
+                        if self.trade_db:
+                            entry_confirmation_payload = entry_confirmation_signal.as_payload()
+                            entry_confirmation_payload.update(
+                                {
+                                    "slug": str(self.current_market_slug or ""),
+                                    "instrument_id": str(inst_id),
+                                    "should_quote": bool(desired_entry.get("should_quote", False)),
+                                    "entry_mode": str(desired_entry.get("entry_mode", "") or ""),
+                                    "price": (
+                                        float(desired_entry.get("price"))
+                                        if desired_entry.get("price") is not None
+                                        else None
+                                    ),
+                                    "robust_net_usdc": (
+                                        float(desired_entry.get("robust_net"))
+                                        if desired_entry.get("robust_net") is not None
+                                        else None
+                                    ),
+                                    "side_score": float(self.side_decision_score),
+                                    "time_left_sec": (
+                                        float(time_left_sec_global)
+                                        if time_left_sec_global is not None
+                                        else None
+                                    ),
+                                }
+                            )
+                            self._db_strategy_event("ENTRY_CONFIRMATION_OBSERVATION", entry_confirmation_payload)
                     desired_entry = apply_weak_pfair_size_adjustment(
                         desired_entry=desired_entry,
                         side=side,

@@ -31,6 +31,7 @@ from monitoring.performance_tracker import get_performance_tracker
 from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
+from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 
 
@@ -87,6 +88,17 @@ def initialize_strategy_settings(
     strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
     strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
     strategy.maker_weak_pfair_size_adjust_multiplier = config.maker.weak_pfair_size_adjust_multiplier
+    strategy.entry_confirmation_engine = EntryConfirmationEngine(
+        EntryConfirmationConfig(
+            enabled=config.maker.external_entry_confirmation_enabled,
+            shadow_enabled=config.maker.external_entry_confirmation_shadow_enabled,
+            book_mid_threshold_ps=config.maker.external_entry_confirmation_book_mid_threshold_ps,
+            conflict_size_multiplier=config.maker.external_entry_confirmation_conflict_size_multiplier,
+            skip_strong_conflict=config.maker.external_entry_confirmation_skip_strong_conflict,
+            weak_pfair_lower=config.maker.weak_pfair_size_adjust_lower,
+            weak_pfair_upper=config.maker.weak_pfair_size_adjust_upper,
+        )
+    )
     raw_quote_mode = config.maker.quote_sides
     strategy.maker_quote_sides = config.maker.quote_sides
     if raw_quote_mode in {"sell", "both_buy"}:

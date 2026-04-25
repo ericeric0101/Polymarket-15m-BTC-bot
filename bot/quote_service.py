@@ -70,6 +70,8 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "entry_mode": desired.get("entry_mode", "value"),
         "size_multiplier": desired.get("size_multiplier", Decimal("1")),
         "weak_pfair_size_adjustment": desired.get("weak_pfair_size_adjustment"),
+        "external_entry_confirmation": desired.get("external_entry_confirmation"),
+        "external_entry_confirmation_size_adjustment": desired.get("external_entry_confirmation_size_adjustment"),
         "entry_quality": desired.get("entry_quality"),
         "entry_quality_quote_price_cap": desired.get("entry_quality_quote_price_cap"),
         "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
