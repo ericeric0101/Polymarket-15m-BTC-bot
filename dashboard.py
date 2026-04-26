@@ -22,8 +22,37 @@ from rich.text import Text
 from dashboard_state import DashboardState, TradeRecord
 
 
-PANEL_STYLE = "dim white"
 PANEL_PADDING = (0, 1)
+DASHBOARD_THEME = os.getenv("DASHBOARD_THEME", "light").strip().lower()
+
+if DASHBOARD_THEME == "dark":
+    PANEL_STYLE = "dim white"
+    CONSOLE_STYLE = "white on black"
+    TITLE_STYLE = "bold bright_blue"
+    LABEL_STYLE = "dim"
+    MUTED_STYLE = "dim"
+    TEXT_STYLE = "white"
+    VALUE_STYLE = "bold white"
+    LINK_STYLE = "bright_blue"
+    POS_STYLE = "bright_green"
+    NEG_STYLE = "bright_red"
+    WARN_STYLE = "yellow"
+    SOLD_STYLE = "bright_cyan"
+    OPEN_STYLE = "bright_blue"
+else:
+    PANEL_STYLE = "grey35"
+    CONSOLE_STYLE = "black on white"
+    TITLE_STYLE = "bold blue"
+    LABEL_STYLE = "grey23"
+    MUTED_STYLE = "grey50"
+    TEXT_STYLE = "black"
+    VALUE_STYLE = "bold black"
+    LINK_STYLE = "blue"
+    POS_STYLE = "green4"
+    NEG_STYLE = "red3"
+    WARN_STYLE = "dark_goldenrod"
+    SOLD_STYLE = "cyan4"
+    OPEN_STYLE = "purple4"
 
 
 def _parse_dotenv(path: Path) -> dict[str, str]:
@@ -104,10 +133,10 @@ def _optional_float(value: object) -> Optional[float]:
 
 def _style_for_signed(value: float) -> str:
     if value > 0:
-        return "bright_green"
+        return POS_STYLE
     if value < 0:
-        return "bright_red"
-    return "white"
+        return NEG_STYLE
+    return TEXT_STYLE
 
 
 def _format_duration(value: Optional[float]) -> str:
@@ -146,16 +175,16 @@ def _slug_epoch(slug: str) -> Optional[int]:
 def _side_text(side: Optional[str]) -> Text:
     normalized = str(side or "").upper()
     if normalized == "UP":
-        return Text("UP", style="bold bright_green")
+        return Text("UP", style=f"bold {POS_STYLE}")
     if normalized == "DOWN":
-        return Text("DOWN", style="bold bright_red")
-    return Text("— NO POSITION —", style="dim")
+        return Text("DOWN", style=f"bold {NEG_STYLE}")
+    return Text("— NO POSITION —", style=MUTED_STYLE)
 
 
 class BTCDashboard:
     def __init__(self, state: DashboardState, *, console: Optional[Console] = None) -> None:
         self.state = state
-        self.console = console or Console(style="white on black")
+        self.console = console or Console(style=CONSOLE_STYLE)
         self._live: Optional[Live] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -221,13 +250,13 @@ class BTCDashboard:
         spread = state.spot_price - state.strike_price
         spread_text = Text()
         if spread > 0:
-            spread_text.append("▲ ", style="bright_green")
-            spread_text.append(_money(spread, signed=True), style="bold bright_green")
+            spread_text.append("▲ ", style=POS_STYLE)
+            spread_text.append(_money(spread, signed=True), style=f"bold {POS_STYLE}")
         elif spread < 0:
-            spread_text.append("▼ ", style="bright_red")
-            spread_text.append(_money(spread, signed=True), style="bold bright_red")
+            spread_text.append("▼ ", style=NEG_STYLE)
+            spread_text.append(_money(spread, signed=True), style=f"bold {NEG_STYLE}")
         else:
-            spread_text.append(_money(spread), style="white")
+            spread_text.append(_money(spread), style=TEXT_STYLE)
 
         grid = Table.grid(expand=True)
         grid.add_column(justify="center", ratio=1)
@@ -236,24 +265,24 @@ class BTCDashboard:
         grid.add_column(justify="center", width=3)
         grid.add_column(justify="center", ratio=1)
         grid.add_row(
-            Text("STRIKE", style="dim", no_wrap=True),
-            Text("│", style="dim"),
-            Text("SPOT", style="dim", no_wrap=True),
-            Text("│", style="dim"),
-            Text("SPREAD", style="dim", no_wrap=True),
+            Text("STRIKE", style=LABEL_STYLE, no_wrap=True),
+            Text("│", style=MUTED_STYLE),
+            Text("SPOT", style=LABEL_STYLE, no_wrap=True),
+            Text("│", style=MUTED_STYLE),
+            Text("SPREAD", style=LABEL_STYLE, no_wrap=True),
         )
         grid.add_row(
-            Text(_money(state.strike_price), style="bold white"),
-            Text("│", style="dim"),
-            Text(_money(state.spot_price), style="bold white"),
-            Text("│", style="dim"),
+            Text(_money(state.strike_price), style=VALUE_STYLE),
+            Text("│", style=MUTED_STYLE),
+            Text(_money(state.spot_price), style=VALUE_STYLE),
+            Text("│", style=MUTED_STYLE),
             spread_text,
         )
 
-        subtitle = Text(f"updated {state.updated_at.astimezone(timezone.utc):%H:%M:%S UTC}", style="dim")
+        subtitle = Text(f"updated {state.updated_at.astimezone(timezone.utc):%H:%M:%S UTC}", style=MUTED_STYLE)
         return Panel(
             Align.center(grid, vertical="middle"),
-            title=Text("BTC 15-MIN MARKET", style="bold bright_blue"),
+            title=Text("BTC 15-MIN MARKET", style=TITLE_STYLE),
             subtitle=subtitle,
             subtitle_align="right",
             border_style=PANEL_STYLE,
@@ -269,7 +298,7 @@ class BTCDashboard:
             body = Align.center(_side_text(None), vertical="middle")
             return Panel(
                 body,
-                title=Text("CURRENT POSITION", style="bold white"),
+                title=Text("CURRENT POSITION", style=VALUE_STYLE),
                 border_style=PANEL_STYLE,
                 padding=PANEL_PADDING,
             )
@@ -280,24 +309,24 @@ class BTCDashboard:
         rows.add_column(justify="right", ratio=1)
 
         side_line = Text()
-        side_line.append("Side", style="dim")
-        side_value = _side_text(side) if side in {"UP", "DOWN"} else Text("UNKNOWN", style="dim")
+        side_line.append("Side", style=LABEL_STYLE)
+        side_value = _side_text(side) if side in {"UP", "DOWN"} else Text("UNKNOWN", style=MUTED_STYLE)
 
-        ask_value = Text("NA", style="dim")
+        ask_value = Text("NA", style=MUTED_STYLE)
         if state.position_ask is not None:
-            ask_value = Text(f"{state.position_ask:.2f} USDC", style="bold yellow")
+            ask_value = Text(f"{state.position_ask:.2f} USDC", style=f"bold {WARN_STYLE}")
 
         pnl_value = Text(_money(unrealized, signed=True), style=f"bold {_style_for_signed(unrealized)}")
         rows.add_row(side_line, side_value)
-        rows.add_row(Text("Entry Price", style="dim"), Text(f"{entry:.2f} USDC", style="bold white"))
-        rows.add_row(Text("Target Ask", style="dim"), ask_value)
-        rows.add_row(Text("Quantity", style="dim"), Text(f"{qty:.2f} shares", style="bold white"))
-        rows.add_row(Text("Mkt price", style="dim"), Text(f"{state.current_market_price:.2f} USDC", style="white"))
-        rows.add_row(Text("Unrealized PnL", style="dim"), pnl_value)
+        rows.add_row(Text("Entry Price", style=LABEL_STYLE), Text(f"{entry:.2f} USDC", style=VALUE_STYLE))
+        rows.add_row(Text("Target Ask", style=LABEL_STYLE), ask_value)
+        rows.add_row(Text("Quantity", style=LABEL_STYLE), Text(f"{qty:.2f} shares", style=VALUE_STYLE))
+        rows.add_row(Text("Mkt price", style=LABEL_STYLE), Text(f"{state.current_market_price:.2f} USDC", style=TEXT_STYLE))
+        rows.add_row(Text("Unrealized PnL", style=LABEL_STYLE), pnl_value)
 
         return Panel(
             rows,
-            title=Text("CURRENT POSITION", style="bold white"),
+            title=Text("CURRENT POSITION", style=VALUE_STYLE),
             border_style=PANEL_STYLE,
             padding=PANEL_PADDING,
         )
@@ -309,28 +338,28 @@ class BTCDashboard:
         pnl_grid = Table.grid(expand=True)
         pnl_grid.add_column(ratio=1)
         pnl_grid.add_column(justify="right", ratio=1)
-        pnl_grid.add_row(Text("DB Cycle PnL", style="dim"), Text(_money(state.cumulative_pnl, signed=True), style=pnl_style))
-        pnl_grid.add_row(Text("Visible Trades PnL", style="dim"), Text(_money(state.visible_trades_pnl, signed=True), style=visible_pnl_style))
+        pnl_grid.add_row(Text("DB Cycle PnL", style=LABEL_STYLE), Text(_money(state.cumulative_pnl, signed=True), style=pnl_style))
+        pnl_grid.add_row(Text("Visible Trades PnL", style=LABEL_STYLE), Text(_money(state.visible_trades_pnl, signed=True), style=visible_pnl_style))
 
         pnl_box = Panel(
             pnl_grid,
-            border_style="dim",
+            border_style=PANEL_STYLE,
             padding=(0, 1),
         )
         usdc_box = Panel(
             Group(
-                Text("USDC Balance", style="dim"),
-                Text(_money(state.usdc_balance), style="bold white"),
+                Text("USDC Balance", style=LABEL_STYLE),
+                Text(_money(state.usdc_balance), style=VALUE_STYLE),
             ),
-            border_style="dim",
+            border_style=PANEL_STYLE,
             padding=(0, 1),
         )
         pol_box = Panel(
             Group(
-                Text("POL Balance", style="dim"),
-                Text(f"{state.pol_balance:.4f} gas reserve", style="bold white"),
+                Text("POL Balance", style=LABEL_STYLE),
+                Text(f"{state.pol_balance:.4f} gas reserve", style=VALUE_STYLE),
             ),
-            border_style="dim",
+            border_style=PANEL_STYLE,
             padding=(0, 1),
         )
         balances_grid = Table.grid(expand=True)
@@ -341,8 +370,8 @@ class BTCDashboard:
         last_updated = state.account_last_updated.astimezone(timezone.utc).strftime("%H:%M UTC")
         return Panel(
             Group(pnl_box, balances_grid),
-            title=Text("ACCOUNT SUMMARY", style="bold white"),
-            subtitle=Text(f"last updated: {last_updated}", style="dim"),
+            title=Text("ACCOUNT SUMMARY", style=VALUE_STYLE),
+            subtitle=Text(f"last updated: {last_updated}", style=MUTED_STYLE),
             subtitle_align="left",
             border_style=PANEL_STYLE,
             padding=PANEL_PADDING,
@@ -353,11 +382,11 @@ class BTCDashboard:
             expand=True,
             show_lines=False,
             show_edge=False,
-            header_style="bold dim",
+            header_style=f"bold {LABEL_STYLE}",
             pad_edge=False,
         )
-        table.add_column("#", style="dim", justify="right", no_wrap=True)
-        table.add_column("Market Slug", style="white", overflow="fold")
+        table.add_column("#", style=MUTED_STYLE, justify="right", no_wrap=True)
+        table.add_column("Market Slug", style=TEXT_STYLE, overflow="fold")
         table.add_column("Side", justify="center", no_wrap=True)
         table.add_column("Qty", justify="right", no_wrap=True)
         table.add_column("Entry", justify="right", no_wrap=True)
@@ -367,15 +396,15 @@ class BTCDashboard:
         table.add_column("Status", justify="right", no_wrap=True)
 
         if not state.trades:
-            table.add_row(Text("—", style="dim"), Text("No trades yet", style="dim"), "", "", "", "", "", "", "")
+            table.add_row(Text("—", style=MUTED_STYLE), Text("No trades yet", style=MUTED_STYLE), "", "", "", "", "", "", "")
         else:
             for idx, trade in enumerate(state.trades[:16], start=1):
                 table.add_row(
-                    Text(str(idx), style="dim"),
-                    Text(trade.market_slug, style="bright_blue"),
+                    Text(str(idx), style=MUTED_STYLE),
+                    Text(trade.market_slug, style=LINK_STYLE),
                     _side_text(trade.side),
-                    Text(f"{trade.qty:.2f}", style="white"),
-                    Text(_price(trade.entry_price), style="white"),
+                    Text(f"{trade.qty:.2f}", style=TEXT_STYLE),
+                    Text(_price(trade.entry_price), style=TEXT_STYLE),
                     self._exit_cell(trade),
                     self._redeem_cell(trade),
                     self._pnl_cell(trade),
@@ -384,8 +413,8 @@ class BTCDashboard:
 
         return Panel(
             table,
-            title=Text("RECENT TRADES", style="bold white"),
-            subtitle=Text("last 16", style="dim"),
+            title=Text("RECENT TRADES", style=VALUE_STYLE),
+            subtitle=Text("last 16", style=MUTED_STYLE),
             subtitle_align="right",
             border_style=PANEL_STYLE,
             padding=PANEL_PADDING,
@@ -401,28 +430,28 @@ class BTCDashboard:
 
         active_side = _side_text(state.active_side)
         if state.active_side is None:
-            active_side = Text("NONE", style="dim")
+            active_side = Text("NONE", style=MUTED_STYLE)
         book = self._book_text(state)
         robust = self._signed_optional_text(state.robust_net_usdc, money=False)
         p_fair = self._prob_text(state.p_fair)
         score = self._signed_optional_text(state.side_score, money=False)
 
         spacer = Text("")
-        table.add_row(Text("Phase", style="dim"), Text(str(state.market_phase or "—"), style="white"), spacer, Text("Active", style="dim"), active_side)
-        table.add_row(Text("Time left", style="dim"), Text(_format_duration(_countdown_time_left(state)), style="white"), spacer, Text("Side score", style="dim"), score)
-        table.add_row(Text("p_fair", style="dim"), p_fair, spacer, Text("Book", style="dim"), book)
-        table.add_row(Text("Robust net", style="dim"), robust, spacer, Text("Exposure", style="dim"), Text(_money(state.open_exposure_usdc), style="white"))
+        table.add_row(Text("Phase", style=LABEL_STYLE), Text(str(state.market_phase or "—"), style=TEXT_STYLE), spacer, Text("Active", style=LABEL_STYLE), active_side)
+        table.add_row(Text("Time left", style=LABEL_STYLE), Text(_format_duration(_countdown_time_left(state)), style=TEXT_STYLE), spacer, Text("Side score", style=LABEL_STYLE), score)
+        table.add_row(Text("p_fair", style=LABEL_STYLE), p_fair, spacer, Text("Book", style=LABEL_STYLE), book)
+        table.add_row(Text("Robust net", style=LABEL_STYLE), robust, spacer, Text("Exposure", style=LABEL_STYLE), Text(_money(state.open_exposure_usdc), style=TEXT_STYLE))
         table.add_row(
-            Text("Pending redeem", style="dim"),
-            Text(f"{state.pending_redeem_count} / {_money(state.pending_redeem_usdc)}", style="yellow" if state.pending_redeem_count else "dim"),
+            Text("Pending redeem", style=LABEL_STYLE),
+            Text(f"{state.pending_redeem_count} / {_money(state.pending_redeem_usdc)}", style=WARN_STYLE if state.pending_redeem_count else MUTED_STYLE),
             spacer,
-            Text("Last block", style="dim"),
-            Text(_shorten(state.last_block_reason, 42), style="yellow" if state.last_block_reason else "dim"),
+            Text("Last block", style=LABEL_STYLE),
+            Text(_shorten(state.last_block_reason, 42), style=WARN_STYLE if state.last_block_reason else MUTED_STYLE),
         )
 
         return Panel(
             table,
-            title=Text("BOT DECISION / ENTRY GATE", style="bold white"),
+            title=Text("BOT DECISION / ENTRY GATE", style=VALUE_STYLE),
             border_style=PANEL_STYLE,
             padding=PANEL_PADDING,
         )
@@ -430,26 +459,26 @@ class BTCDashboard:
     @staticmethod
     def _exit_cell(trade: TradeRecord) -> Text:
         if trade.exit_price is None:
-            return Text("NA", style="dim")
-        return Text(f"{trade.exit_price:.2f}", style="white")
+            return Text("NA", style=MUTED_STYLE)
+        return Text(f"{trade.exit_price:.2f}", style=TEXT_STYLE)
 
     @staticmethod
     def _redeem_cell(trade: TradeRecord) -> Text:
         if trade.exit_price is not None and trade.redeem_amount is None:
-            return Text("NA", style="dim")
+            return Text("NA", style=MUTED_STYLE)
         if not trade.is_settled:
-            return Text("—", style="dim")
+            return Text("—", style=MUTED_STYLE)
         if trade.redeem_amount is None:
             if trade.expected_redeem_amount is not None and trade.expected_redeem_amount > 0:
-                return Text(f"~{_money(trade.expected_redeem_amount)}", style="yellow")
-            return Text("pending", style="yellow")
-        return Text(_money(trade.redeem_amount), style="bold bright_white")
+                return Text(f"~{_money(trade.expected_redeem_amount)}", style=WARN_STYLE)
+            return Text("pending", style=WARN_STYLE)
+        return Text(_money(trade.redeem_amount), style=VALUE_STYLE)
 
     @staticmethod
     def _pnl_cell(trade: TradeRecord) -> Text:
         pnl = BTCDashboard._trade_pnl_amount(trade)
         if pnl is None:
-            return Text("—", style="dim")
+            return Text("—", style=MUTED_STYLE)
         return Text(_money(pnl, signed=True), style=f"bold {_style_for_signed(pnl)}")
 
     @staticmethod
@@ -466,39 +495,39 @@ class BTCDashboard:
     @staticmethod
     def _status_cell(trade: TradeRecord) -> Text:
         if trade.exit_price is not None:
-            return Text("sold", style="bright_cyan")
+            return Text("sold", style=SOLD_STYLE)
         if not trade.is_settled:
-            return Text("open", style="bright_blue")
+            return Text("open", style=OPEN_STYLE)
         if trade.redeem_amount is None:
             if trade.expected_redeem_amount is not None and trade.expected_redeem_amount > 0:
-                return Text("claimable", style="yellow")
-            return Text("pending", style="yellow")
+                return Text("claimable", style=WARN_STYLE)
+            return Text("pending", style=WARN_STYLE)
         if trade.redeem_amount <= 0:
-            return Text("lost", style="bright_red")
-        return Text("redeemed", style="bright_green")
+            return Text("lost", style=NEG_STYLE)
+        return Text("redeemed", style=POS_STYLE)
 
     @staticmethod
     def _prob_text(value: Optional[float]) -> Text:
         if value is None:
-            return Text("NA", style="dim")
-        style = "bright_green" if value >= 0.55 else "yellow" if value >= 0.47 else "bright_red"
+            return Text("NA", style=MUTED_STYLE)
+        style = POS_STYLE if value >= 0.55 else WARN_STYLE if value >= 0.47 else NEG_STYLE
         return Text(f"{value:.3f}", style=style)
 
     @staticmethod
     def _signed_optional_text(value: Optional[float], *, money: bool) -> Text:
         if value is None:
-            return Text("NA", style="dim")
+            return Text("NA", style=MUTED_STYLE)
         rendered = _money(value, signed=True) if money else f"{value:+.4f}"
         return Text(rendered, style=_style_for_signed(value))
 
     @staticmethod
     def _book_text(state: DashboardState) -> Text:
         if state.book_bid is None and state.book_ask is None and state.book_mid is None:
-            return Text("NA", style="dim")
+            return Text("NA", style=MUTED_STYLE)
         bid = "NA" if state.book_bid is None else f"{state.book_bid:.2f}"
         ask = "NA" if state.book_ask is None else f"{state.book_ask:.2f}"
         mid = "NA" if state.book_mid is None else f"{state.book_mid:.2f}"
-        return Text(f"{bid}/{ask} m{mid}", style="white")
+        return Text(f"{bid}/{ask} m{mid}", style=TEXT_STYLE)
 
 
 class TradeJournalDashboardSource:
@@ -620,12 +649,20 @@ class TradeJournalDashboardSource:
     def _latest_decision_snapshot(self, conn: sqlite3.Connection, market_slug: str) -> dict:
         decision = self._latest_payload_for_slug(
             conn,
-            ["ENTRY_CONFIRMATION_OBSERVATION", "SIDE_DECISION", "SIDE_DECISION_OBSERVATION"],
+            [
+                "ENTRY_CONFIRMATION_OBSERVATION",
+                "LIVE_SIGNAL_COMPARE",
+                "MAIN_SIGNAL_CANDIDATE_LIVE",
+                "ENTRY_REGIME_OBSERVATION",
+                "SIDE_DECISION",
+                "SIDE_DECISION_OBSERVATION",
+            ],
             market_slug,
         )
         block = self._latest_payload_for_slug(
             conn,
             [
+                "BUY_PATH_DIAGNOSTIC",
                 "NO_TRADE_ECON_GATE",
                 "NO_TRADE_REDUCE_ONLY",
                 "NO_TRADE_REDUCE_ONLY_TAIL_GUARD",
@@ -635,8 +672,28 @@ class TradeJournalDashboardSource:
             ],
             market_slug,
         )
+        fair_payload = self._latest_payload_for_slug_with_any_field(
+            conn,
+            [
+                "BUY_PATH_DIAGNOSTIC",
+                "ENTRY_CONFIRMATION_OBSERVATION",
+                "NO_TRADE_ECON_GATE",
+                "NO_TRADE_REDUCE_ONLY",
+                "NO_TRADE_REDUCE_ONLY_TAIL_GUARD",
+                "NO_TRADE_TREND_PROTECTION",
+                "NO_TRADE_DIRECTIONAL_EDGE_GATE",
+            ],
+            market_slug,
+            ["p_fair", "fair", "fair_up", "fair_down"],
+        )
 
-        active_side = str(decision.get("active_side") or decision.get("proposed_side") or "").upper()
+        active_side = str(
+            decision.get("active_side")
+            or decision.get("main_active_side")
+            or block.get("active_side")
+            or decision.get("proposed_side")
+            or ""
+        ).upper()
         if active_side not in {"UP", "DOWN"}:
             active_side = None
 
@@ -648,13 +705,19 @@ class TradeJournalDashboardSource:
                 p_fair = fair_up
             elif active_side == "DOWN":
                 p_fair = fair_down
-            elif fair_up is not None and fair_down is not None:
+            if p_fair is None and fair_up is not None and fair_down is not None:
                 p_fair = max(float(fair_up), float(fair_down))
-            else:
-                p_fair = block.get("fair")
+            if p_fair is None:
+                p_fair = fair_payload.get("p_fair") or fair_payload.get("fair") or block.get("fair")
 
-        book_bid = decision.get("best_bid")
-        book_ask = decision.get("best_ask")
+        book_bid = decision.get("best_bid") or decision.get("bid")
+        book_ask = decision.get("best_ask") or decision.get("ask")
+        if active_side == "UP":
+            book_bid = book_bid if book_bid is not None else decision.get("bid_up")
+            book_ask = book_ask if book_ask is not None else decision.get("ask_up")
+        elif active_side == "DOWN":
+            book_bid = book_bid if book_bid is not None else decision.get("bid_down")
+            book_ask = book_ask if book_ask is not None else decision.get("ask_down")
         book_mid = decision.get("book_mid") or decision.get("market_mid")
         if book_bid is None:
             book_bid = block.get("bid")
@@ -672,12 +735,21 @@ class TradeJournalDashboardSource:
             "active_side": active_side,
             "time_left_sec": _optional_float(decision.get("time_left_sec") or block.get("time_left_sec")),
             "decision_updated_at": time_left_source_ts,
-            "side_score": _optional_float(decision.get("side_score") or decision.get("composite_score") or block.get("side_score")),
+            "side_score": _optional_float(
+                decision.get("side_score")
+                or decision.get("composite_score")
+                or decision.get("main_score")
+                or block.get("side_score")
+            ),
             "p_fair": _optional_float(p_fair),
             "book_bid": _optional_float(book_bid),
             "book_ask": _optional_float(book_ask),
             "book_mid": _optional_float(book_mid),
-            "robust_net_usdc": _optional_float(decision.get("robust_net_usdc") or self._robust_from_reason(block.get("primary_reason"))),
+            "robust_net_usdc": _optional_float(
+                decision.get("robust_net_usdc")
+                or block.get("robust_net_usdc")
+                or self._robust_from_reason(block.get("primary_reason") or block.get("blocked"))
+            ),
             "last_block_reason": block.get("primary_reason") or block.get("blocked"),
         }
 
@@ -703,6 +775,42 @@ class TradeJournalDashboardSource:
             SELECT ts, payload_json
             FROM strategy_events
             WHERE event_type IN ({placeholders})
+            {slug_clause}
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        payload = _json_loads(row["payload_json"] if row else None)
+        if row:
+            payload["__ts"] = _parse_dt(row["ts"])
+        return payload
+
+    @staticmethod
+    def _latest_payload_for_slug_with_any_field(
+        conn: sqlite3.Connection,
+        event_types: list[str],
+        market_slug: str,
+        field_names: list[str],
+    ) -> dict:
+        placeholders = ",".join("?" for _ in event_types)
+        field_clause = " OR ".join(f"json_extract(payload_json, '$.{name}') IS NOT NULL" for name in field_names)
+        params: list[str] = list(event_types)
+        slug_clause = ""
+        if market_slug:
+            slug_clause = """
+              AND (
+                json_extract(payload_json, '$.slug') = ?
+                OR json_extract(payload_json, '$.market_slug') = ?
+              )
+            """
+            params.extend([market_slug, market_slug])
+        row = conn.execute(
+            f"""
+            SELECT ts, payload_json
+            FROM strategy_events
+            WHERE event_type IN ({placeholders})
+              AND ({field_clause})
             {slug_clause}
             ORDER BY id DESC
             LIMIT 1
