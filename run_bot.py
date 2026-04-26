@@ -141,6 +141,9 @@ from bot.market_discovery import (
     resolve_primary_btc_15m_instrument_ids,
 )
 from bot.merge_ops import try_merge_yes_no_positions
+from alert_watcher import AlertWatcher
+from dashboard_state import DashboardState, TradeRecord
+from telegram_notifier import TelegramNotifier
 
 load_dotenv()
 
@@ -212,6 +215,9 @@ class IntegratedBTCStrategy(
         test_mode=False,
         selected_slug: Optional[str] = None,
         enable_terminal_dashboard: bool = False,
+        dashboard_state: Optional[DashboardState] = None,
+        telegram_notifier: Optional[TelegramNotifier] = None,
+        alert_watcher: Optional[AlertWatcher] = None,
     ):
         super().__init__()
         
@@ -219,6 +225,11 @@ class IntegratedBTCStrategy(
         self.instrument_id = None
         self.redis_client = redis_client
         self.selected_slug = selected_slug
+        self.dashboard_state = dashboard_state
+        self.telegram_notifier = telegram_notifier
+        self.alert_watcher = alert_watcher
+        self._last_dashboard_sync_ts = 0.0
+        self._last_dashboard_pause_log_ts = 0.0
         initialize_strategy_settings(
             self,
             enable_grafana=enable_grafana,
@@ -231,6 +242,157 @@ class IntegratedBTCStrategy(
         if test_mode:
             logger.info("⚠️  TEST MODE ACTIVE - Trading every minute!")
         logger.info("Integrated BTC strategy initialized.")
+
+    def _record_dashboard_error(self, message: str) -> None:
+        state = getattr(self, "dashboard_state", None)
+        if state is None:
+            return
+        try:
+            recent_errors = list(state.recent_errors)[-19:]
+            recent_errors.append((datetime.now(timezone.utc), str(message)))
+            state.update(recent_errors=recent_errors)
+        except Exception:
+            logger.debug("Failed to record dashboard error", exc_info=True)
+
+    def _sync_dashboard_state(self) -> None:
+        state = getattr(self, "dashboard_state", None)
+        if state is None:
+            return
+        now_dt = datetime.now(timezone.utc)
+        try:
+            slug = str(self.current_market_slug or self.selected_slug or "")
+            strike = self.market_strike_cache_by_slug.get(slug)
+            spot = self._capture_market_open_spot()
+            if spot is None and getattr(self, "_binance_ws_price", None) is not None:
+                spot = Decimal(str(self._binance_ws_price))
+
+            position_side: Optional[str] = None
+            position_entry: Optional[float] = None
+            position_qty: Optional[float] = None
+            position_ask: Optional[float] = None
+            position_hold_sec: Optional[float] = None
+            current_market_price = 0.0
+            for inst_key, inv_state in list(getattr(self, "live_inventory_cost", {}).items()):
+                qty = Decimal(str(inv_state.get("qty", "0")))
+                if qty <= 0:
+                    continue
+                inst_id = self._normalize_instrument_id(inst_key)
+                side = self._side_for_instrument_id(inst_id) if inst_id is not None else ActiveSide.NONE
+                position_side = getattr(side, "value", str(side)).upper()
+                position_entry = float(inv_state.get("avg_entry_price", 0.0) or 0.0)
+                position_qty = float(qty)
+                opened_ts = float(inv_state.get("opened_ts", 0.0) or 0.0)
+                position_hold_sec = max(0.0, time.time() - opened_ts) if opened_ts > 0 else None
+                quote = self._get_quote_for_instrument(inst_id) if inst_id is not None else None
+                if quote is not None:
+                    bid, ask = quote
+                    current_market_price = float((bid + ask) / Decimal("2"))
+                sell_key = self._order_key_for("sell", inst_id) if inst_id is not None else ""
+                sell_order = self.active_maker_orders.get(sell_key, {}) if sell_key else {}
+                if sell_order:
+                    position_ask = float(sell_order.get("limit_price", 0.0) or 0.0)
+                break
+
+            recent_fill_pnls = list(getattr(self, "recent_fill_pnl_results", []) or [])
+            consecutive_losses = 0
+            for pnl in reversed(recent_fill_pnls):
+                if float(pnl) < 0:
+                    consecutive_losses += 1
+                    continue
+                break
+
+            state.update(
+                strike_price=float(strike) if strike is not None else 0.0,
+                spot_price=float(spot) if spot is not None else 0.0,
+                position_side=position_side,
+                position_entry=position_entry,
+                position_qty=position_qty,
+                position_ask=position_ask,
+                position_hold_sec=position_hold_sec,
+                current_market_price=current_market_price,
+                market_slug=slug or None,
+                cumulative_pnl=float(getattr(self, "_live_cumulative_pnl", 0.0) or 0.0),
+                visible_trades_pnl=float(getattr(self, "market_cycle_realized_net_usdc", Decimal("0")) or 0.0),
+                usdc_balance=float(getattr(self, "_cached_usdc_balance", 0.0) or 0.0),
+                pol_balance=float(getattr(self, "_cached_pol_balance", 0.0) or 0.0),
+                account_last_updated=now_dt,
+                market_phase=getattr(self.market_phase, "value", str(self.market_phase)),
+                active_side=getattr(self.active_side, "value", str(self.active_side)),
+                time_left_sec=(
+                    float(self.current_market_end_timestamp - time.time())
+                    if getattr(self, "current_market_end_timestamp", None) is not None
+                    else None
+                ),
+                decision_updated_at=(
+                    datetime.fromtimestamp(float(self.side_decision_ts), tz=timezone.utc)
+                    if float(getattr(self, "side_decision_ts", 0.0) or 0.0) > 0
+                    else None
+                ),
+                side_score=float(getattr(self, "side_decision_score", 0.0) or 0.0),
+                book_bid=float(self.latest_market_bid) if self.latest_market_bid is not None else None,
+                book_ask=float(self.latest_market_ask) if self.latest_market_ask is not None else None,
+                book_mid=(
+                    float((self.latest_market_bid + self.latest_market_ask) / Decimal("2"))
+                    if self.latest_market_bid is not None and self.latest_market_ask is not None
+                    else None
+                ),
+                robust_net_usdc=None,
+                last_block_reason=getattr(self, "side_decision_reason", None),
+                open_exposure_usdc=float(getattr(self, "inventory_delta_shares", Decimal("0")) or 0.0),
+                last_heartbeat=now_dt,
+                consecutive_losses=consecutive_losses,
+            )
+            self._last_dashboard_sync_ts = time.time()
+        except Exception as e:
+            logger.debug(f"Failed to sync Telegram dashboard state: {e}")
+
+    def _handle_dashboard_flatten_request(self) -> None:
+        state = getattr(self, "dashboard_state", None)
+        if state is None or not bool(getattr(state, "flatten_requested", False)):
+            return
+        state.update(flatten_requested=False)
+        submitted = 0
+        for inst_key, inv_state in list(getattr(self, "live_inventory_cost", {}).items()):
+            try:
+                qty = Decimal(str(inv_state.get("qty", "0")))
+                if qty <= 0:
+                    continue
+                inst_id = self._normalize_instrument_id(inst_key)
+                if inst_id is None:
+                    continue
+                quote = self._get_quote_for_instrument(inst_id)
+                if quote is None:
+                    logger.warning(f"Telegram flatten skipped: no quote for {inst_key}")
+                    continue
+                best_bid, _ = quote
+                sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
+                qty_to_exit = min(qty, sellable_qty)
+                avg_entry = Decimal(str(inv_state.get("avg_entry_price", "0")))
+                est_net = (best_bid - avg_entry) * qty_to_exit
+                ok = self._submit_taker_exit_order(
+                    instrument_id=inst_id,
+                    quantity=qty_to_exit,
+                    reason="telegram_flatten",
+                    est_net_if_exit=est_net,
+                    best_bid=best_bid,
+                    fee_rate=self._infer_market_fee_rate_default(),
+                    decision_payload={"source": "telegram"},
+                )
+                if ok:
+                    submitted += 1
+            except Exception as e:
+                self._record_dashboard_error(f"Telegram flatten failed for {inst_key}: {e}")
+                logger.exception(f"Telegram flatten failed for {inst_key}: {e}")
+        logger.warning(f"Telegram flatten request processed; submitted={submitted}")
+
+    def _telegram_cycle_tick(self) -> None:
+        self._sync_dashboard_state()
+        self._handle_dashboard_flatten_request()
+        if self.dashboard_state is not None and self.alert_watcher is not None and self.telegram_notifier is not None:
+            try:
+                self.alert_watcher.check_and_alert(self.dashboard_state, self.telegram_notifier)
+            except Exception as e:
+                logger.debug(f"Alert watcher failed: {e}")
 
     def _current_thesis_epoch(self, slug: str) -> int:
         slug_key = str(slug or "")
@@ -994,6 +1156,28 @@ class IntegratedBTCStrategy(
                 f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
                 f"cum_pnl={self._live_cumulative_pnl:+.4f} win_rate={win_rate:.0f}%"
             )
+            if self.dashboard_state is not None:
+                trades = list(self.dashboard_state.trades)
+                trades.insert(
+                    0,
+                    TradeRecord(
+                        trade_id=int(self._live_total_trades),
+                        market_slug=str(self.current_market_slug or ""),
+                        side=getattr(self.active_side, "value", str(self.active_side)),
+                        entry_price=0.0,
+                        qty=1.0,
+                        exit_price=float(realized_pnl),
+                        redeem_amount=None,
+                        is_settled=True,
+                    ),
+                )
+                consecutive_losses = int(getattr(self.dashboard_state, "consecutive_losses", 0))
+                consecutive_losses = consecutive_losses + 1 if realized_pnl < 0 else 0
+                self.dashboard_state.update(
+                    trades=trades[:50],
+                    cumulative_pnl=float(self._live_cumulative_pnl),
+                    consecutive_losses=consecutive_losses,
+                )
             if self.terminal_dashboard:
                 self.terminal_dashboard.record_position_closed(
                     realized_pnl=realized_pnl,
@@ -2400,6 +2584,13 @@ class IntegratedBTCStrategy(
         """
         Place symmetric maker quotes if expected net economics is positive.
         """
+        self._telegram_cycle_tick()
+        if self.dashboard_state is not None and self.dashboard_state.bot_paused:
+            now_ts = time.time()
+            if now_ts - self._last_dashboard_pause_log_ts >= 30.0:
+                logger.info("Telegram pause active; skipping maker quote cycle.")
+                self._last_dashboard_pause_log_ts = now_ts
+            return
         cycle = await self._prepare_quote_cycle()
         if cycle is None:
             return
@@ -2434,6 +2625,8 @@ class IntegratedBTCStrategy(
         loss_sell_reason: str = "",
         target_qty_override: Optional[Decimal] = None,
     ) -> None:
+        if self.dashboard_state is not None and self.dashboard_state.bot_paused:
+            return
         submit_maker_quote(
             self,
             instrument_id=instrument_id,
