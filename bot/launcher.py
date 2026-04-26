@@ -11,6 +11,8 @@ import httpx
 from loguru import logger
 import redis
 
+from alert_watcher import AlertWatcher
+from dashboard_state import DashboardState
 from nautilus_trader.adapters.polymarket import POLYMARKET
 from nautilus_trader.adapters.polymarket import (
     PolymarketDataClientConfig,
@@ -41,6 +43,8 @@ from bot.market_discovery import (
 from run_bot import (
     IntegratedBTCStrategy,
 )
+from telegram_bot import start_telegram_bot_thread
+from telegram_notifier import TelegramNotifier
 
 
 def _install_fresh_main_thread_event_loop() -> None:
@@ -297,6 +301,26 @@ def run_integrated_bot(
     if not auth:
         raise RuntimeError("Cannot resolve Polymarket auth (provide PK or full API credentials).")
 
+    dashboard_state = DashboardState(
+        strike_price=0.0,
+        spot_price=0.0,
+        position_side=None,
+        position_entry=None,
+        position_qty=None,
+        position_ask=None,
+        current_market_price=0.0,
+        trades=[],
+        cumulative_pnl=0.0,
+        usdc_balance=0.0,
+        pol_balance=0.0,
+        account_last_updated=datetime.now(timezone.utc),
+    )
+    telegram_notifier = TelegramNotifier()
+    alert_watcher = AlertWatcher()
+    telegram_thread = start_telegram_bot_thread(dashboard_state)
+    if telegram_thread is not None:
+        logger.info("Telegram bot controller started in background thread.")
+
     def _build_node_for_cycle(cycle_index: int) -> tuple[TradingNode, str]:
         _install_fresh_main_thread_event_loop()
         btc_slugs = resolve_btc_15m_market_slugs()
@@ -405,6 +429,9 @@ def run_integrated_bot(
             test_mode=test_mode,
             selected_slug=primary_slug,
             enable_terminal_dashboard=enable_terminal_dashboard,
+            dashboard_state=dashboard_state,
+            telegram_notifier=telegram_notifier,
+            alert_watcher=alert_watcher,
         )
 
         logger.info("Building Nautilus node...")
@@ -458,6 +485,9 @@ def run_integrated_bot(
             logger.info("Shutdown requested by user.")
         except Exception as e:
             consecutive_failures += 1
+            recent_errors = list(dashboard_state.recent_errors)[-19:]
+            recent_errors.append((datetime.now(timezone.utc), f"Node cycle {cycle_idx} failed: {e}"))
+            dashboard_state.update(recent_errors=recent_errors)
             logger.exception(f"Node cycle {cycle_idx} failed: {e}")
         finally:
             rollover_stop.set()

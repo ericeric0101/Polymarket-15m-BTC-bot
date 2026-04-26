@@ -300,6 +300,8 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             return
         logger.warning("Non-maker mode is no longer supported in the slimmed bot path.")
     except Exception as e:
+        if hasattr(strategy, "_record_dashboard_error"):
+            strategy._record_dashboard_error(f"Quote tick error: {e}")
         logger.error(f"Error processing quote tick: {e}")
         traceback.print_exc()
 

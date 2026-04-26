@@ -6,6 +6,7 @@ python-dotenv>=1,<2
 loguru>=0.7,<1
 requests>=2.31,<3
 prometheus-client>=0.20,<1
+python-telegram-bot>=20,<22
 
 # CLI / testing helpers used by project scripts
 typer>=0.12,<1

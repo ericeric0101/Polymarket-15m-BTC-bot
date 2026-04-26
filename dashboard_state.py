@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 
 @dataclass
@@ -34,6 +34,8 @@ class DashboardState:
     pol_balance: float
     account_last_updated: datetime
     visible_trades_pnl: float = 0.0
+    market_slug: Optional[str] = None
+    position_hold_sec: Optional[float] = None
     market_phase: str = "—"
     active_side: Optional[str] = None
     time_left_sec: Optional[float] = None
@@ -48,6 +50,11 @@ class DashboardState:
     pending_redeem_count: int = 0
     pending_redeem_usdc: float = 0.0
     open_exposure_usdc: float = 0.0
+    bot_paused: bool = False
+    flatten_requested: bool = False
+    recent_errors: List[Tuple[datetime, str]] = field(default_factory=list)
+    last_heartbeat: datetime = field(default_factory=datetime.utcnow)
+    consecutive_losses: int = 0
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _callbacks: List[Callable[[], None]] = field(default_factory=list, init=False, repr=False)
@@ -78,6 +85,8 @@ class DashboardState:
                 pol_balance=self.pol_balance,
                 account_last_updated=self.account_last_updated,
                 visible_trades_pnl=self.visible_trades_pnl,
+                market_slug=self.market_slug,
+                position_hold_sec=self.position_hold_sec,
                 market_phase=self.market_phase,
                 active_side=self.active_side,
                 time_left_sec=self.time_left_sec,
@@ -92,6 +101,11 @@ class DashboardState:
                 pending_redeem_count=self.pending_redeem_count,
                 pending_redeem_usdc=self.pending_redeem_usdc,
                 open_exposure_usdc=self.open_exposure_usdc,
+                bot_paused=self.bot_paused,
+                flatten_requested=self.flatten_requested,
+                recent_errors=list(self.recent_errors),
+                last_heartbeat=self.last_heartbeat,
+                consecutive_losses=self.consecutive_losses,
                 updated_at=self.updated_at,
             )
 

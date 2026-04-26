@@ -258,13 +258,6 @@ class BTCDashboard:
         else:
             spread_text.append(_money(spread), style=TEXT_STYLE)
 
-        updated = Text(f"updated {state.updated_at.astimezone(timezone.utc):%H:%M:%S UTC}", style=MUTED_STYLE)
-
-        header = Table.grid(expand=True)
-        header.add_column(ratio=1)
-        header.add_column(justify="right", ratio=1)
-        header.add_row(Text("BTC 15-MIN MARKET", style=TITLE_STYLE), updated)
-
         values = Table.grid(expand=True)
         values.add_column(justify="center", ratio=1, min_width=22)
         values.add_column(justify="center", width=3)
@@ -297,7 +290,10 @@ class BTCDashboard:
         )
 
         return Panel(
-            Align.center(Group(header, values), vertical="middle"),
+            Align.center(values, vertical="middle"),
+            title=Text("BTC 15-MIN MARKET", style=TITLE_STYLE),
+            subtitle=Text(f"updated {state.updated_at.astimezone(timezone.utc):%H:%M:%S UTC}", style=MUTED_STYLE),
+            subtitle_align="right",
             border_style=PANEL_STYLE,
             padding=(0, 2),
         )
