@@ -53,6 +53,7 @@ from bot.side_decision import SideDecisionMixin
 from bot.spot_pricer import SpotPricerMixin
 from bot.taker_exit import TakerExitMixin
 from bot.fill_ledger import FillLedgerMixin
+from bot.db_runtime import StrategyDBRuntimeMixin
 from bot.order_runtime import OrderRuntimeMixin
 from bot.order_events import (
     handle_order_canceled,
@@ -104,6 +105,7 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
+    apply_entry_quality_quote_placement,
     apply_forced_exit_sell_pricing,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
@@ -185,6 +187,7 @@ class IntegratedBTCStrategy(
     SpotPricerMixin,
     TakerExitMixin,
     FillLedgerMixin,
+    StrategyDBRuntimeMixin,
     OrderRuntimeMixin,
     PricingRuntimeMixin,
     QuoteRuntimeMixin,
@@ -269,6 +272,9 @@ class IntegratedBTCStrategy(
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
             f"tail_tp={'on' if getattr(self, 'tail_protect_tp_enabled', False) else 'off'} "
+            f"tail_tp_px={float(getattr(self, 'tail_protect_tp_price', Decimal('0'))):.2f} "
+            f"tail_tp_frac={float(getattr(self, 'tail_protect_tp_fraction', Decimal('0'))):.2f} "
+            f"tail_tp_min_entry={float(getattr(self, 'tail_protect_tp_min_entry_price', Decimal('0'))):.2f} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -619,6 +625,28 @@ class IntegratedBTCStrategy(
         except Exception:
             return None
 
+    def _spot_minus_strike_avg(self, lookback_sec: int) -> Optional[Decimal]:
+        slug = str(self.current_market_slug or "")
+        if not slug or lookback_sec <= 0:
+            return None
+        strike = self.market_strike_cache_by_slug.get(slug)
+        if strike is None or strike <= 0:
+            return None
+        now_ts = time.time()
+        samples: list[Decimal] = []
+        try:
+            for ts, spot in reversed(self.external_spot_history):
+                if now_ts - float(ts) > float(lookback_sec):
+                    break
+                if spot is None or spot <= 0:
+                    continue
+                samples.append(Decimal(str(spot)) - strike)
+        except Exception:
+            return None
+        if not samples:
+            return None
+        return sum(samples, Decimal("0")) / Decimal(len(samples))
+
     def _spot_still_supports_side(
         self,
         side: ActiveSide,
@@ -901,69 +929,6 @@ class IntegratedBTCStrategy(
 
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
 
-    def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
-        if not self.trade_db:
-            return
-        payload_out: Dict[str, Any] = dict(payload or {})
-        if self.current_market_slug and "slug" not in payload_out:
-            payload_out["slug"] = self.current_market_slug
-        if self.current_market_slug and "market_slug" not in payload_out:
-            payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
-            payload_out["instrument_id"] = str(self.instrument_id)
-        self.trade_db.log_strategy_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            payload=payload_out,
-        )
-
-    def _db_order_event(
-        self,
-        event_type: str,
-        client_order_id: Optional[str] = None,
-        venue_order_id: Optional[str] = None,
-        side: Optional[str] = None,
-        price: Optional[float] = None,
-        qty: Optional[float] = None,
-        status: Optional[str] = None,
-        reason: Optional[str] = None,
-        commission_usdc: Optional[float] = None,
-        expected_net_usdc: Optional[float] = None,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if not self.trade_db:
-            return
-        payload_out: Dict[str, Any] = dict(payload or {})
-        if self.current_market_slug and "slug" not in payload_out:
-            payload_out["slug"] = self.current_market_slug
-        if self.current_market_slug and "market_slug" not in payload_out:
-            payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
-            payload_out["instrument_id"] = str(self.instrument_id)
-
-        side_out = side
-        if side_out:
-            side_norm = self._normalize_side_text(side_out)
-            if side_norm:
-                side_out = side_norm.upper()
-        self.trade_db.log_order_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            client_order_id=client_order_id,
-            venue_order_id=venue_order_id,
-            side=side_out,
-            price=price,
-            qty=qty,
-            status=status,
-            reason=reason,
-            instrument_id=str(self.instrument_id) if self.instrument_id else None,
-            token_id=self.current_token_id,
-            fee_rate_bps=self.last_observed_fee_rate_bps,
-            expected_net_usdc=expected_net_usdc,
-            commission_usdc=commission_usdc,
-            payload=payload_out,
-        )
-
     def _increment_order_metric(self, status: str) -> None:
         """
         Increment order counters on Grafana exporter when available.
@@ -1065,6 +1030,12 @@ class IntegratedBTCStrategy(
             slug_str = self.current_market_slug or self.selected_slug or "-"
             strike_val = self.market_strike_cache_by_slug.get(str(slug_str))
             spot_val = self._capture_market_open_spot()
+            spot_minus_strike = None
+            if strike_val is not None and spot_val is not None:
+                try:
+                    spot_minus_strike = float(spot_val) - float(strike_val)
+                except Exception:
+                    spot_minus_strike = None
 
             self.terminal_dashboard.update(
                 phase=self.market_phase.value,
@@ -1079,6 +1050,7 @@ class IntegratedBTCStrategy(
                 current_sell_order=sell_order_str,
                 strike=float(strike_val) if strike_val is not None else None,
                 spot=float(spot_val) if spot_val is not None else None,
+                spot_minus_strike=spot_minus_strike,
             )
         except Exception as e:
             logger.debug(f"Failed to update terminal dashboard snapshot: {e}")
@@ -1656,6 +1628,11 @@ class IntegratedBTCStrategy(
                     time_left_sec=time_left_sec_global,
                     shadow_payload=live_shadow_payload,
                 )
+                candidate_robust_net = (
+                    quote_data[3]
+                    if isinstance(quote_data, (tuple, list)) and len(quote_data) > 3
+                    else None
+                )
                 buy_entry_eval = evaluate_buy_entry_controls(
                     side=side,
                     bi_side_enabled=self.bi_side_enabled,
@@ -1666,6 +1643,7 @@ class IntegratedBTCStrategy(
                     side_score=self.side_decision_score,
                     directional_entry_min_score_abs_new=self.directional_entry_min_score_abs_new,
                     directional_first_entry_min_score_abs_new=self.directional_first_entry_min_score_abs_new,
+                    locked_side_score_abs=Decimal(str(getattr(self, "active_side_lock_score_abs", Decimal("0")))),
                     maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
                     maker_reload_min_expected_net_multiplier=self.maker_reload_min_expected_net_multiplier,
                     current_inst_inventory_qty=current_inst_inventory_qty,
@@ -1685,15 +1663,33 @@ class IntegratedBTCStrategy(
                     best_bid=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
                     fair=quote_ctx.fair,
                     trend_buy_max_price_premium_ps=self.trend_buy_max_price_premium_ps,
+                    candidate_entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
+                    spot_minus_strike_avg=(
+                        self._spot_minus_strike_avg(int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0))
+                        if int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0) > 0
+                        else None
+                    ),
+                    entry_spot_strike_avg_min_abs=getattr(self, "entry_spot_strike_avg_min_abs", Decimal("0")),
+                    entry_fair_edge_min_ps=getattr(self, "entry_fair_edge_min_ps", Decimal("0")),
+                    robust_net_usdc=candidate_robust_net,
+                    down_high_price_threshold=getattr(self, "down_high_price_threshold", Decimal("1")),
+                    down_high_price_min_score_abs=getattr(self, "down_high_price_min_score_abs", Decimal("0")),
+                    down_high_price_min_robust_net_usdc=getattr(self, "down_high_price_min_robust_net_usdc", Decimal("0")),
+                    down_high_price_spot_strike_avg_max=getattr(self, "down_high_price_spot_strike_avg_max", Decimal("0")),
+                    shadow_payload=live_shadow_payload,
+                    entry_quality_allow_size_down=bool(
+                        getattr(self, "entry_quality_allow_size_down", False)
+                    ),
                 )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
-                    self._db_order_event(
+                    diag_payload = buy_entry_eval.payload or {}
+                    self._db_buy_path_diagnostic(
                         event_type=buy_entry_eval.event_type,
                         side=side.upper(),
                         status="SKIPPED",
                         reason=buy_entry_eval.reason,
-                        payload=buy_entry_eval.payload or {},
+                        payload=diag_payload,
                     )
                     continue
                 # Determine if the directional thesis has weakened against our position.
@@ -1876,6 +1872,14 @@ class IntegratedBTCStrategy(
                     trend_buy_penalty_discount=self.trend_buy_penalty_discount,
                     trend_buy_score=self.side_decision_score,
                     trend_buy_size_multiplier=self.trend_buy_size_multiplier,
+                    entry_size_multiplier=buy_entry_eval.size_multiplier,
+                    entry_quality=buy_entry_eval.payload,
+                )
+                desired_entry = apply_entry_quality_quote_placement(
+                    desired_entry=desired_entry,
+                    side=side,
+                    quote=quote_ctx.quote,
+                    tick=quote_ctx.tick,
                 )
                 desired_entry = attach_desired_entry_runtime_metadata(
                     desired_entry=desired_entry,
@@ -2379,6 +2383,15 @@ class IntegratedBTCStrategy(
                         upper=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_upper", Decimal("0.53")))),
                         multiplier=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_multiplier", Decimal("0.5")))),
                     )
+                    self._emit_buy_observe_diagnostic(
+                        inst_id=inst_id,
+                        desired_entry=desired_entry,
+                        quote_intent_state=quote_intent_state,
+                        locked_side_runtime=locked_side_runtime,
+                        current_inst_inventory_qty=current_inst_inventory_qty,
+                        market_buy_count=market_buy_count,
+                        time_left_sec=time_left_sec_global,
+                    )
                 desired_quotes[order_key] = desired_entry
 
         return desired_quotes, diag_context_by_inst
@@ -2447,6 +2460,7 @@ class IntegratedBTCStrategy(
 
         # Recover local inventory tracking if the strategy restarted mid-market.
         self._rehydrate_inventory_state_on_startup()
+        self._recover_market_strike_from_trade_db_on_startup()
 
         log_strategy_run_start(
             trade_db=self.trade_db,

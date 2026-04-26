@@ -204,6 +204,13 @@ def initialize_strategy_settings(
     strategy.bi_side_flip_max_score_down_held_new = config.side.flip_max_score_down_held_new
     strategy.directional_entry_min_score_abs_new = config.side.directional_entry_min_score_abs_new
     strategy.directional_entry_min_score_abs = strategy.directional_entry_min_score_abs_new
+    strategy.entry_spot_strike_lookback_sec = config.side.entry_spot_strike_lookback_sec
+    strategy.entry_spot_strike_avg_min_abs = config.side.entry_spot_strike_avg_min_abs
+    strategy.entry_fair_edge_min_ps = config.side.entry_fair_edge_min_ps
+    strategy.down_high_price_threshold = config.side.down_high_price_threshold
+    strategy.down_high_price_min_score_abs = config.side.down_high_price_min_score_abs
+    strategy.down_high_price_min_robust_net_usdc = config.side.down_high_price_min_robust_net_usdc
+    strategy.down_high_price_spot_strike_avg_max = config.side.down_high_price_spot_strike_avg_max
     strategy.continuation_entry_enabled = config.maker.continuation_entry_enabled
     strategy.continuation_entry_size_multiplier = config.maker.continuation_entry_size_multiplier
     strategy.trend_buy_enabled = config.maker.trend_buy_enabled
@@ -503,6 +510,8 @@ def initialize_strategy_settings(
     strategy._last_strike_slug_log_ts = 0.0
     strategy.no_quote_diag_interval_sec = config.observability.no_quote_diag_interval_sec
     strategy._last_no_quote_diag_ts_by_inst = {}
+    strategy.buy_observe_diag_interval_sec = max(5.0, float(config.observability.no_quote_diag_interval_sec))
+    strategy._last_buy_observe_diag_ts_by_key = {}
     strategy._last_sellable_skip_log_ts_by_inst = {}
     strategy.sellable_fallback_after_buy_sec = config.operations.sellable_fallback_after_buy_sec
     strategy.sellable_after_buy_buffer_shares = config.operations.sellable_after_buy_buffer_shares
@@ -625,6 +634,8 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_event_ts_ms = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
+    strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd
+    strategy.active_side_lock_score_abs = Decimal("0")
     from bot.signal_engine import SignalEngine, SignalEngineConfig
     strategy._signal_engine = SignalEngine(SignalEngineConfig(
         btc_ema_fast_sec=strategy.side_signal_btc_ema_fast_sec,

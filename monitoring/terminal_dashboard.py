@@ -1,7 +1,7 @@
 import threading
-import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Deque, Dict, Optional
 
 from rich.console import Group
 from rich.live import Live
@@ -49,6 +49,7 @@ class TerminalDashboard:
             "current_buy_order": None,
             "current_sell_order": None,
             "redeem_runs": 0,
+            "recent_orders": deque(maxlen=8),
         }
 
     def start(self) -> None:
@@ -71,6 +72,33 @@ class TerminalDashboard:
     def increment_redeem(self) -> None:
         with self._lock:
             self._state["redeem_runs"] += 1
+            self._append_recent_order("REDEEM completed")
+            self._state["last_update"] = datetime.now(timezone.utc)
+
+    def _append_recent_order(self, text: str) -> None:
+        recent: Deque[str] = self._state.setdefault("recent_orders", deque(maxlen=8))
+        recent.appendleft(text)
+
+    def record_order_submitted(
+        self,
+        *,
+        side: str,
+        token_side: str,
+        qty: float,
+        price: float,
+        client_order_id: str,
+        is_taker: bool = False,
+    ) -> None:
+        with self._lock:
+            venue = "TAKER" if is_taker else "MAKER"
+            self._append_recent_order(
+                f"{venue} SUBMIT {side.upper()} {token_side} TOKEN {qty:.3f} @ {price:.4f} [{client_order_id}]"
+            )
+            self._state["last_update"] = datetime.now(timezone.utc)
+
+    def record_order_canceled(self, *, client_order_id: str) -> None:
+        with self._lock:
+            self._append_recent_order(f"CANCELED [{client_order_id}]")
             self._state["last_update"] = datetime.now(timezone.utc)
 
     def increment_fill(
@@ -78,6 +106,7 @@ class TerminalDashboard:
         *,
         is_maker_fill: bool,
         side: str,
+        token_side: str,
         qty: float,
         price: float,
         commission_usdc: float,
@@ -98,8 +127,12 @@ class TerminalDashboard:
                 if is_taker_exit:
                     self._state["taker_exit_fills"] += 1
             self._state["last_fill"] = (
-                f"{client_order_id} {side.upper()} {qty:.3f} @ {price:.4f} "
+                f"{client_order_id} {side.upper()} {token_side} TOKEN {qty:.3f} @ {price:.4f} "
                 f"{'MAKER' if is_maker_fill else 'TAKER'}"
+            )
+            self._append_recent_order(
+                f"{'TAKER' if is_taker_exit else ('MAKER' if is_maker_fill else 'TAKER')} "
+                f"FILL {side.upper()} {token_side} TOKEN {qty:.3f} @ {price:.4f} [{client_order_id}]"
             )
             self._state["last_update"] = datetime.now(timezone.utc)
 
@@ -127,18 +160,41 @@ class TerminalDashboard:
         left_grid = Table.grid(expand=True, padding=(0, 0))
         left_grid.add_column()
         
-        buy_text = snapshot.get("current_buy_order") or "None"
-        sell_text = snapshot.get("current_sell_order") or ""
+        buy_text = snapshot.get("current_buy_order") or "No active buy order"
+        sell_text = snapshot.get("current_sell_order") or "No active sell order"
         slug = str(snapshot["slug"])
+        recent_orders = list(snapshot.get("recent_orders") or [])
+        recent_orders_text = "\n".join(recent_orders) if recent_orders else "No recent orders"
         
-        left_grid.add_row(Panel(buy_text, title="Current Buy Order", border_style="cyan"))
-        if sell_text:
-            left_grid.add_row(Panel(sell_text, title="Current Sell Order", border_style="magenta"))
+        active_orders_grid = Table.grid(expand=True, padding=(0, 0))
+        active_orders_grid.add_column()
+        active_orders_grid.add_row(f"[cyan]Buy[/cyan]: {buy_text}")
+        active_orders_grid.add_row(f"[magenta]Sell[/magenta]: {sell_text}")
+        left_grid.add_row(Panel(active_orders_grid, title="Active Orders", border_style="cyan"))
+        left_grid.add_row(Panel(recent_orders_text, title="Recent Orders", border_style="yellow"))
         strike_val = snapshot.get("strike")
         spot_val = snapshot.get("spot")
         strike_str = f"${strike_val:,.2f}" if strike_val else "..."
         spot_str = f"${spot_val:,.2f}" if spot_val else "..."
-        market_text = f"{slug}\nStrike: [bold]{strike_str}[/bold] | Spot: [bold]{spot_str}[/bold]"
+        spot_minus_strike = snapshot.get("spot_minus_strike")
+        spot_minus_strike_str = "..."
+        if spot_minus_strike is not None:
+            delta = float(spot_minus_strike)
+            if delta > 0:
+                direction = "UP"
+                color = "green"
+            elif delta < 0:
+                direction = "DOWN"
+                color = "red"
+            else:
+                direction = "FLAT"
+                color = "yellow"
+            spot_minus_strike_str = f"[{color}]{delta:+,.2f} ({direction})[/{color}]"
+        market_text = (
+            f"{slug}\n"
+            f"Strike: [bold]{strike_str}[/bold] | Spot: [bold]{spot_str}[/bold]\n"
+            f"Spot - Strike: {spot_minus_strike_str}"
+        )
         
         left_grid.add_row(Panel(market_text, title="Market", border_style="blue"))
 
@@ -172,6 +228,7 @@ class TerminalDashboard:
             refresh_per_second=max(1, int(round(1.0 / self.refresh_interval_sec))),
             transient=False,
             auto_refresh=False,
+            screen=True,
         ) as live:
             while not self._stop_event.wait(self.refresh_interval_sec):
                 live.update(self._build_layout(), refresh=True)

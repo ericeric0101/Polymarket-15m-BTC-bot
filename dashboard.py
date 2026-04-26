@@ -304,12 +304,16 @@ class BTCDashboard:
 
     def _account_summary_panel(self, state: DashboardState) -> Panel:
         pnl_style = f"bold {_style_for_signed(state.cumulative_pnl)}"
+        visible_pnl_style = f"bold {_style_for_signed(state.visible_trades_pnl)}"
+
+        pnl_grid = Table.grid(expand=True)
+        pnl_grid.add_column(ratio=1)
+        pnl_grid.add_column(justify="right", ratio=1)
+        pnl_grid.add_row(Text("DB Cycle PnL", style="dim"), Text(_money(state.cumulative_pnl, signed=True), style=pnl_style))
+        pnl_grid.add_row(Text("Visible Trades PnL", style="dim"), Text(_money(state.visible_trades_pnl, signed=True), style=visible_pnl_style))
 
         pnl_box = Panel(
-            Group(
-                Text("Cumulative PnL", style="dim"),
-                Text(_money(state.cumulative_pnl, signed=True), style=pnl_style),
-            ),
+            pnl_grid,
             border_style="dim",
             padding=(0, 1),
         )
@@ -443,20 +447,21 @@ class BTCDashboard:
 
     @staticmethod
     def _pnl_cell(trade: TradeRecord) -> Text:
-        entry_cost = trade.entry_price * trade.qty
-        realized_value = None
-        if trade.exit_price is not None:
-            realized_value = trade.exit_price * trade.qty
-        elif trade.redeem_amount is not None:
-            realized_value = trade.redeem_amount
-        elif trade.expected_redeem_amount is not None:
-            realized_value = trade.expected_redeem_amount
-
-        if realized_value is None:
+        pnl = BTCDashboard._trade_pnl_amount(trade)
+        if pnl is None:
             return Text("—", style="dim")
-
-        pnl = realized_value - entry_cost
         return Text(_money(pnl, signed=True), style=f"bold {_style_for_signed(pnl)}")
+
+    @staticmethod
+    def _trade_pnl_amount(trade: TradeRecord) -> Optional[float]:
+        entry_cost = trade.entry_price * trade.qty
+        if trade.exit_price is not None:
+            return trade.exit_price * trade.qty - entry_cost
+        if trade.redeem_amount is not None:
+            return trade.redeem_amount - entry_cost
+        if trade.expected_redeem_amount is not None:
+            return trade.expected_redeem_amount - entry_cost
+        return None
 
     @staticmethod
     def _status_cell(trade: TradeRecord) -> Text:
@@ -540,6 +545,7 @@ class TradeJournalDashboardSource:
         decision = self._latest_decision_snapshot(conn, str(market.get("slug") or ""))
         trades = self._recent_trades(conn)
         cumulative_pnl = self._cumulative_pnl(conn)
+        visible_trades_pnl = self._visible_trades_pnl(trades)
         usdc_balance, pol_balance, account_updated = self._latest_account_snapshot(conn)
         pending_redeem_count, pending_redeem_usdc = self._pending_redeem_summary(trades)
         position_side, position_entry, position_qty, position_ask, current_market_price = self._current_position(
@@ -560,6 +566,7 @@ class TradeJournalDashboardSource:
             current_market_price=current_market_price,
             trades=trades,
             cumulative_pnl=cumulative_pnl,
+            visible_trades_pnl=visible_trades_pnl,
             usdc_balance=usdc_balance,
             pol_balance=pol_balance,
             account_last_updated=account_updated,
@@ -578,6 +585,15 @@ class TradeJournalDashboardSource:
             pending_redeem_usdc=pending_redeem_usdc,
             open_exposure_usdc=open_exposure_usdc,
         )
+
+    @staticmethod
+    def _visible_trades_pnl(trades: list[TradeRecord]) -> float:
+        total = 0.0
+        for trade in trades[:16]:
+            pnl = BTCDashboard._trade_pnl_amount(trade)
+            if pnl is not None:
+                total += pnl
+        return total
 
     @staticmethod
     def _latest_market_snapshot(conn: sqlite3.Connection) -> dict:

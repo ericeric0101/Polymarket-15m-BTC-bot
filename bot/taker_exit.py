@@ -553,6 +553,16 @@ class TakerExitMixin:
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
         self.taker_exit_reason_by_client_order_id[str(coid)] = reason
+        if getattr(self, "terminal_dashboard", None):
+            token_side = getattr(self._side_for_instrument_id(inst), "value", "NONE")
+            self.terminal_dashboard.record_order_submitted(
+                side="sell",
+                token_side=token_side,
+                qty=float(qty_dec),
+                price=float(best_bid),
+                client_order_id=str(coid),
+                is_taker=True,
+            )
         logger.warning(
             "TAKER EXIT submit: "
             f"reason={reason} inst={inst_key} qty={float(qty_dec):.6f} "

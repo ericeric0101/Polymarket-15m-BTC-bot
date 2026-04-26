@@ -9,7 +9,6 @@ from loguru import logger
 
 from bot.inventory import InventoryLedger
 from bot.post_trade import apply_fill_followup
-from bot.post_entry_decay import register_post_entry_buy
 from execution.rebate_model import estimate_taker_buy_fee_shares, estimate_taker_fee_usdc
 
 
@@ -154,25 +153,6 @@ class FillLedgerMixin:
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
                 self.recent_buy_fill_ts_by_inst[inst_key] = time.time()
-                try:
-                    entry_side = "NONE"
-                    if hasattr(self, "_side_for_instrument_id"):
-                        entry_side_obj = self._side_for_instrument_id(instrument_id)
-                        entry_side = getattr(entry_side_obj, "value", str(entry_side_obj))
-                    register_post_entry_buy(
-                        trackers=getattr(self, "_post_entry_decay_trackers_by_inst", {}),
-                        inst_key=inst_key,
-                        slug=str(getattr(self, "current_market_slug", "") or ""),
-                        entry_side=entry_side,
-                        now_ts=float(self.recent_buy_fill_ts_by_inst[inst_key]),
-                        score=getattr(self, "side_decision_score", Decimal("0")),
-                        fill_price=fill_price,
-                        fill_qty=fill_qty,
-                        inputs=getattr(self, "side_decision_inputs", {}),
-                        strategy_event_fn=self._db_strategy_event,
-                    )
-                except Exception as exc:
-                    logger.debug(f"Post-entry decay registration failed: {exc}")
             return realized_net
         state = self.live_inventory_cost.get(inst_key, {})
         if inst_key:

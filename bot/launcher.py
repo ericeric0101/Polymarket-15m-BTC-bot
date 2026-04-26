@@ -58,10 +58,10 @@ def _install_fresh_main_thread_event_loop() -> None:
 def _request_clob_l2_api_creds_direct(*, client, clob_host: str) -> Optional[Dict[str, str]]:
     """
     Direct HTTP fallback for CLOB API-key create/derive using py-clob's signer headers.
-    Avoids depending on py_clob_client.http_helpers transport behavior.
+    Avoids depending on py_clob_client_v2.http_helpers transport behavior.
     """
-    from py_clob_client.client import CREATE_API_KEY, DERIVE_API_KEY
-    from py_clob_client.headers.headers import create_level_1_headers
+    from py_clob_client_v2.client import CREATE_API_KEY, DERIVE_API_KEY
+    from py_clob_client_v2.headers.headers import create_level_1_headers
 
     headers = dict(create_level_1_headers(client.signer))
     headers["Connection"] = "close"
@@ -116,12 +116,12 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         resolved_funder = funder or ""
         if not resolved_funder:
             try:
-                from py_clob_client.client import ClobClient
+                from py_clob_client_v2.client import ClobClient
 
                 tmp_client = ClobClient(
-                    host=clob_host,
+                    clob_host,
+                    chain_id,
                     key=private_key,
-                    chain_id=chain_id,
                     signature_type=signature_type,
                 )
                 resolved_funder = tmp_client.get_address() or ""
@@ -141,23 +141,24 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         return None
 
     try:
-        from py_clob_client.client import ClobClient
+        from py_clob_client_v2.client import ClobClient
     except Exception as e:
-        logger.error(f"py-clob-client not available for API credential derivation: {e}")
+        logger.error(f"py-clob-client-v2 not available for API credential derivation: {e}")
         return None
 
     try:
         kwargs: Dict[str, Any] = {
-            "host": clob_host,
             "key": private_key,
-            "chain_id": chain_id,
             "signature_type": signature_type,
         }
         if funder:
             kwargs["funder"] = funder
-        client = ClobClient(**kwargs)
+        client = ClobClient(clob_host, chain_id, **kwargs)
         try:
-            derived = client.create_or_derive_api_creds()
+            try:
+                derived = client.create_api_key()
+            except Exception:
+                derived = client.derive_api_key()
         except Exception as primary_error:
             logger.warning(f"py-clob credential derivation failed, trying direct HTTP fallback: {primary_error}")
             direct = _request_clob_l2_api_creds_direct(client=client, clob_host=clob_host.rstrip("/"))

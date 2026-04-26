@@ -259,6 +259,13 @@ class SideDecisionConfig:
     flip_max_score_down_held_new: Decimal
     directional_entry_min_score_abs_new: Decimal
     directional_first_entry_min_score_abs_new: Decimal
+    entry_spot_strike_lookback_sec: int
+    entry_spot_strike_avg_min_abs: Decimal
+    entry_fair_edge_min_ps: Decimal
+    down_high_price_threshold: Decimal
+    down_high_price_min_score_abs: Decimal
+    down_high_price_min_robust_net_usdc: Decimal
+    down_high_price_spot_strike_avg_max: Decimal
     side_thesis_weak_score_abs: Decimal
     side_thesis_weak_requires_opposite_side_new: bool
     side_thesis_weak_opposite_score_abs_new: Decimal
@@ -281,6 +288,16 @@ class SideDecisionConfig:
             raise ValueError("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
         if self.directional_first_entry_min_score_abs_new < 0:
             raise ValueError("DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
+        if self.entry_spot_strike_lookback_sec < 0:
+            raise ValueError("ENTRY_SPOT_STRIKE_LOOKBACK_SEC must be >= 0")
+        if self.entry_fair_edge_min_ps < 0:
+            raise ValueError("ENTRY_FAIR_EDGE_MIN_PS must be >= 0")
+        if self.down_high_price_threshold < 0:
+            raise ValueError("DOWN_HIGH_PRICE_THRESHOLD must be >= 0")
+        if self.down_high_price_min_score_abs < 0:
+            raise ValueError("DOWN_HIGH_PRICE_MIN_SCORE_ABS must be >= 0")
+        if self.down_high_price_min_robust_net_usdc < 0:
+            raise ValueError("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC must be >= 0")
         if self.side_thesis_weak_opposite_score_abs_new < 0:
             raise ValueError("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW must be >= 0")
 
@@ -381,6 +398,7 @@ class MarketDataConfig:
     external_spot_max_failures: int
     external_spot_history_max: int
     polymarket_chainlink_history_max: int
+    external_spot_source_delta_abs_max_usd: Decimal
     market_strike_anchor_max_lag_sec: int
     market_strike_anchor_near_sec: int
     market_strike_rest_retry_sec: int
@@ -455,7 +473,7 @@ class AppConfig:
         )
         maker_min_directional_edge_ps_conservative = _env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS_CONSERVATIVE", "0.03")
         fee_rate_default_decimal = _env_decimal("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
-        if fee_rate_default_decimal <= 0:
+        if fee_rate_default_decimal < 0:
             fee_rate_default_decimal = CRYPTO_FEE_CURVE.fee_rate
         econ_fee_rate_decimal = _env_decimal("MAKER_ECON_FEE_RATE_DECIMAL", "0")
         if econ_fee_rate_decimal < 0:
@@ -719,6 +737,13 @@ class AppConfig:
                     ),
                     max(entry_score_abs_default, Decimal("0.18")),
                 ),
+                entry_spot_strike_lookback_sec=max(0, _env_int("ENTRY_SPOT_STRIKE_LOOKBACK_SEC", 0)),
+                entry_spot_strike_avg_min_abs=_env_decimal("ENTRY_SPOT_STRIKE_AVG_MIN_ABS", "0"),
+                entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0"),
+                down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "1"),
+                down_high_price_min_score_abs=_env_decimal("DOWN_HIGH_PRICE_MIN_SCORE_ABS", "0.25"),
+                down_high_price_min_robust_net_usdc=_env_decimal("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC", "0.15"),
+                down_high_price_spot_strike_avg_max=_env_decimal("DOWN_HIGH_PRICE_SPOT_STRIKE_AVG_MAX", "-10"),
                 side_thesis_weak_score_abs=_env_decimal("SIDE_THESIS_WEAK_SCORE_ABS_NEW", str(entry_score_abs_default)),
                 side_thesis_weak_requires_opposite_side_new=_env_bool_inverted("SIDE_THESIS_WEAK_REQUIRES_OPPOSITE_SIDE_NEW", True),
                 side_thesis_weak_opposite_score_abs_new=_env_decimal("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW", str(held_flip_default)),
@@ -820,6 +845,10 @@ class AppConfig:
                 polymarket_chainlink_history_max=max(
                     60,
                     _env_int("POLYMARKET_CHAINLINK_HISTORY_MAX", external_spot_history_max),
+                ),
+                external_spot_source_delta_abs_max_usd=max(
+                    Decimal("0"),
+                    _env_decimal("EXTERNAL_SPOT_SOURCE_DELTA_ABS_MAX_USD", "40"),
                 ),
                 market_strike_anchor_max_lag_sec=max(10, _env_int("MARKET_STRIKE_ANCHOR_MAX_LAG_SEC", 180)),
                 market_strike_anchor_near_sec=max(5, _env_int("MARKET_STRIKE_ANCHOR_NEAR_SEC", 30)),

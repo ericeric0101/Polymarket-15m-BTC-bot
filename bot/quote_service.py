@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Optional
 
+from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.models import QuoteIntentState, QuoteMode
 
 
@@ -30,6 +31,7 @@ class BuyEntryEvaluation:
     skip: bool
     min_expected_net_usdc: Decimal
     entry_mode: str = "value"  # "value" or "trend"
+    size_multiplier: Decimal = Decimal("1")
     event_type: str = ""
     reason: str = ""
     payload: dict[str, Any] | None = None
@@ -70,6 +72,8 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "weak_pfair_size_adjustment": desired.get("weak_pfair_size_adjustment"),
         "external_entry_confirmation": desired.get("external_entry_confirmation"),
         "external_entry_confirmation_size_adjustment": desired.get("external_entry_confirmation_size_adjustment"),
+        "entry_quality": desired.get("entry_quality"),
+        "entry_quality_quote_price_cap": desired.get("entry_quality_quote_price_cap"),
         "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
         "tail_protect_tp_price": desired.get("tail_protect_tp_price"),
         "target_qty_override": desired.get("target_qty_override"),
@@ -318,6 +322,7 @@ def evaluate_buy_entry_controls(
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
     directional_first_entry_min_score_abs_new: Decimal,
+    locked_side_score_abs: Decimal = Decimal("0"),
     maker_min_expected_net_usdc: Decimal,
     maker_reload_min_expected_net_multiplier: Decimal,
     current_inst_inventory_qty: Decimal,
@@ -337,11 +342,28 @@ def evaluate_buy_entry_controls(
     best_bid: Decimal | None = None,
     fair: Decimal | None = None,
     trend_buy_max_price_premium_ps: Decimal = Decimal("0.02"),
+    candidate_entry_price: Decimal | None = None,
+    spot_minus_strike_avg: Decimal | None = None,
+    entry_spot_strike_avg_min_abs: Decimal = Decimal("0"),
+    entry_fair_edge_min_ps: Decimal = Decimal("0"),
+    robust_net_usdc: Decimal | None = None,
+    down_high_price_threshold: Decimal = Decimal("1"),
+    down_high_price_min_score_abs: Decimal = Decimal("0"),
+    down_high_price_min_robust_net_usdc: Decimal = Decimal("0"),
+    down_high_price_spot_strike_avg_max: Decimal = Decimal("0"),
+    shadow_payload: dict[str, Any] | None = None,
+    entry_quality_allow_size_down: bool = False,
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
+    size_multiplier = Decimal("1")
     if side != "buy":
-        return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc, entry_mode=entry_mode)
+        return BuyEntryEvaluation(
+            skip=False,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            size_multiplier=size_multiplier,
+        )
     if (
         current_inst_inventory_qty >= max_locked_side_position
         and str(inventory_full_behavior or "STOP_BUY").upper() == "STOP_BUY"
@@ -383,7 +405,7 @@ def evaluate_buy_entry_controls(
     if (
         current_inst_inventory_qty <= 0
         and int(market_buy_count) <= 0
-        and abs(side_score) < directional_first_entry_min_score_abs_new
+        and max(abs(side_score), abs(locked_side_score_abs)) < directional_first_entry_min_score_abs_new
     ):
         return BuyEntryEvaluation(
             skip=True,
@@ -395,6 +417,7 @@ def evaluate_buy_entry_controls(
                 "slug": current_slug,
                 "instrument_id": str(inst_id),
                 "side_score": float(side_score),
+                "locked_side_score_abs": float(abs(locked_side_score_abs)),
                 "required_score_abs": float(directional_first_entry_min_score_abs_new),
                 "engine": "new_signal",
             },
@@ -414,8 +437,94 @@ def evaluate_buy_entry_controls(
                 "engine": "new_signal",
             },
         )
+    active_side_txt = str(active_side_value or "NONE").upper()
+    if (
+        active_side_txt in {"UP", "DOWN"}
+        and spot_minus_strike_avg is not None
+        and entry_spot_strike_avg_min_abs > 0
+    ):
+        spot_avg_supports = (
+            spot_minus_strike_avg >= entry_spot_strike_avg_min_abs
+            if active_side_txt == "UP"
+            else spot_minus_strike_avg <= -entry_spot_strike_avg_min_abs
+        )
+        if not spot_avg_supports:
+            return BuyEntryEvaluation(
+                skip=True,
+                min_expected_net_usdc=min_expected_net_usdc,
+                entry_mode=entry_mode,
+                event_type="ORDER_SKIP_ENTRY_SPOT_STRIKE_AVG_GATE",
+                reason="entry_spot_strike_avg_gate",
+                payload={
+                    "slug": current_slug,
+                    "instrument_id": str(inst_id),
+                    "active_side": active_side_txt,
+                    "spot_minus_strike_avg": float(spot_minus_strike_avg),
+                    "required_abs": float(entry_spot_strike_avg_min_abs),
+                    "engine": "entry_context",
+                },
+            )
+    if (
+        candidate_entry_price is not None
+        and fair is not None
+        and candidate_entry_price > 0
+        and fair > 0
+        and entry_fair_edge_min_ps > 0
+        and (fair - candidate_entry_price) < entry_fair_edge_min_ps
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_ENTRY_FAIR_EDGE_GATE",
+            reason="entry_fair_edge_gate",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "active_side": active_side_txt,
+                "entry_price": float(candidate_entry_price),
+                "fair": float(fair),
+                "fair_minus_entry": float(fair - candidate_entry_price),
+                "required_min": float(entry_fair_edge_min_ps),
+                "engine": "entry_context",
+            },
+        )
+    if (
+        active_side_txt == "DOWN"
+        and candidate_entry_price is not None
+        and down_high_price_threshold < 1
+        and candidate_entry_price >= down_high_price_threshold
+        and (
+            abs(side_score) < down_high_price_min_score_abs
+            and (robust_net_usdc is None or robust_net_usdc < down_high_price_min_robust_net_usdc)
+            and (
+                spot_minus_strike_avg is None
+                or spot_minus_strike_avg > down_high_price_spot_strike_avg_max
+            )
+        )
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_DOWN_HIGH_PRICE_GATE",
+            reason="down_high_price_gate",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "entry_price": float(candidate_entry_price),
+                "entry_threshold": float(down_high_price_threshold),
+                "side_score": float(side_score),
+                "required_score_abs": float(down_high_price_min_score_abs),
+                "robust_net_usdc": float(robust_net_usdc) if robust_net_usdc is not None else None,
+                "required_robust_net_usdc": float(down_high_price_min_robust_net_usdc),
+                "spot_minus_strike_avg": float(spot_minus_strike_avg) if spot_minus_strike_avg is not None else None,
+                "required_spot_minus_strike_avg_max": float(down_high_price_spot_strike_avg_max),
+                "engine": "entry_context",
+            },
+        )
     # --- Trend-buy mode detection ---
-    _active_side_txt = str(active_side_value or "NONE").upper()
+    _active_side_txt = active_side_txt
     if (
         current_inst_inventory_qty >= max_locked_side_position
         and str(inventory_full_behavior or "STOP_BUY").upper() == "WIDEN_SPREAD"
@@ -451,7 +560,25 @@ def evaluate_buy_entry_controls(
         )
         # Reload always uses value mode regardless of trend detection.
         entry_mode = "value"
-    return BuyEntryEvaluation(skip=False, min_expected_net_usdc=min_expected_net_usdc, entry_mode=entry_mode)
+    quality_adjustment = evaluate_entry_quality_adjustment(
+        candidate_entry_price=candidate_entry_price,
+        side_score=side_score,
+        fair=fair,
+        robust_net_usdc=robust_net_usdc,
+        spot_minus_strike_avg=spot_minus_strike_avg,
+        active_side_value=active_side_txt,
+        shadow_payload=shadow_payload,
+        allow_size_down=entry_quality_allow_size_down,
+    )
+    min_expected_net_usdc += quality_adjustment.min_expected_net_uplift_usdc
+    size_multiplier = quality_adjustment.size_multiplier
+    return BuyEntryEvaluation(
+        skip=False,
+        min_expected_net_usdc=min_expected_net_usdc,
+        entry_mode=entry_mode,
+        size_multiplier=size_multiplier,
+        payload=quality_adjustment.as_payload(),
+    )
 
 
 def _trend_price_premium_ok(
@@ -496,6 +623,50 @@ def attach_desired_entry_runtime_metadata(
         desired_entry["planned_best_bid"] = quote[0]
         desired_entry["planned_best_ask"] = quote[1]
         desired_entry["planned_quote_ts"] = now_ts
+    return desired_entry
+
+
+def apply_entry_quality_quote_placement(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    quote: tuple[Decimal, Decimal] | None,
+    tick: Decimal,
+) -> dict[str, Any]:
+    if side != "buy" or not desired_entry.get("should_quote", False) or quote is None:
+        return desired_entry
+    quality = desired_entry.get("entry_quality")
+    quality_d = quality if isinstance(quality, dict) else {}
+    placement_mode = str(quality_d.get("entry_quality_quote_placement_mode") or "default")
+    if placement_mode not in {"join_bid", "one_tick_above_bid"}:
+        return desired_entry
+
+    best_bid, best_ask = quote
+    current_price = Decimal(str(desired_entry.get("price", "0") or "0"))
+    if current_price <= 0 or best_bid <= 0 or best_ask <= 0 or tick <= 0:
+        return desired_entry
+
+    if placement_mode == "join_bid":
+        placement_price = best_bid
+    else:
+        placement_price = best_bid + tick
+        if placement_price >= best_ask:
+            placement_price = best_bid
+
+    placement_price = max(Decimal("0.01"), placement_price)
+    if placement_price >= current_price:
+        return desired_entry
+
+    desired_entry["price"] = placement_price
+    desired_entry["entry_quality_quote_price_cap"] = placement_price
+    diag_reason = str(desired_entry.get("diag_reason", "") or "")
+    placement_diag = (
+        f"entry_quality_quote_placement {placement_mode} "
+        f"{float(current_price):.4f}->{float(placement_price):.4f}"
+    )
+    desired_entry["diag_reason"] = (
+        f"{diag_reason} | {placement_diag}" if diag_reason else placement_diag
+    )
     return desired_entry
 
 
@@ -1291,6 +1462,8 @@ def build_desired_quote_entry(
     trend_buy_penalty_discount: Decimal = Decimal("0.50"),
     trend_buy_score: Decimal = Decimal("0"),
     trend_buy_size_multiplier: Decimal = Decimal("1"),
+    entry_size_multiplier: Decimal = Decimal("1"),
+    entry_quality: dict[str, Any] | None = None,
     decision_phase: str = "",
     decision_regime: str = "",
     decision_pressure: float | None = None,
@@ -1481,10 +1654,16 @@ def build_desired_quote_entry(
         "other_cost_ps": other_cost_ps,
         "entry_mode": entry_mode if side == "buy" else "",
         "size_multiplier": (
-            max(Decimal("0"), trend_buy_size_multiplier)
-            if side == "buy" and entry_mode == "trend"
+            max(Decimal("0"), entry_size_multiplier)
+            * (
+                max(Decimal("0"), trend_buy_size_multiplier)
+                if entry_mode == "trend"
+                else Decimal("1")
+            )
+            if side == "buy"
             else Decimal("1")
         ),
+        "entry_quality": entry_quality if side == "buy" else None,
         # Observability: non-empty only when a loss-sell was gated/allowed.
         # Values: "thesis_bad" | "emergency_with_thesis" |
         #         "absolute_last_resort(<Ns)" | "" (no loss-sell override)

@@ -312,9 +312,11 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     strategy.rebate_reporter.flush_daily_report()
     if strategy.terminal_dashboard:
         side_norm = side_for_ledger or strategy._normalize_side_text(getattr(event, "order_side", ""))
+        token_side = getattr(strategy._side_for_instrument_id(filled_inst), "value", "NONE")
         strategy.terminal_dashboard.increment_fill(
             is_maker_fill=is_maker_fill,
             side=side_norm,
+            token_side=token_side,
             qty=float(getattr(event, "last_qty", 0.0) or 0.0),
             price=float(getattr(event, "last_px", 0.0) or 0.0),
             commission_usdc=float(effective_fee_usdc_dec),
@@ -357,6 +359,8 @@ def handle_order_canceled(strategy: Any, event: Any) -> None:
     if cancel_result.should_skip:
         logger.debug(f"Skip duplicate cancel ack log for {canceled_id}")
         return
+    if strategy.terminal_dashboard and canceled_id:
+        strategy.terminal_dashboard.record_order_canceled(client_order_id=canceled_id)
     strategy._update_terminal_dashboard_snapshot()
     strategy._db_order_event(
         event_type="ORDER_CANCELED",

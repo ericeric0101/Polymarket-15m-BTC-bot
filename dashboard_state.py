@@ -33,6 +33,7 @@ class DashboardState:
     usdc_balance: float
     pol_balance: float
     account_last_updated: datetime
+    visible_trades_pnl: float = 0.0
     market_phase: str = "—"
     active_side: Optional[str] = None
     time_left_sec: Optional[float] = None
@@ -76,6 +77,7 @@ class DashboardState:
                 usdc_balance=self.usdc_balance,
                 pol_balance=self.pol_balance,
                 account_last_updated=self.account_last_updated,
+                visible_trades_pnl=self.visible_trades_pnl,
                 market_phase=self.market_phase,
                 active_side=self.active_side,
                 time_left_sec=self.time_left_sec,
