@@ -272,6 +272,9 @@ class IntegratedBTCStrategy(
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
             f"tail_tp={'on' if getattr(self, 'tail_protect_tp_enabled', False) else 'off'} "
+            f"tail_tp_px={float(getattr(self, 'tail_protect_tp_price', Decimal('0'))):.2f} "
+            f"tail_tp_frac={float(getattr(self, 'tail_protect_tp_fraction', Decimal('0'))):.2f} "
+            f"tail_tp_min_entry={float(getattr(self, 'tail_protect_tp_min_entry_price', Decimal('0'))):.2f} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -1625,6 +1628,11 @@ class IntegratedBTCStrategy(
                     time_left_sec=time_left_sec_global,
                     shadow_payload=live_shadow_payload,
                 )
+                candidate_robust_net = (
+                    quote_data[3]
+                    if isinstance(quote_data, (tuple, list)) and len(quote_data) > 3
+                    else None
+                )
                 buy_entry_eval = evaluate_buy_entry_controls(
                     side=side,
                     bi_side_enabled=self.bi_side_enabled,
@@ -1663,7 +1671,7 @@ class IntegratedBTCStrategy(
                     ),
                     entry_spot_strike_avg_min_abs=getattr(self, "entry_spot_strike_avg_min_abs", Decimal("0")),
                     entry_fair_edge_min_ps=getattr(self, "entry_fair_edge_min_ps", Decimal("0")),
-                    robust_net_usdc=desired_entry.get("robust_net"),
+                    robust_net_usdc=candidate_robust_net,
                     down_high_price_threshold=getattr(self, "down_high_price_threshold", Decimal("1")),
                     down_high_price_min_score_abs=getattr(self, "down_high_price_min_score_abs", Decimal("0")),
                     down_high_price_min_robust_net_usdc=getattr(self, "down_high_price_min_robust_net_usdc", Decimal("0")),

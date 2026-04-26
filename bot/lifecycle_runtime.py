@@ -92,7 +92,37 @@ class StrategyLifecycleMixin:
 
     def _record_market_settlement(self) -> None:
         try:
-            inv = float(self.inventory_delta_shares)
+            raw_inv = float(self.inventory_delta_shares)
+            ledger_inv = 0.0
+            inventory_side = None
+            has_inventory_ledger = bool(self.live_inventory_cost)
+            for inv_key, inv_state in self.live_inventory_cost.items():
+                inv_qty = float(inv_state.get("qty", 0))
+                if inv_qty > 0.001:
+                    detected = self._side_for_instrument_id(inv_key)
+                    if detected != ActiveSide.NONE:
+                        ledger_inv += inv_qty
+                        if inventory_side is None:
+                            inventory_side = detected.value
+
+            inv = ledger_inv if has_inventory_ledger else raw_inv
+            if has_inventory_ledger and abs(raw_inv - ledger_inv) > 0.001:
+                logger.warning(
+                    f"Settlement inventory reconciled from ledger: "
+                    f"raw_inv={raw_inv:.6f} ledger_inv={ledger_inv:.6f} "
+                    f"slug={self.current_market_slug or ''}"
+                )
+                self._db_strategy_event(
+                    "MARKET_SETTLEMENT_INVENTORY_RECONCILED",
+                    {
+                        "slug": self.current_market_slug or "",
+                        "raw_inventory_delta_shares": raw_inv,
+                        "ledger_inventory_shares": ledger_inv,
+                        "reason": "settlement_uses_live_inventory_cost_ledger",
+                    },
+                )
+                self.inventory_delta_shares = Decimal(str(ledger_inv))
+
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
                 cycle_fill_realized = float(self.market_cycle_realized_net_usdc)
@@ -163,15 +193,6 @@ class StrategyLifecycleMixin:
                     "reason": "spot_strike_scale_mismatch",
                 })
                 return
-
-            inventory_side = None
-            for inv_key, inv_state in self.live_inventory_cost.items():
-                inv_qty = float(inv_state.get("qty", 0))
-                if inv_qty > 0.001:
-                    detected = self._side_for_instrument_id(inv_key)
-                    if detected != ActiveSide.NONE:
-                        inventory_side = detected.value
-                        break
 
             settlement = compute_settlement_summary(
                 spot=spot,

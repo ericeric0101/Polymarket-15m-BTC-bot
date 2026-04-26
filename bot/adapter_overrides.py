@@ -356,30 +356,41 @@ def _install_pyclob_http_overrides() -> None:
             setattr(local, attr, client)
         return client
 
-    def _request_with_client(client: httpx.Client, endpoint: str, method: str, headers: dict, data):
+    def _overload_headers(method: str, headers: dict | None) -> dict:
+        overload = getattr(pyclob_helpers, "_overload_headers", None)
+        if overload is None:
+            overload = getattr(pyclob_helpers, "overloadHeaders", None)
+        if overload is None:
+            return dict(headers or {})
+        return dict(overload(method, headers))
+
+    def _request_with_client(client: httpx.Client, endpoint: str, method: str, headers: dict, data, params=None):
         if isinstance(data, str):
             return client.request(
                 method=method,
                 url=endpoint,
                 headers=headers,
                 content=data.encode("utf-8"),
+                params=params,
             )
         return client.request(
             method=method,
             url=endpoint,
             headers=headers,
             json=data,
+            params=params,
         )
 
-    def request(endpoint: str, method: str, headers=None, data=None):
+    def request(endpoint: str, method: str, headers=None, data=None, params=None):
         try:
-            headers = pyclob_helpers.overloadHeaders(method, headers)
+            headers = _overload_headers(method, headers)
             resp = _request_with_client(
                 _get_thread_local_client(http2=True),
                 endpoint,
                 method,
                 headers,
                 data,
+                params,
             )
             if resp.status_code != 200:
                 raise PolyApiException(resp)
@@ -389,7 +400,7 @@ def _install_pyclob_http_overrides() -> None:
                 return resp.text
         except (httpx.RequestError, RuntimeError):
             try:
-                fallback_headers = dict(pyclob_helpers.overloadHeaders(method, headers))
+                fallback_headers = _overload_headers(method, headers)
                 fallback_headers["Connection"] = "close"
                 resp = _request_with_client(
                     _get_thread_local_client(http2=False),
@@ -397,6 +408,7 @@ def _install_pyclob_http_overrides() -> None:
                     method,
                     fallback_headers,
                     data,
+                    params,
                 )
                 if resp.status_code != 200:
                     raise PolyApiException(resp)
