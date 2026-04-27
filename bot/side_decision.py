@@ -335,23 +335,7 @@ class SideDecisionMixin:
         return (now_ts - pending_since) >= min_persist
 
     def _pre_entry_flip_allowed(self, *, proposed_side: ActiveSide) -> bool:
-        if not self.active_side_locked or proposed_side in (ActiveSide.NONE, self.active_side):
-            return False
-        if int(getattr(self, "side_flip_count", 0) or 0) >= 1:
-            return False
-        slug = str(getattr(self, "current_market_slug", "") or "")
-        market_buy_count = int(getattr(self, "market_buy_count_by_slug", {}).get(slug, 0) or 0)
-        if market_buy_count > 0:
-            return False
-        try:
-            live_inventory_cost = getattr(self, "live_inventory_cost", {}) or {}
-            for state in live_inventory_cost.values():
-                qty = Decimal(str((state or {}).get("qty", "0")))
-                if qty > 0:
-                    return False
-        except Exception:
-            return False
-        return True
+        return False
 
     def _populate_spot_source_inputs(
         self,
