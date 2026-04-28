@@ -325,6 +325,12 @@ class ExitConfig:
     taker_exit_max_spread_pct: Decimal
     taker_exit_stop_loss_max_spread_pct: Decimal
     taker_exit_wait_for_sell_quote_sec: int
+    taker_exit_only_after_invalidation: bool
+    taker_exit_max_time_left_sec: int
+    taker_exit_min_bid: Decimal
+    taker_exit_min_recovery_ratio: Decimal
+    taker_exit_require_inventory: bool
+    taker_exit_disable_if_bid_below: Decimal
     market_stop_loss_max_per_market: int
     market_max_buy_events_per_market: int
     taker_exit_max_hold_near_close_sec: int
@@ -381,6 +387,14 @@ class ExitConfig:
             raise ValueError("CATASTROPHIC_STOP_LOSS_CONFIRMATIONS must be >= 1")
         if self.maker_urgent_exit_min_confirmations < 1:
             raise ValueError("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS must be >= 1")
+        if self.taker_exit_max_time_left_sec < 0:
+            raise ValueError("TAKER_EXIT_MAX_TIME_LEFT_SEC must be >= 0")
+        if self.taker_exit_min_bid < 0 or self.taker_exit_min_bid > Decimal("1"):
+            raise ValueError("TAKER_EXIT_MIN_BID must be in [0, 1]")
+        if self.taker_exit_disable_if_bid_below < 0 or self.taker_exit_disable_if_bid_below > Decimal("1"):
+            raise ValueError("TAKER_EXIT_DISABLE_IF_BID_BELOW must be in [0, 1]")
+        if self.taker_exit_min_recovery_ratio < 0:
+            raise ValueError("TAKER_EXIT_MIN_RECOVERY_RATIO must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -785,6 +799,12 @@ class AppConfig:
                 taker_exit_max_spread_pct=_env_decimal("TAKER_EXIT_MAX_SPREAD_PCT", "0.02"),
                 taker_exit_stop_loss_max_spread_pct=_env_decimal("TAKER_EXIT_STOP_LOSS_MAX_SPREAD_PCT", "0.03"),
                 taker_exit_wait_for_sell_quote_sec=max(0, _env_int("TAKER_EXIT_WAIT_FOR_SELL_QUOTE_SEC", 20)),
+                taker_exit_only_after_invalidation=_env_bool("TAKER_EXIT_ONLY_AFTER_INVALIDATION", False),
+                taker_exit_max_time_left_sec=max(0, _env_int("TAKER_EXIT_MAX_TIME_LEFT_SEC", 0)),
+                taker_exit_min_bid=_env_decimal("TAKER_EXIT_MIN_BID", "0"),
+                taker_exit_min_recovery_ratio=_env_decimal("TAKER_EXIT_MIN_RECOVERY_RATIO", "0"),
+                taker_exit_require_inventory=_env_bool("TAKER_EXIT_REQUIRE_INVENTORY", True),
+                taker_exit_disable_if_bid_below=_env_decimal("TAKER_EXIT_DISABLE_IF_BID_BELOW", "0"),
                 market_stop_loss_max_per_market=max(0, _env_int("MARKET_STOP_LOSS_MAX_PER_MARKET", 2)),
                 market_max_buy_events_per_market=max(0, _env_int("MARKET_MAX_BUY_EVENTS_PER_MARKET", 2)),
                 taker_exit_max_hold_near_close_sec=max(0, _env_int("TAKER_EXIT_MAX_HOLD_NEAR_CLOSE_SEC", 90)),

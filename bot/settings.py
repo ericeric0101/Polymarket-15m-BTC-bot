@@ -270,6 +270,12 @@ def initialize_strategy_settings(
     strategy.taker_exit_max_spread_pct = config.exit.taker_exit_max_spread_pct
     strategy.taker_exit_stop_loss_max_spread_pct = config.exit.taker_exit_stop_loss_max_spread_pct
     strategy.taker_exit_wait_for_sell_quote_sec = config.exit.taker_exit_wait_for_sell_quote_sec
+    strategy.taker_exit_only_after_invalidation = config.exit.taker_exit_only_after_invalidation
+    strategy.taker_exit_max_time_left_sec = config.exit.taker_exit_max_time_left_sec
+    strategy.taker_exit_min_bid = config.exit.taker_exit_min_bid
+    strategy.taker_exit_min_recovery_ratio = config.exit.taker_exit_min_recovery_ratio
+    strategy.taker_exit_require_inventory = config.exit.taker_exit_require_inventory
+    strategy.taker_exit_disable_if_bid_below = config.exit.taker_exit_disable_if_bid_below
     strategy.market_stop_loss_max_per_market = config.exit.market_stop_loss_max_per_market
     strategy.market_max_buy_events_per_market = config.exit.market_max_buy_events_per_market
     strategy.taker_exit_max_hold_near_close_sec = config.exit.taker_exit_max_hold_near_close_sec
