@@ -90,15 +90,19 @@ def find_btc_instrument(strategy: Any) -> bool:
         logger.error("NO BTC 15-MIN INSTRUMENTS FOUND!")
         return False
 
+    preferred_slug = None
+    phase_value = str(getattr(getattr(strategy, "current_phase", None), "value", "") or "")
+    next_market_slug = str(getattr(strategy, "next_market_slug", "") or "").strip()
+    if next_market_slug and phase_value in {"WAITING", "SETTLING"}:
+        preferred_slug = next_market_slug
+    elif not str(strategy.current_market_slug or ""):
+        preferred_slug = str(strategy.selected_slug or "") or None
+
     selection, selection_kind, current_count, future_count = resolve_bi_side_market_selection(
         btc_instruments=btc_instruments,
         current_timestamp=current_timestamp,
         extract_outcome=strategy._extract_outcome_from_instrument,
-        preferred_slug=(
-            str(strategy.selected_slug or "")
-            if not str(strategy.current_market_slug or "")
-            else None
-        ),
+        preferred_slug=preferred_slug,
     )
     if strategy.startup_verbose:
         logger.info(

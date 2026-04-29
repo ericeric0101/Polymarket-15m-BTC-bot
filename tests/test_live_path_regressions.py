@@ -12,6 +12,7 @@ from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
+from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
@@ -33,6 +34,7 @@ from bot.quote_service import (
     retreat_crossing_buy_quote,
     should_requote_existing_order,
 )
+from bot.recovery import StrategyRecoveryMixin
 from bot.order_submission import submit_maker_quote
 from bot.shadow_signal import (
     ShadowSignalConfig,
@@ -44,6 +46,7 @@ from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
 from execution.exit_policy import ExitStage
+from monitoring.trade_journal_db import TradeJournalDB
 from run_bot import IntegratedBTCStrategy
 
 
@@ -1071,6 +1074,77 @@ def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
     assert strategy._startup_rehydrated_inventory_force_sell_only is True
     assert strategy.live_inventory_cost["inst-up"]["avg_entry_price"] == Decimal("0.37")
     assert strategy.strategy_events[0][0] == "STARTUP_INVENTORY_REHYDRATED"
+
+
+def test_startup_rehydrate_recovers_cost_basis_from_recent_buy_submit(tmp_path):
+    class SubmitFallbackStrategy(StrategyRecoveryMixin):
+        def __init__(self) -> None:
+            self.trade_db = TradeJournalDB(str(tmp_path / "journal.db"))
+
+    strategy = SubmitFallbackStrategy()
+    inst = "condition-token.POLYMARKET"
+    strategy.trade_db.log_order_event(
+        run_id="test",
+        event_type="ORDER_SUBMIT",
+        side="BUY",
+        price=0.64,
+        qty=10.8,
+        status="SUBMITTED",
+        instrument_id="current-primary-inst",
+        payload={"submitted_instrument_id": inst},
+    )
+
+    state = strategy._rebuild_inventory_state_from_recent_buy_submit(
+        inst_key=inst,
+        target_qty=Decimal("10.8"),
+        cutoff="2026-01-01T00:00:00+00:00",
+    )
+
+    assert state is not None
+    assert state["qty"] == Decimal("10.8")
+    assert state["avg_entry_price"] == Decimal("0.64")
+
+
+def test_market_selection_honors_preferred_current_slug_even_if_cache_closed_flag_is_stale():
+    now_ts = int(time.time())
+    current_start = now_ts - 20
+    future_start = current_start + 900
+    preferred_slug = f"btc-updown-15m-{current_start}"
+    future_slug = f"btc-updown-15m-{future_start}"
+
+    def make_item(slug: str, outcome: str, start_ts: int, closed: bool) -> dict:
+        return {
+            "instrument": SimpleNamespace(
+                id=f"{slug}-{outcome}",
+                info={
+                    "question": "Bitcoin Up or Down",
+                    "market_slug": slug,
+                    "active": True,
+                    "closed": closed,
+                },
+            ),
+            "slug": slug,
+            "market_timestamp": start_ts,
+            "end_timestamp": start_ts + 900,
+            "question": "bitcoin",
+            "active": True,
+            "closed": closed,
+            "time_diff_minutes": (start_ts - now_ts) / 60,
+        }
+
+    selection, _, _, _ = resolve_bi_side_market_selection(
+        btc_instruments=[
+            make_item(preferred_slug, "up", current_start, True),
+            make_item(preferred_slug, "down", current_start, True),
+            make_item(future_slug, "up", future_start, False),
+        ],
+        current_timestamp=now_ts,
+        extract_outcome=lambda instrument: "down" if str(instrument.id).endswith("-down") else "up",
+        preferred_slug=preferred_slug,
+    )
+
+    assert selection is not None
+    assert selection.current_market_slug == preferred_slug
 
 
 def test_ghost_inventory_reconcile_recovers_cost_basis_from_recent_buy_order():
