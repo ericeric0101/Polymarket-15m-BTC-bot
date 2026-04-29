@@ -1073,6 +1073,83 @@ def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
     assert strategy.strategy_events[0][0] == "STARTUP_INVENTORY_REHYDRATED"
 
 
+def test_ghost_inventory_reconcile_recovers_cost_basis_from_recent_buy_order():
+    strategy = DummySellableQtyStrategy()
+    strategy.live_inventory_cost = {}
+    strategy.inventory_delta_shares = Decimal("0")
+    strategy.active_maker_orders = {
+        "buy": {
+            "side": "buy",
+            "instrument_id": "inst-down",
+            "price": Decimal("0.64"),
+            "quantity": Decimal("10.8"),
+            "created_ts": time.time(),
+            "order": SimpleNamespace(client_order_id="BUY-1"),
+        }
+    }
+    strategy.strategy_events = []
+    strategy._db_strategy_event = lambda event_type, payload=None: strategy.strategy_events.append((event_type, payload or {}))
+
+    restored = IntegratedBTCStrategy._reconcile_ghost_inventory(
+        strategy,
+        instrument_id="inst-down",
+        confirmed_qty=Decimal("0"),
+        onchain_qty=Decimal("10.8"),
+    )
+
+    assert restored == Decimal("10.8")
+    assert strategy.live_inventory_cost["inst-down"]["avg_entry_price"] == Decimal("0.64")
+    assert strategy.strategy_events[-1][1]["avg_entry_recovered"] is True
+
+
+def test_polymarket_user_trade_decimal_fallback_handles_empty_maker_fields():
+    install_runtime_compatibility_overrides()
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketEventType
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketLiquiditySide
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketOrderSide
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketTradeStatus
+    from nautilus_trader.adapters.polymarket.schemas.order import PolymarketMakerOrder
+    from nautilus_trader.adapters.polymarket.schemas.user import PolymarketUserTrade
+
+    trade = PolymarketUserTrade(
+        asset_id="taker-token",
+        bucket_index=0,
+        fee_rate_bps="",
+        id="trade-1",
+        last_update="0",
+        maker_address="maker",
+        maker_orders=[
+            PolymarketMakerOrder(
+                asset_id="maker-token",
+                fee_rate_bps="",
+                maker_address="maker",
+                matched_amount="",
+                order_id="maker-order-1",
+                outcome="Up",
+                owner="api-key",
+                price="",
+            )
+        ],
+        market="condition-1",
+        match_time="0",
+        outcome="Up",
+        owner="api-key",
+        price="0.64",
+        side=PolymarketOrderSide.BUY,
+        size="10.8",
+        status=PolymarketTradeStatus.CONFIRMED,
+        taker_order_id="taker-order-1",
+        timestamp="0",
+        trade_owner="api-key",
+        trader_side=PolymarketLiquiditySide.MAKER,
+        type=PolymarketEventType.TRADE,
+    )
+
+    assert trade.last_px("maker-order-1") == Decimal("0.64")
+    assert trade.last_qty("maker-order-1") == Decimal("10.8")
+    assert trade.get_fee_rate_bps("maker-order-1") == Decimal("0")
+
+
 def test_maker_quote_instruments_include_held_and_recovery_legs():
     strategy = DummyMakerInstrumentStrategy()
 

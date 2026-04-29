@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from bot.collateral_tokens import (
     COLLATERAL_ONRAMP_ADDRESS,
+    PUSD_ADDRESS,
     USDCE_ADDRESS,
     get_ctf_collateral,
 )
@@ -51,6 +52,37 @@ CTF_REDEEM_ABI = [
         "name": "redeemPositions",
         "outputs": [],
         "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+            {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
+            {"internalType": "uint256", "name": "indexSet", "type": "uint256"},
+        ],
+        "name": "getCollectionId",
+        "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "collateralToken", "type": "address"},
+            {"internalType": "bytes32", "name": "collectionId", "type": "bytes32"},
+        ],
+        "name": "getPositionId",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "account", "type": "address"},
+            {"internalType": "uint256", "name": "id", "type": "uint256"},
+        ],
+        "name": "balanceOf",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
         "type": "function",
     },
 ]
@@ -77,6 +109,11 @@ COLLATERAL_ONRAMP_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+]
+
+CTF_COLLATERAL_CANDIDATES = [
+    ("pUSD", PUSD_ADDRESS),
+    ("USDC.e", USDCE_ADDRESS),
 ]
 
 GWEI = 10**9
@@ -293,6 +330,49 @@ def _redeem_conditions(
             print(f"Skip invalid conditionId: {cid_txt}")
             continue
 
+        configured_collateral = get_ctf_collateral()
+        collateral_candidates = [
+            (configured_collateral.symbol, Web3.to_checksum_address(configured_collateral.address)),
+            *[
+                (symbol, Web3.to_checksum_address(address))
+                for symbol, address in CTF_COLLATERAL_CANDIDATES
+                if Web3.to_checksum_address(address) != Web3.to_checksum_address(configured_collateral.address)
+            ],
+        ]
+        condition_bytes = Web3.to_bytes(hexstr=cid_txt)
+        zero_parent_collection = b"\x00" * 32
+        collateral_balances: list[tuple[str, str, int]] = []
+        for symbol, collateral_address in collateral_candidates:
+            total_balance = 0
+            for index_set in (1, 2):
+                collection_id = contract.functions.getCollectionId(
+                    zero_parent_collection,
+                    condition_bytes,
+                    index_set,
+                ).call()
+                position_id = contract.functions.getPositionId(collateral_address, collection_id).call()
+                total_balance += int(contract.functions.balanceOf(owner, position_id).call())
+            collateral_balances.append((symbol, collateral_address, total_balance))
+
+        selected_symbol, selected_collateral_address, selected_balance = max(
+            collateral_balances,
+            key=lambda item: item[2],
+        )
+        balance_report = ", ".join(
+            f"{symbol}={balance / 1_000_000:.6f}" for symbol, _, balance in collateral_balances
+        )
+        if selected_balance <= 0:
+            print(f"Skip condition={cid_txt}: no on-chain CTF balance found ({balance_report})")
+            continue
+        if selected_collateral_address != ctf_collateral_address:
+            print(
+                f"collateral override condition={cid_txt} "
+                f"configured={ctf_collateral.symbol} selected={selected_symbol} "
+                f"balances=({balance_report})"
+            )
+        else:
+            print(f"collateral selected condition={cid_txt} {selected_symbol} balances=({balance_report})")
+
         tx_base = {
             "chainId": chain_id,
             "from": owner,
@@ -301,9 +381,9 @@ def _redeem_conditions(
         tx_base.update(_build_fee_params(w3))
 
         tx_func = contract.functions.redeemPositions(
-            ctf_collateral_address,
-            b"\x00" * 32,
-            Web3.to_bytes(hexstr=cid_txt),
+            selected_collateral_address,
+            zero_parent_collection,
+            condition_bytes,
             [1, 2],
         )
 
@@ -371,8 +451,9 @@ def _redeem_conditions(
         print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
         nonce += 1
 
-        amount_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
-        if amount_base_units > 0 and ctf_collateral.is_usdce:
+        expected_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
+        amount_base_units = expected_base_units if expected_base_units > 0 else selected_balance
+        if amount_base_units > 0 and selected_symbol == "USDC.e":
             approve_tx = usdce.functions.approve(
                 Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
                 amount_base_units,
@@ -407,7 +488,7 @@ def _redeem_conditions(
         elif amount_base_units > 0:
             print(
                 f"wrapToPUSD skipped condition={cid_txt} "
-                f"ctf_collateral={ctf_collateral.symbol} amount={amount_base_units / 1_000_000:.6f}"
+                f"ctf_collateral={selected_symbol} amount={amount_base_units / 1_000_000:.6f}"
             )
 
 

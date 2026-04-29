@@ -280,6 +280,15 @@ class PricingRuntimeMixin:
         if restored_qty <= old_qty:
             return restored_qty
 
+        inferred_entry = self._infer_ghost_inventory_entry_price(
+            instrument_id=inst,
+            instrument_key=inst_key,
+            restored_qty=restored_qty,
+            now_ts=now_ts,
+        )
+        if avg_entry <= 0 and inferred_entry is not None and inferred_entry > 0:
+            avg_entry = inferred_entry
+
         restored_fee_remaining = old_fee_remaining
         if old_qty > 0 and old_fee_remaining > 0:
             restored_fee_remaining = old_fee_remaining * (restored_qty / old_qty)
@@ -359,6 +368,7 @@ class PricingRuntimeMixin:
                         "onchain_qty": float(onchain_qty),
                         "restored_qty": float(restored_qty),
                         "avg_entry_price": float(avg_entry),
+                        "avg_entry_recovered": bool(inferred_entry is not None and inferred_entry > 0),
                         "cleared_sell_orders": cleared_order_ids,
                     },
                 )
@@ -369,9 +379,86 @@ class PricingRuntimeMixin:
             "Ghost inventory reconciled: "
             f"inst={inst_key} confirmed_before={float(old_qty):.4f} "
             f"onchain={float(onchain_qty):.4f} restored={float(restored_qty):.4f} "
+            f"avg_entry={float(avg_entry):.4f} "
             f"cleared_sell_orders={len(cleared_order_ids)}"
         )
         return restored_qty
+
+    def _infer_ghost_inventory_entry_price(
+        self: PricingRuntimeHost,
+        *,
+        instrument_id: Any,
+        instrument_key: str,
+        restored_qty: Decimal,
+        now_ts: float,
+    ) -> Optional[Decimal]:
+        """
+        Recover cost basis when a Polymarket maker fill matched on-chain but
+        the venue fill ack failed before Nautilus emitted ORDER_FILLED.
+        """
+        candidates: list[tuple[float, Decimal, Decimal, str]] = []
+        active_orders = getattr(self, "active_maker_orders", None)
+        if isinstance(active_orders, dict):
+            for state in active_orders.values():
+                if str(state.get("side", "") or "").lower() != "buy":
+                    continue
+                if str(state.get("instrument_id", "") or "") != str(instrument_id):
+                    continue
+                try:
+                    price = Decimal(str(state.get("price", "0")))
+                    qty = Decimal(str(state.get("quantity", "0")))
+                    created_ts = float(state.get("created_ts", 0.0) or 0.0)
+                except Exception:
+                    continue
+                candidates.append((created_ts, price, qty, "active_order"))
+
+        recent_submits = getattr(self, "recent_buy_submit_by_inst", None)
+        if isinstance(recent_submits, dict):
+            state = recent_submits.get(instrument_key)
+            if isinstance(state, dict):
+                try:
+                    price = Decimal(str(state.get("price", "0")))
+                    qty = Decimal(str(state.get("quantity", "0")))
+                    created_ts = float(state.get("created_ts", 0.0) or 0.0)
+                except Exception:
+                    price = Decimal("0")
+                    qty = Decimal("0")
+                    created_ts = 0.0
+                candidates.append((created_ts, price, qty, "recent_submit"))
+
+        trade_db = getattr(self, "trade_db", None)
+        if trade_db is not None and hasattr(trade_db, "load_recent_buy_submits"):
+            try:
+                rows = trade_db.load_recent_buy_submits(str(instrument_id), limit=20)
+            except Exception:
+                rows = []
+            for row in rows or []:
+                try:
+                    price = Decimal(str(row.get("price", "0")))
+                    qty = Decimal(str(row.get("qty", "0")))
+                    created_ts = float(row.get("epoch_ts", 0.0) or 0.0)
+                except Exception:
+                    continue
+                candidates.append((created_ts, price, qty, "trade_db"))
+
+        fresh_candidates = [
+            (created_ts, price, qty, source)
+            for created_ts, price, qty, source in candidates
+            if price > 0
+            and qty > 0
+            and (created_ts <= 0 or now_ts - created_ts <= 180.0)
+            and qty >= min(restored_qty, Decimal("1"))
+        ]
+        if not fresh_candidates:
+            return None
+        fresh_candidates.sort(key=lambda item: item[0], reverse=True)
+        created_ts, price, qty, source = fresh_candidates[0]
+        logger.warning(
+            "Recovered ghost inventory cost basis from recent BUY submit: "
+            f"inst={instrument_key} source={source} price={float(price):.4f} "
+            f"submit_qty={float(qty):.6f} restored_qty={float(restored_qty):.6f}"
+        )
+        return price
 
     def _get_effective_sellable_qty(self, instrument_id: Optional[Any]) -> Decimal:
         """

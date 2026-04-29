@@ -294,6 +294,17 @@ def submit_maker_quote(
         target_version=int(target_version or 0),
         loss_sell_reason=loss_sell_reason,
     )
+    if side == "buy" and inst_key:
+        recent_buy_submits = getattr(strategy, "recent_buy_submit_by_inst", None)
+        if not isinstance(recent_buy_submits, dict):
+            recent_buy_submits = {}
+            setattr(strategy, "recent_buy_submit_by_inst", recent_buy_submits)
+        recent_buy_submits[inst_key] = {
+            "price": Decimal(str(limit_price)),
+            "quantity": Decimal(str(token_qty)),
+            "created_ts": time.time(),
+            "client_order_id": str(order.client_order_id),
+        }
     if getattr(strategy, "terminal_dashboard", None):
         token_side = getattr(strategy._side_for_instrument_id(instrument_id), "value", "NONE")
         strategy.terminal_dashboard.record_order_submitted(
@@ -319,6 +330,7 @@ def submit_maker_quote(
         expected_net_usdc=float(econ.expected_net_usdc),
         payload={
             "maker": True,
+            "submitted_instrument_id": str(instrument_id),
             "rebate_estimate_usdc": float(econ.expected_rebate_usdc),
             "spread_capture_estimate_usdc": float(econ.expected_spread_capture_usdc),
             "directional_edge_ps": (
