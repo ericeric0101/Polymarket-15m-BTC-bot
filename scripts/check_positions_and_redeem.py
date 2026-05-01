@@ -88,6 +88,24 @@ CTF_REDEEM_ABI = [
 ]
 ERC20_APPROVE_ABI = [
     {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}],
+        "name": "allowance",
+        "outputs": [{"name": "remaining", "type": "uint256"}],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
         "constant": False,
         "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}],
         "name": "approve",
@@ -256,6 +274,7 @@ def _redeem_conditions(
     rpc_url: str,
     condition_ids: list[str],
     condition_sizes: dict[str, float],
+    wrap_existing_usdce: bool = False,
 ) -> None:
     from web3 import Web3
     from web3.middleware import ExtraDataToPOAMiddleware
@@ -323,6 +342,70 @@ def _redeem_conditions(
     nonce = w3.eth.get_transaction_count(owner, "pending")
     max_attempts = max(1, int(os.getenv("AUTO_REDEEM_MAX_SEND_ATTEMPTS", "3")))
     receipt_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_RECEIPT_TIMEOUT_SEC", "120")))
+
+    def _send_wrap_usdce(amount_base_units: int, *, reason: str) -> bool:
+        nonlocal nonce
+        if amount_base_units <= 0:
+            print(f"wrapToPUSD skipped reason={reason} amount=0.000000")
+            return False
+
+        onramp_address = Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS)
+        usdce_balance = int(usdce.functions.balanceOf(owner).call())
+        wrap_amount = min(int(amount_base_units), usdce_balance)
+        if wrap_amount <= 0:
+            print(
+                f"wrapToPUSD skipped reason={reason} "
+                f"wallet_USDC.e={usdce_balance / 1_000_000:.6f} requested={amount_base_units / 1_000_000:.6f}"
+            )
+            return False
+        if wrap_amount < amount_base_units:
+            print(
+                f"wrapToPUSD amount reduced reason={reason} "
+                f"requested={amount_base_units / 1_000_000:.6f} wallet_USDC.e={usdce_balance / 1_000_000:.6f} "
+                f"selected={wrap_amount / 1_000_000:.6f}"
+            )
+
+        allowance = int(usdce.functions.allowance(owner, onramp_address).call())
+        if allowance < wrap_amount:
+            approve_tx = usdce.functions.approve(
+                onramp_address,
+                wrap_amount,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": nonce,
+            })
+            approve_signed = w3.eth.account.sign_transaction(approve_tx, private_key=private_key)
+            approve_hash = w3.eth.send_raw_transaction(approve_signed.raw_transaction)
+            approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=120)
+            print(f"wrapApprove reason={reason} tx={approve_hash.hex()} status={approve_receipt.status}")
+            nonce += 1
+
+        try:
+            wrap_tx = onramp.functions.wrap(
+                Web3.to_checksum_address(USDCE_ADDRESS),
+                owner,
+                wrap_amount,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": nonce,
+            })
+            wrap_signed = w3.eth.account.sign_transaction(wrap_tx, private_key=private_key)
+            wrap_hash = w3.eth.send_raw_transaction(wrap_signed.raw_transaction)
+            wrap_receipt = w3.eth.wait_for_transaction_receipt(wrap_hash, timeout=120)
+            print(
+                f"wrapToPUSD reason={reason} amount={wrap_amount / 1_000_000:.6f} "
+                f"tx={wrap_hash.hex()} status={wrap_receipt.status}"
+            )
+            nonce += 1
+            return bool(wrap_receipt.status == 1)
+        except Exception as exc:
+            print(
+                f"wrapToPUSD failed/skipped reason={reason} amount={wrap_amount / 1_000_000:.6f} "
+                f"wallet_USDC.e={usdce_balance / 1_000_000:.6f} error={type(exc).__name__}: {exc}"
+            )
+            return False
 
     for cid in condition_ids:
         cid_txt = str(cid).strip()
@@ -454,42 +537,16 @@ def _redeem_conditions(
         expected_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
         amount_base_units = expected_base_units if expected_base_units > 0 else selected_balance
         if amount_base_units > 0 and selected_symbol == "USDC.e":
-            approve_tx = usdce.functions.approve(
-                Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
-                amount_base_units,
-            ).build_transaction({
-                "chainId": chain_id,
-                "from": owner,
-                "nonce": nonce,
-            })
-            approve_signed = w3.eth.account.sign_transaction(approve_tx, private_key=private_key)
-            approve_hash = w3.eth.send_raw_transaction(approve_signed.raw_transaction)
-            approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=120)
-            print(f"wrapApprove condition={cid_txt} tx={approve_hash.hex()} status={approve_receipt.status}")
-            nonce += 1
-
-            wrap_tx = onramp.functions.wrap(
-                Web3.to_checksum_address(USDCE_ADDRESS),
-                owner,
-                amount_base_units,
-            ).build_transaction({
-                "chainId": chain_id,
-                "from": owner,
-                "nonce": nonce,
-            })
-            wrap_signed = w3.eth.account.sign_transaction(wrap_tx, private_key=private_key)
-            wrap_hash = w3.eth.send_raw_transaction(wrap_signed.raw_transaction)
-            wrap_receipt = w3.eth.wait_for_transaction_receipt(wrap_hash, timeout=120)
-            print(
-                f"wrapToPUSD condition={cid_txt} amount={amount_base_units / 1_000_000:.6f} "
-                f"tx={wrap_hash.hex()} status={wrap_receipt.status}"
-            )
-            nonce += 1
+            _send_wrap_usdce(amount_base_units, reason=f"condition={cid_txt}")
         elif amount_base_units > 0:
             print(
                 f"wrapToPUSD skipped condition={cid_txt} "
                 f"ctf_collateral={selected_symbol} amount={amount_base_units / 1_000_000:.6f}"
             )
+
+    if wrap_existing_usdce:
+        usdce_balance = int(usdce.functions.balanceOf(owner).call())
+        _send_wrap_usdce(usdce_balance, reason="existing_usdce_balance")
 
 
 def main() -> int:
@@ -516,6 +573,11 @@ def main() -> int:
         type=float,
         default=None,
         help="Skip the whole redeem run when selected redeemable total size is below this threshold",
+    )
+    parser.add_argument(
+        "--wrap-existing-usdce",
+        action="store_true",
+        help="After redeem attempts, wrap any existing wallet USDC.e balance to pUSD.",
     )
     args = parser.parse_args()
 
@@ -668,6 +730,7 @@ def main() -> int:
         rpc_url=rpc_url,
         condition_ids=filtered_redeemable_conditions,
         condition_sizes=redeemable_condition_sizes,
+        wrap_existing_usdce=bool(args.wrap_existing_usdce),
     )
     print("Redeem flow complete.")
     return 0

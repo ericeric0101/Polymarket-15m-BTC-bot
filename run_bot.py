@@ -107,6 +107,7 @@ from bot.quoting import (
 from bot.quote_service import (
     apply_entry_quality_quote_placement,
     apply_forced_exit_sell_pricing,
+    apply_high_entry_price_size_adjustment,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
     apply_weak_pfair_size_adjustment,
@@ -2566,6 +2567,29 @@ class IntegratedBTCStrategy(
                         lower=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_lower", Decimal("0.47")))),
                         upper=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_upper", Decimal("0.53")))),
                         multiplier=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_multiplier", Decimal("0.5")))),
+                    )
+                    desired_entry = apply_high_entry_price_size_adjustment(
+                        desired_entry=desired_entry,
+                        side=side,
+                        enabled=bool(getattr(self, "maker_high_entry_price_size_adjust_enabled", False)),
+                        threshold=Decimal(
+                            str(
+                                getattr(
+                                    self,
+                                    "maker_high_entry_price_size_adjust_threshold",
+                                    Decimal("0.70"),
+                                )
+                            )
+                        ),
+                        multiplier=Decimal(
+                            str(
+                                getattr(
+                                    self,
+                                    "maker_high_entry_price_size_adjust_multiplier",
+                                    Decimal("0.5"),
+                                )
+                            )
+                        ),
                     )
                     self._emit_buy_observe_diagnostic(
                         inst_id=inst_id,

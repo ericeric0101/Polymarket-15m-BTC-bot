@@ -88,6 +88,15 @@ def initialize_strategy_settings(
     strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
     strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
     strategy.maker_weak_pfair_size_adjust_multiplier = config.maker.weak_pfair_size_adjust_multiplier
+    strategy.maker_high_entry_price_size_adjust_enabled = (
+        config.maker.high_entry_price_size_adjust_enabled
+    )
+    strategy.maker_high_entry_price_size_adjust_threshold = (
+        config.maker.high_entry_price_size_adjust_threshold
+    )
+    strategy.maker_high_entry_price_size_adjust_multiplier = (
+        config.maker.high_entry_price_size_adjust_multiplier
+    )
     strategy.entry_confirmation_engine = EntryConfirmationEngine(
         EntryConfirmationConfig(
             enabled=config.maker.external_entry_confirmation_enabled,

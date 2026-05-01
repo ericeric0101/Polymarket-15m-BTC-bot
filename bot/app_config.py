@@ -78,6 +78,9 @@ class MakerConfig:
     weak_pfair_size_adjust_lower: Decimal
     weak_pfair_size_adjust_upper: Decimal
     weak_pfair_size_adjust_multiplier: Decimal
+    high_entry_price_size_adjust_enabled: bool
+    high_entry_price_size_adjust_threshold: Decimal
+    high_entry_price_size_adjust_multiplier: Decimal
     external_entry_confirmation_enabled: bool
     external_entry_confirmation_shadow_enabled: bool
     external_entry_confirmation_book_mid_threshold_ps: Decimal
@@ -205,6 +208,10 @@ class MakerConfig:
             raise ValueError("MAKER_QUOTE_SIZE_USDC must be > 0")
         if self.min_shares <= 0 or self.exchange_min_shares <= 0:
             raise ValueError("Maker min share settings must be > 0")
+        if self.high_entry_price_size_adjust_threshold < 0:
+            raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD must be >= 0")
+        if self.high_entry_price_size_adjust_multiplier <= 0:
+            raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER must be > 0")
         if self.reload_inventory_threshold_shares < 0:
             raise ValueError("MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES must be >= 0")
         if self.continuation_entry_size_multiplier <= 0:
@@ -553,6 +560,18 @@ class AppConfig:
                 weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
                 weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
                 weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
+                high_entry_price_size_adjust_enabled=_env_bool(
+                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_ENABLED",
+                    False,
+                ),
+                high_entry_price_size_adjust_threshold=_env_decimal(
+                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD",
+                    "0.70",
+                ),
+                high_entry_price_size_adjust_multiplier=_env_decimal(
+                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER",
+                    "0.5",
+                ),
                 external_entry_confirmation_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_ENABLED", False),
                 external_entry_confirmation_shadow_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_SHADOW_ENABLED", True),
                 external_entry_confirmation_book_mid_threshold_ps=_env_decimal(

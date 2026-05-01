@@ -22,6 +22,7 @@ from bot.quote_service import (
     apply_forced_exit_sell_pricing,
     apply_entry_quality_quote_placement,
     apply_shadow_entry_veto,
+    apply_high_entry_price_size_adjustment,
     build_desired_quote_entry,
     compute_loss_sell_policy,
     build_directional_snapshot,
@@ -2961,6 +2962,46 @@ def test_value_entry_size_multiplier_flows_into_submit_qty():
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
     assert submitted_qty == Decimal("3.240000")
     assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.6
+
+
+def test_high_entry_price_size_adjustment_halves_submit_qty():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.71"),
+        "size_multiplier": Decimal("1"),
+        "diag_reason": "trend_buy_entry",
+    }
+
+    adjusted = apply_high_entry_price_size_adjustment(
+        desired_entry=desired_entry,
+        side="buy",
+        enabled=True,
+        threshold=Decimal("0.70"),
+        multiplier=Decimal("0.5"),
+    )
+    snapshot = build_directional_snapshot(adjusted)
+    strategy = DummyTrendSubmitStrategy()
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.71"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+        directional_snapshot=snapshot,
+        target_qty_override=Decimal("10.8"),
+    )
+
+    assert strategy.submitted_orders, "expected submit_order to be called"
+    submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
+    assert submitted_qty == Decimal("5.400000")
+    assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.5
+    assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
 
 
 def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
