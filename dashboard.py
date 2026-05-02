@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from rich.align import Align
-from rich.console import Console, Group
+from rich.console import Console, Group, Screen
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -23,7 +23,25 @@ from dashboard_state import DashboardState, TradeRecord
 
 
 PANEL_PADDING = (0, 1)
-DASHBOARD_THEME = os.getenv("DASHBOARD_THEME", "light").strip().lower()
+
+
+def _parse_dotenv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+_ENV_VALUES = _parse_dotenv(Path.cwd() / ".env")
+DASHBOARD_THEME = (
+    os.getenv("DASHBOARD_THEME") or _ENV_VALUES.get("DASHBOARD_THEME") or "light"
+).strip().lower()
 
 if DASHBOARD_THEME == "dark":
     PANEL_STYLE = "dim white"
@@ -55,23 +73,9 @@ else:
     OPEN_STYLE = "purple4"
 
 
-def _parse_dotenv(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-    return values
-
-
 def _resolve_db_path(explicit: Optional[str] = None) -> Path:
     cwd = Path.cwd()
-    env_values = _parse_dotenv(cwd / ".env")
-    raw_path = explicit or os.getenv("TRADE_DB_PATH") or env_values.get("TRADE_DB_PATH") or "./logs/trade_journal.db"
+    raw_path = explicit or os.getenv("TRADE_DB_PATH") or _ENV_VALUES.get("TRADE_DB_PATH") or "./logs/trade_journal.db"
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
         path = cwd / path
@@ -209,11 +213,11 @@ class BTCDashboard:
         if live is None:
             return
         with self._render_lock:
-            live.update(self.render(), refresh=True)
+            live.update(self.render_screen(), refresh=True)
 
     def _run(self) -> None:
         with Live(
-            self.render(),
+            self.render_screen(),
             console=self.console,
             refresh_per_second=1,
             screen=True,
@@ -223,6 +227,9 @@ class BTCDashboard:
             while not self._stop_event.wait(1.0):
                 self.refresh()
             self._live = None
+
+    def render_screen(self) -> Screen:
+        return Screen(self.render(), style=CONSOLE_STYLE)
 
     def render(self) -> Layout:
         state = self.state.snapshot()

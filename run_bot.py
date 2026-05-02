@@ -133,6 +133,11 @@ from bot.quote_service import (
     should_requote_existing_order,
 )
 from bot.entry_confirmation import apply_entry_confirmation_adjustment
+from bot.smart_money import (
+    apply_smart_money_adjustment,
+    extract_condition_id_from_instrument_id,
+    extract_token_id_from_instrument_id,
+)
 from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
@@ -1306,6 +1311,10 @@ class IntegratedBTCStrategy(
         if not m:
             return None
         return m.group(1)
+
+    @staticmethod
+    def _extract_condition_id_from_instrument(instrument_id: Any) -> str:
+        return extract_condition_id_from_instrument_id(instrument_id)
 
     @staticmethod
     def _extract_venue_balance_shares_from_reject(reason: str) -> Optional[Decimal]:
@@ -2560,6 +2569,72 @@ class IntegratedBTCStrategy(
                                 }
                             )
                             self._db_strategy_event("ENTRY_CONFIRMATION_OBSERVATION", entry_confirmation_payload)
+                    smart_money_tracker = getattr(self, "smart_money_tracker", None)
+                    smart_money_config = getattr(self, "smart_money_config", None)
+                    if (
+                        smart_money_tracker is not None
+                        and smart_money_config is not None
+                        and (
+                            bool(getattr(smart_money_config, "enabled", False))
+                            or bool(getattr(smart_money_config, "shadow_enabled", True))
+                        )
+                    ):
+                        condition_id = (
+                            self._extract_condition_id_from_instrument(inst_id)
+                            or self._extract_condition_id_from_instrument(self.current_up_instrument_id)
+                            or self._extract_condition_id_from_instrument(self.current_down_instrument_id)
+                        )
+                        if condition_id:
+                            smart_money_tracker.watch_market(
+                                condition_id=condition_id,
+                                slug=str(self.current_market_slug or ""),
+                                up_token_id=extract_token_id_from_instrument_id(self.current_up_instrument_id),
+                                down_token_id=extract_token_id_from_instrument_id(self.current_down_instrument_id),
+                            )
+                        smart_money_signal = smart_money_tracker.evaluate(
+                            condition_id=condition_id,
+                            active_side=self.active_side.value,
+                            market_end_ts=(
+                                float(self.current_market_end_timestamp)
+                                if self.current_market_end_timestamp is not None
+                                else None
+                            ),
+                            now_ts=now_ts,
+                        )
+                        desired_entry = apply_smart_money_adjustment(
+                            desired_entry=desired_entry,
+                            side=side,
+                            signal=smart_money_signal,
+                            config=smart_money_config,
+                        )
+                        if self.trade_db:
+                            smart_money_payload = smart_money_signal.as_payload()
+                            smart_money_payload.update(
+                                {
+                                    "slug": str(self.current_market_slug or ""),
+                                    "condition_id": condition_id,
+                                    "instrument_id": str(inst_id),
+                                    "should_quote": bool(desired_entry.get("should_quote", False)),
+                                    "entry_mode": str(desired_entry.get("entry_mode", "") or ""),
+                                    "price": (
+                                        float(desired_entry.get("price"))
+                                        if desired_entry.get("price") is not None
+                                        else None
+                                    ),
+                                    "robust_net_usdc": (
+                                        float(desired_entry.get("robust_net"))
+                                        if desired_entry.get("robust_net") is not None
+                                        else None
+                                    ),
+                                    "side_score": float(self.side_decision_score),
+                                    "time_left_sec": (
+                                        float(time_left_sec_global)
+                                        if time_left_sec_global is not None
+                                        else None
+                                    ),
+                                }
+                            )
+                            self._db_strategy_event("SMART_MONEY_OBSERVATION", smart_money_payload)
                     desired_entry = apply_weak_pfair_size_adjustment(
                         desired_entry=desired_entry,
                         side=side,

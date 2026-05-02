@@ -367,6 +367,12 @@ def handle_stop(strategy: Any) -> None:
         ],
         join_timeout_sec=2.0,
     )
+    smart_money_tracker = getattr(strategy, "smart_money_tracker", None)
+    if smart_money_tracker is not None:
+        try:
+            smart_money_tracker.stop()
+        except Exception:
+            pass
     logger.info("Integrated BTC strategy stopped")
     strategy._cancel_active_maker_orders()
     strategy.rebate_reporter.flush_daily_report()

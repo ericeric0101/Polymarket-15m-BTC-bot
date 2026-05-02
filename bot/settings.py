@@ -32,6 +32,7 @@ from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
+from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 
 
@@ -107,6 +108,29 @@ def initialize_strategy_settings(
             weak_pfair_lower=config.maker.weak_pfair_size_adjust_lower,
             weak_pfair_upper=config.maker.weak_pfair_size_adjust_upper,
         )
+    )
+    strategy.smart_money_config = SmartMoneyConfig(
+        enabled=config.maker.smart_money_enabled,
+        shadow_enabled=config.maker.smart_money_shadow_enabled,
+        poll_interval_sec=config.maker.smart_money_poll_interval_sec,
+        min_cash_filter=config.maker.smart_money_min_cash_filter,
+        recent_window_sec=config.maker.smart_money_recent_window_sec,
+        stale_after_sec=config.maker.smart_money_stale_after_sec,
+        fomo_cutoff_sec=config.maker.smart_money_fomo_cutoff_sec,
+        entry_threshold=config.maker.smart_money_entry_threshold,
+        min_directional_wallets=config.maker.smart_money_min_directional_wallets,
+        conflict_size_multiplier=config.maker.smart_money_conflict_size_multiplier,
+        skip_strong_conflict=config.maker.smart_money_skip_strong_conflict,
+        position_refresh_sec=config.maker.smart_money_position_refresh_sec,
+        hedge_ratio=config.maker.smart_money_hedge_ratio,
+        bot_size_cv_threshold=config.maker.smart_money_bot_size_cv_threshold,
+        min_wallet_trades=config.maker.smart_money_min_wallet_trades,
+        directional_min_cash=config.maker.smart_money_directional_min_cash,
+    )
+    strategy.smart_money_tracker = (
+        SmartMoneyTracker(strategy.smart_money_config)
+        if strategy.smart_money_config.enabled or strategy.smart_money_config.shadow_enabled
+        else None
     )
     raw_quote_mode = config.maker.quote_sides
     strategy.maker_quote_sides = config.maker.quote_sides

@@ -86,6 +86,22 @@ class MakerConfig:
     external_entry_confirmation_book_mid_threshold_ps: Decimal
     external_entry_confirmation_conflict_size_multiplier: Decimal
     external_entry_confirmation_skip_strong_conflict: bool
+    smart_money_enabled: bool
+    smart_money_shadow_enabled: bool
+    smart_money_min_cash_filter: float
+    smart_money_poll_interval_sec: float
+    smart_money_recent_window_sec: float
+    smart_money_stale_after_sec: float
+    smart_money_fomo_cutoff_sec: float
+    smart_money_entry_threshold: Decimal
+    smart_money_min_directional_wallets: int
+    smart_money_conflict_size_multiplier: Decimal
+    smart_money_skip_strong_conflict: bool
+    smart_money_position_refresh_sec: float
+    smart_money_hedge_ratio: float
+    smart_money_bot_size_cv_threshold: float
+    smart_money_min_wallet_trades: int
+    smart_money_directional_min_cash: float
     quote_sides: str
     directional_edge_gate_enabled: bool
     min_directional_edge_ps: Decimal
@@ -585,6 +601,37 @@ class AppConfig:
                 external_entry_confirmation_skip_strong_conflict=_env_bool(
                     "EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT",
                     False,
+                ),
+                smart_money_enabled=_env_bool("SMART_MONEY_ENABLED", False),
+                smart_money_shadow_enabled=_env_bool("SMART_MONEY_SHADOW_ENABLED", True),
+                smart_money_min_cash_filter=max(0.0, _env_float("SMART_MONEY_MIN_CASH_FILTER", 10.0)),
+                smart_money_poll_interval_sec=max(1.0, _env_float("SMART_MONEY_POLL_INTERVAL_SEC", 3.0)),
+                smart_money_recent_window_sec=max(15.0, _env_float("SMART_MONEY_RECENT_WINDOW_SEC", 180.0)),
+                smart_money_stale_after_sec=max(3.0, _env_float("SMART_MONEY_STALE_AFTER_SEC", 12.0)),
+                smart_money_fomo_cutoff_sec=max(0.0, _env_float("SMART_MONEY_FOMO_CUTOFF_SEC", 120.0)),
+                smart_money_entry_threshold=_env_decimal("SMART_MONEY_ENTRY_THRESHOLD", "0.62"),
+                smart_money_min_directional_wallets=max(
+                    1,
+                    _env_int("SMART_MONEY_MIN_DIRECTIONAL_WALLETS", 2),
+                ),
+                smart_money_conflict_size_multiplier=_env_decimal(
+                    "SMART_MONEY_CONFLICT_SIZE_MULTIPLIER",
+                    "0.5",
+                ),
+                smart_money_skip_strong_conflict=_env_bool("SMART_MONEY_SKIP_STRONG_CONFLICT", False),
+                smart_money_position_refresh_sec=max(
+                    5.0,
+                    _env_float("SMART_MONEY_POSITION_REFRESH_SEC", 30.0),
+                ),
+                smart_money_hedge_ratio=max(0.0, _env_float("SMART_MONEY_HEDGE_RATIO", 0.25)),
+                smart_money_bot_size_cv_threshold=max(
+                    0.0,
+                    _env_float("SMART_MONEY_BOT_SIZE_CV_THRESHOLD", 0.05),
+                ),
+                smart_money_min_wallet_trades=max(1, _env_int("SMART_MONEY_MIN_WALLET_TRADES", 3)),
+                smart_money_directional_min_cash=max(
+                    0.0,
+                    _env_float("SMART_MONEY_DIRECTIONAL_MIN_CASH", 20.0),
                 ),
                 quote_sides=normalize_quote_mode(quote_sides_raw),
                 directional_edge_gate_enabled=_env_bool("MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", False),

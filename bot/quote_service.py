@@ -73,6 +73,8 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "high_entry_price_size_adjustment": desired.get("high_entry_price_size_adjustment"),
         "external_entry_confirmation": desired.get("external_entry_confirmation"),
         "external_entry_confirmation_size_adjustment": desired.get("external_entry_confirmation_size_adjustment"),
+        "smart_money_confirmation": desired.get("smart_money_confirmation"),
+        "smart_money_size_adjustment": desired.get("smart_money_size_adjustment"),
         "entry_quality": desired.get("entry_quality"),
         "entry_quality_quote_price_cap": desired.get("entry_quality_quote_price_cap"),
         "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
