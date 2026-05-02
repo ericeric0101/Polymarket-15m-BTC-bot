@@ -126,6 +126,11 @@ def initialize_strategy_settings(
         bot_size_cv_threshold=config.maker.smart_money_bot_size_cv_threshold,
         min_wallet_trades=config.maker.smart_money_min_wallet_trades,
         directional_min_cash=config.maker.smart_money_directional_min_cash,
+        wallet_db_path=config.maker.smart_money_wallet_db_path,
+        wallet_label_cache_ttl_sec=config.maker.smart_money_wallet_label_cache_ttl_sec,
+        weight_smart=config.maker.smart_money_weight_smart,
+        weight_directional=config.maker.smart_money_weight_directional,
+        weight_unknown=config.maker.smart_money_weight_unknown,
     )
     strategy.smart_money_tracker = (
         SmartMoneyTracker(strategy.smart_money_config)

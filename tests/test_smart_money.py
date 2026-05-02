@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot.smart_money import (
     SmartMoneyConfig,
     SmartMoneyTracker,
+    WalletLabel,
     _TradeEvent,
     apply_smart_money_adjustment,
     extract_condition_id_from_instrument_id,
@@ -125,3 +126,34 @@ def test_hedger_wallet_is_excluded_from_flow():
 
     assert signal.direction == "DOWN"
     assert signal.features["label_counts"]["HEDGER"] == 1
+
+
+def test_offline_smart_label_gets_higher_weight():
+    tracker = SmartMoneyTracker(
+        SmartMoneyConfig(
+            entry_threshold=Decimal("0.60"),
+            min_directional_wallets=1,
+            directional_min_cash=10,
+            min_wallet_trades=3,
+            shadow_enabled=True,
+            weight_smart=2.0,
+            weight_unknown=0.25,
+        )
+    )
+    tracker._load_offline_labels = lambda wallets: {  # type: ignore[method-assign]
+        "0xsmart": WalletLabel(label="SMART", confidence=0.9, updated_at=1)
+    }
+
+    signal = tracker._compute_signal(
+        recent=[
+            _trade("0xsmart", "UP", 20),
+            _trade("0xunknown", "DOWN", 60),
+        ],
+        hedgers=set(),
+        active_side="UP",
+        cache_age_sec=1.0,
+        last_error="",
+    )
+
+    assert signal.direction == "UP"
+    assert signal.features["label_counts"]["SMART"] == 1

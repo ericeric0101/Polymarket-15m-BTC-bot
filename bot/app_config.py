@@ -102,6 +102,11 @@ class MakerConfig:
     smart_money_bot_size_cv_threshold: float
     smart_money_min_wallet_trades: int
     smart_money_directional_min_cash: float
+    smart_money_wallet_db_path: str
+    smart_money_wallet_label_cache_ttl_sec: float
+    smart_money_weight_smart: float
+    smart_money_weight_directional: float
+    smart_money_weight_unknown: float
     quote_sides: str
     directional_edge_gate_enabled: bool
     min_directional_edge_ps: Decimal
@@ -633,6 +638,20 @@ class AppConfig:
                     0.0,
                     _env_float("SMART_MONEY_DIRECTIONAL_MIN_CASH", 20.0),
                 ),
+                smart_money_wallet_db_path=_env_str(
+                    "SMART_MONEY_WALLET_DB_PATH",
+                    "./logs/smart_money_wallets.db",
+                ),
+                smart_money_wallet_label_cache_ttl_sec=max(
+                    1.0,
+                    _env_float("SMART_MONEY_WALLET_LABEL_CACHE_TTL_SEC", 60.0),
+                ),
+                smart_money_weight_smart=max(0.0, _env_float("SMART_MONEY_WEIGHT_SMART", 2.0)),
+                smart_money_weight_directional=max(
+                    0.0,
+                    _env_float("SMART_MONEY_WEIGHT_DIRECTIONAL", 1.0),
+                ),
+                smart_money_weight_unknown=max(0.0, _env_float("SMART_MONEY_WEIGHT_UNKNOWN", 0.25)),
                 quote_sides=normalize_quote_mode(quote_sides_raw),
                 directional_edge_gate_enabled=_env_bool("MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", False),
                 min_directional_edge_ps=_env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"),

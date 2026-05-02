@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -65,6 +67,11 @@ class SmartMoneyConfig:
     bot_size_cv_threshold: float = 0.05
     min_wallet_trades: int = 3
     directional_min_cash: float = 20.0
+    wallet_db_path: str = "./logs/smart_money_wallets.db"
+    wallet_label_cache_ttl_sec: float = 60.0
+    weight_smart: float = 2.0
+    weight_directional: float = 1.0
+    weight_unknown: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,54 @@ class _MarketCache:
     last_error: str = ""
 
 
+@dataclass(frozen=True)
+class WalletLabel:
+    label: str
+    confidence: float
+    updated_at: int
+
+
+class WalletLabelStore:
+    def __init__(self, db_path: str) -> None:
+        self.db_path = str(db_path or "")
+
+    def load_labels(self, wallets: set[str]) -> dict[str, WalletLabel]:
+        if not self.db_path or not wallets:
+            return {}
+        path = Path(self.db_path)
+        if not path.exists():
+            return {}
+        wallet_list = sorted({str(wallet or "").lower() for wallet in wallets if wallet})
+        if not wallet_list:
+            return {}
+        out: dict[str, WalletLabel] = {}
+        try:
+            with sqlite3.connect(str(path), timeout=2) as conn:
+                conn.row_factory = sqlite3.Row
+                for i in range(0, len(wallet_list), 250):
+                    chunk = wallet_list[i : i + 250]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = conn.execute(
+                        f"""
+                        SELECT proxy_wallet, label, confidence, updated_at
+                        FROM smart_money_wallets
+                        WHERE proxy_wallet IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                    for row in rows:
+                        wallet = str(row["proxy_wallet"] or "").lower()
+                        label = str(row["label"] or "UNKNOWN").upper()
+                        out[wallet] = WalletLabel(
+                            label=label,
+                            confidence=_as_float(row["confidence"], 0.0),
+                            updated_at=int(_as_float(row["updated_at"], 0.0)),
+                        )
+        except Exception as exc:
+            logger.debug(f"Smart money wallet label load failed: {exc}")
+        return out
+
+
 class SmartMoneyTracker:
     """
     Background Data API poller for market-level directional flow.
@@ -133,6 +188,8 @@ class SmartMoneyTracker:
         self._active_condition_id = ""
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._wallet_store = WalletLabelStore(config.wallet_db_path)
+        self._wallet_label_cache: dict[str, tuple[WalletLabel | None, float]] = {}
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -280,6 +337,7 @@ class SmartMoneyTracker:
         for trade in recent:
             if trade.proxy_wallet:
                 wallet_events[trade.proxy_wallet].append(trade)
+        offline_labels = self._load_offline_labels(set(wallet_events.keys()))
 
         weighted_cash = defaultdict(float)
         directional_wallets = Counter()
@@ -287,18 +345,23 @@ class SmartMoneyTracker:
         raw_cash = defaultdict(float)
 
         for wallet, events in wallet_events.items():
-            label = self._classify_wallet(wallet=wallet, events=events, hedgers=hedgers)
+            label = self._classify_wallet(
+                wallet=wallet,
+                events=events,
+                hedgers=hedgers,
+                offline_label=offline_labels.get(wallet),
+            )
             label_counts[label] += 1
-            if label in {"HEDGER", "BOT_LIKE"}:
+            if label in {"HEDGER", "BOT_LIKE", "NOISE"}:
                 continue
-            weight = 1.0 if label == "DIRECTIONAL" else 0.25
+            weight = self._label_weight(label)
             by_direction = defaultdict(float)
             for event in events:
                 by_direction[event.direction] += event.usdc_size
             for direction, cash in by_direction.items():
                 raw_cash[direction] += cash
                 weighted_cash[direction] += cash * weight
-            if label == "DIRECTIONAL":
+            if label in {"SMART", "DIRECTIONAL"}:
                 for direction, cash in by_direction.items():
                     if cash >= self.config.directional_min_cash:
                         directional_wallets[direction] += 1
@@ -311,6 +374,7 @@ class SmartMoneyTracker:
             "wallet_count": len(wallet_events),
             "hedger_wallet_count": len(hedgers),
             "label_counts": dict(label_counts),
+            "offline_label_count": sum(1 for label in offline_labels.values() if label is not None),
             "raw_cash_up": raw_cash["UP"],
             "raw_cash_down": raw_cash["DOWN"],
             "weighted_cash_up": weighted_cash["UP"],
@@ -361,9 +425,14 @@ class SmartMoneyTracker:
         wallet: str,
         events: list[_TradeEvent],
         hedgers: set[str],
+        offline_label: WalletLabel | None = None,
     ) -> str:
         if wallet in hedgers:
             return "HEDGER"
+        if offline_label is not None:
+            label = str(offline_label.label or "UNKNOWN").upper()
+            if label in {"SMART", "DIRECTIONAL", "HEDGER", "BOT_LIKE", "NOISE"}:
+                return label
         if len(events) < self.config.min_wallet_trades:
             return "UNKNOWN"
         sizes = [event.usdc_size for event in events if event.usdc_size > 0]
@@ -379,6 +448,37 @@ class SmartMoneyTracker:
         if len(directions) == 1 and total_cash >= self.config.directional_min_cash:
             return "DIRECTIONAL"
         return "UNKNOWN"
+
+    def _label_weight(self, label: str) -> float:
+        label = str(label or "UNKNOWN").upper()
+        if label == "SMART":
+            return max(0.0, float(self.config.weight_smart))
+        if label == "DIRECTIONAL":
+            return max(0.0, float(self.config.weight_directional))
+        if label in {"HEDGER", "BOT_LIKE", "NOISE"}:
+            return 0.0
+        return max(0.0, float(self.config.weight_unknown))
+
+    def _load_offline_labels(self, wallets: set[str]) -> dict[str, WalletLabel | None]:
+        now = time.time()
+        ttl = max(1.0, float(self.config.wallet_label_cache_ttl_sec))
+        needed: set[str] = set()
+        labels: dict[str, WalletLabel | None] = {}
+        with self._lock:
+            for wallet in wallets:
+                cached = self._wallet_label_cache.get(wallet)
+                if cached is None or (now - cached[1]) > ttl:
+                    needed.add(wallet)
+                else:
+                    labels[wallet] = cached[0]
+        loaded = self._wallet_store.load_labels(needed)
+        if needed:
+            with self._lock:
+                for wallet in needed:
+                    label = loaded.get(wallet)
+                    self._wallet_label_cache[wallet] = (label, now)
+                    labels[wallet] = label
+        return labels
 
     def _run(self) -> None:
         base_url = self.config.data_api_base_url.rstrip("/")
