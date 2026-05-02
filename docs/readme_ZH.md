@@ -1,543 +1,650 @@
-# Polymarket BTC 15 分鐘交易機器人（繁體中文）
+# Polymarket BTC 15 分鐘交易 Bot V2 操作手冊
 
-[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
-[![NautilusTrader](https://img.shields.io/badge/nautilus-1.222.0-green.svg)](https://nautilustrader.io/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Polymarket](https://img.shields.io/badge/Polymarket-CLOB-purple)](https://polymarket.com)
-[![Redis](https://img.shields.io/badge/Redis-powered-red.svg)](https://redis.io/)
-[![Rich](https://img.shields.io/badge/terminal-dashboard-green)](https://github.com/Textualize/rich)
+這份文件描述目前 repo 內的 **V2 版 BTC 15m Polymarket bot**。它不是早期 README 裡的 7-phase demo，也不是只做 UP 的舊版策略。現行主路徑是：
 
-此專案是一個面向 **Polymarket BTC 15 分鐘 up/down 市場** 的實盤 / 模擬交易機器人。  
-目前主路徑以 **maker-first** 掛單、**雙邊 side 決策（bi-side）**、**SQLite 交易日誌**、以及 **Rich terminal dashboard** 為核心。
+- `run_bot.py` 啟動 Nautilus live node
+- `bot/` 負責市場生命週期、bi-side 方向決策、maker quote、風控與資料庫事件
+- `execution/` 負責 Polymarket CLOB/V2 order path、fee/risk helper
+- `monitoring/trade_journal_db.py` 寫入 SQLite journal
+- `scripts/` 提供 preflight、allowance、dashboard、報表、probe、smart money builder
 
-這份文件以目前程式實作為準，已移除過時的 Grafana/Prometheus 操作說明。
+預設建議先 simulation / shadow-only 觀察，再逐步切 live。
 
 ---
 
 ## 目錄
-- [功能特色](#功能特色)
-- [系統概觀](#系統概觀)
-- [先決條件](#先決條件)
-- [快速開始](#快速開始)
-- [重要環境變數](#重要環境變數)
-- [執行方式](#執行方式)
-- [Terminal Dashboard](#terminal-dashboard)
-- [交易資料庫與分析工具](#交易資料庫與分析工具)
-- [實盤注意事項](#實盤注意事項)
-- [專案結構](#專案結構)
+
+- [目前架構](#目前架構)
+- [安裝與環境](#安裝與環境)
+- [啟動流程](#啟動流程)
+- [核心環境變數](#核心環境變數)
+- [策略行為](#策略行為)
+- [Smart Money Tracking](#smart-money-tracking)
+- [資料庫與報表](#資料庫與報表)
+- [監控方式](#監控方式)
+- [維運指令](#維運指令)
 - [測試與檢查](#測試與檢查)
-- [常見問題](#常見問題)
-- [免責聲明](#免責聲明)
+- [專案結構](#專案結構)
+- [風險提醒](#風險提醒)
 
 ---
 
-## 功能特色
-
-| 類別 | 說明 |
-|---|---|
-| 市場切換 | 自動探索並切換最新 BTC 15m 市場 |
-| 雙邊決策 | `UP / DOWN / NONE`，含 observation window 與單次 flip 限制 |
-| Maker 主導 | 以 maker buy / maker sell 為主，盡量避免高費用 taker 出場 |
-| 執行經濟模型 | 掛單前會先估算 `expected_net / robust_net / exec_penalty` |
-| 交易日誌 | 所有關鍵事件寫入 `logs/trade_journal.db` |
-| 監控 | 提供獨立 Rich terminal dashboard，可在新 terminal 觀察執行狀態 |
-| 對帳工具 | 內建 DB 摘要、PnL 對帳、edge attribution 等腳本 |
-| 安全保護 | preflight、Redis mode guard、allowance/balance 檢查、reduce-only、settlement 記錄 |
-
----
-
-## 系統概觀
+## 目前架構
 
 ```mermaid
 flowchart LR
-    A["Gamma / Polymarket 市場資料"] --> B["run_bot.py"]
-    C["Binance / Coinbase 現貨參考"] --> B
-    D["Redis 模式控制"] --> B
-    B --> E["Nautilus 策略執行"]
-    E --> F["Polymarket CLOB 下單"]
-    E --> G["SQLite 交易日誌"]
-    G --> H["scripts/live_dashboard.py"]
-    G --> I["scripts/trade_db_report.py / pnl_reconcile_report.py"]
+    A["Gamma market discovery"] --> B["run_bot.py / TradingNode"]
+    C["Polymarket CLOB orderbook"] --> B
+    D["Binance / Coinbase / Chainlink spot"] --> B
+    E["Smart money Data API tracker"] --> B
+    B --> F["Bi-side decision: UP / DOWN / NONE"]
+    F --> G["Maker quote + risk gates"]
+    G --> H["Polymarket CLOB V2 orders"]
+    B --> I["logs/trade_journal.db"]
+    J["offline smart wallet builder"] --> K["logs/smart_money_wallets.db"]
+    K --> E
+    I --> L["reports / live_dashboard"]
 ```
 
-重點：
+現行 bot 的主要特徵：
 
-- 真正的交易邏輯在 [run_bot.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py)
-- 所有關鍵事件會寫進 [logs/trade_journal.db](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/logs/trade_journal.db)
-- 監控建議用獨立 viewer：
-  - [scripts/live_dashboard.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/live_dashboard.py)
+- 自動探索當前與下一個 BTC 15m market
+- 方向決策支援 `UP / DOWN / NONE`
+- 以 maker-first 為主，只有在特定 exit path 才考慮 taker
+- 下單前會經過 edge、inventory、balance、orderbook、momentum、entry confirmation 等 gate
+- 所有關鍵事件寫入 SQLite，方便回測和歸因
+- Smart money 預設 shadow-only，可同時跑離線 wallet 名單與 live tracker
 
 ---
 
-## 先決條件
+## 安裝與環境
 
-- Python 3.14+
-- Redis
-- Polymarket API 憑證或 `POLYMARKET_PK`
-- 可用的 Polygon / Polymarket 帳戶與 USDC.e
-
----
-
-## 快速開始
-
-### 1. 下載專案
+建議使用 repo 內的 `.venv`。若尚未建立：
 
 ```bash
-git clone <your-repo-url>
-cd Polymarket-BTC-15-Minute-Trading-Bot-main
-```
-
-### 2. 建立虛擬環境
-
-```bash
-python -m venv venv
-source venv/bin/activate
-```
-
-### 3. 安裝依賴
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. 建立 `.env`
-
-```bash
+cd /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main
+python -m venv .venv
+./.venv/bin/pip install -r requirements.txt
 cp .env.example .env
 ```
 
-### 5. 啟動 Redis
+Redis 建議本機啟動：
 
 ```bash
-# macOS
-brew install redis
-redis-server
-
-# Linux
-sudo apt install redis-server
 redis-server
 ```
 
-### 6. 先跑 preflight
+V2 live 需要：
 
-```bash
-python run_bot.py --preflight-only
-```
+- `POLYMARKET_PK`
+- Polymarket CLOB L2 API creds，或允許程式用 private key derive/create
+- Polygon chain id `137`
+- 正確的 funder / wallet
+- pUSD / allowance 狀態可用
+- 少量 MATIC 作 gas
 
 ---
 
-## 重要環境變數
+## 啟動流程
 
-以下是目前最重要、最常需要調的群組。完整可參考 [`.env.example`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/.env.example)。
+### 1. Preflight
 
-### 1. Polymarket 憑證
+```bash
+./.venv/bin/python run_bot.py --preflight-only
+```
+
+preflight 會檢查：
+
+- Polymarket auth
+- BTC 15m market discovery
+- instrument ids
+- Redis 是否可用
+- simulation/live mode 目標
+
+### 2. Simulation
+
+```bash
+./.venv/bin/python run_bot.py
+```
+
+沒有 `--live` 時預設是 simulation。
+
+### 3. Live
+
+```bash
+./.venv/bin/python run_bot.py --live
+```
+
+live mode 會要求輸入 `yes` 才繼續。這會使用真實資金。
+
+### 4. Test mode
+
+```bash
+./.venv/bin/python run_bot.py --test-mode
+```
+
+用於加速測試，不建議直接當正式 live 參數。
+
+### 5. 內嵌 terminal dashboard
+
+```bash
+./.venv/bin/python run_bot.py --live --terminal-dashboard
+```
+
+此模式會把背景 log 導到：
+
+```text
+logs/bot/terminal_bot.log
+```
+
+通常更建議用獨立 dashboard viewer，見 [監控方式](#監控方式)。
+
+---
+
+## 核心環境變數
+
+完整設定以 [.env.example](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/.env.example) 為準。
+
+### Polymarket / V2
 
 ```env
 POLYMARKET_PK=
-POLYMARKET_API_KEY=
-POLYMARKET_API_SECRET=
-POLYMARKET_PASSPHRASE=
-POLYMARKET_FUNDER=
 POLYMARKET_WALLET_ADDRESS=
+POLYMARKET_FUNDER=
 POLYMARKET_SIGNATURE_TYPE=0
 POLYMARKET_CHAIN_ID=137
+POLYMARKET_CLOB_BASE_URL=https://clob.polymarket.com
+POLYMARKET_GAMMA_API=https://gamma-api.polymarket.com
+POLYMARKET_CTF_COLLATERAL_TOKEN=PUSD
+POLY_BUILDER_CODE=
 ```
 
-說明：
+若 `POLYMARKET_API_KEY / POLYMARKET_API_SECRET / POLYMARKET_PASSPHRASE` 沒有設定，程式會嘗試由 `POLYMARKET_PK` derive/create L2 creds。
 
-- 若未提供 API creds，程式可嘗試用 `POLYMARKET_PK` 自動 derive
-- `POLYMARKET_PK` 對應的錢包就是實盤資金來源
-
-### 2. Redis
-
-```env
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_DB=2
-REDIS_USERNAME=
-REDIS_PASSWORD=
-```
-
-### 3. DB / 監控
+### DB / runtime
 
 ```env
 TRADE_DB_ENABLED=1
 TRADE_DB_PATH=./logs/trade_journal.db
-TERMINAL_DASHBOARD=0
-TERMINAL_DASHBOARD_REFRESH_SEC=1
+NAUTILUS_COMPAT_PATCH_MODE=runtime
+AUTO_APPLY_NAUTILUS_PATCH=1
+AUTO_NODE_ROLLOVER_ENABLED=1
+AUTO_NODE_ROLLOVER_SEC=3600
 ```
 
-說明：
+`TRADE_DB_ENABLED=1` 建議保持開啟，報表、dashboard、settlement attribution 都依賴它。
 
-- `TRADE_DB_ENABLED=1` 建議保持開啟
-- 獨立 viewer [scripts/live_dashboard.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/live_dashboard.py) 會讀這個 DB
-- `TERMINAL_DASHBOARD` 是嵌入 `run_bot.py` 的內嵌版 terminal dashboard，平常不必開
-
-### 4. Bi-side 決策
-
-```env
-BI_SIDE_ENABLED=1
-BI_SIDE_DECISION_GRACE_SEC=45
-BI_SIDE_ALLOW_INTRAMARKET_FLIP=1
-BI_SIDE_FLIP_CONFIRMATIONS=2
-BI_SIDE_FLIP_MAX_PER_MARKET=1
-BI_SIDE_FLIP_MIN_SCORE_UP=2
-BI_SIDE_FLIP_MAX_SCORE_DOWN=-2
-BI_SIDE_FLIP_MIN_FAIR=0.60
-```
-
-說明：
-
-- observation window 期間只觀察，不立即鎖邊
-- flip 已收緊，不會再因弱訊號隨便翻向
-
-### 5. Maker / 風控
+### Maker sizing
 
 ```env
 MAKER_MODE=1
-MAKER_FIXED_SHARES=6
-MAKER_MIN_SHARES=6
-MAKER_MAX_ORDER_USDC=6.0
-MAKER_QUOTE_SIZE_USDC=6.0
-MAKER_MIN_EXPECTED_NET_USDC=0.0005
-MAKER_ADVERSE_SELECTION_BUFFER=0.001
-MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT=0.15
-MAKER_EXECUTION_NON_ATOMIC_VOL_MULT=0.08
-MAKER_EXECUTION_VWAP_MULT=0.2
-MAKER_MIN_MINUTES_TO_CLOSE=1.0
+MAKER_QUOTE_REFRESH_SEC=3
+MAKER_QUOTE_SIZE_USDC=1.0
+MAKER_FIXED_SHARES=10.8
+MAKER_MAX_ORDER_USDC=12.0
+MAKER_MAX_INVENTORY_SHARES=12
+MAX_LOCKED_SIDE_POSITION=12
+INVENTORY_FULL_BEHAVIOR=STOP_BUY
+MAKER_MIN_EXPECTED_NET_USDC=0.002
 ```
 
-### 6. Taker 出場
+### Bi-side direction
 
 ```env
-TAKER_EXIT_MIN_NET_USDC=0.03
-TAKER_EXIT_STOP_LOSS_USDC=0.25
+BI_SIDE_ENABLED=1
+BI_SIDE_DEFAULT_MODE=NONE
+BI_SIDE_DECISION_MODE=boundary_only
+BI_SIDE_DECISION_GRACE_SEC=60
+BI_SIDE_LOCK_UNTIL_REDUCE_ONLY=1
+BI_SIDE_ALLOW_INTRAMARKET_FLIP=1
+BI_SIDE_FLIP_CONFIRMATIONS=2
+BI_SIDE_MIN_TIME_LEFT_SEC=180
 ```
 
-注意：
+### Entry / edge gates
 
-- `TAKER_EXIT_MIN_NET_USDC` 是 fee-adjusted take-profit 門檻
-- `TAKER_EXIT_STOP_LOSS_USDC` 是 fee-adjusted stop-loss 門檻
-- 程式已修正為：**只有價格真的朝不利方向走時，才允許走 stop-loss**
+```env
+DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW=0.20
+ENTRY_FAIR_EDGE_MIN_PS=0.00
+MAKER_DIRECTIONAL_EDGE_GATE_ENABLED=1
+MAKER_MIN_DIRECTIONAL_EDGE_PS=0.01
+MAKER_MIN_DIRECTIONAL_EDGE_PS_DOWN=0.01
+MAKER_MIN_MINUTES_TO_CLOSE=3.0
+MAKER_MIN_FAIR_PRICE=0.20
+MAKER_MAX_FAIR_PRICE=0.90
+```
+
+### Hold-to-redeem / tail protection
+
+```env
+HOLD_TO_REDEEM=1
+TAIL_PROTECT_TP_ENABLED=1
+TAIL_PROTECT_TP_PRICE=0.97
+TAIL_PROTECT_TP_FRACTION=1.00
+TAIL_PROTECT_TP_MIN_ENTRY_PRICE=0.55
+```
 
 ---
 
-## 執行方式
+## 策略行為
 
-### 啟動前安全檢查
+### 市場生命週期
 
-```bash
-python run_bot.py --preflight-only
-```
+- `WAITING`：等待可交易 BTC 15m market
+- `ACTIVE`：正常評估方向與 maker quote
+- `REDUCE_ONLY`：接近結算，不再開新 BUY，優先處理庫存
+- `SETTLING`：取消掛單、紀錄 settlement、等待 rollover
 
-### 一般模式
+### 方向決策
 
-```bash
-python run_bot.py
-```
+現行 bot 不是固定只做 UP。bi-side 開啟後會根據 spot、strike、orderbook、fair price、momentum 等資訊決定：
 
-### 測試模式
+- `UP`
+- `DOWN`
+- `NONE`
 
-```bash
-python run_bot.py --test-mode
-```
+`NONE` 代表訊號不足，buy path 會被擋住。
 
-### 實盤模式
+### 入場
 
-```bash
-python run_bot.py --live
-```
+入場不是單一 if 判斷，而是一串 gate：
 
-### 實盤 + 內嵌 terminal dashboard
+- side 是否已鎖定
+- market phase 是否允許 buy
+- fair price / directional edge 是否合理
+- robust net 是否足夠
+- orderbook 是否可用
+- inventory cap 是否會超過
+- momentum / shadow signal / entry confirmation 是否衝突
+- smart money shadow/live signal 是否衝突
 
-```bash
-python run_bot.py --live --terminal-dashboard # （或者在 .env 加上 TERMINAL_DASHBOARD=1）
-```
+### 出場
 
-說明：
+出場優先順序大致是：
 
-- `--terminal-dashboard` 是**內嵌版**，跟 bot 在同個 process 裡執行。
-- **全新防破圖機制**：為避免背景 Log 印在畫面上干擾 Dashboard 版面，當此模式啟用時，程式會將背景 Log 自動攔截並改道輸出至 `logs/bot/terminal_bot.log`。
-- 若你想同時監看原始日誌，可以在另一個 terminal 執行：`tail -f logs/bot/terminal_bot.log`
-
-### 舊版監控輸出
-
-```bash
-python run_bot.py --no-grafana
-```
-
-說明：
-
-- 程式仍保留 `--no-grafana` 參數，主要是為了相容現有執行方式
-- 目前不再建議依賴 Grafana 作為主要監控介面
+1. maker sell 正常減倉
+2. forced exit / adverse exit
+3. tail protect TP
+4. hold-to-redeem
+5. last-resort / true-last-resort
 
 ---
 
-## Terminal Dashboard
+## Smart Money Tracking
 
-目前建議的監控方式是**獨立 Rich viewer**，不需要重啟已經在跑的 bot。
+目前 smart money 分成兩層：
 
-### 啟動方式
+1. **Live tracker**
+   - 隨 bot 一起跑
+   - 追蹤當前 market 的即時大額 flow
+   - 寫 `SMART_MONEY_OBSERVATION`
+   - 預設 shadow-only，不改下單
 
-在另一個 terminal 執行：
+2. **Offline wallet builder**
+   - 手動或定期執行
+   - 掃 BTC 15m market 的 `/trades` 與 `/v1/market-positions`
+   - 建立 `logs/smart_money_wallets.db`
+   - live tracker 讀這份 DB 來加權 wallet label
 
-```bash
-python scripts/live_dashboard.py
+### Live tracker 設定
+
+建議先 shadow-only：
+
+```env
+SMART_MONEY_ENABLED=0
+SMART_MONEY_SHADOW_ENABLED=1
+SMART_MONEY_MIN_CASH_FILTER=10
+SMART_MONEY_POLL_INTERVAL_SEC=3
+SMART_MONEY_RECENT_WINDOW_SEC=180
+SMART_MONEY_STALE_AFTER_SEC=12
+SMART_MONEY_FOMO_CUTOFF_SEC=120
+SMART_MONEY_ENTRY_THRESHOLD=0.62
+SMART_MONEY_MIN_DIRECTIONAL_WALLETS=2
+SMART_MONEY_CONFLICT_SIZE_MULTIPLIER=0.5
+SMART_MONEY_SKIP_STRONG_CONFLICT=0
+SMART_MONEY_WALLET_DB_PATH=./logs/smart_money_wallets.db
+SMART_MONEY_WALLET_LABEL_CACHE_TTL_SEC=60
+SMART_MONEY_WEIGHT_SMART=2.0
+SMART_MONEY_WEIGHT_DIRECTIONAL=1.0
+SMART_MONEY_WEIGHT_UNKNOWN=0.25
 ```
 
-可選參數：
+shadow-only 狀態下，bot 只會寫觀察事件，不會改 `should_quote` 或 size。
 
-```bash
-python scripts/live_dashboard.py --refresh-sec 2
-python scripts/live_dashboard.py --db-path logs/trade_journal.db
+啟用 live 影響下單：
+
+```env
+SMART_MONEY_ENABLED=1
+SMART_MONEY_SKIP_STRONG_CONFLICT=0
 ```
 
-### 顯示內容
+建議第一階段只允許 conflict 時 `reduce_size`，不要直接 skip。等報表證明 conflict 有預測力後，再考慮：
 
-- 最近一次 `STRATEGY_START` 之後的統計
-- 當前 `phase / slug / active side`
-- wallet `USDC.e`
-- `fills / maker / taker / taker exit`
-- 累計手續費
-- cycle 數量、cycle 勝率、cycle PnL
-- 最近一筆 fill
-- 最近一個結束 market 的 cycle PnL
+```env
+SMART_MONEY_SKIP_STRONG_CONFLICT=1
+```
 
-### 什麼情況該用獨立 viewer
+### Live tracker 如何運作
 
-如果你已經有一個 `run_bot.py` 在跑，不想重啟，只想在新 terminal 監看：
+背景 thread 每約 3 秒抓：
 
-- 用 [scripts/live_dashboard.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/live_dashboard.py)
-- **不要再開第二個 `run_bot.py`**
+```text
+GET https://data-api.polymarket.com/trades
+  ?market=<condition_id>
+  &side=BUY
+  &takerOnly=false
+  &filterType=CASH
+  &filterAmount=<SMART_MONEY_MIN_CASH_FILTER>
+```
+
+每約 30 秒抓：
+
+```text
+GET https://data-api.polymarket.com/v1/market-positions
+  ?market=<condition_id>
+  &status=OPEN
+  &sortBy=TOTAL_PNL
+```
+
+它不會在 quote loop 裡逐 wallet 查歷史。下單路徑只讀記憶體 cache 和 `smart_money_wallets.db` label cache，因此對 bot 延遲影響很小。
+
+### 查看 live observation
+
+```bash
+sqlite3 logs/trade_journal.db "
+select ts,
+       json_extract(payload_json,'$.slug') as slug,
+       json_extract(payload_json,'$.state') as state,
+       json_extract(payload_json,'$.direction') as direction,
+       json_extract(payload_json,'$.score') as score,
+       json_extract(payload_json,'$.weighted_cash_up') as up_cash,
+       json_extract(payload_json,'$.weighted_cash_down') as down_cash,
+       json_extract(payload_json,'$.label_counts') as labels
+from strategy_events
+where event_type='SMART_MONEY_OBSERVATION'
+order by id desc
+limit 20;
+"
+```
+
+### Offline builder 用法
+
+建立或更新 wallet 名單：
+
+```bash
+./.venv/bin/python scripts/build_smart_money_wallets.py \
+  --lookback-intervals 96 \
+  --print-top 20
+```
+
+常用參數：
+
+```bash
+./.venv/bin/python scripts/build_smart_money_wallets.py --help
+```
+
+重點參數：
+
+- `--db`：輸出 DB，預設 `./logs/smart_money_wallets.db`
+- `--lookback-intervals`：往回掃幾個 15m interval，`96` 約一天
+- `--min-cash`：只看大於此 USDC notional 的 trades
+- `--min-markets`：標成 `SMART` 至少需要跨幾個 markets
+- `--min-total-cash`：wallet 累計 buy cash 門檻
+- `--hedge-ratio`：雙邊 exposure 比例達標就標為 `HEDGER`
+- `--dry-run`：只印結果，不寫 DB
+
+先 dry-run：
+
+```bash
+./.venv/bin/python scripts/build_smart_money_wallets.py \
+  --dry-run \
+  --lookback-intervals 12 \
+  --print-top 10
+```
+
+實際寫入：
+
+```bash
+./.venv/bin/python scripts/build_smart_money_wallets.py \
+  --lookback-intervals 96 \
+  --print-top 20
+```
+
+### smart_money_wallets.db schema
+
+DB 檔案：
+
+```text
+logs/smart_money_wallets.db
+```
+
+主要表：
+
+```text
+smart_money_wallets
+```
+
+重要欄位：
+
+- `proxy_wallet`
+- `label`
+- `confidence`
+- `total_trades`
+- `buy_trades`
+- `sell_trades`
+- `markets_seen`
+- `directional_hits`
+- `mixed_hits`
+- `hedger_hits`
+- `total_buy_cash`
+- `up_buy_cash`
+- `down_buy_cash`
+- `avg_trade_cash`
+- `size_cv`
+- `position_total_pnl`
+- `last_seen_ts`
+- `updated_at`
+- `payload_json`
+
+目前 label 定義：
+
+- `SMART`：跨多個 markets、有足夠 buy cash、方向一致性高
+- `DIRECTIONAL`：單 market 或樣本較少，但方向性明顯
+- `HEDGER`：同 market 雙邊 exposure 明顯
+- `BOT_LIKE`：交易 size 過度固定
+- `UNKNOWN`：樣本不足或分類不明
+
+查看 label 分佈：
+
+```bash
+sqlite3 logs/smart_money_wallets.db "
+select label, count(*)
+from smart_money_wallets
+group by label
+order by count(*) desc;
+"
+```
+
+查看 top wallets：
+
+```bash
+sqlite3 logs/smart_money_wallets.db "
+select label,
+       printf('%.3f', confidence) as confidence,
+       proxy_wallet,
+       printf('%.2f', total_buy_cash) as total_buy_cash,
+       markets_seen
+from smart_money_wallets
+order by label='SMART' desc, confidence desc, total_buy_cash desc
+limit 20;
+"
+```
+
+### 建議測試方式
+
+1. 先跑 offline builder 建 DB
+2. `.env` 保持 `SMART_MONEY_ENABLED=0`
+3. 啟動 bot，讓它寫 `SMART_MONEY_OBSERVATION`
+4. 跑 1-3 天後，用 observation 對照實際 PnL
+5. 若 conflict 對虧損有預測力，再開 `SMART_MONEY_ENABLED=1`
 
 ---
 
-## 交易資料庫與分析工具
+## 資料庫與報表
 
-Bot 會把關鍵事件寫入：
+主交易 journal：
 
-- [logs/trade_journal.db](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/logs/trade_journal.db)
+```text
+logs/trade_journal.db
+```
 
-重要表：
+主要表：
 
 - `strategy_runs`
 - `strategy_events`
 - `order_events`
 
-### 查看 DB 摘要
+查看摘要：
 
 ```bash
-venv/bin/python scripts/trade_db_report.py
+./.venv/bin/python scripts/trade_db_report.py
 ```
 
-### 查看 PnL 對帳
+PnL 對帳：
 
 ```bash
-# 最近 6 小時
-venv/bin/python scripts/pnl_reconcile_report.py --hours 6
-
-# 指定 run_id
-venv/bin/python scripts/pnl_reconcile_report.py --run-id <RUN_ID> --hours 24
-
-# 全期間
-venv/bin/python scripts/pnl_reconcile_report.py --hours 0
+./.venv/bin/python scripts/pnl_reconcile_report.py --hours 6
+./.venv/bin/python scripts/pnl_reconcile_report.py --hours 24
+./.venv/bin/python scripts/pnl_reconcile_report.py --hours 0
 ```
 
-### 其他分析腳本
+Edge attribution：
 
 ```bash
-venv/bin/python scripts/realized_edge_report.py
-venv/bin/python scripts/hourly_attribution_report.py
-venv/bin/python scripts/mirrored_down_report.py
+./.venv/bin/python scripts/realized_edge_report.py --hours 24
+./.venv/bin/python scripts/hourly_attribution_report.py --hours 24
+./.venv/bin/python scripts/recent_buy_fill_report.py --hours 24
 ```
 
-### Pure Signal Probe（只觀測、不下單）
-
-若你想驗證「`spot / priceToBeat / time_left / orderbook` 是否真的存在可交易錯價」，可以使用：
-
-- [scripts/pure_signal_probe.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/pure_signal_probe.py)
-
-這支腳本不會下單，只會：
-
-- 找目前 BTC 15 分鐘市場
-- 取得 strike（優先讀 `priceToBeat`，失敗時會 fallback 到 question parsing / 開盤 spot history / Binance REST 開盤價回填）
-- 抓 BTC spot
-- 透過 Nautilus Polymarket data client 訂閱 quote ticks，使用和 `run_bot.py` 同源的 bid/ask
-- 估算短期波動率
-- 計算 `fair_up / fair_down`
-- 讀取 `UP / DOWN` orderbook 最佳價
-- 計算理論 edge
-- 寫入 SQLite DB，供之後和真實成交資料比對
-
-常用指令：
+Shadow / probe report：
 
 ```bash
-./venv/bin/python scripts/pure_signal_probe.py --duration-sec 1800 --interval-sec 2
-```
-
-意思：
-
-- `--duration-sec 1800`：執行 1800 秒，也就是 30 分鐘
-- `--interval-sec 2`：每 2 秒記錄一次 market snapshot
-
-若你只想先跑 5 分鐘：
-
-```bash
-./venv/bin/python scripts/pure_signal_probe.py --duration-sec 300 --interval-sec 2
-```
-
-若你不想和主 bot 共用同一個 DB，建議改寫到獨立資料庫：
-
-```bash
-./venv/bin/python scripts/pure_signal_probe.py --db ./logs/pure_probe.db --duration-sec 1800 --interval-sec 2
-```
-
-若你想在 terminal 看到低頻摘要，可加上 `--verbose`：
-
-```bash
-./venv/bin/python scripts/pure_signal_probe.py --db ./logs/pure_probe.db --duration-sec 1800 --interval-sec 2 --verbose --verbose-every-sec 30
-```
-
-意思：
-
-- `--verbose`：開啟輕量摘要輸出
-- `--verbose-every-sec 30`：每 30 秒最多印一行，不會每 2 秒洗版
-
-若你想開啟「只模擬、不下真單」的 paper trade 模式：
-
-```bash
-./venv/bin/python scripts/pure_signal_probe.py \
-  --db ./logs/pure_probe.db \
-  --duration-sec 21600 \
-  --interval-sec 2 \
-  --verbose --verbose-every-sec 60 \
-  --paper-trade \
-  --paper-persistence-sec 10
-```
-
-這個模式會：
-
-- 每個市場最多記錄一筆 paper entry
-- candidate 需要連續成立至少 `--paper-persistence-sec` 秒才會進場
-- 不會送出真實訂單
-- 會把模擬進場與模擬結算寫進 DB
-
-相關 event type：
-
-- `PAPER_TRADE_ENTRY`
-- `PAPER_TRADE_SETTLEMENT`
-- `PAPER_ENTRY`
-- `PAPER_SETTLEMENT`
-
-若你想確認 probe 是否真的有持續寫入 DB，可開另一個 terminal 執行：
-
-```bash
-sqlite3 logs/pure_probe.db "select count(*) from strategy_events;"
-sqlite3 logs/pure_probe.db "select id, ts, event_type, substr(payload_json,1,220) from strategy_events order by id desc limit 8;"
-```
-
-若你想把 probe 資料庫整個重置，直接刪除：
-
-```bash
-rm -f logs/pure_probe.db logs/pure_probe.db-wal logs/pure_probe.db-shm
-```
-
-說明：
-
-- 這支 probe 可以和 `python run_bot.py` 同時在不同 terminal 執行
-- 它不會下單，但會額外打市場資料 API
-- 若擔心和主 bot 的 journal 混在一起，優先使用 `--db ./logs/pure_probe.db`
-- 所有時間參數都以「秒」為單位
-
-### Pure Probe Report（候選訊號驗證報表）
-
-當 `pure_signal_probe.py` 跑了一段時間後，可以用下面指令把 `pure_probe.db` 的候選訊號，和主 bot `trade_journal.db` 裡的 `MARKET_SETTLEMENT` 結果對起來：
-
-```bash
-./venv/bin/python scripts/pure_probe_report.py --probe-db ./logs/pure_probe.db --trade-db ./logs/trade_journal.db --hours 12
-```
-
-這份報表會輸出：
-
-- `candidate_rows`：候選訊號總筆數
-- `candidate_markets`：有候選訊號的市場數
-- `settled_candidate_markets`：已經能對到結算結果的市場數
-- `all_candidates`：若每一筆 candidate 都在 `ask` 成交並抱到結算，理論損益如何
-- `first_per_market`：每個市場只取第一筆 candidate 的理論結果
-- `best_edge_per_market`：每個市場只取 edge 最大那筆 candidate 的理論結果
-- `last_per_market`：每個市場只取最後一筆 candidate 的理論結果
-- `paper_all`：若 probe 開了 `--paper-trade`，則顯示模擬進場/結算的實際 paper 結果
-
-如果 `settled_candidate_markets` 很少，代表樣本還不夠，先讓 probe 繼續跑久一點再看報表。
-
-若你想更接近實際策略，可以加上：
-
-```bash
-./venv/bin/python scripts/pure_probe_report.py \
+./.venv/bin/python scripts/shadow_probe_report.py --hours 24
+./.venv/bin/python scripts/shadow_veto_report.py --hours 24
+./.venv/bin/python scripts/pure_probe_report.py \
   --probe-db ./logs/pure_probe.db \
   --trade-db ./logs/trade_journal.db \
-  --run-id pure_probe_1774565788_47f89221 \
-  --selection last \
-  --persistence-sec 10 \
   --hours 24
 ```
 
-重點參數：
+---
 
-- `--run-id`：只分析某一次 probe run，避免不同輪資料混在一起
-- `--report-kind {all,candidate,paper}`：只看 candidate 驗證、只看 paper trade，或兩者都看
-- `--selection {all,first,best,last}`：每市場只保留哪一筆訊號
-- `--persistence-sec 10`：candidate 需要在 snapshot 中連續成立至少 10 秒才算有效
-- `--segment-gap-sec`：兩筆 snapshot 間隔多大以內，仍視為同一段 candidate streak
+## 監控方式
 
-新版報表還會額外分解：
+### 獨立 live dashboard
 
-- `BUY_UP` / `BUY_DOWN`
-- `edge` 分桶
-- `time_left_sec` 分桶
+建議在另一個 terminal 開：
 
-用來觀察哪一種候選訊號更接近可上線條件。
+```bash
+./.venv/bin/python scripts/live_dashboard.py
+```
+
+指定 DB：
+
+```bash
+./.venv/bin/python scripts/live_dashboard.py --db-path logs/trade_journal.db --refresh-sec 2
+```
+
+這個 viewer 只讀 SQLite，不會啟動第二個 bot。
+
+### 原始 log
+
+若使用 `--terminal-dashboard`：
+
+```bash
+tail -f logs/bot/terminal_bot.log
+```
+
+一般模式下，Nautilus / bot log 依照現有 runtime log 設定輸出。
 
 ---
 
-## 實盤注意事項
+## 維運指令
 
-### 1. Live mode 風險
-
-`python run_bot.py --live` 會使用 `.env` 中的實際帳戶資產。  
-請務必確認：
-
-- `POLYMARKET_PK`
-- `MAKER_FIXED_SHARES`
-- `MAKER_MAX_ORDER_USDC`
-- `MAKER_MAX_INVENTORY_SHARES`
-
-### 2. Redis 模式鎖
-
-可用 [redis_control.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/redis_control.py) 查看或切換狀態：
+### Redis mode
 
 ```bash
-python redis_control.py status
-python redis_control.py sim
-python redis_control.py live
+./.venv/bin/python redis_control.py status
+./.venv/bin/python redis_control.py sim
+./.venv/bin/python redis_control.py live
 ```
 
-### 3. Allowance / Balance 問題
+實際是否 live 仍取決於啟動參數與 runtime guard。不要只看 Redis 就假設已經切到真實交易。
 
-若遇到 `not enough balance / allowance`：
+### Allowance / balance
 
 ```bash
-venv/bin/python scripts/check_allowance.py --check-only
-venv/bin/python scripts/check_allowance.py --apply
-venv/bin/python scripts/check_allowance.py --apply --onchain
+./.venv/bin/python scripts/check_allowance.py --check-only
+./.venv/bin/python scripts/check_allowance.py --apply
+./.venv/bin/python scripts/check_allowance.py --apply --onchain
 ```
 
-### 4. 已結算倉位兌現
+### Positions / redeem
 
 ```bash
-venv/bin/python scripts/check_positions_and_redeem.py --slug btc-updown-15m
-venv/bin/python scripts/check_positions_and_redeem.py --slug btc-updown-15m --apply
+./.venv/bin/python scripts/check_positions_and_redeem.py --slug btc-updown-15m
+./.venv/bin/python scripts/check_positions_and_redeem.py --slug btc-updown-15m --apply
 ```
+
+### Pure signal probe
+
+只觀察，不下單：
+
+```bash
+./.venv/bin/python scripts/pure_signal_probe.py \
+  --db ./logs/pure_probe.db \
+  --duration-sec 1800 \
+  --interval-sec 2 \
+  --verbose --verbose-every-sec 30
+```
+
+Paper trade 模式：
+
+```bash
+./.venv/bin/python scripts/pure_signal_probe.py \
+  --db ./logs/pure_probe.db \
+  --duration-sec 21600 \
+  --interval-sec 2 \
+  --paper-trade \
+  --paper-persistence-sec 10 \
+  --verbose --verbose-every-sec 60
+```
+
+---
+
+## 測試與檢查
+
+語法檢查：
+
+```bash
+./.venv/bin/python -m py_compile run_bot.py bot/smart_money.py scripts/build_smart_money_wallets.py
+```
+
+Smart money 單元測試：
+
+```bash
+./.venv/bin/python -m pytest tests/test_smart_money.py
+```
+
+常用回歸測試：
+
+```bash
+PYTHONPATH=. ./.venv/bin/python -m pytest tests/test_f4_last_resort_guard.py
+PYTHONPATH=. ./.venv/bin/python -m pytest tests/test_absolute_max_loss_breaker.py
+PYTHONPATH=. ./.venv/bin/python -m pytest tests/test_f2_trailing_profit_release.py
+```
+
+注意：部分測試需要本地安裝 `py_clob_client_v2` 或完整 runtime dependency。
 
 ---
 
@@ -545,131 +652,44 @@ venv/bin/python scripts/check_positions_and_redeem.py --slug btc-updown-15m --ap
 
 ```text
 Polymarket-BTC-15-Minute-Trading-Bot-main/
-├── bot/                        # 報價、風控、後處理、wallet helper
-├── execution/                  # maker engine / exit policy / fee client
-├── monitoring/                 # DB writer、legacy exporter、terminal dashboard
-├── scripts/                    # 分析工具與獨立 viewer
-├── logs/                       # trade_journal.db、nautilus logs、報表輸出
-├── grafana/                    # 舊版 Grafana 資料（保留但非主路徑）
-├── run_bot.py                  # 主策略與啟動入口
-├── redis_control.py            # Redis 模式切換工具
-├── .env.example
-├── README.md
-└── docs/readme_ZH.md
+├── run_bot.py                         # 主策略 class 與 Nautilus strategy callbacks
+├── bot/
+│   ├── launcher.py                    # CLI / node 啟動
+│   ├── app_config.py                  # .env -> typed config
+│   ├── market_runtime.py              # market selection / lifecycle helper
+│   ├── side_decision.py               # UP / DOWN / NONE 決策
+│   ├── quote_service.py               # desired quote / risk gates
+│   ├── smart_money.py                 # live smart money tracker
+│   └── ...
+├── execution/
+│   ├── polymarket_client.py           # V2 CLOB client wrapper
+│   ├── maker_engine.py
+│   ├── risk_engine.py
+│   └── ...
+├── monitoring/
+│   └── trade_journal_db.py            # SQLite journal writer
+├── scripts/
+│   ├── build_smart_money_wallets.py   # offline wallet label builder
+│   ├── live_dashboard.py
+│   ├── check_allowance.py
+│   ├── check_positions_and_redeem.py
+│   └── *report.py
+├── tests/
+├── logs/
+│   ├── trade_journal.db
+│   └── smart_money_wallets.db
+├── docs/
+└── .env.example
 ```
 
-補充：
-
-- `grafana/` 目錄目前仍存在，但不再是建議的主要監控方式
+`core/` 仍保留不少早期實驗與 legacy abstraction，不是目前 live path 的主要入口。現行交易行為以 `run_bot.py`、`bot/`、`execution/`、`monitoring/` 為準。
 
 ---
 
-## 測試與檢查
+## 風險提醒
 
-先講清楚：
-
-- 目前真正的 live trading 主路徑是 [`run_bot.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py)、[`bot/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot)、[`execution/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/execution)、[`monitoring/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/monitoring) 與 Binance / Coinbase data source
-- [`core/ingestion/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/ingestion)、[`core/nautilus_core/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/nautilus_core)、[`core/strategy_brain/`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/core/strategy_brain) 目前屬於 legacy / sidecar 區域，不應直接當作現行交易核心
-- 詳細分類見 [`LEGACY_PATCH_STATUS.md`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/docs/LEGACY_PATCH_STATUS.md)
-
-### 語法檢查
-
-```bash
-python3 -m py_compile run_bot.py
-python3 -m py_compile scripts/live_dashboard.py
-```
-
-### Legacy 模組測試腳本
-
-```bash
-python data_sources/test.py
-python core/ingestion/test_ingestion.py
-python core/strategy_brain/test_strategy.py
-python core/nautilus_core/test_nautilus.py
-python execution/test_execution.py
-```
-
-這些檔案目前比較接近：
-
-- 舊實驗腳本
-- 模組驗證腳本
-- CLI / 手動檢查工具
-
-它們**不是**目前可信的 pytest 自動化測試套件。  
-repo 根目錄的 [`pytest.ini`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/pytest.ini) 已刻意把這些 legacy script-style 測試排除在 pytest 收集之外，避免誤把它們當成正式回歸測試。
-
-### Runtime patch 注意事項
-
-目前 [`run_bot.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py) 啟動時會自動套用本地 patch。以下腳本會修改 `venv/site-packages`，因此屬於 runtime-critical：
-
-- [`scripts/patch_nautilus_polymarket_drop_log.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_drop_log.py)
-- [`scripts/patch_nautilus_polymarket_ticksize_log.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_ticksize_log.py)
-- [`scripts/patch_nautilus_polymarket_trade_log.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_trade_log.py)
-- [`scripts/patch_nautilus_polymarket_execution.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_nautilus_polymarket_execution.py)
-- [`scripts/patch_py_clob_http_helpers.py`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/scripts/patch_py_clob_http_helpers.py)
-
-這些 patch 在現況下不能隨便刪，否則可能直接改變交易行為。
-
----
-
-## 常見問題
-
-### Q1. `BI_SIDE_ENABLED=1 python run_bot.py` 每次都要加嗎？
-
-不一定。  
-如果 [`.env`](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/.env) 已經設：
-
-```env
-BI_SIDE_ENABLED=1
-```
-
-那直接：
-
-```bash
-python run_bot.py
-```
-
-就夠了。
-
-### Q2. `--live` 跟 `--terminal-dashboard` 會衝突嗎？
-
-不衝突，但那是**同一個 process 內嵌顯示**。  
-如果你想在另一個 terminal 看監控，不要用第二個 `run_bot.py`，請改用：
-
-```bash
-python scripts/live_dashboard.py
-```
-
-### Q3. 為什麼我看到成交了，但 PnL 還可能為負？
-
-常見原因：
-
-- taker fee 很高
-- 出場走 taker exit
-- 或持倉帶到 settlement 才結束，結果方向錯
-
-所以不能只看買賣價差，必須看：
-
-- `ORDER_FILLED.payload.realized_net_usdc`
-- `MARKET_SETTLEMENT.payload.settlement_pnl_usdc`
-- `MARKET_CYCLE_PNL.payload.cycle_combined_pnl_usdc`
-
-### Q4. 最近修過哪些重要邏輯？
-
-近期重要變更包含：
-
-- observation window 寫入 DB
-- flip 條件收緊
-- `SETTLING / WAITING` 不再顯示 `tradable=YES`
-- 修正 stop-loss，不再把「只有 fee 造成的負淨值」誤判成價格止損
-- 新增獨立 Rich terminal dashboard viewer
-
----
-
-## 免責聲明
-
-- 加密資產與預測市場交易有高風險
-- 本專案以研究 / 工程實驗用途為主
-- 歷史績效不保證未來結果
-- 使用者需自行承擔實盤資金風險
-- 強烈建議先模擬、再小額、再逐步放大
+- `--live` 是真實資金。
+- Smart money 初期請保持 shadow-only。離線 label 不是保證勝率，只是 flow 分類與候選名單。
+- `SMART` label 需要跨多市場樣本才有意義；單一 market 的 `DIRECTIONAL` 不應被當成高手。
+- 不要同時跑兩個 live bot 寫同一個錢包，除非你明確知道 inventory / order collision 風險。
+- 每次調整 size、inventory cap、skip gate 前，先看 `trade_journal.db` 報表，而不是只看單筆 PnL。
