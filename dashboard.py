@@ -933,8 +933,11 @@ class TradeJournalDashboardSource:
                 continue
             settlement = settlements.get(slug, {})
             redeem_amount = None
-            if slug in redeems:
+            redeem = redeems.get(slug)
+            if redeem is not None:
                 redeem_amount = float(settlement.get("redeem_value_usdc") or 0.0)
+                if redeem_amount <= 0 and redeem.get("redeem_size_usdc") is not None:
+                    redeem_amount = float(redeem.get("redeem_size_usdc") or 0.0)
             expected_redeem_amount = None
             if slug in settlements:
                 expected_redeem_amount = float(settlement.get("redeem_value_usdc") or 0.0)
@@ -972,7 +975,7 @@ class TradeJournalDashboardSource:
         return out
 
     @staticmethod
-    def _redeem_by_slug(conn: sqlite3.Connection) -> set[str]:
+    def _redeem_by_slug(conn: sqlite3.Connection) -> dict[str, dict]:
         rows = conn.execute(
             """
             SELECT payload_json
@@ -982,11 +985,13 @@ class TradeJournalDashboardSource:
             LIMIT 1000
             """
         ).fetchall()
-        return {
-            str(payload.get("slug") or payload.get("market_slug") or "")
-            for payload in (_json_loads(row["payload_json"]) for row in rows)
-            if str(payload.get("slug") or payload.get("market_slug") or "")
-        }
+        out: dict[str, dict] = {}
+        for row in rows:
+            payload = _json_loads(row["payload_json"])
+            slug = str(payload.get("slug") or payload.get("market_slug") or "")
+            if slug and slug not in out:
+                out[slug] = payload
+        return out
 
     @staticmethod
     def _exit_by_slug(conn: sqlite3.Connection) -> dict[str, float]:

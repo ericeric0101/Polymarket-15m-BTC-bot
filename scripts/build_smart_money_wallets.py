@@ -52,6 +52,13 @@ def _chunked(values: list[str], size: int) -> Iterable[list[str]]:
 
 
 @dataclass
+class MarketRef:
+    condition_id: str
+    slug: str
+    source: str
+
+
+@dataclass
 class WalletStats:
     proxy_wallet: str
     total_trades: int = 0
@@ -186,6 +193,128 @@ def fetch_markets(client: httpx.Client, gamma_base: str, slugs: list[str]) -> li
         except Exception as exc:
             print(f"gamma skip slug={slug}: {type(exc).__name__}: {exc}")
     return markets
+
+
+def fetch_gamma_market_refs(client: httpx.Client, gamma_base: str, slugs: list[str]) -> list[MarketRef]:
+    refs: list[MarketRef] = []
+    seen: set[str] = set()
+    for market in fetch_markets(client, gamma_base, slugs):
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
+        slug = str(market.get("slug") or "").strip()
+        if not condition_id or condition_id in seen:
+            continue
+        seen.add(condition_id)
+        refs.append(MarketRef(condition_id=condition_id, slug=slug, source="gamma"))
+    return refs
+
+
+def fetch_recent_trades(
+    client: httpx.Client,
+    data_base: str,
+    *,
+    limit: int,
+    pages: int,
+    min_cash: float,
+) -> list[dict[str, Any]]:
+    all_trades: list[dict[str, Any]] = []
+    page_limit = max(1, min(10000, int(limit)))
+    for page in range(max(1, int(pages))):
+        params: dict[str, Any] = {
+            "takerOnly": "false",
+            "limit": page_limit,
+            "offset": page * page_limit,
+        }
+        if min_cash > 0:
+            params["filterType"] = "CASH"
+            params["filterAmount"] = min_cash
+        response = client.get(f"{data_base.rstrip('/')}/trades", params=params)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list) or not payload:
+            break
+        all_trades.extend(item for item in payload if isinstance(item, dict))
+        if len(payload) < page_limit:
+            break
+    return all_trades
+
+
+def discover_market_refs_from_data_trades(
+    client: httpx.Client,
+    data_base: str,
+    *,
+    lookback_intervals: int,
+    lookahead_intervals: int,
+    seed_trades_limit: int,
+    seed_trades_pages: int,
+    min_cash: float,
+) -> list[MarketRef]:
+    now = datetime.now(timezone.utc)
+    current_start = int(now.timestamp() // 900) * 900
+    min_start = current_start - max(0, lookback_intervals) * 900
+    max_start = current_start + max(0, lookahead_intervals) * 900
+    refs_by_condition: dict[str, MarketRef] = {}
+    trades = fetch_recent_trades(
+        client,
+        data_base,
+        limit=seed_trades_limit,
+        pages=seed_trades_pages,
+        min_cash=min_cash,
+    )
+    for trade in trades:
+        slug = str(trade.get("slug") or "").strip()
+        condition_id = str(trade.get("conditionId") or "").strip()
+        if not slug.startswith("btc-updown-15m-") or not condition_id:
+            continue
+        try:
+            market_start = int(slug.rsplit("-", 1)[-1])
+        except Exception:
+            continue
+        if market_start < min_start or market_start > max_start:
+            continue
+        refs_by_condition.setdefault(
+            condition_id,
+            MarketRef(condition_id=condition_id, slug=slug, source="data_trades"),
+        )
+    refs = list(refs_by_condition.values())
+    refs.sort(key=lambda ref: int(ref.slug.rsplit("-", 1)[-1]) if ref.slug.rsplit("-", 1)[-1].isdigit() else 0)
+    return refs
+
+
+def discover_market_refs(
+    client: httpx.Client,
+    *,
+    data_base: str,
+    gamma_base: str,
+    slugs: list[str],
+    market_source: str,
+    lookback_intervals: int,
+    lookahead_intervals: int,
+    seed_trades_limit: int,
+    seed_trades_pages: int,
+    min_cash: float,
+) -> list[MarketRef]:
+    market_source = str(market_source or "data").lower()
+    refs_by_condition: dict[str, MarketRef] = {}
+    if market_source in {"data", "both"}:
+        try:
+            for ref in discover_market_refs_from_data_trades(
+                client,
+                data_base,
+                lookback_intervals=lookback_intervals,
+                lookahead_intervals=lookahead_intervals,
+                seed_trades_limit=seed_trades_limit,
+                seed_trades_pages=seed_trades_pages,
+                min_cash=min_cash,
+            ):
+                refs_by_condition[ref.condition_id] = ref
+        except Exception as exc:
+            print(f"data trade market discovery failed: {type(exc).__name__}: {exc}")
+    if market_source in {"gamma", "both"} or not refs_by_condition:
+        for ref in fetch_gamma_market_refs(client, gamma_base, slugs):
+            refs_by_condition.setdefault(ref.condition_id, ref)
+    refs = list(refs_by_condition.values())
+    refs.sort(key=lambda ref: int(ref.slug.rsplit("-", 1)[-1]) if ref.slug.rsplit("-", 1)[-1].isdigit() else 0)
+    return refs
 
 
 def fetch_trades(
@@ -394,13 +523,28 @@ def build(args: argparse.Namespace) -> int:
     gamma_base = args.gamma_api_base.rstrip("/")
 
     with httpx.Client(timeout=timeout) as client:
-        markets = fetch_markets(client, gamma_base, slugs)
+        markets = discover_market_refs(
+            client,
+            data_base=data_base,
+            gamma_base=gamma_base,
+            slugs=slugs,
+            market_source=args.market_source,
+            lookback_intervals=args.lookback_intervals,
+            lookahead_intervals=args.lookahead_intervals,
+            seed_trades_limit=args.seed_trades_limit,
+            seed_trades_pages=args.seed_trades_pages,
+            min_cash=args.min_cash,
+        )
         if args.markets_limit > 0:
             markets = markets[-args.markets_limit :]
-        print(f"markets={len(markets)} slugs_scanned={len(slugs)}")
+        source_counts = Counter(market.source for market in markets)
+        print(
+            f"markets={len(markets)} slugs_scanned={len(slugs)} "
+            f"market_source={args.market_source} source_counts={dict(source_counts)}"
+        )
         for idx, market in enumerate(markets, start=1):
-            condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
-            slug = str(market.get("slug") or "")
+            condition_id = market.condition_id
+            slug = market.slug
             if not condition_id:
                 continue
             try:
@@ -446,7 +590,7 @@ def build(args: argparse.Namespace) -> int:
                 stats = wallet_stats.setdefault(wallet, WalletStats(proxy_wallet=wallet))
                 stats.position_total_pnl += pnl
                 stats.position_pnl_hits += 1
-            print(f"[{idx}/{len(markets)}] slug={slug} trades={len(trades)} wallets_total={len(wallet_stats)}")
+            print(f"[{idx}/{len(markets)}] slug={slug} source={market.source} trades={len(trades)} wallets_total={len(wallet_stats)}")
 
     rows: list[tuple[WalletStats, str, float, dict[str, Any]]] = []
     counts = Counter()
@@ -481,9 +625,17 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--db", default="./logs/smart_money_wallets.db")
     ap.add_argument("--data-api-base", default="https://data-api.polymarket.com")
     ap.add_argument("--gamma-api-base", default="https://gamma-api.polymarket.com")
+    ap.add_argument(
+        "--market-source",
+        choices=("data", "gamma", "both"),
+        default="data",
+        help="Market discovery source. 'data' infers BTC 15m markets from recent Data API trades.",
+    )
     ap.add_argument("--lookback-intervals", type=int, default=96)
     ap.add_argument("--lookahead-intervals", type=int, default=0)
     ap.add_argument("--markets-limit", type=int, default=0)
+    ap.add_argument("--seed-trades-limit", type=int, default=10000)
+    ap.add_argument("--seed-trades-pages", type=int, default=3)
     ap.add_argument("--min-cash", type=float, default=10.0)
     ap.add_argument("--trades-limit", type=int, default=10000)
     ap.add_argument("--positions-limit", type=int, default=500)
@@ -498,11 +650,28 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--timeout-sec", type=float, default=8.0)
     ap.add_argument("--print-top", type=int, default=20)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--loop", action="store_true", help="Run forever and rebuild the wallet DB every --interval-sec seconds")
+    ap.add_argument("--interval-sec", type=float, default=900.0, help="Loop sleep interval; default 900 seconds")
     return ap
 
 
 def main() -> int:
-    return build(build_parser().parse_args())
+    args = build_parser().parse_args()
+    if not args.loop:
+        return build(args)
+    while True:
+        started = time.time()
+        print(f"\n=== smart money builder cycle start {datetime.now(timezone.utc).isoformat()} ===")
+        try:
+            build(args)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"builder cycle failed: {type(exc).__name__}: {exc}")
+        elapsed = time.time() - started
+        sleep_sec = max(1.0, float(args.interval_sec) - elapsed)
+        print(f"=== smart money builder cycle end elapsed={elapsed:.1f}s sleep={sleep_sec:.1f}s ===")
+        time.sleep(sleep_sec)
 
 
 if __name__ == "__main__":

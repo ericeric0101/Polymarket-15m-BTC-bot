@@ -377,6 +377,8 @@ limit 20;
   --print-top 20
 ```
 
+目前預設 `--market-source data`，意思是先從 Data API 最近 trades 反推 BTC 15m markets，再逐 market 抓完整 trades/positions。這比只用 Gamma `markets?slug=...` 更適合建立歷史 wallet 名單，因為 Gamma 對舊 15m slug 不一定穩定回傳。
+
 常用參數：
 
 ```bash
@@ -386,11 +388,15 @@ limit 20;
 重點參數：
 
 - `--db`：輸出 DB，預設 `./logs/smart_money_wallets.db`
+- `--market-source {data,gamma,both}`：市場來源，預設 `data`
 - `--lookback-intervals`：往回掃幾個 15m interval，`96` 約一天
+- `--seed-trades-limit` / `--seed-trades-pages`：從 Data API 最近 trades 取多少資料來反推 market
 - `--min-cash`：只看大於此 USDC notional 的 trades
 - `--min-markets`：標成 `SMART` 至少需要跨幾個 markets
 - `--min-total-cash`：wallet 累計 buy cash 門檻
 - `--hedge-ratio`：雙邊 exposure 比例達標就標為 `HEDGER`
+- `--loop`：常駐自動更新 DB
+- `--interval-sec`：loop 模式每幾秒更新一次，預設 900 秒
 - `--dry-run`：只印結果，不寫 DB
 
 先 dry-run：
@@ -409,6 +415,35 @@ limit 20;
   --lookback-intervals 96 \
   --print-top 20
 ```
+
+常駐自動更新：
+
+```bash
+./.venv/bin/python scripts/build_smart_money_wallets.py \
+  --loop \
+  --interval-sec 900 \
+  --lookback-intervals 96 \
+  --print-top 20
+```
+
+如果你想把它放背景跑，可用 `nohup`：
+
+```bash
+nohup ./.venv/bin/python scripts/build_smart_money_wallets.py \
+  --loop \
+  --interval-sec 900 \
+  --lookback-intervals 96 \
+  --print-top 20 \
+  > logs/smart_money_builder.log 2>&1 &
+```
+
+停止背景 builder：
+
+```bash
+pkill -f "scripts/build_smart_money_wallets.py"
+```
+
+不建議把離線 builder 放進 live quote loop。它可以和 bot 同時跑，但應該是獨立 process；live tracker 只讀 `smart_money_wallets.db` 的結果。
 
 ### smart_money_wallets.db schema
 
