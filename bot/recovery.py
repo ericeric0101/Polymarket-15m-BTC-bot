@@ -98,7 +98,13 @@ class StrategyRecoveryMixin:
 
         state = ledger.get(inst_key)
         if not state:
-            return None
+            state = self._rebuild_inventory_state_from_recent_buy_submit(
+                inst_key=inst_key,
+                target_qty=target_qty,
+                cutoff=cutoff,
+            )
+            if state is None:
+                return None
 
         replay_qty = Decimal(str(state.get("qty", "0")))
         if replay_qty <= 0:
@@ -114,6 +120,68 @@ class StrategyRecoveryMixin:
         if float(state.get("opened_ts", 0.0)) <= 0:
             state["opened_ts"] = first_fill_ts or time.time()
         return state
+
+    def _rebuild_inventory_state_from_recent_buy_submit(
+        self,
+        *,
+        inst_key: str,
+        target_qty: Decimal,
+        cutoff: str,
+    ) -> Optional[Dict[str, Any]]:
+        db_path = getattr(self.trade_db, "db_path", "") if self.trade_db else ""
+        if not db_path:
+            return None
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT ts, price, qty, payload_json
+                FROM order_events
+                WHERE event_type='ORDER_SUBMIT'
+                  AND UPPER(COALESCE(side, ''))='BUY'
+                  AND ts >= ?
+                  AND (
+                      instrument_id=?
+                      OR json_extract(payload_json, '$.submitted_instrument_id')=?
+                      OR json_extract(payload_json, '$.instrument_id')=?
+                  )
+                ORDER BY id DESC
+                LIMIT 20
+                """,
+                (cutoff, inst_key, inst_key, inst_key),
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Inventory submit fallback DB lookup failed for {inst_key}: {e}")
+            return None
+
+        for row in rows:
+            try:
+                price = Decimal(str(row["price"] or 0))
+                qty = Decimal(str(row["qty"] or 0))
+            except Exception:
+                continue
+            if price <= 0 or qty <= 0:
+                continue
+            if qty + Decimal("0.000001") < min(target_qty, Decimal("1")):
+                continue
+            try:
+                opened_ts = datetime.fromisoformat(str(row["ts"])).timestamp()
+            except Exception:
+                opened_ts = time.time()
+            logger.warning(
+                "Inventory rehydrate recovered cost basis from recent BUY submit: "
+                f"inst={inst_key} price={float(price):.4f} "
+                f"submit_qty={float(qty):.6f} target_qty={float(target_qty):.6f}"
+            )
+            return {
+                "qty": target_qty,
+                "avg_entry_price": price,
+                "entry_fee_remaining": Decimal("0"),
+                "opened_ts": opened_ts,
+            }
+        return None
 
     def _rehydrate_inventory_state_on_startup(self) -> None:
         if self.live_inventory_cost or self.inventory_delta_shares > 0:
@@ -217,6 +285,16 @@ class StrategyRecoveryMixin:
                         "Real on-chain wallet USDC balance",
                     )
                 self._prom_wallet_balance.set(float(self._cached_usdc_balance))
+            except Exception:
+                pass
+            try:
+                self._db_strategy_event(
+                    "ACCOUNT_SUMMARY",
+                    {
+                        "usdc_balance": float(self._cached_usdc_balance),
+                        "pol_balance": float(getattr(self, "_cached_pol_balance", 0.0) or 0.0),
+                    },
+                )
             except Exception:
                 pass
             self._update_terminal_dashboard_snapshot()

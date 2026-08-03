@@ -21,13 +21,24 @@ import os
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 
 import requests
 from dotenv import load_dotenv
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from bot.collateral_tokens import (
+    COLLATERAL_ONRAMP_ADDRESS,
+    PUSD_ADDRESS,
+    USDCE_ADDRESS,
+    get_ctf_collateral,
+)
+
 DATA_API = "https://data-api.polymarket.com"
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 CTF_REDEEM_ABI = [
@@ -43,6 +54,84 @@ CTF_REDEEM_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+            {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
+            {"internalType": "uint256", "name": "indexSet", "type": "uint256"},
+        ],
+        "name": "getCollectionId",
+        "outputs": [{"internalType": "bytes32", "name": "", "type": "bytes32"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "collateralToken", "type": "address"},
+            {"internalType": "bytes32", "name": "collectionId", "type": "bytes32"},
+        ],
+        "name": "getPositionId",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "address", "name": "account", "type": "address"},
+            {"internalType": "uint256", "name": "id", "type": "uint256"},
+        ],
+        "name": "balanceOf",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+ERC20_APPROVE_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}],
+        "name": "allowance",
+        "outputs": [{"name": "remaining", "type": "uint256"}],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "constant": False,
+        "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "payable": False,
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+COLLATERAL_ONRAMP_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "_asset", "type": "address"},
+            {"internalType": "address", "name": "_to", "type": "address"},
+            {"internalType": "uint256", "name": "_amount", "type": "uint256"},
+        ],
+        "name": "wrap",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+CTF_COLLATERAL_CANDIDATES = [
+    ("pUSD", PUSD_ADDRESS),
+    ("USDC.e", USDCE_ADDRESS),
 ]
 
 GWEI = 10**9
@@ -50,6 +139,17 @@ GWEI = 10**9
 
 def _gwei_to_wei(w3, value: float | int) -> int:
     return int(w3.to_wei(value, "gwei"))
+
+
+def _to_checksum_address(addr: str) -> str:
+    s = addr.strip()
+    try:
+        from web3 import Web3
+
+        return Web3.to_checksum_address(s)
+    except Exception:
+        # Allow read-only position checks even when web3 is not installed.
+        return s
 
 
 def _build_eip1559_fees(w3, *, bump_multiplier: float = 1.0) -> dict[str, int]:
@@ -108,12 +208,6 @@ def _is_hex_address(v: str | None) -> bool:
         return False
     s = v.strip()
     return s.startswith("0x") and len(s) == 42
-
-
-def _to_checksum_address(addr: str) -> str:
-    from web3 import Web3
-
-    return Web3.to_checksum_address(addr)
 
 
 def _address_from_private_key(private_key: str) -> str:
@@ -179,6 +273,8 @@ def _redeem_conditions(
     chain_id: int,
     rpc_url: str,
     condition_ids: list[str],
+    condition_sizes: dict[str, float],
+    wrap_existing_usdce: bool = False,
 ) -> None:
     from web3 import Web3
     from web3.middleware import ExtraDataToPOAMiddleware
@@ -236,15 +332,129 @@ def _redeem_conditions(
 
     owner = Web3.to_checksum_address(owner_address)
     contract = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_REDEEM_ABI)
+    ctf_collateral = get_ctf_collateral()
+    ctf_collateral_address = Web3.to_checksum_address(ctf_collateral.address)
+    usdce = w3.eth.contract(address=Web3.to_checksum_address(USDCE_ADDRESS), abi=ERC20_APPROVE_ABI)
+    onramp = w3.eth.contract(
+        address=Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
+        abi=COLLATERAL_ONRAMP_ABI,
+    )
     nonce = w3.eth.get_transaction_count(owner, "pending")
     max_attempts = max(1, int(os.getenv("AUTO_REDEEM_MAX_SEND_ATTEMPTS", "3")))
     receipt_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_RECEIPT_TIMEOUT_SEC", "120")))
+
+    def _send_wrap_usdce(amount_base_units: int, *, reason: str) -> bool:
+        nonlocal nonce
+        if amount_base_units <= 0:
+            print(f"wrapToPUSD skipped reason={reason} amount=0.000000")
+            return False
+
+        onramp_address = Web3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS)
+        usdce_balance = int(usdce.functions.balanceOf(owner).call())
+        wrap_amount = min(int(amount_base_units), usdce_balance)
+        if wrap_amount <= 0:
+            print(
+                f"wrapToPUSD skipped reason={reason} "
+                f"wallet_USDC.e={usdce_balance / 1_000_000:.6f} requested={amount_base_units / 1_000_000:.6f}"
+            )
+            return False
+        if wrap_amount < amount_base_units:
+            print(
+                f"wrapToPUSD amount reduced reason={reason} "
+                f"requested={amount_base_units / 1_000_000:.6f} wallet_USDC.e={usdce_balance / 1_000_000:.6f} "
+                f"selected={wrap_amount / 1_000_000:.6f}"
+            )
+
+        allowance = int(usdce.functions.allowance(owner, onramp_address).call())
+        if allowance < wrap_amount:
+            approve_tx = usdce.functions.approve(
+                onramp_address,
+                wrap_amount,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": nonce,
+            })
+            approve_signed = w3.eth.account.sign_transaction(approve_tx, private_key=private_key)
+            approve_hash = w3.eth.send_raw_transaction(approve_signed.raw_transaction)
+            approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=120)
+            print(f"wrapApprove reason={reason} tx={approve_hash.hex()} status={approve_receipt.status}")
+            nonce += 1
+
+        try:
+            wrap_tx = onramp.functions.wrap(
+                Web3.to_checksum_address(USDCE_ADDRESS),
+                owner,
+                wrap_amount,
+            ).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": nonce,
+            })
+            wrap_signed = w3.eth.account.sign_transaction(wrap_tx, private_key=private_key)
+            wrap_hash = w3.eth.send_raw_transaction(wrap_signed.raw_transaction)
+            wrap_receipt = w3.eth.wait_for_transaction_receipt(wrap_hash, timeout=120)
+            print(
+                f"wrapToPUSD reason={reason} amount={wrap_amount / 1_000_000:.6f} "
+                f"tx={wrap_hash.hex()} status={wrap_receipt.status}"
+            )
+            nonce += 1
+            return bool(wrap_receipt.status == 1)
+        except Exception as exc:
+            print(
+                f"wrapToPUSD failed/skipped reason={reason} amount={wrap_amount / 1_000_000:.6f} "
+                f"wallet_USDC.e={usdce_balance / 1_000_000:.6f} error={type(exc).__name__}: {exc}"
+            )
+            return False
 
     for cid in condition_ids:
         cid_txt = str(cid).strip()
         if not cid_txt.startswith("0x") or len(cid_txt) != 66:
             print(f"Skip invalid conditionId: {cid_txt}")
             continue
+
+        configured_collateral = get_ctf_collateral()
+        collateral_candidates = [
+            (configured_collateral.symbol, Web3.to_checksum_address(configured_collateral.address)),
+            *[
+                (symbol, Web3.to_checksum_address(address))
+                for symbol, address in CTF_COLLATERAL_CANDIDATES
+                if Web3.to_checksum_address(address) != Web3.to_checksum_address(configured_collateral.address)
+            ],
+        ]
+        condition_bytes = Web3.to_bytes(hexstr=cid_txt)
+        zero_parent_collection = b"\x00" * 32
+        collateral_balances: list[tuple[str, str, int]] = []
+        for symbol, collateral_address in collateral_candidates:
+            total_balance = 0
+            for index_set in (1, 2):
+                collection_id = contract.functions.getCollectionId(
+                    zero_parent_collection,
+                    condition_bytes,
+                    index_set,
+                ).call()
+                position_id = contract.functions.getPositionId(collateral_address, collection_id).call()
+                total_balance += int(contract.functions.balanceOf(owner, position_id).call())
+            collateral_balances.append((symbol, collateral_address, total_balance))
+
+        selected_symbol, selected_collateral_address, selected_balance = max(
+            collateral_balances,
+            key=lambda item: item[2],
+        )
+        balance_report = ", ".join(
+            f"{symbol}={balance / 1_000_000:.6f}" for symbol, _, balance in collateral_balances
+        )
+        if selected_balance <= 0:
+            print(f"Skip condition={cid_txt}: no on-chain CTF balance found ({balance_report})")
+            continue
+        if selected_collateral_address != ctf_collateral_address:
+            print(
+                f"collateral override condition={cid_txt} "
+                f"configured={ctf_collateral.symbol} selected={selected_symbol} "
+                f"balances=({balance_report})"
+            )
+        else:
+            print(f"collateral selected condition={cid_txt} {selected_symbol} balances=({balance_report})")
 
         tx_base = {
             "chainId": chain_id,
@@ -254,9 +464,9 @@ def _redeem_conditions(
         tx_base.update(_build_fee_params(w3))
 
         tx_func = contract.functions.redeemPositions(
-            Web3.to_checksum_address(USDC_ADDRESS),
-            b"\x00" * 32,
-            Web3.to_bytes(hexstr=cid_txt),
+            selected_collateral_address,
+            zero_parent_collection,
+            condition_bytes,
             [1, 2],
         )
 
@@ -324,6 +534,20 @@ def _redeem_conditions(
         print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
         nonce += 1
 
+        expected_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
+        amount_base_units = expected_base_units if expected_base_units > 0 else selected_balance
+        if amount_base_units > 0 and selected_symbol == "USDC.e":
+            _send_wrap_usdce(amount_base_units, reason=f"condition={cid_txt}")
+        elif amount_base_units > 0:
+            print(
+                f"wrapToPUSD skipped condition={cid_txt} "
+                f"ctf_collateral={selected_symbol} amount={amount_base_units / 1_000_000:.6f}"
+            )
+
+    if wrap_existing_usdce:
+        usdce_balance = int(usdce.functions.balanceOf(owner).call())
+        _send_wrap_usdce(usdce_balance, reason="existing_usdce_balance")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check Polymarket positions and redeem winners")
@@ -349,6 +573,11 @@ def main() -> int:
         type=float,
         default=None,
         help="Skip the whole redeem run when selected redeemable total size is below this threshold",
+    )
+    parser.add_argument(
+        "--wrap-existing-usdce",
+        action="store_true",
+        help="After redeem attempts, wrap any existing wallet USDC.e balance to pUSD.",
     )
     args = parser.parse_args()
 
@@ -475,6 +704,8 @@ def main() -> int:
     print(f"Owner: {owner}")
     print(f"Chain ID: {chain_id}")
     print(f"RPC URL: {rpc_url}")
+    ctf_collateral = get_ctf_collateral()
+    print(f"CTF collateral: {ctf_collateral.symbol} {ctf_collateral.address}")
     print(f"Min condition size: {min_condition_size:.6f}")
     print(f"Min total size: {min_total_size:.6f}")
     print(f"Redeemable conditions (raw): {json.dumps(redeemable_conditions)}")
@@ -498,6 +729,8 @@ def main() -> int:
         chain_id=chain_id,
         rpc_url=rpc_url,
         condition_ids=filtered_redeemable_conditions,
+        condition_sizes=redeemable_condition_sizes,
+        wrap_existing_usdce=bool(args.wrap_existing_usdce),
     )
     print("Redeem flow complete.")
     return 0

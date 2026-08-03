@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import time
 import threading
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import httpx
-import py_clob_client.http_helpers.helpers as pyclob_helpers
+import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 from loguru import logger
-from py_clob_client.exceptions import PolyApiException
+from py_clob_client_v2.exceptions import PolyApiException
 
 
 def install_runtime_compatibility_overrides() -> None:
     _install_polymarket_data_overrides()
     _install_polymarket_execution_overrides()
+    _install_polymarket_user_trade_overrides()
     _install_pyclob_http_overrides()
 
 
@@ -26,6 +28,11 @@ def verify_runtime_compatibility_targets(project_root: Path) -> list[str]:
 
     targets.append(f"PolymarketDataClient._handle_quote={hasattr(PolymarketDataClient, '_handle_quote')}")
     targets.append(f"PolymarketExecutionClient._handle_ws_order_msg={hasattr(PolymarketExecutionClient, '_handle_ws_order_msg')}")
+    try:
+        from nautilus_trader.adapters.polymarket.schemas.user import PolymarketUserTrade
+        targets.append(f"PolymarketUserTrade.last_qty={hasattr(PolymarketUserTrade, 'last_qty')}")
+    except Exception as exc:
+        targets.append(f"PolymarketUserTrade.import_error={exc}")
     targets.append(f"pyclob.request={hasattr(pyclob_helpers, 'request')}")
     return targets
 
@@ -340,6 +347,47 @@ def _install_polymarket_execution_overrides() -> None:
     cls._btc15m_runtime_compat_patched = True
 
 
+def _safe_decimal(value, fallback=None) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        if fallback is None:
+            raise
+    return Decimal(str(fallback))
+
+
+def _install_polymarket_user_trade_overrides() -> None:
+    from nautilus_trader.adapters.polymarket.schemas.user import PolymarketUserTrade
+    from nautilus_trader.model.enums import LiquiditySide
+
+    cls = PolymarketUserTrade
+    if getattr(cls, "_btc15m_decimal_fallback_patched", False):
+        return
+
+    def patched_last_px(self, filled_user_order_id: str) -> Decimal:
+        if self.liquidity_side() == LiquiditySide.TAKER:
+            return _safe_decimal(self.price)
+        order = self.get_maker_order(filled_user_order_id)
+        return _safe_decimal(order.price, self.price)
+
+    def patched_last_qty(self, filled_user_order_id: str) -> Decimal:
+        if self.liquidity_side() == LiquiditySide.TAKER:
+            return _safe_decimal(self.size)
+        order = self.get_maker_order(filled_user_order_id)
+        return _safe_decimal(order.matched_amount, self.size)
+
+    def patched_get_fee_rate_bps(self, filled_user_order_id: str) -> Decimal:
+        if self.liquidity_side() == LiquiditySide.TAKER:
+            return _safe_decimal(self.fee_rate_bps, 0)
+        order = self.get_maker_order(filled_user_order_id)
+        return _safe_decimal(order.fee_rate_bps, self.fee_rate_bps or 0)
+
+    cls.last_px = patched_last_px
+    cls.last_qty = patched_last_qty
+    cls.get_fee_rate_bps = patched_get_fee_rate_bps
+    cls._btc15m_decimal_fallback_patched = True
+
+
 def _install_pyclob_http_overrides() -> None:
     if getattr(pyclob_helpers, "_btc15m_runtime_compat_patched", False):
         return
@@ -356,30 +404,41 @@ def _install_pyclob_http_overrides() -> None:
             setattr(local, attr, client)
         return client
 
-    def _request_with_client(client: httpx.Client, endpoint: str, method: str, headers: dict, data):
+    def _overload_headers(method: str, headers: dict | None) -> dict:
+        overload = getattr(pyclob_helpers, "_overload_headers", None)
+        if overload is None:
+            overload = getattr(pyclob_helpers, "overloadHeaders", None)
+        if overload is None:
+            return dict(headers or {})
+        return dict(overload(method, headers))
+
+    def _request_with_client(client: httpx.Client, endpoint: str, method: str, headers: dict, data, params=None):
         if isinstance(data, str):
             return client.request(
                 method=method,
                 url=endpoint,
                 headers=headers,
                 content=data.encode("utf-8"),
+                params=params,
             )
         return client.request(
             method=method,
             url=endpoint,
             headers=headers,
             json=data,
+            params=params,
         )
 
-    def request(endpoint: str, method: str, headers=None, data=None):
+    def request(endpoint: str, method: str, headers=None, data=None, params=None):
         try:
-            headers = pyclob_helpers.overloadHeaders(method, headers)
+            headers = _overload_headers(method, headers)
             resp = _request_with_client(
                 _get_thread_local_client(http2=True),
                 endpoint,
                 method,
                 headers,
                 data,
+                params,
             )
             if resp.status_code != 200:
                 raise PolyApiException(resp)
@@ -389,7 +448,7 @@ def _install_pyclob_http_overrides() -> None:
                 return resp.text
         except (httpx.RequestError, RuntimeError):
             try:
-                fallback_headers = dict(pyclob_helpers.overloadHeaders(method, headers))
+                fallback_headers = _overload_headers(method, headers)
                 fallback_headers["Connection"] = "close"
                 resp = _request_with_client(
                     _get_thread_local_client(http2=False),
@@ -397,6 +456,7 @@ def _install_pyclob_http_overrides() -> None:
                     method,
                     fallback_headers,
                     data,
+                    params,
                 )
                 if resp.status_code != 200:
                     raise PolyApiException(resp)

@@ -57,7 +57,7 @@ from nautilus_trader.trading.strategy import Strategy  # noqa: E402
 load_dotenv(PROJECT_ROOT / ".env")
 
 try:
-    from py_clob_client.client import ClobClient  # type: ignore
+    from py_clob_client_v2.client import ClobClient  # type: ignore
 except Exception:
     ClobClient = None
 
@@ -308,15 +308,16 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
 
     try:
         kwargs: Dict[str, Any] = {
-            "host": clob_host,
             "key": private_key,
-            "chain_id": chain_id,
             "signature_type": signature_type,
         }
         if funder:
             kwargs["funder"] = funder
-        client = ClobClient(**kwargs)
-        derived = client.create_or_derive_api_creds()
+        client = ClobClient(clob_host, chain_id, **kwargs)
+        try:
+            derived = client.create_api_key()
+        except Exception:
+            derived = client.derive_api_key()
         d_key = getattr(derived, "api_key", None) or (derived.get("api_key") if isinstance(derived, dict) else None)
         d_secret = getattr(derived, "api_secret", None) or (derived.get("api_secret") if isinstance(derived, dict) else None)
         d_pass = getattr(derived, "api_passphrase", None) or (derived.get("api_passphrase") if isinstance(derived, dict) else None)

@@ -74,29 +74,28 @@ def submit_maker_quote(
         qty_dec = strategy._compute_maker_order_qty(limit_price, precision)
     if side == "buy":
         entry_mode = str((directional_snapshot or {}).get("entry_mode", "value") or "value").lower()
-        if entry_mode in {"continuation", "topup", "trend"}:
-            size_multiplier = Decimal(
-                str(
-                    (directional_snapshot or {}).get(
-                        "size_multiplier",
-                        (
-                            strategy.continuation_entry_size_multiplier
-                            if entry_mode == "continuation"
-                            else (
-                                getattr(strategy, "trend_buy_size_multiplier", Decimal("1"))
-                                if entry_mode == "trend"
-                                else Decimal("1")
-                            )
-                        ),
-                    )
+        size_multiplier = Decimal(
+            str(
+                (directional_snapshot or {}).get(
+                    "size_multiplier",
+                    (
+                        strategy.continuation_entry_size_multiplier
+                        if entry_mode == "continuation"
+                        else (
+                            getattr(strategy, "trend_buy_size_multiplier", Decimal("1"))
+                            if entry_mode == "trend"
+                            else Decimal("1")
+                        )
+                    ),
                 )
             )
-            min_buy_qty = max(strategy.maker_min_shares, strategy.maker_exchange_min_shares)
-            qty_dec = max(qty_dec * size_multiplier, min_buy_qty)
+        )
+        min_buy_qty = max(strategy.maker_min_shares, strategy.maker_exchange_min_shares)
+        qty_dec = max(qty_dec * size_multiplier, min_buy_qty)
     if qty_dec <= 0:
         return
+    inst_key = strategy._instrument_key(instrument_id)
     if side == "buy":
-        inst_key = strategy._instrument_key(instrument_id)
         reentry_pause_until = float(strategy.stop_loss_reentry_pause_until_by_inst.get(inst_key, 0.0))
         if time.time() < reentry_pause_until:
             cooldown_left = reentry_pause_until - time.time()
@@ -119,9 +118,33 @@ def submit_maker_quote(
             return
 
     if side == "sell" and not strategy._is_dry_run_mode():
+        recent_buy_ts = float(getattr(strategy, "recent_buy_fill_ts_by_inst", {}).get(inst_key, 0.0))
+        sell_delay_sec = float(getattr(strategy, "sell_delay_after_buy_sec", 0.0) or 0.0)
+        if recent_buy_ts > 0 and sell_delay_sec > 0:
+            now_ts = time.time()
+            pause_left = (recent_buy_ts + sell_delay_sec) - now_ts
+            if pause_left > 0:
+                logger.info(
+                    "Skip maker SELL quote: waiting for post-BUY venue balance sync "
+                    f"(inst={inst_key}, pause_left={pause_left:.1f}s)"
+                )
+                strategy._db_order_event(
+                    event_type="ORDER_SKIP_SELL_DELAY_AFTER_BUY",
+                    side=side.upper(),
+                    price=float(limit_price),
+                    qty=float(qty_dec),
+                    status="SKIPPED",
+                    reason="sell_delay_after_buy",
+                    payload={
+                        "instrument_id": str(instrument_id),
+                        "recent_buy_ts": recent_buy_ts,
+                        "sell_delay_after_buy_sec": sell_delay_sec,
+                        "pause_left_sec": pause_left,
+                    },
+                )
+                return
         sellable_qty = strategy._get_effective_sellable_qty(instrument_id=instrument_id)
         confirmed_qty = strategy._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
-        inst_key = strategy._instrument_key(instrument_id)
         venue_cap = strategy._sell_recovery_venue_cap_by_inst.get(inst_key, None) if inst_key else None
         if venue_cap is not None and venue_cap > 0:
             sellable_qty = min(sellable_qty, venue_cap)
@@ -271,7 +294,18 @@ def submit_maker_quote(
         target_version=int(target_version or 0),
         loss_sell_reason=loss_sell_reason,
     )
-    if strategy.terminal_dashboard:
+    if side == "buy" and inst_key:
+        recent_buy_submits = getattr(strategy, "recent_buy_submit_by_inst", None)
+        if not isinstance(recent_buy_submits, dict):
+            recent_buy_submits = {}
+            setattr(strategy, "recent_buy_submit_by_inst", recent_buy_submits)
+        recent_buy_submits[inst_key] = {
+            "price": Decimal(str(limit_price)),
+            "quantity": Decimal(str(token_qty)),
+            "created_ts": time.time(),
+            "client_order_id": str(order.client_order_id),
+        }
+    if getattr(strategy, "terminal_dashboard", None):
         token_side = getattr(strategy._side_for_instrument_id(instrument_id), "value", "NONE")
         strategy.terminal_dashboard.record_order_submitted(
             side=side,
@@ -296,6 +330,7 @@ def submit_maker_quote(
         expected_net_usdc=float(econ.expected_net_usdc),
         payload={
             "maker": True,
+            "submitted_instrument_id": str(instrument_id),
             "rebate_estimate_usdc": float(econ.expected_rebate_usdc),
             "spread_capture_estimate_usdc": float(econ.expected_spread_capture_usdc),
             "directional_edge_ps": (
@@ -352,6 +387,31 @@ def submit_maker_quote(
                 str(directional_snapshot.get("entry_mode", "value"))
                 if directional_snapshot
                 else "value"
+            ),
+            "size_multiplier": (
+                float(directional_snapshot.get("size_multiplier"))
+                if directional_snapshot and directional_snapshot.get("size_multiplier") is not None
+                else 1.0
+            ),
+            "entry_quality": (
+                directional_snapshot.get("entry_quality")
+                if directional_snapshot
+                else None
+            ),
+            "external_entry_confirmation": (
+                directional_snapshot.get("external_entry_confirmation")
+                if directional_snapshot
+                else None
+            ),
+            "external_entry_confirmation_size_adjustment": (
+                directional_snapshot.get("external_entry_confirmation_size_adjustment")
+                if directional_snapshot
+                else None
+            ),
+            "entry_quality_quote_price_cap": (
+                float(directional_snapshot.get("entry_quality_quote_price_cap"))
+                if directional_snapshot and directional_snapshot.get("entry_quality_quote_price_cap") is not None
+                else None
             ),
             "sell_recovery_required": (
                 bool(strategy._sell_recovery_required_by_inst.get(strategy._instrument_key(instrument_id), 0.0))

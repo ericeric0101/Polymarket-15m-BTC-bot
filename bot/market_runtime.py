@@ -90,15 +90,19 @@ def find_btc_instrument(strategy: Any) -> bool:
         logger.error("NO BTC 15-MIN INSTRUMENTS FOUND!")
         return False
 
+    preferred_slug = None
+    phase_value = str(getattr(getattr(strategy, "current_phase", None), "value", "") or "")
+    next_market_slug = str(getattr(strategy, "next_market_slug", "") or "").strip()
+    if next_market_slug and phase_value in {"WAITING", "SETTLING"}:
+        preferred_slug = next_market_slug
+    elif not str(strategy.current_market_slug or ""):
+        preferred_slug = str(strategy.selected_slug or "") or None
+
     selection, selection_kind, current_count, future_count = resolve_bi_side_market_selection(
         btc_instruments=btc_instruments,
         current_timestamp=current_timestamp,
         extract_outcome=strategy._extract_outcome_from_instrument,
-        preferred_slug=(
-            str(strategy.selected_slug or "")
-            if not str(strategy.current_market_slug or "")
-            else None
-        ),
+        preferred_slug=preferred_slug,
     )
     if strategy.startup_verbose:
         logger.info(
@@ -207,9 +211,18 @@ def find_btc_instrument(strategy: Any) -> bool:
 def wait_for_btc_instrument(strategy: Any, timeout_sec: int = 60, poll_interval_sec: int = 2) -> bool:
     """Wait for instruments to arrive in cache during startup."""
     deadline = time.time() + timeout_sec
+    bootstrap_attempted = False
     while time.time() < deadline:
         if find_btc_instrument(strategy):
             return True
+        if not bootstrap_attempted and hasattr(strategy, "_bootstrap_btc_instruments_into_cache"):
+            bootstrap_attempted = True
+            try:
+                loaded = int(strategy._bootstrap_btc_instruments_into_cache())
+            except Exception:
+                loaded = 0
+            if loaded > 0 and find_btc_instrument(strategy):
+                return True
         time.sleep(poll_interval_sec)
     return False
 
@@ -291,13 +304,14 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             return
         logger.warning("Non-maker mode is no longer supported in the slimmed bot path.")
     except Exception as e:
+        if hasattr(strategy, "_record_dashboard_error"):
+            strategy._record_dashboard_error(f"Quote tick error: {e}")
         logger.error(f"Error processing quote tick: {e}")
         traceback.print_exc()
 
 
 def maker_quote_sync(strategy: Any, bid_price: float, ask_price: float) -> None:
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(
             strategy._quote_maker_orders(
@@ -353,6 +367,12 @@ def handle_stop(strategy: Any) -> None:
         ],
         join_timeout_sec=2.0,
     )
+    smart_money_tracker = getattr(strategy, "smart_money_tracker", None)
+    if smart_money_tracker is not None:
+        try:
+            smart_money_tracker.stop()
+        except Exception:
+            pass
     logger.info("Integrated BTC strategy stopped")
     strategy._cancel_active_maker_orders()
     strategy.rebate_reporter.flush_daily_report()

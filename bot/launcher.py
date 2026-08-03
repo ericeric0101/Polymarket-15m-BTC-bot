@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import os
 import threading
 import time
@@ -10,6 +11,8 @@ import httpx
 from loguru import logger
 import redis
 
+from alert_watcher import AlertWatcher
+from dashboard_state import DashboardState
 from nautilus_trader.adapters.polymarket import POLYMARKET
 from nautilus_trader.adapters.polymarket import (
     PolymarketDataClientConfig,
@@ -40,15 +43,29 @@ from bot.market_discovery import (
 from run_bot import (
     IntegratedBTCStrategy,
 )
+from telegram_bot import start_telegram_bot_thread
+from telegram_notifier import TelegramNotifier
+
+
+def _install_fresh_main_thread_event_loop() -> None:
+    try:
+        current_loop = asyncio.get_event_loop_policy().get_event_loop()
+    except Exception:
+        current_loop = None
+
+    if current_loop is not None and not current_loop.is_closed():
+        return
+
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def _request_clob_l2_api_creds_direct(*, client, clob_host: str) -> Optional[Dict[str, str]]:
     """
     Direct HTTP fallback for CLOB API-key create/derive using py-clob's signer headers.
-    Avoids depending on py_clob_client.http_helpers transport behavior.
+    Avoids depending on py_clob_client_v2.http_helpers transport behavior.
     """
-    from py_clob_client.client import CREATE_API_KEY, DERIVE_API_KEY
-    from py_clob_client.headers.headers import create_level_1_headers
+    from py_clob_client_v2.client import CREATE_API_KEY, DERIVE_API_KEY
+    from py_clob_client_v2.headers.headers import create_level_1_headers
 
     headers = dict(create_level_1_headers(client.signer))
     headers["Connection"] = "close"
@@ -103,12 +120,12 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         resolved_funder = funder or ""
         if not resolved_funder:
             try:
-                from py_clob_client.client import ClobClient
+                from py_clob_client_v2.client import ClobClient
 
                 tmp_client = ClobClient(
-                    host=clob_host,
+                    clob_host,
+                    chain_id,
                     key=private_key,
-                    chain_id=chain_id,
                     signature_type=signature_type,
                 )
                 resolved_funder = tmp_client.get_address() or ""
@@ -128,23 +145,24 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         return None
 
     try:
-        from py_clob_client.client import ClobClient
+        from py_clob_client_v2.client import ClobClient
     except Exception as e:
-        logger.error(f"py-clob-client not available for API credential derivation: {e}")
+        logger.error(f"py-clob-client-v2 not available for API credential derivation: {e}")
         return None
 
     try:
         kwargs: Dict[str, Any] = {
-            "host": clob_host,
             "key": private_key,
-            "chain_id": chain_id,
             "signature_type": signature_type,
         }
         if funder:
             kwargs["funder"] = funder
-        client = ClobClient(**kwargs)
+        client = ClobClient(clob_host, chain_id, **kwargs)
         try:
-            derived = client.create_or_derive_api_creds()
+            try:
+                derived = client.create_api_key()
+            except Exception:
+                derived = client.derive_api_key()
         except Exception as primary_error:
             logger.warning(f"py-clob credential derivation failed, trying direct HTTP fallback: {primary_error}")
             direct = _request_clob_l2_api_creds_direct(client=client, clob_host=clob_host.rstrip("/"))
@@ -283,7 +301,28 @@ def run_integrated_bot(
     if not auth:
         raise RuntimeError("Cannot resolve Polymarket auth (provide PK or full API credentials).")
 
+    dashboard_state = DashboardState(
+        strike_price=0.0,
+        spot_price=0.0,
+        position_side=None,
+        position_entry=None,
+        position_qty=None,
+        position_ask=None,
+        current_market_price=0.0,
+        trades=[],
+        cumulative_pnl=0.0,
+        usdc_balance=0.0,
+        pol_balance=0.0,
+        account_last_updated=datetime.now(timezone.utc),
+    )
+    telegram_notifier = TelegramNotifier()
+    alert_watcher = AlertWatcher()
+    telegram_thread = start_telegram_bot_thread(dashboard_state)
+    if telegram_thread is not None:
+        logger.info("Telegram bot controller started in background thread.")
+
     def _build_node_for_cycle(cycle_index: int) -> tuple[TradingNode, str]:
+        _install_fresh_main_thread_event_loop()
         btc_slugs = resolve_btc_15m_market_slugs()
         if not btc_slugs:
             raise RuntimeError("No BTC 15-min market slugs resolved. Refusing to start.")
@@ -390,6 +429,9 @@ def run_integrated_bot(
             test_mode=test_mode,
             selected_slug=primary_slug,
             enable_terminal_dashboard=enable_terminal_dashboard,
+            dashboard_state=dashboard_state,
+            telegram_notifier=telegram_notifier,
+            alert_watcher=alert_watcher,
         )
 
         logger.info("Building Nautilus node...")
@@ -443,6 +485,9 @@ def run_integrated_bot(
             logger.info("Shutdown requested by user.")
         except Exception as e:
             consecutive_failures += 1
+            recent_errors = list(dashboard_state.recent_errors)[-19:]
+            recent_errors.append((datetime.now(timezone.utc), f"Node cycle {cycle_idx} failed: {e}"))
+            dashboard_state.update(recent_errors=recent_errors)
             logger.exception(f"Node cycle {cycle_idx} failed: {e}")
         finally:
             rollover_stop.set()
@@ -453,6 +498,7 @@ def run_integrated_bot(
                     node.dispose()
                 except Exception as e:
                     logger.warning(f"Node dispose raised: {e}")
+            _install_fresh_main_thread_event_loop()
             logger.info(f"Bot cycle {cycle_idx} stopped")
 
         try:
@@ -530,8 +576,6 @@ def main():
     test_mode = args.test_mode
     enable_terminal_dashboard = args.terminal_dashboard
     app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
-    if not enable_terminal_dashboard and app_config.observability.terminal_dashboard_enabled:
-        enable_terminal_dashboard = True
 
     if enable_terminal_dashboard:
         logger.remove()

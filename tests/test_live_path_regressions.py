@@ -8,17 +8,25 @@ from types import SimpleNamespace
 
 from bot.adapter_overrides import install_runtime_compatibility_overrides
 from bot.app_config import AppConfig
+from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
+from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
+from bot.price_streams import (
+    build_polymarket_chainlink_subscribe_payload,
+    extract_polymarket_chainlink_tick,
+)
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
     apply_forced_exit_sell_pricing,
+    apply_entry_quality_quote_placement,
     apply_shadow_entry_veto,
+    apply_high_entry_price_size_adjustment,
     build_desired_quote_entry,
     compute_loss_sell_policy,
     build_directional_snapshot,
@@ -31,6 +39,7 @@ from bot.quote_service import (
     retreat_crossing_buy_quote,
     should_requote_existing_order,
 )
+from bot.recovery import StrategyRecoveryMixin
 from bot.order_submission import submit_maker_quote
 from bot.shadow_signal import (
     ShadowSignalConfig,
@@ -42,6 +51,7 @@ from bot.spot_pricer import SpotPricerMixin
 from bot.side_decision import SideDecisionMixin
 from bot.taker_exit import TakerExitMixin
 from execution.exit_policy import ExitStage
+from monitoring.trade_journal_db import TradeJournalDB
 from run_bot import IntegratedBTCStrategy
 
 
@@ -960,6 +970,9 @@ class DummySpotPricerStrategy(SpotPricerMixin):
     def __init__(self) -> None:
         self.market_strike_cache_by_slug = {}
         self.market_strike_source_by_slug = {}
+        self.market_strike_provisional_by_slug = {}
+        self.market_strike_provisional_source_by_slug = {}
+        self._strike_pending_log_state_by_slug = {}
         self.market_start_ts_by_slug = {"btc-updown-15m-test": 1_000}
         self.market_strike_anchor_max_lag_sec = 180
         self.market_strike_anchor_near_sec = 30
@@ -972,6 +985,7 @@ class DummySpotPricerStrategy(SpotPricerMixin):
         self.market_strike_gamma_mismatch_warn_interval_sec = 180
         self.polymarket_chainlink_history = [(1000.1, Decimal("66625.19"))]
         self.polymarket_chainlink_history_max = 1200
+        self.polymarket_chainlink_twap_enabled = True
         self.external_spot_history = [(1000.1, Decimal("66602.20"))]
         self.external_spot_history_max = 1200
         self.latest_external_spot = Decimal("66630.00")
@@ -1069,6 +1083,154 @@ def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
     assert strategy._startup_rehydrated_inventory_force_sell_only is True
     assert strategy.live_inventory_cost["inst-up"]["avg_entry_price"] == Decimal("0.37")
     assert strategy.strategy_events[0][0] == "STARTUP_INVENTORY_REHYDRATED"
+
+
+def test_startup_rehydrate_recovers_cost_basis_from_recent_buy_submit(tmp_path):
+    class SubmitFallbackStrategy(StrategyRecoveryMixin):
+        def __init__(self) -> None:
+            self.trade_db = TradeJournalDB(str(tmp_path / "journal.db"))
+
+    strategy = SubmitFallbackStrategy()
+    inst = "condition-token.POLYMARKET"
+    strategy.trade_db.log_order_event(
+        run_id="test",
+        event_type="ORDER_SUBMIT",
+        side="BUY",
+        price=0.64,
+        qty=10.8,
+        status="SUBMITTED",
+        instrument_id="current-primary-inst",
+        payload={"submitted_instrument_id": inst},
+    )
+
+    state = strategy._rebuild_inventory_state_from_recent_buy_submit(
+        inst_key=inst,
+        target_qty=Decimal("10.8"),
+        cutoff="2026-01-01T00:00:00+00:00",
+    )
+
+    assert state is not None
+    assert state["qty"] == Decimal("10.8")
+    assert state["avg_entry_price"] == Decimal("0.64")
+
+
+def test_market_selection_honors_preferred_current_slug_even_if_cache_closed_flag_is_stale():
+    now_ts = int(time.time())
+    current_start = now_ts - 20
+    future_start = current_start + 900
+    preferred_slug = f"btc-updown-15m-{current_start}"
+    future_slug = f"btc-updown-15m-{future_start}"
+
+    def make_item(slug: str, outcome: str, start_ts: int, closed: bool) -> dict:
+        return {
+            "instrument": SimpleNamespace(
+                id=f"{slug}-{outcome}",
+                info={
+                    "question": "Bitcoin Up or Down",
+                    "market_slug": slug,
+                    "active": True,
+                    "closed": closed,
+                },
+            ),
+            "slug": slug,
+            "market_timestamp": start_ts,
+            "end_timestamp": start_ts + 900,
+            "question": "bitcoin",
+            "active": True,
+            "closed": closed,
+            "time_diff_minutes": (start_ts - now_ts) / 60,
+        }
+
+    selection, _, _, _ = resolve_bi_side_market_selection(
+        btc_instruments=[
+            make_item(preferred_slug, "up", current_start, True),
+            make_item(preferred_slug, "down", current_start, True),
+            make_item(future_slug, "up", future_start, False),
+        ],
+        current_timestamp=now_ts,
+        extract_outcome=lambda instrument: "down" if str(instrument.id).endswith("-down") else "up",
+        preferred_slug=preferred_slug,
+    )
+
+    assert selection is not None
+    assert selection.current_market_slug == preferred_slug
+
+
+def test_ghost_inventory_reconcile_recovers_cost_basis_from_recent_buy_order():
+    strategy = DummySellableQtyStrategy()
+    strategy.live_inventory_cost = {}
+    strategy.inventory_delta_shares = Decimal("0")
+    strategy.active_maker_orders = {
+        "buy": {
+            "side": "buy",
+            "instrument_id": "inst-down",
+            "price": Decimal("0.64"),
+            "quantity": Decimal("10.8"),
+            "created_ts": time.time(),
+            "order": SimpleNamespace(client_order_id="BUY-1"),
+        }
+    }
+    strategy.strategy_events = []
+    strategy._db_strategy_event = lambda event_type, payload=None: strategy.strategy_events.append((event_type, payload or {}))
+
+    restored = IntegratedBTCStrategy._reconcile_ghost_inventory(
+        strategy,
+        instrument_id="inst-down",
+        confirmed_qty=Decimal("0"),
+        onchain_qty=Decimal("10.8"),
+    )
+
+    assert restored == Decimal("10.8")
+    assert strategy.live_inventory_cost["inst-down"]["avg_entry_price"] == Decimal("0.64")
+    assert strategy.strategy_events[-1][1]["avg_entry_recovered"] is True
+
+
+def test_polymarket_user_trade_decimal_fallback_handles_empty_maker_fields():
+    install_runtime_compatibility_overrides()
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketEventType
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketLiquiditySide
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketOrderSide
+    from nautilus_trader.adapters.polymarket.common.enums import PolymarketTradeStatus
+    from nautilus_trader.adapters.polymarket.schemas.order import PolymarketMakerOrder
+    from nautilus_trader.adapters.polymarket.schemas.user import PolymarketUserTrade
+
+    trade = PolymarketUserTrade(
+        asset_id="taker-token",
+        bucket_index=0,
+        fee_rate_bps="",
+        id="trade-1",
+        last_update="0",
+        maker_address="maker",
+        maker_orders=[
+            PolymarketMakerOrder(
+                asset_id="maker-token",
+                fee_rate_bps="",
+                maker_address="maker",
+                matched_amount="",
+                order_id="maker-order-1",
+                outcome="Up",
+                owner="api-key",
+                price="",
+            )
+        ],
+        market="condition-1",
+        match_time="0",
+        outcome="Up",
+        owner="api-key",
+        price="0.64",
+        side=PolymarketOrderSide.BUY,
+        size="10.8",
+        status=PolymarketTradeStatus.CONFIRMED,
+        taker_order_id="taker-order-1",
+        timestamp="0",
+        trade_owner="api-key",
+        trader_side=PolymarketLiquiditySide.MAKER,
+        type=PolymarketEventType.TRADE,
+    )
+
+    assert trade.last_px("maker-order-1") == Decimal("0.64")
+    assert trade.last_qty("maker-order-1") == Decimal("10.8")
+    assert trade.get_fee_rate_bps("maker-order-1") == Decimal("0")
 
 
 def test_maker_quote_instruments_include_held_and_recovery_legs():
@@ -1298,7 +1460,7 @@ def test_strike_prefers_polymarket_chainlink_history_anchor():
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
     assert strike == Decimal("66625.19")
-    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_open"
+    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_twap_open"
 
 
 def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
@@ -2438,6 +2600,7 @@ def test_app_config_reads_extended_env(monkeypatch):
     monkeypatch.setenv("AUTO_REDEEM_ENABLED", "1")
     monkeypatch.setenv("TRADE_DB_PATH", "./logs/custom.db")
     monkeypatch.setenv("REGIME_GUARD_N_MARKETS", "6")
+    monkeypatch.setenv("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC", "60")
 
     cfg = AppConfig.from_env(enable_terminal_dashboard=False)
 
@@ -2446,6 +2609,45 @@ def test_app_config_reads_extended_env(monkeypatch):
     assert cfg.operations.auto_redeem_enabled is True
     assert cfg.operations.trade_db_path == "./logs/custom.db"
     assert cfg.risk.regime_guard_n_markets == 6
+    assert cfg.market_data.polymarket_chainlink_twap_enabled is True
+    assert cfg.market_data.polymarket_chainlink_twap_window_sec == 60
+    assert cfg.market_data.require_twap_reference_spot is True
+
+
+def test_polymarket_chainlink_twap_subscribe_payload_uses_60s_topic():
+    payload = build_polymarket_chainlink_subscribe_payload(
+        use_twap=True,
+        window_seconds=60,
+        symbol="BTC/USD",
+    )
+
+    sub = payload["subscriptions"][0]
+    assert sub["topic"] == "crypto_prices_twap_sixty"
+    assert sub["type"] == "update"
+    assert sub["filters"] == '{"symbol":"btc/usd"}'
+
+
+def test_extract_polymarket_chainlink_twap_tick_prefers_full_accuracy_e18():
+    tick = extract_polymarket_chainlink_tick(
+        {
+            "topic": "crypto_prices_twap_sixty",
+            "type": "update",
+            "timestamp": 1785178800123,
+            "payload": {
+                "symbol": "btc/usd",
+                "value": 65000.0,
+                "full_accuracy_value": "65000500000000000000000",
+                "timestamp": 1785178800000,
+                "window_s": 60,
+            },
+        }
+    )
+
+    assert tick is not None
+    assert tick.price == Decimal("65000.5")
+    assert tick.updated_at_ms == 1785178800000
+    assert tick.window_seconds == 60
+    assert tick.source == "polymarket_chainlink_twap_60s_ws"
 
 
 def test_runtime_compatibility_overrides_install():
@@ -2453,7 +2655,7 @@ def test_runtime_compatibility_overrides_install():
 
     from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
     from nautilus_trader.adapters.polymarket.execution import PolymarketExecutionClient
-    import py_clob_client.http_helpers.helpers as pyclob_helpers
+    import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 
     assert getattr(PolymarketDataClient, "_btc15m_runtime_compat_patched", False) is True
     assert getattr(PolymarketExecutionClient, "_btc15m_runtime_compat_patched", False) is True
@@ -2723,6 +2925,152 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty():
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
     assert submitted_qty == Decimal("8.100000")
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "trend"
+
+
+def test_entry_quality_adjustment_soft_sizes_high_price_chase_risk():
+    adjustment = evaluate_entry_quality_adjustment(
+        candidate_entry_price=Decimal("0.85"),
+        side_score=Decimal("0.72"),
+        fair=Decimal("0.87"),
+        robust_net_usdc=Decimal("0.03"),
+        spot_minus_strike_avg=Decimal("12"),
+        active_side_value="UP",
+        shadow_payload={
+            "spot_minus_strike": 8.0,
+            "ret_30_bps": 6.2,
+            "breakout_persistence_60s": 0.15,
+        },
+    )
+
+    assert adjustment.size_multiplier < Decimal("1")
+    assert adjustment.min_expected_net_uplift_usdc > Decimal("0")
+    assert adjustment.label in {"moderate_chase_risk", "high_chase_risk"}
+    assert "high_price" in adjustment.reasons
+
+
+def test_value_entry_size_multiplier_flows_into_submit_qty():
+    desired_entry = build_desired_quote_entry(
+        order_key="buy:inst-up",
+        side="buy",
+        inst_id="inst-up",
+        quote_data=(
+            Decimal("0.64"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.007"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            True,
+            Decimal("-0.031"),
+            Decimal("0.030"),
+            Decimal("0.010"),
+            Decimal("0.054"),
+            Decimal("0.6244"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={"buy": "econ_gate"},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("-0.005"),
+        now_ts=0.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=None,
+        maker_exchange_min_shares=Decimal("1.0"),
+        avg_entry=Decimal("0"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+        entry_mode="value",
+        entry_size_multiplier=Decimal("0.60"),
+        entry_quality={"entry_quality_label": "moderate_chase_risk"},
+    )
+    snapshot = build_directional_snapshot(desired_entry)
+    strategy = DummyTrendSubmitStrategy()
+    strategy.maker_min_shares = Decimal("1.0")
+    strategy.maker_exchange_min_shares = Decimal("1.0")
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=desired_entry["econ"],
+        directional_snapshot=snapshot,
+    )
+
+    assert strategy.submitted_orders, "expected submit_order to be called"
+    submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
+    assert submitted_qty == Decimal("3.240000")
+    assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.6
+
+
+def test_high_entry_price_size_adjustment_halves_submit_qty():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.71"),
+        "size_multiplier": Decimal("1"),
+        "diag_reason": "trend_buy_entry",
+    }
+
+    adjusted = apply_high_entry_price_size_adjustment(
+        desired_entry=desired_entry,
+        side="buy",
+        enabled=True,
+        threshold=Decimal("0.70"),
+        multiplier=Decimal("0.5"),
+    )
+    snapshot = build_directional_snapshot(adjusted)
+    strategy = DummyTrendSubmitStrategy()
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.71"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+        directional_snapshot=snapshot,
+        target_qty_override=Decimal("10.8"),
+    )
+
+    assert strategy.submitted_orders, "expected submit_order to be called"
+    submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
+    assert submitted_qty == Decimal("5.400000")
+    assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.5
+    assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
+
+
+def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
+    desired_entry = {
+        "should_quote": True,
+        "price": Decimal("0.74"),
+        "entry_quality": {
+            "entry_quality_quote_placement_mode": "join_bid",
+        },
+    }
+
+    out = apply_entry_quality_quote_placement(
+        desired_entry=desired_entry,
+        side="buy",
+        quote=(Decimal("0.70"), Decimal("0.75")),
+        tick=Decimal("0.01"),
+    )
+
+    assert out["price"] == Decimal("0.70")
+    assert out["entry_quality_quote_price_cap"] == Decimal("0.70")
+    assert "entry_quality_quote_placement join_bid 0.7400->0.7000" in out["diag_reason"]
 
 
 def test_reduce_only_overrides_trend_buy_quote():
@@ -3362,6 +3710,31 @@ def test_capture_market_open_spot_prefers_fresh_chainlink_over_stale_latest_exte
     assert price == Decimal("101.25")
     assert source == "polymarket_chainlink_ws"
     assert math.isclose(age, 0.6, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_capture_market_open_spot_prefers_fresh_twap_over_snapshot_chainlink():
+    now_ts = 1_000.0
+    dummy = SimpleNamespace(
+        _polymarket_chainlink_twap_price=Decimal("101.50"),
+        _polymarket_chainlink_twap_price_ts=999.6,
+        _polymarket_chainlink_twap_window_sec=60,
+        polymarket_chainlink_twap_window_sec=60,
+        _polymarket_chainlink_price=Decimal("101.25"),
+        _polymarket_chainlink_price_ts=999.7,
+        _binance_ws_price=Decimal("100.80"),
+        _binance_ws_price_ts=999.8,
+        latest_external_spot=Decimal("99.50"),
+        latest_external_spot_source="binance_ws",
+        latest_external_spot_source_ts=810.0,
+        last_external_spot=Decimal("99.40"),
+        external_spot_history=[],
+    )
+
+    price, source, age = IntegratedBTCStrategy._capture_market_open_spot_detail(dummy, now_ts=now_ts)
+
+    assert price == Decimal("101.50")
+    assert source == "polymarket_chainlink_twap_60s_ws"
+    assert math.isclose(age, 0.4, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():

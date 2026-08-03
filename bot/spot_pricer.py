@@ -29,8 +29,8 @@ from bot.market_data import (
 )
 from bot.price_streams import (
     BINANCE_AGGTRADE_WS_URL,
-    POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD,
     POLYMARKET_LIVE_WS_URL,
+    build_polymarket_chainlink_subscribe_payload,
     extract_binance_aggtrade_tick,
     extract_polymarket_chainlink_tick,
 )
@@ -42,8 +42,13 @@ class SpotPricerMixin:
 
     _AUTHORITATIVE_STRIKE_SOURCES = {
         "polymarket_chainlink_open",
+        "polymarket_chainlink_twap_open",
         "polymarket_chainlink_live_latch",
+        "polymarket_chainlink_twap_live_latch",
     }
+
+    def _is_twap_spot_source(self, source: str) -> bool:
+        return str(source or "").startswith("polymarket_chainlink_twap_")
 
     def _maybe_log_strike_pending_state(
         self,
@@ -106,8 +111,17 @@ class SpotPricerMixin:
                     ping_timeout=None,
                 ) as ws:
                     reconnect_delay = 1.0
-                    logger.info("✓ Polymarket Chainlink WS connected")
-                    ws.send(_json.dumps(POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD))
+                    use_twap = bool(getattr(self, "polymarket_chainlink_twap_enabled", True))
+                    twap_window = int(getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60)
+                    twap_symbol = str(getattr(self, "polymarket_chainlink_twap_symbol", "btc/usd") or "btc/usd")
+                    subscribe_payload = build_polymarket_chainlink_subscribe_payload(
+                        use_twap=use_twap,
+                        window_seconds=twap_window,
+                        symbol=twap_symbol,
+                    )
+                    mode = f"TWAP {twap_window}s" if use_twap else "spot"
+                    logger.info(f"✓ Polymarket Chainlink WS connected ({mode})")
+                    ws.send(_json.dumps(subscribe_payload))
                     while not self._polymarket_chainlink_ws_stop_event.is_set():
                         try:
                             raw = ws.recv(timeout=5)
@@ -119,6 +133,11 @@ class SpotPricerMixin:
                         self._polymarket_chainlink_price = tick.price
                         self._polymarket_chainlink_price_ts = tick.received_at_ts
                         self._polymarket_chainlink_event_ts_ms = tick.updated_at_ms
+                        if self._is_twap_spot_source(tick.source):
+                            self._polymarket_chainlink_twap_price = tick.price
+                            self._polymarket_chainlink_twap_price_ts = tick.received_at_ts
+                            self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
+                            self._polymarket_chainlink_twap_window_sec = tick.window_seconds
                         self._record_polymarket_chainlink_observation(
                             tick.price,
                             tick.received_at_ts,
@@ -224,7 +243,7 @@ class SpotPricerMixin:
     async def _fetch_external_spot_price(self) -> Optional[Decimal]:
         """
         Get BTC reference spot price.
-        Primary: Polymarket Chainlink WS.
+        Primary: Polymarket Chainlink TWAP WS.
         Fallback: Binance WS.
         Last resort: Coinbase HTTP.
         """
@@ -238,11 +257,16 @@ class SpotPricerMixin:
             if binance_age < 10.0:
                 binance_fresh = True
                 binance_price = self._binance_ws_price
-        # Primary: Polymarket Chainlink WS if fresh.
-        if self._polymarket_chainlink_price is not None:
-            age = time.time() - self._polymarket_chainlink_price_ts
+        require_twap = bool(getattr(self, "require_twap_reference_spot", True))
+        twap_price = getattr(self, "_polymarket_chainlink_twap_price", None)
+        twap_ts = float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0)
+        twap_window = int(getattr(self, "_polymarket_chainlink_twap_window_sec", 0) or getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60)
+
+        # Primary: Polymarket Chainlink TWAP WS if fresh.
+        if twap_price is not None:
+            age = time.time() - twap_ts
             if age < 10.0:
-                price = self._polymarket_chainlink_price
+                price = twap_price
                 if (
                     binance_fresh
                     and binance_price is not None
@@ -253,19 +277,35 @@ class SpotPricerMixin:
                     now_ts = time.time()
                     if now_ts - last_warn_ts >= 30.0:
                         logger.warning(
-                            "Reference spot source delta exceeded guard; using Polymarket Chainlink as primary: "
-                            f"chainlink={float(price):.2f} binance={float(binance_price):.2f} "
+                            "Reference spot source delta exceeded guard; using Polymarket Chainlink TWAP as primary: "
+                            f"twap={float(price):.2f} binance={float(binance_price):.2f} "
                             f"delta={float(price - binance_price):+.2f} "
                             f"guard={float(max_delta_abs):.2f}"
                         )
                         self._last_spot_source_delta_warn_ts = now_ts
+                self.latest_external_spot_source = f"polymarket_chainlink_twap_{twap_window}s_ws"
+                self.latest_external_spot_source_ts = twap_ts
+                if not getattr(self, "_logged_first_spot", False):
+                    logger.info(f"✓ First BTC reference spot via Polymarket Chainlink {twap_window}s TWAP WS: ${price:,.2f}")
+                    self._logged_first_spot = True
+                return price
+            logger.debug(f"Polymarket Chainlink TWAP WS price stale ({age:.1f}s)")
+
+        if require_twap:
+            return None
+
+        # Legacy fallback: Polymarket Chainlink snapshot WS if explicitly allowed.
+        if self._polymarket_chainlink_price is not None:
+            age = time.time() - self._polymarket_chainlink_price_ts
+            if age < 10.0:
+                price = self._polymarket_chainlink_price
                 self.latest_external_spot_source = "polymarket_chainlink_ws"
                 self.latest_external_spot_source_ts = self._polymarket_chainlink_price_ts
                 if not getattr(self, "_logged_first_spot", False):
-                    logger.info(f"✓ First BTC reference spot via Polymarket Chainlink WS: ${price:,.2f}")
+                    logger.info(f"✓ First BTC reference spot via Polymarket Chainlink snapshot WS fallback: ${price:,.2f}")
                     self._logged_first_spot = True
                 return price
-            logger.debug(f"Polymarket Chainlink WS price stale ({age:.1f}s), falling back")
+            logger.debug(f"Polymarket Chainlink snapshot WS price stale ({age:.1f}s), falling back")
 
         # Fallback: Binance WS price if fresh.
         if self._binance_ws_price is not None:
@@ -380,7 +420,8 @@ class SpotPricerMixin:
             return None
         if now_ts > float(start_ts) + float(self.market_strike_anchor_max_lag_sec):
             return None
-        if str(getattr(self, "latest_external_spot_source", "") or "") != "polymarket_chainlink_ws":
+        source = str(getattr(self, "latest_external_spot_source", "") or "")
+        if source != "polymarket_chainlink_ws" and not self._is_twap_spot_source(source):
             return None
         price = getattr(self, "latest_external_spot", None)
         if price is None or price <= 0:
@@ -389,20 +430,21 @@ class SpotPricerMixin:
         if src_ts <= 0 or abs(src_ts - float(start_ts)) > float(self.market_strike_anchor_max_lag_sec):
             return None
         self.market_strike_cache_by_slug[slug] = price
-        self.market_strike_source_by_slug[slug] = "polymarket_chainlink_live_latch"
+        strike_source = "polymarket_chainlink_twap_live_latch" if self._is_twap_spot_source(source) else "polymarket_chainlink_live_latch"
+        self.market_strike_source_by_slug[slug] = strike_source
         self.market_strike_provisional_by_slug.pop(slug, None)
         self.market_strike_provisional_source_by_slug.pop(slug, None)
         self._record_strike_event(
             event_type="MARKET_STRIKE_LOCKED",
             slug=slug,
             strike=price,
-            source="polymarket_chainlink_live_latch",
+            source=strike_source,
             extra={
                 "sample_dt_sec": float(src_ts - float(start_ts)),
             },
         )
         logger.info(
-            f"[STRIKE] Locked opening strike from Polymarket Chainlink live latch: "
+            f"[STRIKE] Locked opening strike from Polymarket Chainlink live latch ({source}): "
             f"${float(price):.2f} for slug={slug} "
             f"(sample_dt={src_ts - float(start_ts):+.2f}s)"
         )
@@ -556,12 +598,17 @@ class SpotPricerMixin:
             strike = self._extract_strike_from_question(question)
             return strike
 
-        # 3) Primary: Polymarket Chainlink history around market open
+        # 3) Primary: Polymarket Chainlink reference history around market open
         anchor = self._resolve_opening_strike_from_polymarket_history(start_ts)
         if anchor is not None:
             anchor_ts, anchor_px = anchor
             self.market_strike_cache_by_slug[slug] = anchor_px
-            self.market_strike_source_by_slug[slug] = "polymarket_chainlink_open"
+            hist_source = (
+                "polymarket_chainlink_twap_open"
+                if bool(getattr(self, "polymarket_chainlink_twap_enabled", True))
+                else "polymarket_chainlink_open"
+            )
+            self.market_strike_source_by_slug[slug] = hist_source
             self.market_strike_provisional_by_slug.pop(slug, None)
             self.market_strike_provisional_source_by_slug.pop(slug, None)
             self._strike_pending_log_state_by_slug.pop(slug, None)
@@ -569,13 +616,13 @@ class SpotPricerMixin:
                 event_type="MARKET_STRIKE_LOCKED",
                 slug=slug,
                 strike=anchor_px,
-                source="polymarket_chainlink_open",
+                source=hist_source,
                 extra={
                     "sample_dt_sec": float(anchor_ts - float(start_ts)),
                 },
             )
             logger.info(
-                f"[STRIKE] Locked opening strike from Polymarket Chainlink history: "
+                f"[STRIKE] Locked opening strike from Polymarket Chainlink history ({hist_source}): "
                 f"${float(anchor_px):.2f} for slug={slug} "
                 f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
             )
@@ -747,7 +794,7 @@ class SpotPricerMixin:
                         imp_str = f" implied_σ={float(implied_sigma_used):.4f}" if implied_sigma_used else ""
                         fair_color = "green" if fair_for_token >= Decimal("0.60") else "yellow" if fair_for_token >= Decimal("0.40") else "red"
                         side_color = "green" if self.active_side.value == "UP" else "red" if self.active_side.value == "DOWN" else "yellow"
-                        source_color = "cyan" if (self.latest_external_spot_source or "") == "polymarket_chainlink_ws" else "yellow"
+                        source_color = "cyan" if self._is_twap_spot_source(self.latest_external_spot_source or "") else "yellow"
                         msg = (
                             "<white>Digital pricer inputs:</white> "
                             f"spot=<cyan>{float(external):.2f}</cyan> "

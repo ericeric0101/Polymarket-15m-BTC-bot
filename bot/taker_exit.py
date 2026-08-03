@@ -30,6 +30,12 @@ class TakerExitHost(Protocol):
     hold_to_redeem_enabled: bool
     taker_exit_cooldown_sec: int
     taker_exit_eval_interval_sec: float
+    taker_exit_only_after_invalidation: bool
+    taker_exit_max_time_left_sec: int
+    taker_exit_min_bid: Decimal
+    taker_exit_min_recovery_ratio: Decimal
+    taker_exit_require_inventory: bool
+    taker_exit_disable_if_bid_below: Decimal
     taker_exit_reject_cooldown_until_by_inst: dict[str, float]
     taker_exit_tail_attempted_by_inst: dict[str, Any]
     taker_exit_last_eval_ts_by_inst: dict[str, float]
@@ -69,7 +75,9 @@ class TakerExitMixin:
     async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
             return
-        if getattr(self, "hold_to_redeem_enabled", False):
+        hold_to_redeem = bool(getattr(self, "hold_to_redeem_enabled", False))
+        invalidation_recovery_enabled = bool(getattr(self, "taker_exit_only_after_invalidation", False))
+        if hold_to_redeem and not invalidation_recovery_enabled:
             return
         if self.taker_exit_cooldown_sec < 0:
             return
@@ -163,6 +171,22 @@ class TakerExitMixin:
             if fee_rate is None or fee_rate < 0:
                 fee_rate = Decimal("0")
 
+            confirmed_locked_side_invalidated = bool(
+                getattr(self, "_side_invalidation_confirmed_by_slug", {}).get(
+                    str(self.current_market_slug or ""),
+                    False,
+                )
+            )
+            invalidation_recovery_candidate = (
+                hold_to_redeem
+                and invalidation_recovery_enabled
+                and confirmed_locked_side_invalidated
+                and time_left_sec is not None
+                and int(getattr(self, "taker_exit_max_time_left_sec", 0)) > 0
+                and time_left_sec <= float(getattr(self, "taker_exit_max_time_left_sec", 0))
+                and best_bid >= Decimal(str(getattr(self, "taker_exit_disable_if_bid_below", Decimal("0"))))
+                and best_bid >= Decimal(str(getattr(self, "taker_exit_min_bid", Decimal("0"))))
+            )
             avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)
@@ -174,6 +198,7 @@ class TakerExitMixin:
                 and avg_entry > 0
                 and best_bid < avg_entry
                 and not emergency_window
+                and not invalidation_recovery_candidate
             ):
                 self._log_taker_exit_skip_throttled(
                     inst_key=inst_key,
@@ -231,12 +256,6 @@ class TakerExitMixin:
                 self._stop_loss_execution_priority_by_inst.get(inst_key, False)
                 or int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)) > 0
             )
-            confirmed_locked_side_invalidated = bool(
-                getattr(self, "_side_invalidation_confirmed_by_slug", {}).get(
-                    str(self.current_market_slug or ""),
-                    False,
-                )
-            )
             exit_decision = self.exit_policy_engine.evaluate(
                 snapshot,
                 position,
@@ -256,6 +275,93 @@ class TakerExitMixin:
                 and time_left_sec <= float(self.taker_exit_max_hold_near_close_sec)
             )
             held_side = self._side_for_instrument_id(inst_id).value if hasattr(self, "_side_for_instrument_id") else "NONE"
+
+            if invalidation_recovery_candidate:
+                sellable_qty = position.sellable_qty
+                qty_to_exit = min(qty, sellable_qty)
+                if (
+                    bool(getattr(self, "taker_exit_require_inventory", True))
+                    and qty_to_exit + Decimal("0.000001") < self.maker_exchange_min_shares
+                ):
+                    self._log_taker_exit_skip_throttled(
+                        inst_key=inst_key,
+                        reason_tag="invalidation_recovery_no_sellable",
+                        message=(
+                            "Skip invalidation recovery taker exit: no sellable inventory "
+                            f"qty={float(qty):.6f} sellable={float(sellable_qty):.6f}"
+                        ),
+                        now_ts=now_ts,
+                    )
+                    continue
+                cost_basis = avg_entry * qty_to_exit
+                gross_recovery = best_bid * qty_to_exit
+                recovery_ratio = (gross_recovery / cost_basis) if cost_basis > 0 else Decimal("0")
+                min_recovery_ratio = Decimal(str(getattr(self, "taker_exit_min_recovery_ratio", Decimal("0"))))
+                if recovery_ratio < min_recovery_ratio:
+                    self._record_exit_policy_decision_throttled(
+                        inst_key=inst_key,
+                        reason_tag="invalidation_recovery_recovery_gate",
+                        now_ts=now_ts,
+                        payload={
+                            "slug": self.current_market_slug or "",
+                            "instrument_id": inst_key,
+                            "decision_type": "INVALIDATION_RECOVERY_SKIP",
+                            "reason": "recovery_ratio_below_min",
+                            "avg_entry": float(avg_entry),
+                            "qty": float(qty),
+                            "sellable_qty": float(sellable_qty),
+                            "time_left_sec": time_left_sec,
+                            "best_bid": float(best_bid),
+                            "best_ask": float(best_ask),
+                            "gross_recovery": float(gross_recovery),
+                            "cost_basis": float(cost_basis),
+                            "recovery_ratio": float(recovery_ratio),
+                            "min_recovery_ratio": float(min_recovery_ratio),
+                            "locked_side_invalidated": "1",
+                        },
+                    )
+                    self._log_taker_exit_skip_throttled(
+                        inst_key=inst_key,
+                        reason_tag="invalidation_recovery_recovery_gate",
+                        message=(
+                            "Skip invalidation recovery taker exit: "
+                            f"recovery_ratio={float(recovery_ratio):.3f} < min={float(min_recovery_ratio):.3f} "
+                            f"best_bid={float(best_bid):.4f} avg_entry={float(avg_entry):.4f}"
+                        ),
+                        now_ts=now_ts,
+                    )
+                    continue
+                ok = self._submit_taker_exit_order(
+                    instrument_id=inst_id,
+                    quantity=qty_to_exit,
+                    reason="invalidation_recovery",
+                    est_net_if_exit=net_if_exit,
+                    best_bid=best_bid,
+                    fee_rate=fee_rate,
+                    decision_payload={
+                        "slug": self.current_market_slug or "",
+                        "decision_type": "INVALIDATION_RECOVERY_TAKER_EXIT",
+                        "decision_reason": "hold_to_redeem_side_invalidated_recovery",
+                        "avg_entry": float(avg_entry),
+                        "time_left_sec": time_left_sec,
+                        "exit_stage": exit_stage.value,
+                        "best_ask": float(best_ask),
+                        "gross_if_exit": float(exit_decision.gross_if_exit),
+                        "exit_fee_est": float(exit_decision.exit_fee_est),
+                        "exit_px_effective": float(exit_decision.exit_px_effective),
+                        "sellable_qty": float(sellable_qty),
+                        "gross_recovery": float(gross_recovery),
+                        "cost_basis": float(cost_basis),
+                        "recovery_ratio": float(recovery_ratio),
+                        "min_recovery_ratio": float(min_recovery_ratio),
+                        "locked_side_invalidated": "1",
+                        "hold_to_redeem": "1",
+                    },
+                )
+                if ok:
+                    self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                    self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+                    continue
 
             if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
                 if hasattr(self, "position_manager"):

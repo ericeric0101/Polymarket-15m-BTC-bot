@@ -47,9 +47,15 @@ def build_patch_manifest(_project_root: Path) -> List[CompatibilityPatchSpec]:
             implementation="runtime_override",
         ),
         CompatibilityPatchSpec(
+            name="user-trade-decimal-fallback",
+            intent="Fallback to trade-level numeric fields when Polymarket maker trade fields are empty.",
+            target_family="nautilus.polymarket.schemas.user",
+            implementation="runtime_override",
+        ),
+        CompatibilityPatchSpec(
             name="py-clob-http-fallback",
             intent="Use HTTP/1.1 fallback retry for py-clob helper request transport errors.",
-            target_family="py_clob_client.http_helpers",
+            target_family="py_clob_client_v2.http_helpers",
             implementation="runtime_override",
         ),
     ]
@@ -83,4 +89,3 @@ def apply_compatibility_patches(*, project_root: Path, enabled: bool, mode: str 
 
     install_runtime_compatibility_overrides()
     logger.info(f"Compatibility runtime overrides installed: {len(manifest)} targets")
-

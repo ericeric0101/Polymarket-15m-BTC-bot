@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Patch py_clob_client HTTP helper for better transport resiliency:
+Patch py_clob_client_v2 HTTP helper for better transport resiliency:
 - keep HTTP/2 primary client
 - add HTTP/1.1 fallback client
 - retry once on request exceptions (especially RemoteProtocolError) via HTTP/1.1
@@ -19,10 +19,10 @@ MARKER = "_pyclob_http11_fallback_retry"
 
 def find_target_file(project_root: Path) -> Path:
     candidates = sorted(
-        project_root.glob("venv/lib/python*/site-packages/py_clob_client/http_helpers/helpers.py")
+        project_root.glob("venv/lib/python*/site-packages/py_clob_client_v2/http_helpers/helpers.py")
     )
     if not candidates:
-        raise FileNotFoundError("Cannot find py_clob_client helpers.py inside venv.")
+        raise FileNotFoundError("Cannot find py_clob_client_v2 helpers.py inside venv.")
     return candidates[-1]
 
 
@@ -154,4 +154,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

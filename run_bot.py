@@ -32,6 +32,10 @@ sys.path.insert(0, str(project_root))
 
 # Now import Nautilus
 from nautilus_trader.adapters.polymarket import POLYMARKET
+from nautilus_trader.adapters.polymarket.factories import get_polymarket_http_client
+from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProvider
+from nautilus_trader.adapters.polymarket.providers import PolymarketInstrumentProviderConfig
+from nautilus_trader.common.component import LiveClock
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.identifiers import InstrumentId, ClientOrderId
 from nautilus_trader.model.enums import OrderSide, TimeInForce
@@ -101,9 +105,12 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
+    apply_entry_quality_quote_placement,
     apply_forced_exit_sell_pricing,
+    apply_high_entry_price_size_adjustment,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
+    apply_weak_pfair_size_adjustment,
     attach_desired_entry_runtime_metadata,
     apply_confirmed_inventory_sell_guard,
     apply_reload_edge_guard,
@@ -125,6 +132,12 @@ from bot.quote_service import (
     resolve_quote_intent_state,
     should_requote_existing_order,
 )
+from bot.entry_confirmation import apply_entry_confirmation_adjustment
+from bot.smart_money import (
+    apply_smart_money_adjustment,
+    extract_condition_id_from_instrument_id,
+    extract_token_id_from_instrument_id,
+)
 from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
@@ -134,6 +147,9 @@ from bot.market_discovery import (
     resolve_primary_btc_15m_instrument_ids,
 )
 from bot.merge_ops import try_merge_yes_no_positions
+from alert_watcher import AlertWatcher
+from dashboard_state import DashboardState, TradeRecord
+from telegram_notifier import TelegramNotifier
 
 load_dotenv()
 
@@ -205,6 +221,9 @@ class IntegratedBTCStrategy(
         test_mode=False,
         selected_slug: Optional[str] = None,
         enable_terminal_dashboard: bool = False,
+        dashboard_state: Optional[DashboardState] = None,
+        telegram_notifier: Optional[TelegramNotifier] = None,
+        alert_watcher: Optional[AlertWatcher] = None,
     ):
         super().__init__()
         
@@ -212,6 +231,11 @@ class IntegratedBTCStrategy(
         self.instrument_id = None
         self.redis_client = redis_client
         self.selected_slug = selected_slug
+        self.dashboard_state = dashboard_state
+        self.telegram_notifier = telegram_notifier
+        self.alert_watcher = alert_watcher
+        self._last_dashboard_sync_ts = 0.0
+        self._last_dashboard_pause_log_ts = 0.0
         initialize_strategy_settings(
             self,
             enable_grafana=enable_grafana,
@@ -224,6 +248,157 @@ class IntegratedBTCStrategy(
         if test_mode:
             logger.info("⚠️  TEST MODE ACTIVE - Trading every minute!")
         logger.info("Integrated BTC strategy initialized.")
+
+    def _record_dashboard_error(self, message: str) -> None:
+        state = getattr(self, "dashboard_state", None)
+        if state is None:
+            return
+        try:
+            recent_errors = list(state.recent_errors)[-19:]
+            recent_errors.append((datetime.now(timezone.utc), str(message)))
+            state.update(recent_errors=recent_errors)
+        except Exception:
+            logger.debug("Failed to record dashboard error", exc_info=True)
+
+    def _sync_dashboard_state(self) -> None:
+        state = getattr(self, "dashboard_state", None)
+        if state is None:
+            return
+        now_dt = datetime.now(timezone.utc)
+        try:
+            slug = str(self.current_market_slug or self.selected_slug or "")
+            strike = self.market_strike_cache_by_slug.get(slug)
+            spot = self._capture_market_open_spot()
+            if spot is None and getattr(self, "_binance_ws_price", None) is not None:
+                spot = Decimal(str(self._binance_ws_price))
+
+            position_side: Optional[str] = None
+            position_entry: Optional[float] = None
+            position_qty: Optional[float] = None
+            position_ask: Optional[float] = None
+            position_hold_sec: Optional[float] = None
+            current_market_price = 0.0
+            for inst_key, inv_state in list(getattr(self, "live_inventory_cost", {}).items()):
+                qty = Decimal(str(inv_state.get("qty", "0")))
+                if qty <= 0:
+                    continue
+                inst_id = self._normalize_instrument_id(inst_key)
+                side = self._side_for_instrument_id(inst_id) if inst_id is not None else ActiveSide.NONE
+                position_side = getattr(side, "value", str(side)).upper()
+                position_entry = float(inv_state.get("avg_entry_price", 0.0) or 0.0)
+                position_qty = float(qty)
+                opened_ts = float(inv_state.get("opened_ts", 0.0) or 0.0)
+                position_hold_sec = max(0.0, time.time() - opened_ts) if opened_ts > 0 else None
+                quote = self._get_quote_for_instrument(inst_id) if inst_id is not None else None
+                if quote is not None:
+                    bid, ask = quote
+                    current_market_price = float((bid + ask) / Decimal("2"))
+                sell_key = self._order_key_for("sell", inst_id) if inst_id is not None else ""
+                sell_order = self.active_maker_orders.get(sell_key, {}) if sell_key else {}
+                if sell_order:
+                    position_ask = float(sell_order.get("limit_price", 0.0) or 0.0)
+                break
+
+            recent_fill_pnls = list(getattr(self, "recent_fill_pnl_results", []) or [])
+            consecutive_losses = 0
+            for pnl in reversed(recent_fill_pnls):
+                if float(pnl) < 0:
+                    consecutive_losses += 1
+                    continue
+                break
+
+            state.update(
+                strike_price=float(strike) if strike is not None else 0.0,
+                spot_price=float(spot) if spot is not None else 0.0,
+                position_side=position_side,
+                position_entry=position_entry,
+                position_qty=position_qty,
+                position_ask=position_ask,
+                position_hold_sec=position_hold_sec,
+                current_market_price=current_market_price,
+                market_slug=slug or None,
+                cumulative_pnl=float(getattr(self, "_live_cumulative_pnl", 0.0) or 0.0),
+                visible_trades_pnl=float(getattr(self, "market_cycle_realized_net_usdc", Decimal("0")) or 0.0),
+                usdc_balance=float(getattr(self, "_cached_usdc_balance", 0.0) or 0.0),
+                pol_balance=float(getattr(self, "_cached_pol_balance", 0.0) or 0.0),
+                account_last_updated=now_dt,
+                market_phase=getattr(self.market_phase, "value", str(self.market_phase)),
+                active_side=getattr(self.active_side, "value", str(self.active_side)),
+                time_left_sec=(
+                    float(self.current_market_end_timestamp - time.time())
+                    if getattr(self, "current_market_end_timestamp", None) is not None
+                    else None
+                ),
+                decision_updated_at=(
+                    datetime.fromtimestamp(float(self.side_decision_ts), tz=timezone.utc)
+                    if float(getattr(self, "side_decision_ts", 0.0) or 0.0) > 0
+                    else None
+                ),
+                side_score=float(getattr(self, "side_decision_score", 0.0) or 0.0),
+                book_bid=float(self.latest_market_bid) if self.latest_market_bid is not None else None,
+                book_ask=float(self.latest_market_ask) if self.latest_market_ask is not None else None,
+                book_mid=(
+                    float((self.latest_market_bid + self.latest_market_ask) / Decimal("2"))
+                    if self.latest_market_bid is not None and self.latest_market_ask is not None
+                    else None
+                ),
+                robust_net_usdc=None,
+                last_block_reason=getattr(self, "side_decision_reason", None),
+                open_exposure_usdc=float(getattr(self, "inventory_delta_shares", Decimal("0")) or 0.0),
+                last_heartbeat=now_dt,
+                consecutive_losses=consecutive_losses,
+            )
+            self._last_dashboard_sync_ts = time.time()
+        except Exception as e:
+            logger.debug(f"Failed to sync Telegram dashboard state: {e}")
+
+    def _handle_dashboard_flatten_request(self) -> None:
+        state = getattr(self, "dashboard_state", None)
+        if state is None or not bool(getattr(state, "flatten_requested", False)):
+            return
+        state.update(flatten_requested=False)
+        submitted = 0
+        for inst_key, inv_state in list(getattr(self, "live_inventory_cost", {}).items()):
+            try:
+                qty = Decimal(str(inv_state.get("qty", "0")))
+                if qty <= 0:
+                    continue
+                inst_id = self._normalize_instrument_id(inst_key)
+                if inst_id is None:
+                    continue
+                quote = self._get_quote_for_instrument(inst_id)
+                if quote is None:
+                    logger.warning(f"Telegram flatten skipped: no quote for {inst_key}")
+                    continue
+                best_bid, _ = quote
+                sellable_qty = self._get_effective_sellable_qty(instrument_id=inst_id)
+                qty_to_exit = min(qty, sellable_qty)
+                avg_entry = Decimal(str(inv_state.get("avg_entry_price", "0")))
+                est_net = (best_bid - avg_entry) * qty_to_exit
+                ok = self._submit_taker_exit_order(
+                    instrument_id=inst_id,
+                    quantity=qty_to_exit,
+                    reason="telegram_flatten",
+                    est_net_if_exit=est_net,
+                    best_bid=best_bid,
+                    fee_rate=self._infer_market_fee_rate_default(),
+                    decision_payload={"source": "telegram"},
+                )
+                if ok:
+                    submitted += 1
+            except Exception as e:
+                self._record_dashboard_error(f"Telegram flatten failed for {inst_key}: {e}")
+                logger.exception(f"Telegram flatten failed for {inst_key}: {e}")
+        logger.warning(f"Telegram flatten request processed; submitted={submitted}")
+
+    def _telegram_cycle_tick(self) -> None:
+        self._sync_dashboard_state()
+        self._handle_dashboard_flatten_request()
+        if self.dashboard_state is not None and self.alert_watcher is not None and self.telegram_notifier is not None:
+            try:
+                self.alert_watcher.check_and_alert(self.dashboard_state, self.telegram_notifier)
+            except Exception as e:
+                logger.debug(f"Alert watcher failed: {e}")
 
     def _current_thesis_epoch(self, slug: str) -> int:
         slug_key = str(slug or "")
@@ -262,9 +437,15 @@ class IntegratedBTCStrategy(
             f"mode={'maker' if self.maker_mode else 'signal'} "
             f"quote_sides={self.maker_quote_sides} "
             f"pricer={self.maker_fair_pricer_mode} "
+            f"ref={'twap' if getattr(self, 'polymarket_chainlink_twap_enabled', True) else 'spot'} "
+            f"twap_window={int(getattr(self, 'polymarket_chainlink_twap_window_sec', 60) or 60)}s "
+            f"require_twap={'on' if getattr(self, 'require_twap_reference_spot', True) else 'off'} "
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
             f"tail_tp={'on' if getattr(self, 'tail_protect_tp_enabled', False) else 'off'} "
+            f"tail_tp_px={float(getattr(self, 'tail_protect_tp_price', Decimal('0'))):.2f} "
+            f"tail_tp_frac={float(getattr(self, 'tail_protect_tp_fraction', Decimal('0'))):.2f} "
+            f"tail_tp_min_entry={float(getattr(self, 'tail_protect_tp_min_entry_price', Decimal('0'))):.2f} "
             f"post_only={'on' if self.maker_use_post_only else 'off'} "
             f"auto_tune={'on' if self.auto_tune_enabled else 'off'} "
             f"auto_redeem={'on' if self.auto_redeem_enabled else 'off'} "
@@ -290,6 +471,99 @@ class IntegratedBTCStrategy(
                 f"dir_edge_min={float(self.maker_min_directional_edge_ps):.4f} "
                 f"regime_guard={'on' if self.regime_guard_enabled else 'off'}"
             )
+
+    def _bootstrap_btc_instruments_into_cache(self) -> int:
+        """
+        Prime the strategy cache if startup races ahead of the data client.
+
+        This uses the same BTC 15m slug discovery and Polymarket instrument provider
+        configuration as the launcher, then inserts any loaded instruments into the
+        strategy cache so the normal startup path can continue.
+        """
+        result: Dict[str, Any] = {"loaded": 0, "error": None}
+
+        def _worker() -> None:
+            try:
+                load_slug_count = max(1, int(os.getenv("BTC_MARKET_LOAD_SLUG_COUNT", "3")))
+                btc_slugs = resolve_btc_15m_market_slugs()
+                ordered_slugs: List[str] = []
+                if self.selected_slug:
+                    ordered_slugs.append(str(self.selected_slug))
+                ordered_slugs.extend([slug for slug in btc_slugs if slug not in ordered_slugs])
+                slugs_to_load = ordered_slugs[:load_slug_count]
+
+                seen_ids: Set[str] = set()
+                instrument_ids: List[InstrumentId] = []
+                for slug in slugs_to_load:
+                    ids = resolve_primary_btc_15m_instrument_ids(slug)
+                    if not ids:
+                        continue
+                    for inst_id in ids:
+                        if inst_id.value in seen_ids:
+                            continue
+                        seen_ids.add(inst_id.value)
+                        instrument_ids.append(inst_id)
+
+                if not instrument_ids:
+                    result["error"] = "Instrument bootstrap fallback found no BTC 15m instrument IDs."
+                    return
+
+                now_utc = datetime.now(timezone.utc)
+                window_back_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_BACK_MINUTES", "5"))
+                window_forward_minutes = int(os.getenv("BTC_MARKET_END_WINDOW_FORWARD_MINUTES", "120"))
+                instrument_cfg = PolymarketInstrumentProviderConfig(
+                    load_all=False,
+                    load_ids=frozenset(instrument_ids),
+                    filters={
+                        "active": True,
+                        "closed": False,
+                        "archived": False,
+                        "end_date_min": (now_utc - timedelta(minutes=window_back_minutes)).isoformat(),
+                        "end_date_max": (now_utc + timedelta(minutes=window_forward_minutes)).isoformat(),
+                        "limit": 25,
+                    },
+                    use_gamma_markets=True,
+                )
+
+                provider = PolymarketInstrumentProvider(
+                    client=get_polymarket_http_client(
+                        private_key=os.getenv("POLYMARKET_PK"),
+                        signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
+                        funder=os.getenv("POLYMARKET_FUNDER") or None,
+                        api_key=os.getenv("POLYMARKET_API_KEY"),
+                        api_secret=os.getenv("POLYMARKET_API_SECRET"),
+                        passphrase=os.getenv("POLYMARKET_PASSPHRASE"),
+                        base_url=os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com"),
+                    ),
+                    clock=LiveClock(),
+                    config=instrument_cfg,
+                )
+                asyncio.run(provider.initialize(reload=True))
+
+                loaded = 0
+                for instrument in provider.get_all().values():
+                    self.cache.add_instrument(instrument)
+                    loaded += 1
+                result["loaded"] = loaded
+            except Exception as exc:
+                result["error"] = str(exc)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join(timeout=30)
+        if thread.is_alive():
+            logger.warning("Instrument bootstrap fallback timed out after 30s.")
+            return 0
+        if result["error"]:
+            logger.warning(str(result["error"]))
+            return 0
+        if result["loaded"]:
+            logger.warning(
+                f"Instrument bootstrap fallback loaded {result['loaded']} BTC 15m instruments into cache.",
+            )
+        else:
+            logger.warning("Instrument bootstrap fallback completed but returned zero instruments.")
+        return int(result["loaded"])
 
     def _max_inventory_avg_entry(self) -> Decimal:
         return InventoryLedger.max_avg_entry(self.live_inventory_cost)
@@ -474,6 +748,16 @@ class IntegratedBTCStrategy(
             float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0),
             "polymarket_chainlink_ws",
         )
+        twap_window = int(
+            getattr(self, "_polymarket_chainlink_twap_window_sec", 0)
+            or getattr(self, "polymarket_chainlink_twap_window_sec", 60)
+            or 60
+        )
+        twap = _candidate(
+            getattr(self, "_polymarket_chainlink_twap_price", None),
+            float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0),
+            f"polymarket_chainlink_twap_{twap_window}s_ws",
+        )
         binance = _candidate(
             getattr(self, "_binance_ws_price", None),
             float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0),
@@ -486,12 +770,12 @@ class IntegratedBTCStrategy(
             latest_src,
         )
 
-        for cand in (poly, binance, latest):
+        for cand in (twap, poly, binance, latest):
             price, source, age = cand
             if price is not None and age is not None and age < fresh_sec:
                 return cand
 
-        stale_candidates = [cand for cand in (poly, binance, latest) if cand[0] is not None]
+        stale_candidates = [cand for cand in (twap, poly, binance, latest) if cand[0] is not None]
         if stale_candidates:
             stale_candidates.sort(key=lambda item: item[2] if item[2] is not None else float("inf"))
             return stale_candidates[0]
@@ -891,6 +1175,28 @@ class IntegratedBTCStrategy(
                 f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
                 f"cum_pnl={self._live_cumulative_pnl:+.4f} win_rate={win_rate:.0f}%"
             )
+            if self.dashboard_state is not None:
+                trades = list(self.dashboard_state.trades)
+                trades.insert(
+                    0,
+                    TradeRecord(
+                        trade_id=int(self._live_total_trades),
+                        market_slug=str(self.current_market_slug or ""),
+                        side=getattr(self.active_side, "value", str(self.active_side)),
+                        entry_price=0.0,
+                        qty=1.0,
+                        exit_price=float(realized_pnl),
+                        redeem_amount=None,
+                        is_settled=True,
+                    ),
+                )
+                consecutive_losses = int(getattr(self.dashboard_state, "consecutive_losses", 0))
+                consecutive_losses = consecutive_losses + 1 if realized_pnl < 0 else 0
+                self.dashboard_state.update(
+                    trades=trades[:50],
+                    cumulative_pnl=float(self._live_cumulative_pnl),
+                    consecutive_losses=consecutive_losses,
+                )
             if self.terminal_dashboard:
                 self.terminal_dashboard.record_position_closed(
                     realized_pnl=realized_pnl,
@@ -1018,6 +1324,10 @@ class IntegratedBTCStrategy(
         if not m:
             return None
         return m.group(1)
+
+    @staticmethod
+    def _extract_condition_id_from_instrument(instrument_id: Any) -> str:
+        return extract_condition_id_from_instrument_id(instrument_id)
 
     @staticmethod
     def _extract_venue_balance_shares_from_reject(reason: str) -> Optional[Decimal]:
@@ -1525,6 +1835,11 @@ class IntegratedBTCStrategy(
                     time_left_sec=time_left_sec_global,
                     shadow_payload=live_shadow_payload,
                 )
+                candidate_robust_net = (
+                    quote_data[3]
+                    if isinstance(quote_data, (tuple, list)) and len(quote_data) > 3
+                    else None
+                )
                 buy_entry_eval = evaluate_buy_entry_controls(
                     side=side,
                     bi_side_enabled=self.bi_side_enabled,
@@ -1563,11 +1878,15 @@ class IntegratedBTCStrategy(
                     ),
                     entry_spot_strike_avg_min_abs=getattr(self, "entry_spot_strike_avg_min_abs", Decimal("0")),
                     entry_fair_edge_min_ps=getattr(self, "entry_fair_edge_min_ps", Decimal("0")),
-                    robust_net_usdc=desired_entry.get("robust_net"),
+                    robust_net_usdc=candidate_robust_net,
                     down_high_price_threshold=getattr(self, "down_high_price_threshold", Decimal("1")),
                     down_high_price_min_score_abs=getattr(self, "down_high_price_min_score_abs", Decimal("0")),
                     down_high_price_min_robust_net_usdc=getattr(self, "down_high_price_min_robust_net_usdc", Decimal("0")),
                     down_high_price_spot_strike_avg_max=getattr(self, "down_high_price_spot_strike_avg_max", Decimal("0")),
+                    shadow_payload=live_shadow_payload,
+                    entry_quality_allow_size_down=bool(
+                        getattr(self, "entry_quality_allow_size_down", False)
+                    ),
                 )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
@@ -1760,6 +2079,14 @@ class IntegratedBTCStrategy(
                     trend_buy_penalty_discount=self.trend_buy_penalty_discount,
                     trend_buy_score=self.side_decision_score,
                     trend_buy_size_multiplier=self.trend_buy_size_multiplier,
+                    entry_size_multiplier=buy_entry_eval.size_multiplier,
+                    entry_quality=buy_entry_eval.payload,
+                )
+                desired_entry = apply_entry_quality_quote_placement(
+                    desired_entry=desired_entry,
+                    side=side,
+                    quote=quote_ctx.quote,
+                    tick=quote_ctx.tick,
                 )
                 desired_entry = attach_desired_entry_runtime_metadata(
                     desired_entry=desired_entry,
@@ -2192,6 +2519,166 @@ class IntegratedBTCStrategy(
                         down_instrument_id=self.current_down_instrument_id,
                         shadow_payload=live_shadow_payload,
                     )
+                    entry_confirmation_engine = getattr(self, "entry_confirmation_engine", None)
+                    entry_confirmation_config = (
+                        getattr(entry_confirmation_engine, "config", None)
+                        if entry_confirmation_engine is not None
+                        else None
+                    )
+                    if (
+                        entry_confirmation_engine is not None
+                        and entry_confirmation_config is not None
+                        and (
+                            bool(getattr(entry_confirmation_config, "enabled", False))
+                            or bool(getattr(entry_confirmation_config, "shadow_enabled", True))
+                        )
+                    ):
+                        ref_spot, ref_spot_source, ref_spot_age = self._capture_market_open_spot_detail(now_ts=now_ts)
+                        binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)
+                        binance_age = max(0.0, now_ts - binance_ts) if binance_ts > 0 else None
+                        entry_confirmation_signal = entry_confirmation_engine.evaluate(
+                            active_side=self.active_side.value,
+                            p_fair=desired_entry.get("p_fair"),
+                            fair=quote_ctx.fair,
+                            best_bid=quote_ctx.quote[0],
+                            best_ask=quote_ctx.quote[1],
+                            ref_spot=ref_spot,
+                            ref_spot_source=ref_spot_source,
+                            ref_spot_age_sec=ref_spot_age,
+                            strike=self.market_strike_cache_by_slug.get(str(self.current_market_slug or "")),
+                            binance_spot=getattr(self, "_binance_ws_price", None),
+                            binance_age_sec=binance_age,
+                        )
+                        desired_entry = apply_entry_confirmation_adjustment(
+                            desired_entry=desired_entry,
+                            side=side,
+                            signal=entry_confirmation_signal,
+                            config=entry_confirmation_config,
+                        )
+                        if self.trade_db:
+                            entry_confirmation_payload = entry_confirmation_signal.as_payload()
+                            entry_confirmation_payload.update(
+                                {
+                                    "slug": str(self.current_market_slug or ""),
+                                    "instrument_id": str(inst_id),
+                                    "should_quote": bool(desired_entry.get("should_quote", False)),
+                                    "entry_mode": str(desired_entry.get("entry_mode", "") or ""),
+                                    "price": (
+                                        float(desired_entry.get("price"))
+                                        if desired_entry.get("price") is not None
+                                        else None
+                                    ),
+                                    "robust_net_usdc": (
+                                        float(desired_entry.get("robust_net"))
+                                        if desired_entry.get("robust_net") is not None
+                                        else None
+                                    ),
+                                    "side_score": float(self.side_decision_score),
+                                    "time_left_sec": (
+                                        float(time_left_sec_global)
+                                        if time_left_sec_global is not None
+                                        else None
+                                    ),
+                                }
+                            )
+                            self._db_strategy_event("ENTRY_CONFIRMATION_OBSERVATION", entry_confirmation_payload)
+                    smart_money_tracker = getattr(self, "smart_money_tracker", None)
+                    smart_money_config = getattr(self, "smart_money_config", None)
+                    if (
+                        smart_money_tracker is not None
+                        and smart_money_config is not None
+                        and (
+                            bool(getattr(smart_money_config, "enabled", False))
+                            or bool(getattr(smart_money_config, "shadow_enabled", True))
+                        )
+                    ):
+                        condition_id = (
+                            self._extract_condition_id_from_instrument(inst_id)
+                            or self._extract_condition_id_from_instrument(self.current_up_instrument_id)
+                            or self._extract_condition_id_from_instrument(self.current_down_instrument_id)
+                        )
+                        if condition_id:
+                            smart_money_tracker.watch_market(
+                                condition_id=condition_id,
+                                slug=str(self.current_market_slug or ""),
+                                up_token_id=extract_token_id_from_instrument_id(self.current_up_instrument_id),
+                                down_token_id=extract_token_id_from_instrument_id(self.current_down_instrument_id),
+                            )
+                        smart_money_signal = smart_money_tracker.evaluate(
+                            condition_id=condition_id,
+                            active_side=self.active_side.value,
+                            market_end_ts=(
+                                float(self.current_market_end_timestamp)
+                                if self.current_market_end_timestamp is not None
+                                else None
+                            ),
+                            now_ts=now_ts,
+                        )
+                        desired_entry = apply_smart_money_adjustment(
+                            desired_entry=desired_entry,
+                            side=side,
+                            signal=smart_money_signal,
+                            config=smart_money_config,
+                        )
+                        if self.trade_db:
+                            smart_money_payload = smart_money_signal.as_payload()
+                            smart_money_payload.update(
+                                {
+                                    "slug": str(self.current_market_slug or ""),
+                                    "condition_id": condition_id,
+                                    "instrument_id": str(inst_id),
+                                    "should_quote": bool(desired_entry.get("should_quote", False)),
+                                    "entry_mode": str(desired_entry.get("entry_mode", "") or ""),
+                                    "price": (
+                                        float(desired_entry.get("price"))
+                                        if desired_entry.get("price") is not None
+                                        else None
+                                    ),
+                                    "robust_net_usdc": (
+                                        float(desired_entry.get("robust_net"))
+                                        if desired_entry.get("robust_net") is not None
+                                        else None
+                                    ),
+                                    "side_score": float(self.side_decision_score),
+                                    "time_left_sec": (
+                                        float(time_left_sec_global)
+                                        if time_left_sec_global is not None
+                                        else None
+                                    ),
+                                }
+                            )
+                            self._db_strategy_event("SMART_MONEY_OBSERVATION", smart_money_payload)
+                    desired_entry = apply_weak_pfair_size_adjustment(
+                        desired_entry=desired_entry,
+                        side=side,
+                        enabled=bool(getattr(self, "maker_weak_pfair_size_adjust_enabled", True)),
+                        lower=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_lower", Decimal("0.47")))),
+                        upper=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_upper", Decimal("0.53")))),
+                        multiplier=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_multiplier", Decimal("0.5")))),
+                    )
+                    desired_entry = apply_high_entry_price_size_adjustment(
+                        desired_entry=desired_entry,
+                        side=side,
+                        enabled=bool(getattr(self, "maker_high_entry_price_size_adjust_enabled", False)),
+                        threshold=Decimal(
+                            str(
+                                getattr(
+                                    self,
+                                    "maker_high_entry_price_size_adjust_threshold",
+                                    Decimal("0.70"),
+                                )
+                            )
+                        ),
+                        multiplier=Decimal(
+                            str(
+                                getattr(
+                                    self,
+                                    "maker_high_entry_price_size_adjust_multiplier",
+                                    Decimal("0.5"),
+                                )
+                            )
+                        ),
+                    )
                     self._emit_buy_observe_diagnostic(
                         inst_id=inst_id,
                         desired_entry=desired_entry,
@@ -2209,6 +2696,13 @@ class IntegratedBTCStrategy(
         """
         Place symmetric maker quotes if expected net economics is positive.
         """
+        self._telegram_cycle_tick()
+        if self.dashboard_state is not None and self.dashboard_state.bot_paused:
+            now_ts = time.time()
+            if now_ts - self._last_dashboard_pause_log_ts >= 30.0:
+                logger.info("Telegram pause active; skipping maker quote cycle.")
+                self._last_dashboard_pause_log_ts = now_ts
+            return
         cycle = await self._prepare_quote_cycle()
         if cycle is None:
             return
@@ -2243,6 +2737,8 @@ class IntegratedBTCStrategy(
         loss_sell_reason: str = "",
         target_qty_override: Optional[Decimal] = None,
     ) -> None:
+        if self.dashboard_state is not None and self.dashboard_state.bot_paused:
+            return
         submit_maker_quote(
             self,
             instrument_id=instrument_id,
@@ -2400,7 +2896,6 @@ class IntegratedBTCStrategy(
     def _preload_history_sync(self):
         """Synchronous wrapper for history preload."""
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._preload_price_history())
         finally:

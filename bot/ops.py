@@ -241,10 +241,29 @@ def run_auto_redeem_script(
 
         # Parse stdout for individual redeem results and total redeemable size.
         redeem_results: list[dict[str, Any]] = []
+        condition_slug_by_id: dict[str, str] = {}
+        condition_size_by_id: dict[str, float] = {}
         selected_total_size = 0.0
         redeemable_count_raw = 0
         for line in stdout_full.splitlines():
             line_s = line.strip()
+            # Parse report lines from check_positions_and_redeem.py:
+            # - condition=0x... redeemable=True ... slug=btc-updown-15m-... title=...
+            if line_s.startswith("- condition="):
+                parts: dict[str, str] = {}
+                for token in line_s.split():
+                    if "=" in token:
+                        k, v = token.split("=", 1)
+                        parts[k.lstrip("-")] = v
+                condition_id = parts.get("condition", "")
+                slug = parts.get("slug", "")
+                if condition_id and slug:
+                    condition_slug_by_id[condition_id] = slug
+                if condition_id and parts.get("redeemable") == "True" and "size" in parts:
+                    try:
+                        condition_size_by_id[condition_id] = float(parts["size"])
+                    except ValueError:
+                        pass
             # Parse: redeemPositions condition=0x... tx=0x... status=1
             if line_s.startswith("redeemPositions "):
                 parts: dict[str, str] = {}
@@ -252,11 +271,18 @@ def run_auto_redeem_script(
                     if "=" in token:
                         k, v = token.split("=", 1)
                         parts[k] = v
+                condition_id = parts.get("condition", "")
+                slug = condition_slug_by_id.get(condition_id, "")
                 result = {
-                    "condition_id": parts.get("condition", ""),
+                    "condition_id": condition_id,
                     "tx_hash": parts.get("tx", ""),
                     "status": int(parts.get("status", "0")),
                 }
+                if condition_id in condition_size_by_id:
+                    result["redeem_size_usdc"] = condition_size_by_id[condition_id]
+                if slug:
+                    result["slug"] = slug
+                    result["market_slug"] = slug
                 redeem_results.append(result)
                 db_strategy_event_fn("REDEEM_EXECUTED", result)
             # Parse: Selected total redeemable size: 1.234567

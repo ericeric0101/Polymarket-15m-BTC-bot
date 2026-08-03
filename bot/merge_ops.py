@@ -5,6 +5,87 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any, Callable
 
+from bot.collateral_tokens import (
+    COLLATERAL_ONRAMP_ADDRESS,
+    USDCE_ADDRESS,
+    get_ctf_collateral,
+)
+
+ERC20_APPROVE_ABI = [
+    {
+        "constant": False,
+        "inputs": [{"name": "_spender", "type": "address"}, {"name": "_value", "type": "uint256"}],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "payable": False,
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+COLLATERAL_ONRAMP_ABI = [
+    {
+        "inputs": [
+            {"internalType": "address", "name": "_asset", "type": "address"},
+            {"internalType": "address", "name": "_to", "type": "address"},
+            {"internalType": "uint256", "name": "_amount", "type": "uint256"},
+        ],
+        "name": "wrap",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+
+def _wrap_usdce_to_pusd(
+    *,
+    w3: Any,
+    private_key: str,
+    owner: str,
+    chain_id: int,
+    amount: int,
+    nonce: int,
+    logger_info_fn: Callable[[str], None],
+) -> int:
+    usdce = w3.eth.contract(address=w3.to_checksum_address(USDCE_ADDRESS), abi=ERC20_APPROVE_ABI)
+    onramp = w3.eth.contract(
+        address=w3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
+        abi=COLLATERAL_ONRAMP_ABI,
+    )
+
+    approve_tx = usdce.functions.approve(
+        w3.to_checksum_address(COLLATERAL_ONRAMP_ADDRESS),
+        amount,
+    ).build_transaction({
+        "chainId": chain_id,
+        "from": owner,
+        "nonce": nonce,
+    })
+    approve_signed = w3.eth.account.sign_transaction(approve_tx, private_key=private_key)
+    approve_hash = w3.eth.send_raw_transaction(approve_signed.raw_transaction)
+    approve_receipt = w3.eth.wait_for_transaction_receipt(approve_hash, timeout=120)
+    logger_info_fn(
+        f"✓ Wrap prep SUCCESS: approve onramp tx={approve_hash.hex()} status={approve_receipt.status}"
+    )
+    nonce += 1
+
+    wrap_tx = onramp.functions.wrap(
+        w3.to_checksum_address(USDCE_ADDRESS),
+        owner,
+        amount,
+    ).build_transaction({
+        "chainId": chain_id,
+        "from": owner,
+        "nonce": nonce,
+    })
+    wrap_signed = w3.eth.account.sign_transaction(wrap_tx, private_key=private_key)
+    wrap_hash = w3.eth.send_raw_transaction(wrap_signed.raw_transaction)
+    wrap_receipt = w3.eth.wait_for_transaction_receipt(wrap_hash, timeout=120)
+    logger_info_fn(
+        f"✓ Wrap SUCCESS: asset=USDC.e amount={amount / 1_000_000:.4f} tx={wrap_hash.hex()} status={wrap_receipt.status}"
+    )
+    return nonce + 1
+
 
 def execute_merge_on_chain(
     *,
@@ -21,7 +102,6 @@ def execute_merge_on_chain(
         from web3.middleware import ExtraDataToPOAMiddleware
 
         ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-        usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
         ctf_merge_abi = [{
             "inputs": [
                 {"internalType": "address", "name": "collateralToken", "type": "address"},
@@ -42,8 +122,10 @@ def execute_merge_on_chain(
         acct = Account.from_key(pk)
         owner = w3.to_checksum_address(acct.address)
         contract = w3.eth.contract(address=w3.to_checksum_address(ctf_address), abi=ctf_merge_abi)
+        ctf_collateral = get_ctf_collateral()
+        ctf_collateral_address = w3.to_checksum_address(ctf_collateral.address)
         tx = contract.functions.mergePositions(
-            w3.to_checksum_address(usdc_address),
+            ctf_collateral_address,
             b"\x00" * 32,
             Web3.to_bytes(hexstr=condition_id),
             [1, 2],
@@ -59,8 +141,19 @@ def execute_merge_on_chain(
         usdc_recovered = amount / 1_000_000
         logger_info_fn(
             f"✓ Merge SUCCESS: condition={condition_id[:16]}... "
-            f"recovered={usdc_recovered:.4f} USDC tx={txh.hex()} status={receipt.status}"
+            f"recovered={usdc_recovered:.4f} {ctf_collateral.symbol} "
+            f"tx={txh.hex()} status={receipt.status}"
         )
+        if receipt.status == 1 and ctf_collateral.is_usdce:
+            _wrap_usdce_to_pusd(
+                w3=w3,
+                private_key=pk,
+                owner=owner,
+                chain_id=chain_id,
+                amount=amount,
+                nonce=w3.eth.get_transaction_count(owner, "pending"),
+                logger_info_fn=logger_info_fn,
+            )
         return receipt.status == 1
     except Exception as e:
         logger_warning_fn(f"Merge on-chain failed: {e}")
@@ -80,7 +173,7 @@ def try_merge_yes_no_positions(
         if not pk or int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")) != 0:
             return
 
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
         rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
         chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))

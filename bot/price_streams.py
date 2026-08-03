@@ -9,13 +9,17 @@ from typing import Any, Optional
 
 BINANCE_AGGTRADE_WS_URL = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
 POLYMARKET_LIVE_WS_URL = "wss://ws-live-data.polymarket.com"
+POLYMARKET_CHAINLINK_TWAP_TOPIC_BY_WINDOW = {
+    30: "crypto_prices_twap_thirty",
+    60: "crypto_prices_twap_sixty",
+}
 POLYMARKET_CHAINLINK_SUBSCRIBE_PAYLOAD = {
     "action": "subscribe",
     "subscriptions": [
         {
-            "topic": "crypto_prices_chainlink",
-            "type": "*",
-            "filters": "",
+            "topic": "crypto_prices_twap_sixty",
+            "type": "update",
+            "filters": "{\"symbol\":\"btc/usd\"}",
         }
     ],
 }
@@ -27,6 +31,7 @@ class PriceTick:
     price: Decimal
     updated_at_ms: Optional[int]
     received_at_ts: float
+    window_seconds: Optional[int] = None
     raw_summary: str = ""
 
 
@@ -63,6 +68,39 @@ def to_epoch_ms(value: Any) -> Optional[int]:
     if num > 1_000_000_000:
         return int(num * 1000)
     return None
+
+
+def from_e18_decimal(value: Any) -> Optional[Decimal]:
+    dec = to_decimal(value)
+    if dec is None:
+        return None
+    return dec / Decimal("1000000000000000000")
+
+
+def build_polymarket_chainlink_subscribe_payload(
+    *,
+    use_twap: bool = True,
+    window_seconds: int = 60,
+    symbol: str = "btc/usd",
+) -> dict[str, Any]:
+    if use_twap:
+        topic = POLYMARKET_CHAINLINK_TWAP_TOPIC_BY_WINDOW.get(int(window_seconds))
+        if topic is None:
+            raise ValueError("Polymarket Chainlink TWAP window must be 30 or 60 seconds")
+        filters = json.dumps({"symbol": symbol.strip().lower()}, separators=(",", ":"))
+    else:
+        topic = "crypto_prices_chainlink"
+        filters = ""
+    return {
+        "action": "subscribe",
+        "subscriptions": [
+            {
+                "topic": topic,
+                "type": "update" if use_twap else "*",
+                "filters": filters,
+            }
+        ],
+    }
 
 
 def extract_binance_aggtrade_tick(raw: Any) -> Optional[PriceTick]:
@@ -116,6 +154,26 @@ def extract_polymarket_chainlink_tick(payload: Any) -> Optional[PriceTick]:
     if isinstance(payload, dict):
         topic = str(payload.get("topic", "")).lower()
         inner = payload.get("payload")
+        if topic in {"crypto_prices_twap_thirty", "crypto_prices_twap_sixty", "prices.crypto.chainlink.twap"} and isinstance(inner, dict):
+            symbol = str(inner.get("symbol", "")).lower()
+            if symbol in {"btc/usd", "btcusd", "btc"} or "btc" in symbol:
+                window_seconds = (
+                    int(inner.get("window_s") or inner.get("windowSeconds") or inner.get("window_seconds") or 0)
+                    or (30 if topic == "crypto_prices_twap_thirty" else 60 if topic == "crypto_prices_twap_sixty" else 0)
+                )
+                price = from_e18_decimal(inner.get("full_accuracy_value"))
+                if price is None or price <= 0:
+                    price = to_decimal(inner.get("value"))
+                updated_ms = to_epoch_ms(inner.get("timestamp")) or to_epoch_ms(payload.get("timestamp"))
+                if price is not None and price > 0:
+                    return PriceTick(
+                        source=f"polymarket_chainlink_twap_{window_seconds}s_ws" if window_seconds else "polymarket_chainlink_twap_ws",
+                        price=price,
+                        updated_at_ms=updated_ms,
+                        received_at_ts=time.time(),
+                        window_seconds=window_seconds or None,
+                        raw_summary=str(payload)[:240],
+                    )
         if topic == "crypto_prices_chainlink" and isinstance(inner, dict):
             symbol = str(inner.get("symbol", "")).lower()
             if "btc" in symbol:

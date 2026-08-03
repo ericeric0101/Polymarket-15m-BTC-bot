@@ -4,15 +4,23 @@ Real API integration with Polymarket CLOB
 """
 import os
 import asyncio
+import time
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from loguru import logger
 import httpx
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType as PolyOrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import (
+    ApiCreds,
+    AssetType,
+    BalanceAllowanceParams,
+    OrderArgs,
+    OrderPayload,
+    OrderType as PolyOrderType,
+)
+from py_clob_client_v2.order_builder.constants import BUY, SELL
 POLYMARKET_AVAILABLE = True
 
 
@@ -71,17 +79,96 @@ class PolymarketClient:
         
         # Check if SDK available
         if not POLYMARKET_AVAILABLE:
-            logger.error("Polymarket SDK not available. Install: pip install py-clob-client")
+            logger.error("Polymarket SDK not available. Install: pip install py-clob-client-v2")
             return
         
         # Validate credentials
         if not self.private_key:
             logger.error("POLYMARKET_PK not found in environment")
         if not (self.api_key and self.api_secret and self.api_passphrase):
-            logger.warning("L2 API credentials not fully set; will try create_or_derive from POLYMARKET_PK")
+            logger.warning("L2 API credentials not fully set; will try create/derive from POLYMARKET_PK")
         
         mode = "TESTNET" if testnet else "MAINNET"
         logger.info(f"Initialized Polymarket Client [{mode}] Chain ID: {chain_id}")
+
+    def _credential_probe_params(self) -> BalanceAllowanceParams:
+        return BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=self.signature_type,
+        )
+
+    def _set_client_creds(self, creds: ApiCreds) -> None:
+        self.api_key = creds.api_key
+        self.api_secret = creds.api_secret
+        self.api_passphrase = creds.api_passphrase
+        self.client.set_api_creds(creds)
+
+    def _ensure_valid_api_creds(self) -> None:
+        if not self.client:
+            raise RuntimeError("CLOB client is not initialized")
+
+        env_creds_present = bool(self.api_key and self.api_secret and self.api_passphrase)
+        if env_creds_present:
+            self.client.set_api_creds(ApiCreds(
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                api_passphrase=self.api_passphrase,
+            ))
+            try:
+                self.client.get_balance_allowance(self._credential_probe_params())
+                return
+            except Exception as exc:
+                logger.warning(f"Configured L2 creds rejected, falling back to derive/create: {exc}")
+
+        try:
+            derived = self.client.create_api_key()
+            logger.info("Derived fresh L2 creds via create_api_key()")
+        except Exception:
+            derived = self.client.derive_api_key()
+            logger.info("Derived fresh L2 creds via derive_api_key()")
+
+        if isinstance(derived, dict):
+            derived = ApiCreds(
+                api_key=derived["api_key"],
+                api_secret=derived["api_secret"],
+                api_passphrase=derived["api_passphrase"],
+            )
+        self._set_client_creds(derived)
+
+    def _post_order_with_reauth_and_retry(
+        self,
+        signed_order: Any,
+        *,
+        order_type: str,
+        side: str,
+        max_attempts: int = 2,
+    ) -> dict:
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self.client.post_order(signed_order, order_type=order_type)
+            except Exception as exc:
+                last_exc = exc
+                msg = str(exc)
+                lower = msg.lower()
+                if "unauthorized/invalid api key" in lower or "invalid api key" in lower:
+                    logger.warning("Order post rejected by invalid L2 creds; re-deriving credentials and retrying")
+                    self._ensure_valid_api_creds()
+                    continue
+                if (
+                    "not enough balance / allowance" in lower
+                    and attempt < max_attempts
+                ):
+                    logger.warning(
+                        "Order post hit transient balance/allowance rejection on %s; waiting briefly and retrying once",
+                        side.upper(),
+                    )
+                    time.sleep(2.0)
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Order post failed without a concrete exception")
     
     async def connect(self) -> bool:
         """
@@ -100,29 +187,19 @@ class PolymarketClient:
         
         try:
             # Initialize CLOB client
+            clob_host = os.getenv(
+                "POLYMARKET_CLOB_BASE_URL",
+                "https://clob-v2.polymarket.com" if self.testnet else "https://clob.polymarket.com",
+            )
             self.client = ClobClient(
-                host="https://clob.polymarket.com" if not self.testnet else "https://clob-testnet.polymarket.com",
+                clob_host,
+                self.chain_id,
                 key=self.private_key,
-                chain_id=self.chain_id,
                 signature_type=self.signature_type,
-                funder=self.funder,  # Optional funder address
+                funder=self.funder,
             )
 
-            if not (self.api_key and self.api_secret and self.api_passphrase):
-                logger.info("API credentials missing; deriving L2 creds from private key")
-                derived = self.client.create_or_derive_api_creds()
-                self.api_key = derived.api_key if hasattr(derived, "api_key") else derived.get("api_key")
-                self.api_secret = derived.api_secret if hasattr(derived, "api_secret") else derived.get("api_secret")
-                self.api_passphrase = (
-                    derived.api_passphrase if hasattr(derived, "api_passphrase") else derived.get("api_passphrase")
-                )
-            
-            # Set API credentials for authenticated endpoints
-            self.client.set_api_creds(
-                api_key=self.api_key,
-                api_secret=self.api_secret,
-                api_passphrase=self.api_passphrase,
-            )
+            self._ensure_valid_api_creds()
             
             # Test connection
             balance = await self._get_balance_internal()
@@ -210,13 +287,10 @@ class PolymarketClient:
             return None
         
         try:
-            # Get order book
-            book = self.client.get_order_book(token_id)
-            
-            if book and "bids" in book and len(book["bids"]) > 0:
-                # Best bid price
-                best_bid = Decimal(str(book["bids"][0]["price"]))
-                return best_bid
+            book = await self.get_orderbook(token_id)
+
+            if book and book["bids"]:
+                return book["bids"][0]["price"]
             
             return None
             
@@ -239,24 +313,33 @@ class PolymarketClient:
         
         try:
             book = self.client.get_order_book(token_id)
-            
-            return {
-                "timestamp": datetime.now(),
-                "token_id": token_id,
-                "bids": [
+            bids = sorted(
+                (
                     {
                         "price": Decimal(str(bid["price"])),
                         "size": Decimal(str(bid["size"])),
                     }
                     for bid in book.get("bids", [])
-                ],
-                "asks": [
+                ),
+                key=lambda level: level["price"],
+                reverse=True,
+            )
+            asks = sorted(
+                (
                     {
                         "price": Decimal(str(ask["price"])),
                         "size": Decimal(str(ask["size"])),
                     }
                     for ask in book.get("asks", [])
-                ],
+                ),
+                key=lambda level: level["price"],
+            )
+
+            return {
+                "timestamp": datetime.now(),
+                "token_id": token_id,
+                "bids": bids,
+                "asks": asks,
             }
             
         except Exception as e:
@@ -306,19 +389,29 @@ class PolymarketClient:
                     price = book["bids"][0]["price"] if book["bids"] else Decimal("0.5")
             
             # Create order arguments
+            builder_code = os.getenv(
+                "POLY_BUILDER_CODE",
+                "0x0000000000000000000000000000000000000000000000000000000000000000",
+            )
             order_args = OrderArgs(
                 token_id=token_id,
                 price=float(price),
                 size=float(size),
                 side=poly_side,
-                fee_rate_bps=0,  # Fee in basis points
+                expiration=0,
+                builder_code=builder_code,
+                metadata="0x0000000000000000000000000000000000000000000000000000000000000000",
             )
             
             # Build and sign order
             signed_order = self.client.create_order(order_args)
             
             # Submit order
-            response = self.client.post_order(signed_order, order_type=order_type)
+            response = self._post_order_with_reauth_and_retry(
+                signed_order,
+                order_type=order_type,
+                side=side,
+            )
             
             if response and "orderID" in response:
                 order_id = response["orderID"]
@@ -353,7 +446,7 @@ class PolymarketClient:
             return False
         
         try:
-            response = self.client.cancel_order(order_id)
+            response = self.client.cancel_order(OrderPayload(orderID=order_id))
             
             if response:
                 logger.info(f"Order cancelled: {order_id}")
@@ -376,7 +469,7 @@ class PolymarketClient:
             return []
         
         try:
-            orders = self.client.get_orders()
+            orders = self.client.get_open_orders()
             
             open_orders = []
             for order in orders:
@@ -407,24 +500,11 @@ class PolymarketClient:
         if not self.client:
             return []
         
-        try:
-            # Get balance of outcome tokens
-            balances = self.client.get_balances()
-            
-            positions = []
-            for token_id, balance in balances.items():
-                if token_id != "USDC" and float(balance) > 0:
-                    positions.append({
-                        "token_id": token_id,
-                        "size": Decimal(str(balance)),
-                        "timestamp": datetime.now(),
-                    })
-            
-            return positions
-            
-        except Exception as e:
-            logger.error(f"Error fetching positions: {e}")
-            return []
+        logger.warning(
+            "get_positions() is not implemented against py-clob-client-v2 because the SDK "
+            "does not expose a generic all-token balance endpoint. Returning an empty list."
+        )
+        return []
     
     async def _get_balance_internal(self) -> Optional[Dict[str, Decimal]]:
         """Internal method to get balance."""
@@ -432,13 +512,18 @@ class PolymarketClient:
             return None
         
         try:
-            balances = self.client.get_balances()
-            
+            result = self.client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.signature_type,
+                )
+            )
+            raw_balance = int((result or {}).get("balance", "0"))
+            balance = Decimal(str(raw_balance)) / Decimal("1000000")
             return {
-                token: Decimal(str(amount))
-                for token, amount in balances.items()
+                "USDC": balance,
+                "pUSD": balance,
             }
-            
         except Exception as e:
             logger.error(f"Error fetching balance: {e}")
             return None

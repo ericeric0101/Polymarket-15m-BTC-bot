@@ -74,6 +74,39 @@ class MakerConfig:
     min_shares: Decimal
     exchange_min_shares: Decimal
     fixed_shares: Decimal
+    weak_pfair_size_adjust_enabled: bool
+    weak_pfair_size_adjust_lower: Decimal
+    weak_pfair_size_adjust_upper: Decimal
+    weak_pfair_size_adjust_multiplier: Decimal
+    high_entry_price_size_adjust_enabled: bool
+    high_entry_price_size_adjust_threshold: Decimal
+    high_entry_price_size_adjust_multiplier: Decimal
+    external_entry_confirmation_enabled: bool
+    external_entry_confirmation_shadow_enabled: bool
+    external_entry_confirmation_book_mid_threshold_ps: Decimal
+    external_entry_confirmation_conflict_size_multiplier: Decimal
+    external_entry_confirmation_skip_strong_conflict: bool
+    smart_money_enabled: bool
+    smart_money_shadow_enabled: bool
+    smart_money_min_cash_filter: float
+    smart_money_poll_interval_sec: float
+    smart_money_recent_window_sec: float
+    smart_money_stale_after_sec: float
+    smart_money_fomo_cutoff_sec: float
+    smart_money_entry_threshold: Decimal
+    smart_money_min_directional_wallets: int
+    smart_money_conflict_size_multiplier: Decimal
+    smart_money_skip_strong_conflict: bool
+    smart_money_position_refresh_sec: float
+    smart_money_hedge_ratio: float
+    smart_money_bot_size_cv_threshold: float
+    smart_money_min_wallet_trades: int
+    smart_money_directional_min_cash: float
+    smart_money_wallet_db_path: str
+    smart_money_wallet_label_cache_ttl_sec: float
+    smart_money_weight_smart: float
+    smart_money_weight_directional: float
+    smart_money_weight_unknown: float
     quote_sides: str
     directional_edge_gate_enabled: bool
     min_directional_edge_ps: Decimal
@@ -196,6 +229,10 @@ class MakerConfig:
             raise ValueError("MAKER_QUOTE_SIZE_USDC must be > 0")
         if self.min_shares <= 0 or self.exchange_min_shares <= 0:
             raise ValueError("Maker min share settings must be > 0")
+        if self.high_entry_price_size_adjust_threshold < 0:
+            raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD must be >= 0")
+        if self.high_entry_price_size_adjust_multiplier <= 0:
+            raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER must be > 0")
         if self.reload_inventory_threshold_shares < 0:
             raise ValueError("MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES must be >= 0")
         if self.continuation_entry_size_multiplier <= 0:
@@ -316,6 +353,12 @@ class ExitConfig:
     taker_exit_max_spread_pct: Decimal
     taker_exit_stop_loss_max_spread_pct: Decimal
     taker_exit_wait_for_sell_quote_sec: int
+    taker_exit_only_after_invalidation: bool
+    taker_exit_max_time_left_sec: int
+    taker_exit_min_bid: Decimal
+    taker_exit_min_recovery_ratio: Decimal
+    taker_exit_require_inventory: bool
+    taker_exit_disable_if_bid_below: Decimal
     market_stop_loss_max_per_market: int
     market_max_buy_events_per_market: int
     taker_exit_max_hold_near_close_sec: int
@@ -372,6 +415,14 @@ class ExitConfig:
             raise ValueError("CATASTROPHIC_STOP_LOSS_CONFIRMATIONS must be >= 1")
         if self.maker_urgent_exit_min_confirmations < 1:
             raise ValueError("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS must be >= 1")
+        if self.taker_exit_max_time_left_sec < 0:
+            raise ValueError("TAKER_EXIT_MAX_TIME_LEFT_SEC must be >= 0")
+        if self.taker_exit_min_bid < 0 or self.taker_exit_min_bid > Decimal("1"):
+            raise ValueError("TAKER_EXIT_MIN_BID must be in [0, 1]")
+        if self.taker_exit_disable_if_bid_below < 0 or self.taker_exit_disable_if_bid_below > Decimal("1"):
+            raise ValueError("TAKER_EXIT_DISABLE_IF_BID_BELOW must be in [0, 1]")
+        if self.taker_exit_min_recovery_ratio < 0:
+            raise ValueError("TAKER_EXIT_MIN_RECOVERY_RATIO must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -389,6 +440,10 @@ class MarketDataConfig:
     external_spot_max_failures: int
     external_spot_history_max: int
     polymarket_chainlink_history_max: int
+    polymarket_chainlink_twap_enabled: bool
+    polymarket_chainlink_twap_window_sec: int
+    polymarket_chainlink_twap_symbol: str
+    require_twap_reference_spot: bool
     external_spot_source_delta_abs_max_usd: Decimal
     market_strike_anchor_max_lag_sec: int
     market_strike_anchor_near_sec: int
@@ -404,6 +459,12 @@ class MarketDataConfig:
     fee_rate_fetch_interval_sec: int
     fee_rate_cache_ttl_sec: int
     clob_base_url: str
+
+    def __post_init__(self) -> None:
+        if self.polymarket_chainlink_twap_window_sec not in {30, 60}:
+            raise ValueError("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC must be 30 or 60")
+        if self.require_twap_reference_spot and not self.polymarket_chainlink_twap_enabled:
+            raise ValueError("REQUIRE_TWAP_REFERENCE_SPOT requires POLYMARKET_CHAINLINK_TWAP_ENABLED")
 
 
 @dataclass(frozen=True)
@@ -443,7 +504,7 @@ class AppConfig:
     @classmethod
     def from_env(cls, *, enable_terminal_dashboard: bool) -> "AppConfig":
         startup_verbose = _env_bool("STARTUP_VERBOSE", False)
-        terminal_dashboard_enabled = enable_terminal_dashboard or _env_bool("TERMINAL_DASHBOARD", False)
+        terminal_dashboard_enabled = bool(enable_terminal_dashboard)
         terminal_dashboard_refresh_sec = max(0.5, _env_float("TERMINAL_DASHBOARD_REFRESH_SEC", 1.0))
         quote_sides_raw = _env_str("MAKER_QUOTE_SIDES", "both").strip().lower()
         default_mode = _env_str("BI_SIDE_DEFAULT_MODE", "NONE").strip().upper()
@@ -501,6 +562,9 @@ class AppConfig:
         )
 
         external_spot_history_max = max(60, _env_int("EXTERNAL_SPOT_HISTORY_MAX", 1200))
+        polymarket_twap_window_sec = _env_int("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC", 60)
+        if polymarket_twap_window_sec not in {30, 60}:
+            raise ValueError("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC must be 30 or 60")
         fee_rate_cache_ttl_sec = _env_int("FEE_RATE_CACHE_TTL_SEC", 300)
 
         return cls(
@@ -526,6 +590,81 @@ class AppConfig:
                 min_shares=maker_min_shares,
                 exchange_min_shares=maker_exchange_min_shares,
                 fixed_shares=maker_fixed_shares,
+                weak_pfair_size_adjust_enabled=_env_bool("MAKER_WEAK_PFAIR_SIZE_ADJUST_ENABLED", True),
+                weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
+                weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
+                weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
+                high_entry_price_size_adjust_enabled=_env_bool(
+                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_ENABLED",
+                    False,
+                ),
+                high_entry_price_size_adjust_threshold=_env_decimal(
+                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD",
+                    "0.70",
+                ),
+                high_entry_price_size_adjust_multiplier=_env_decimal(
+                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER",
+                    "0.5",
+                ),
+                external_entry_confirmation_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_ENABLED", False),
+                external_entry_confirmation_shadow_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_SHADOW_ENABLED", True),
+                external_entry_confirmation_book_mid_threshold_ps=_env_decimal(
+                    "EXTERNAL_ENTRY_CONFIRMATION_BOOK_MID_THRESHOLD_PS",
+                    "0.02",
+                ),
+                external_entry_confirmation_conflict_size_multiplier=_env_decimal(
+                    "EXTERNAL_ENTRY_CONFIRMATION_CONFLICT_SIZE_MULTIPLIER",
+                    "0.5",
+                ),
+                external_entry_confirmation_skip_strong_conflict=_env_bool(
+                    "EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT",
+                    False,
+                ),
+                smart_money_enabled=_env_bool("SMART_MONEY_ENABLED", False),
+                smart_money_shadow_enabled=_env_bool("SMART_MONEY_SHADOW_ENABLED", True),
+                smart_money_min_cash_filter=max(0.0, _env_float("SMART_MONEY_MIN_CASH_FILTER", 10.0)),
+                smart_money_poll_interval_sec=max(1.0, _env_float("SMART_MONEY_POLL_INTERVAL_SEC", 3.0)),
+                smart_money_recent_window_sec=max(15.0, _env_float("SMART_MONEY_RECENT_WINDOW_SEC", 180.0)),
+                smart_money_stale_after_sec=max(3.0, _env_float("SMART_MONEY_STALE_AFTER_SEC", 12.0)),
+                smart_money_fomo_cutoff_sec=max(0.0, _env_float("SMART_MONEY_FOMO_CUTOFF_SEC", 120.0)),
+                smart_money_entry_threshold=_env_decimal("SMART_MONEY_ENTRY_THRESHOLD", "0.62"),
+                smart_money_min_directional_wallets=max(
+                    1,
+                    _env_int("SMART_MONEY_MIN_DIRECTIONAL_WALLETS", 2),
+                ),
+                smart_money_conflict_size_multiplier=_env_decimal(
+                    "SMART_MONEY_CONFLICT_SIZE_MULTIPLIER",
+                    "0.5",
+                ),
+                smart_money_skip_strong_conflict=_env_bool("SMART_MONEY_SKIP_STRONG_CONFLICT", False),
+                smart_money_position_refresh_sec=max(
+                    5.0,
+                    _env_float("SMART_MONEY_POSITION_REFRESH_SEC", 30.0),
+                ),
+                smart_money_hedge_ratio=max(0.0, _env_float("SMART_MONEY_HEDGE_RATIO", 0.25)),
+                smart_money_bot_size_cv_threshold=max(
+                    0.0,
+                    _env_float("SMART_MONEY_BOT_SIZE_CV_THRESHOLD", 0.05),
+                ),
+                smart_money_min_wallet_trades=max(1, _env_int("SMART_MONEY_MIN_WALLET_TRADES", 3)),
+                smart_money_directional_min_cash=max(
+                    0.0,
+                    _env_float("SMART_MONEY_DIRECTIONAL_MIN_CASH", 20.0),
+                ),
+                smart_money_wallet_db_path=_env_str(
+                    "SMART_MONEY_WALLET_DB_PATH",
+                    "./logs/smart_money_wallets.db",
+                ),
+                smart_money_wallet_label_cache_ttl_sec=max(
+                    1.0,
+                    _env_float("SMART_MONEY_WALLET_LABEL_CACHE_TTL_SEC", 60.0),
+                ),
+                smart_money_weight_smart=max(0.0, _env_float("SMART_MONEY_WEIGHT_SMART", 2.0)),
+                smart_money_weight_directional=max(
+                    0.0,
+                    _env_float("SMART_MONEY_WEIGHT_DIRECTIONAL", 1.0),
+                ),
+                smart_money_weight_unknown=max(0.0, _env_float("SMART_MONEY_WEIGHT_UNKNOWN", 0.25)),
                 quote_sides=normalize_quote_mode(quote_sides_raw),
                 directional_edge_gate_enabled=_env_bool("MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", False),
                 min_directional_edge_ps=_env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"),
@@ -758,6 +897,12 @@ class AppConfig:
                 taker_exit_max_spread_pct=_env_decimal("TAKER_EXIT_MAX_SPREAD_PCT", "0.02"),
                 taker_exit_stop_loss_max_spread_pct=_env_decimal("TAKER_EXIT_STOP_LOSS_MAX_SPREAD_PCT", "0.03"),
                 taker_exit_wait_for_sell_quote_sec=max(0, _env_int("TAKER_EXIT_WAIT_FOR_SELL_QUOTE_SEC", 20)),
+                taker_exit_only_after_invalidation=_env_bool("TAKER_EXIT_ONLY_AFTER_INVALIDATION", False),
+                taker_exit_max_time_left_sec=max(0, _env_int("TAKER_EXIT_MAX_TIME_LEFT_SEC", 0)),
+                taker_exit_min_bid=_env_decimal("TAKER_EXIT_MIN_BID", "0"),
+                taker_exit_min_recovery_ratio=_env_decimal("TAKER_EXIT_MIN_RECOVERY_RATIO", "0"),
+                taker_exit_require_inventory=_env_bool("TAKER_EXIT_REQUIRE_INVENTORY", True),
+                taker_exit_disable_if_bid_below=_env_decimal("TAKER_EXIT_DISABLE_IF_BID_BELOW", "0"),
                 market_stop_loss_max_per_market=max(0, _env_int("MARKET_STOP_LOSS_MAX_PER_MARKET", 2)),
                 market_max_buy_events_per_market=max(0, _env_int("MARKET_MAX_BUY_EVENTS_PER_MARKET", 2)),
                 taker_exit_max_hold_near_close_sec=max(0, _env_int("TAKER_EXIT_MAX_HOLD_NEAR_CLOSE_SEC", 90)),
@@ -819,6 +964,10 @@ class AppConfig:
                     60,
                     _env_int("POLYMARKET_CHAINLINK_HISTORY_MAX", external_spot_history_max),
                 ),
+                polymarket_chainlink_twap_enabled=_env_bool_inverted("POLYMARKET_CHAINLINK_TWAP_ENABLED", True),
+                polymarket_chainlink_twap_window_sec=polymarket_twap_window_sec,
+                polymarket_chainlink_twap_symbol=_env_str("POLYMARKET_CHAINLINK_TWAP_SYMBOL", "btc/usd").strip().lower() or "btc/usd",
+                require_twap_reference_spot=_env_bool_inverted("REQUIRE_TWAP_REFERENCE_SPOT", True),
                 external_spot_source_delta_abs_max_usd=max(
                     Decimal("0"),
                     _env_decimal("EXTERNAL_SPOT_SOURCE_DELTA_ABS_MAX_USD", "40"),
@@ -857,7 +1006,7 @@ class AppConfig:
                     min(Decimal("0.05"), _env_decimal("CONDITIONAL_BALANCE_SAFETY_BUFFER_PCT", "0.001")),
                 ),
                 sell_recovery_qty_buffer_shares=max(Decimal("0"), _env_decimal("SELL_RECOVERY_QTY_BUFFER_SHARES", "0.01")),
-                sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 3.0)),
+                sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 10.0)),
                 sell_balance_retry_pause_sec=max(1.0, _env_float("SELL_BALANCE_RETRY_PAUSE_SEC", 3.0)),
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
                 trade_db_path=_env_str("TRADE_DB_PATH", "./logs/trade_journal.db"),

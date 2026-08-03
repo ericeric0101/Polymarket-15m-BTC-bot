@@ -31,6 +31,8 @@ from monitoring.performance_tracker import get_performance_tracker
 from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
+from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
+from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 
 
@@ -83,6 +85,58 @@ def initialize_strategy_settings(
     strategy.maker_min_shares = config.maker.min_shares
     strategy.maker_exchange_min_shares = config.maker.exchange_min_shares
     strategy.maker_fixed_shares = config.maker.fixed_shares
+    strategy.maker_weak_pfair_size_adjust_enabled = config.maker.weak_pfair_size_adjust_enabled
+    strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
+    strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
+    strategy.maker_weak_pfair_size_adjust_multiplier = config.maker.weak_pfair_size_adjust_multiplier
+    strategy.maker_high_entry_price_size_adjust_enabled = (
+        config.maker.high_entry_price_size_adjust_enabled
+    )
+    strategy.maker_high_entry_price_size_adjust_threshold = (
+        config.maker.high_entry_price_size_adjust_threshold
+    )
+    strategy.maker_high_entry_price_size_adjust_multiplier = (
+        config.maker.high_entry_price_size_adjust_multiplier
+    )
+    strategy.entry_confirmation_engine = EntryConfirmationEngine(
+        EntryConfirmationConfig(
+            enabled=config.maker.external_entry_confirmation_enabled,
+            shadow_enabled=config.maker.external_entry_confirmation_shadow_enabled,
+            book_mid_threshold_ps=config.maker.external_entry_confirmation_book_mid_threshold_ps,
+            conflict_size_multiplier=config.maker.external_entry_confirmation_conflict_size_multiplier,
+            skip_strong_conflict=config.maker.external_entry_confirmation_skip_strong_conflict,
+            weak_pfair_lower=config.maker.weak_pfair_size_adjust_lower,
+            weak_pfair_upper=config.maker.weak_pfair_size_adjust_upper,
+        )
+    )
+    strategy.smart_money_config = SmartMoneyConfig(
+        enabled=config.maker.smart_money_enabled,
+        shadow_enabled=config.maker.smart_money_shadow_enabled,
+        poll_interval_sec=config.maker.smart_money_poll_interval_sec,
+        min_cash_filter=config.maker.smart_money_min_cash_filter,
+        recent_window_sec=config.maker.smart_money_recent_window_sec,
+        stale_after_sec=config.maker.smart_money_stale_after_sec,
+        fomo_cutoff_sec=config.maker.smart_money_fomo_cutoff_sec,
+        entry_threshold=config.maker.smart_money_entry_threshold,
+        min_directional_wallets=config.maker.smart_money_min_directional_wallets,
+        conflict_size_multiplier=config.maker.smart_money_conflict_size_multiplier,
+        skip_strong_conflict=config.maker.smart_money_skip_strong_conflict,
+        position_refresh_sec=config.maker.smart_money_position_refresh_sec,
+        hedge_ratio=config.maker.smart_money_hedge_ratio,
+        bot_size_cv_threshold=config.maker.smart_money_bot_size_cv_threshold,
+        min_wallet_trades=config.maker.smart_money_min_wallet_trades,
+        directional_min_cash=config.maker.smart_money_directional_min_cash,
+        wallet_db_path=config.maker.smart_money_wallet_db_path,
+        wallet_label_cache_ttl_sec=config.maker.smart_money_wallet_label_cache_ttl_sec,
+        weight_smart=config.maker.smart_money_weight_smart,
+        weight_directional=config.maker.smart_money_weight_directional,
+        weight_unknown=config.maker.smart_money_weight_unknown,
+    )
+    strategy.smart_money_tracker = (
+        SmartMoneyTracker(strategy.smart_money_config)
+        if strategy.smart_money_config.enabled or strategy.smart_money_config.shadow_enabled
+        else None
+    )
     raw_quote_mode = config.maker.quote_sides
     strategy.maker_quote_sides = config.maker.quote_sides
     if raw_quote_mode in {"sell", "both_buy"}:
@@ -254,6 +308,12 @@ def initialize_strategy_settings(
     strategy.taker_exit_max_spread_pct = config.exit.taker_exit_max_spread_pct
     strategy.taker_exit_stop_loss_max_spread_pct = config.exit.taker_exit_stop_loss_max_spread_pct
     strategy.taker_exit_wait_for_sell_quote_sec = config.exit.taker_exit_wait_for_sell_quote_sec
+    strategy.taker_exit_only_after_invalidation = config.exit.taker_exit_only_after_invalidation
+    strategy.taker_exit_max_time_left_sec = config.exit.taker_exit_max_time_left_sec
+    strategy.taker_exit_min_bid = config.exit.taker_exit_min_bid
+    strategy.taker_exit_min_recovery_ratio = config.exit.taker_exit_min_recovery_ratio
+    strategy.taker_exit_require_inventory = config.exit.taker_exit_require_inventory
+    strategy.taker_exit_disable_if_bid_below = config.exit.taker_exit_disable_if_bid_below
     strategy.market_stop_loss_max_per_market = config.exit.market_stop_loss_max_per_market
     strategy.market_max_buy_events_per_market = config.exit.market_max_buy_events_per_market
     strategy.taker_exit_max_hold_near_close_sec = config.exit.taker_exit_max_hold_near_close_sec
@@ -477,6 +537,10 @@ def initialize_strategy_settings(
     strategy.external_spot_history_max = config.market_data.external_spot_history_max
     strategy.polymarket_chainlink_history = []
     strategy.polymarket_chainlink_history_max = config.market_data.polymarket_chainlink_history_max
+    strategy.polymarket_chainlink_twap_enabled = config.market_data.polymarket_chainlink_twap_enabled
+    strategy.polymarket_chainlink_twap_window_sec = config.market_data.polymarket_chainlink_twap_window_sec
+    strategy.polymarket_chainlink_twap_symbol = config.market_data.polymarket_chainlink_twap_symbol
+    strategy.require_twap_reference_spot = config.market_data.require_twap_reference_spot
     strategy.market_strike_cache_by_slug = {}
     strategy.market_strike_source_by_slug = {}
     strategy.market_strike_provisional_by_slug = {}
@@ -616,6 +680,10 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_price = None
     strategy._polymarket_chainlink_price_ts = 0.0
     strategy._polymarket_chainlink_event_ts_ms = None
+    strategy._polymarket_chainlink_twap_price = None
+    strategy._polymarket_chainlink_twap_price_ts = 0.0
+    strategy._polymarket_chainlink_twap_event_ts_ms = None
+    strategy._polymarket_chainlink_twap_window_sec = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
     strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd

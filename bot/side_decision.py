@@ -335,23 +335,7 @@ class SideDecisionMixin:
         return (now_ts - pending_since) >= min_persist
 
     def _pre_entry_flip_allowed(self, *, proposed_side: ActiveSide) -> bool:
-        if not self.active_side_locked or proposed_side in (ActiveSide.NONE, self.active_side):
-            return False
-        if int(getattr(self, "side_flip_count", 0) or 0) >= 1:
-            return False
-        slug = str(getattr(self, "current_market_slug", "") or "")
-        market_buy_count = int(getattr(self, "market_buy_count_by_slug", {}).get(slug, 0) or 0)
-        if market_buy_count > 0:
-            return False
-        try:
-            live_inventory_cost = getattr(self, "live_inventory_cost", {}) or {}
-            for state in live_inventory_cost.values():
-                qty = Decimal(str((state or {}).get("qty", "0")))
-                if qty > 0:
-                    return False
-        except Exception:
-            return False
-        return True
+        return False
 
     def _populate_spot_source_inputs(
         self,
@@ -384,6 +368,16 @@ class SideDecisionMixin:
         poly_ts = float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0)
         inputs["polymarket_chainlink_price"] = float(poly_px) if poly_px is not None else None
         inputs["polymarket_chainlink_age_sec"] = max(0.0, now_ts - poly_ts) if poly_ts > 0 else None
+
+        twap_px = getattr(self, "_polymarket_chainlink_twap_price", None)
+        twap_ts = float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0)
+        inputs["polymarket_chainlink_twap_price"] = float(twap_px) if twap_px is not None else None
+        inputs["polymarket_chainlink_twap_age_sec"] = max(0.0, now_ts - twap_ts) if twap_ts > 0 else None
+        inputs["polymarket_chainlink_twap_window_sec"] = getattr(
+            self,
+            "_polymarket_chainlink_twap_window_sec",
+            getattr(self, "polymarket_chainlink_twap_window_sec", None),
+        )
 
     # ------------------------------------------------------------------
     # Core decision logic (dispatcher)

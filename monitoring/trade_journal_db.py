@@ -214,6 +214,55 @@ class TradeJournalDB:
         except Exception as e:
             logger.debug(f"TradeJournalDB log_order_event failed: {e}")
 
+    def load_recent_buy_submits(self, instrument_id: str, limit: int = 20) -> list[Dict[str, Any]]:
+        if not instrument_id:
+            return []
+        sql = """
+        SELECT ts, client_order_id, price, qty, payload_json
+        FROM order_events
+        WHERE event_type = 'ORDER_SUBMIT'
+          AND UPPER(COALESCE(side, '')) = 'BUY'
+          AND (
+              instrument_id = ?
+              OR json_extract(payload_json, '$.submitted_instrument_id') = ?
+              OR json_extract(payload_json, '$.instrument_id') = ?
+          )
+        ORDER BY id DESC
+        LIMIT ?
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(sql, (instrument_id, instrument_id, instrument_id, int(limit))).fetchall()
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_recent_buy_submits failed: {e}")
+            return []
+
+        out: list[Dict[str, Any]] = []
+        for ts, client_order_id, price, qty, payload_json in rows:
+            payload: Dict[str, Any] = {}
+            try:
+                parsed = json.loads(payload_json or "{}")
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except Exception:
+                payload = {}
+            epoch_ts = 0.0
+            try:
+                epoch_ts = datetime.fromisoformat(str(ts)).timestamp()
+            except Exception:
+                epoch_ts = 0.0
+            out.append(
+                {
+                    "ts": ts,
+                    "epoch_ts": epoch_ts,
+                    "client_order_id": client_order_id,
+                    "price": price,
+                    "qty": qty,
+                    "payload": payload,
+                }
+            )
+        return out
+
     def load_latest_locked_strike(self, slug: str) -> Optional[Dict[str, Any]]:
         if not slug:
             return None

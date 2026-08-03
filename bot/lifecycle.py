@@ -155,6 +155,17 @@ def resolve_bi_side_market_selection(
             if str(item.get("slug") or "") == preferred_slug_norm:
                 selected = item
                 break
+        if selected is None:
+            for item in btc_instruments:
+                if str(item.get("slug") or "") != preferred_slug_norm:
+                    continue
+                start_ts = item.get("market_timestamp")
+                end_ts = item.get("end_timestamp") or ((start_ts + 900) if start_ts else None)
+                if end_ts is not None and end_ts < (current_timestamp - 60):
+                    continue
+                selected = item
+                selection_kind = "preferred"
+                break
     if selected is None:
         selected, selection_kind = select_current_or_next_market(filtered)
     if selected is None:
