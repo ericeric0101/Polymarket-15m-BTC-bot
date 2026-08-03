@@ -440,6 +440,10 @@ class MarketDataConfig:
     external_spot_max_failures: int
     external_spot_history_max: int
     polymarket_chainlink_history_max: int
+    polymarket_chainlink_twap_enabled: bool
+    polymarket_chainlink_twap_window_sec: int
+    polymarket_chainlink_twap_symbol: str
+    require_twap_reference_spot: bool
     external_spot_source_delta_abs_max_usd: Decimal
     market_strike_anchor_max_lag_sec: int
     market_strike_anchor_near_sec: int
@@ -455,6 +459,12 @@ class MarketDataConfig:
     fee_rate_fetch_interval_sec: int
     fee_rate_cache_ttl_sec: int
     clob_base_url: str
+
+    def __post_init__(self) -> None:
+        if self.polymarket_chainlink_twap_window_sec not in {30, 60}:
+            raise ValueError("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC must be 30 or 60")
+        if self.require_twap_reference_spot and not self.polymarket_chainlink_twap_enabled:
+            raise ValueError("REQUIRE_TWAP_REFERENCE_SPOT requires POLYMARKET_CHAINLINK_TWAP_ENABLED")
 
 
 @dataclass(frozen=True)
@@ -552,6 +562,9 @@ class AppConfig:
         )
 
         external_spot_history_max = max(60, _env_int("EXTERNAL_SPOT_HISTORY_MAX", 1200))
+        polymarket_twap_window_sec = _env_int("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC", 60)
+        if polymarket_twap_window_sec not in {30, 60}:
+            raise ValueError("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC must be 30 or 60")
         fee_rate_cache_ttl_sec = _env_int("FEE_RATE_CACHE_TTL_SEC", 300)
 
         return cls(
@@ -951,6 +964,10 @@ class AppConfig:
                     60,
                     _env_int("POLYMARKET_CHAINLINK_HISTORY_MAX", external_spot_history_max),
                 ),
+                polymarket_chainlink_twap_enabled=_env_bool_inverted("POLYMARKET_CHAINLINK_TWAP_ENABLED", True),
+                polymarket_chainlink_twap_window_sec=polymarket_twap_window_sec,
+                polymarket_chainlink_twap_symbol=_env_str("POLYMARKET_CHAINLINK_TWAP_SYMBOL", "btc/usd").strip().lower() or "btc/usd",
+                require_twap_reference_spot=_env_bool_inverted("REQUIRE_TWAP_REFERENCE_SPOT", True),
                 external_spot_source_delta_abs_max_usd=max(
                     Decimal("0"),
                     _env_decimal("EXTERNAL_SPOT_SOURCE_DELTA_ABS_MAX_USD", "40"),

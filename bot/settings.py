@@ -537,6 +537,10 @@ def initialize_strategy_settings(
     strategy.external_spot_history_max = config.market_data.external_spot_history_max
     strategy.polymarket_chainlink_history = []
     strategy.polymarket_chainlink_history_max = config.market_data.polymarket_chainlink_history_max
+    strategy.polymarket_chainlink_twap_enabled = config.market_data.polymarket_chainlink_twap_enabled
+    strategy.polymarket_chainlink_twap_window_sec = config.market_data.polymarket_chainlink_twap_window_sec
+    strategy.polymarket_chainlink_twap_symbol = config.market_data.polymarket_chainlink_twap_symbol
+    strategy.require_twap_reference_spot = config.market_data.require_twap_reference_spot
     strategy.market_strike_cache_by_slug = {}
     strategy.market_strike_source_by_slug = {}
     strategy.market_strike_provisional_by_slug = {}
@@ -676,6 +680,10 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_price = None
     strategy._polymarket_chainlink_price_ts = 0.0
     strategy._polymarket_chainlink_event_ts_ms = None
+    strategy._polymarket_chainlink_twap_price = None
+    strategy._polymarket_chainlink_twap_price_ts = 0.0
+    strategy._polymarket_chainlink_twap_event_ts_ms = None
+    strategy._polymarket_chainlink_twap_window_sec = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
     strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd

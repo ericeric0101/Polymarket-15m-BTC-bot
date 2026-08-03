@@ -369,6 +369,16 @@ class SideDecisionMixin:
         inputs["polymarket_chainlink_price"] = float(poly_px) if poly_px is not None else None
         inputs["polymarket_chainlink_age_sec"] = max(0.0, now_ts - poly_ts) if poly_ts > 0 else None
 
+        twap_px = getattr(self, "_polymarket_chainlink_twap_price", None)
+        twap_ts = float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0)
+        inputs["polymarket_chainlink_twap_price"] = float(twap_px) if twap_px is not None else None
+        inputs["polymarket_chainlink_twap_age_sec"] = max(0.0, now_ts - twap_ts) if twap_ts > 0 else None
+        inputs["polymarket_chainlink_twap_window_sec"] = getattr(
+            self,
+            "_polymarket_chainlink_twap_window_sec",
+            getattr(self, "polymarket_chainlink_twap_window_sec", None),
+        )
+
     # ------------------------------------------------------------------
     # Core decision logic (dispatcher)
     # ------------------------------------------------------------------

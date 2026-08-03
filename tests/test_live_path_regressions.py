@@ -17,6 +17,10 @@ from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
+from bot.price_streams import (
+    build_polymarket_chainlink_subscribe_payload,
+    extract_polymarket_chainlink_tick,
+)
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
     apply_forced_exit_sell_pricing,
@@ -966,6 +970,9 @@ class DummySpotPricerStrategy(SpotPricerMixin):
     def __init__(self) -> None:
         self.market_strike_cache_by_slug = {}
         self.market_strike_source_by_slug = {}
+        self.market_strike_provisional_by_slug = {}
+        self.market_strike_provisional_source_by_slug = {}
+        self._strike_pending_log_state_by_slug = {}
         self.market_start_ts_by_slug = {"btc-updown-15m-test": 1_000}
         self.market_strike_anchor_max_lag_sec = 180
         self.market_strike_anchor_near_sec = 30
@@ -978,6 +985,7 @@ class DummySpotPricerStrategy(SpotPricerMixin):
         self.market_strike_gamma_mismatch_warn_interval_sec = 180
         self.polymarket_chainlink_history = [(1000.1, Decimal("66625.19"))]
         self.polymarket_chainlink_history_max = 1200
+        self.polymarket_chainlink_twap_enabled = True
         self.external_spot_history = [(1000.1, Decimal("66602.20"))]
         self.external_spot_history_max = 1200
         self.latest_external_spot = Decimal("66630.00")
@@ -1452,7 +1460,7 @@ def test_strike_prefers_polymarket_chainlink_history_anchor():
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
     assert strike == Decimal("66625.19")
-    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_open"
+    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_twap_open"
 
 
 def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
@@ -2592,6 +2600,7 @@ def test_app_config_reads_extended_env(monkeypatch):
     monkeypatch.setenv("AUTO_REDEEM_ENABLED", "1")
     monkeypatch.setenv("TRADE_DB_PATH", "./logs/custom.db")
     monkeypatch.setenv("REGIME_GUARD_N_MARKETS", "6")
+    monkeypatch.setenv("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC", "60")
 
     cfg = AppConfig.from_env(enable_terminal_dashboard=False)
 
@@ -2600,6 +2609,45 @@ def test_app_config_reads_extended_env(monkeypatch):
     assert cfg.operations.auto_redeem_enabled is True
     assert cfg.operations.trade_db_path == "./logs/custom.db"
     assert cfg.risk.regime_guard_n_markets == 6
+    assert cfg.market_data.polymarket_chainlink_twap_enabled is True
+    assert cfg.market_data.polymarket_chainlink_twap_window_sec == 60
+    assert cfg.market_data.require_twap_reference_spot is True
+
+
+def test_polymarket_chainlink_twap_subscribe_payload_uses_60s_topic():
+    payload = build_polymarket_chainlink_subscribe_payload(
+        use_twap=True,
+        window_seconds=60,
+        symbol="BTC/USD",
+    )
+
+    sub = payload["subscriptions"][0]
+    assert sub["topic"] == "crypto_prices_twap_sixty"
+    assert sub["type"] == "update"
+    assert sub["filters"] == '{"symbol":"btc/usd"}'
+
+
+def test_extract_polymarket_chainlink_twap_tick_prefers_full_accuracy_e18():
+    tick = extract_polymarket_chainlink_tick(
+        {
+            "topic": "crypto_prices_twap_sixty",
+            "type": "update",
+            "timestamp": 1785178800123,
+            "payload": {
+                "symbol": "btc/usd",
+                "value": 65000.0,
+                "full_accuracy_value": "65000500000000000000000",
+                "timestamp": 1785178800000,
+                "window_s": 60,
+            },
+        }
+    )
+
+    assert tick is not None
+    assert tick.price == Decimal("65000.5")
+    assert tick.updated_at_ms == 1785178800000
+    assert tick.window_seconds == 60
+    assert tick.source == "polymarket_chainlink_twap_60s_ws"
 
 
 def test_runtime_compatibility_overrides_install():
@@ -3662,6 +3710,31 @@ def test_capture_market_open_spot_prefers_fresh_chainlink_over_stale_latest_exte
     assert price == Decimal("101.25")
     assert source == "polymarket_chainlink_ws"
     assert math.isclose(age, 0.6, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_capture_market_open_spot_prefers_fresh_twap_over_snapshot_chainlink():
+    now_ts = 1_000.0
+    dummy = SimpleNamespace(
+        _polymarket_chainlink_twap_price=Decimal("101.50"),
+        _polymarket_chainlink_twap_price_ts=999.6,
+        _polymarket_chainlink_twap_window_sec=60,
+        polymarket_chainlink_twap_window_sec=60,
+        _polymarket_chainlink_price=Decimal("101.25"),
+        _polymarket_chainlink_price_ts=999.7,
+        _binance_ws_price=Decimal("100.80"),
+        _binance_ws_price_ts=999.8,
+        latest_external_spot=Decimal("99.50"),
+        latest_external_spot_source="binance_ws",
+        latest_external_spot_source_ts=810.0,
+        last_external_spot=Decimal("99.40"),
+        external_spot_history=[],
+    )
+
+    price, source, age = IntegratedBTCStrategy._capture_market_open_spot_detail(dummy, now_ts=now_ts)
+
+    assert price == Decimal("101.50")
+    assert source == "polymarket_chainlink_twap_60s_ws"
+    assert math.isclose(age, 0.4, rel_tol=0.0, abs_tol=1e-9)
 
 
 def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():

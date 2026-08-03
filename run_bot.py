@@ -437,6 +437,9 @@ class IntegratedBTCStrategy(
             f"mode={'maker' if self.maker_mode else 'signal'} "
             f"quote_sides={self.maker_quote_sides} "
             f"pricer={self.maker_fair_pricer_mode} "
+            f"ref={'twap' if getattr(self, 'polymarket_chainlink_twap_enabled', True) else 'spot'} "
+            f"twap_window={int(getattr(self, 'polymarket_chainlink_twap_window_sec', 60) or 60)}s "
+            f"require_twap={'on' if getattr(self, 'require_twap_reference_spot', True) else 'off'} "
             f"bi_side={'on' if self.bi_side_enabled else 'off'} "
             f"hold_to_redeem={'on' if getattr(self, 'hold_to_redeem_enabled', False) else 'off'} "
             f"tail_tp={'on' if getattr(self, 'tail_protect_tp_enabled', False) else 'off'} "
@@ -745,6 +748,16 @@ class IntegratedBTCStrategy(
             float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0),
             "polymarket_chainlink_ws",
         )
+        twap_window = int(
+            getattr(self, "_polymarket_chainlink_twap_window_sec", 0)
+            or getattr(self, "polymarket_chainlink_twap_window_sec", 60)
+            or 60
+        )
+        twap = _candidate(
+            getattr(self, "_polymarket_chainlink_twap_price", None),
+            float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0),
+            f"polymarket_chainlink_twap_{twap_window}s_ws",
+        )
         binance = _candidate(
             getattr(self, "_binance_ws_price", None),
             float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0),
@@ -757,12 +770,12 @@ class IntegratedBTCStrategy(
             latest_src,
         )
 
-        for cand in (poly, binance, latest):
+        for cand in (twap, poly, binance, latest):
             price, source, age = cand
             if price is not None and age is not None and age < fresh_sec:
                 return cand
 
-        stale_candidates = [cand for cand in (poly, binance, latest) if cand[0] is not None]
+        stale_candidates = [cand for cand in (twap, poly, binance, latest) if cand[0] is not None]
         if stale_candidates:
             stale_candidates.sort(key=lambda item: item[2] if item[2] is not None else float("inf"))
             return stale_candidates[0]
