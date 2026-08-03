@@ -483,8 +483,10 @@ class BTCDashboard:
         if not trade.is_settled:
             return Text("—", style=MUTED_STYLE)
         if trade.redeem_amount is None:
-            if trade.expected_redeem_amount is not None and trade.expected_redeem_amount > 0:
-                return Text(f"~{_money(trade.expected_redeem_amount)}", style=WARN_STYLE)
+            if trade.expected_redeem_amount is not None:
+                if trade.expected_redeem_amount > 0:
+                    return Text(f"~{_money(trade.expected_redeem_amount)}", style=WARN_STYLE)
+                return Text(_money(0.0), style=MUTED_STYLE)
             return Text("pending", style=WARN_STYLE)
         return Text(_money(trade.redeem_amount), style=VALUE_STYLE)
 
@@ -497,6 +499,8 @@ class BTCDashboard:
 
     @staticmethod
     def _trade_pnl_amount(trade: TradeRecord) -> Optional[float]:
+        if trade.realized_pnl is not None:
+            return trade.realized_pnl
         entry_cost = trade.entry_price * trade.qty
         if trade.exit_price is not None:
             return trade.exit_price * trade.qty - entry_cost
@@ -925,6 +929,7 @@ class TradeJournalDashboardSource:
         settlements = self._settlement_by_slug(conn)
         redeems = self._redeem_by_slug(conn)
         exits = self._exit_by_slug(conn)
+        cycle_pnl = self._cycle_pnl_by_slug(conn)
 
         trades: list[TradeRecord] = []
         for idx, row in enumerate(buy_rows, start=1):
@@ -934,13 +939,16 @@ class TradeJournalDashboardSource:
             settlement = settlements.get(slug, {})
             redeem_amount = None
             redeem = redeems.get(slug)
-            if redeem is not None:
-                redeem_amount = float(settlement.get("redeem_value_usdc") or 0.0)
-                if redeem_amount <= 0 and redeem.get("redeem_size_usdc") is not None:
-                    redeem_amount = float(redeem.get("redeem_size_usdc") or 0.0)
+            settlement_redeem_amount = _optional_float(settlement.get("redeem_value_usdc"))
+            if redeem is not None and (slug not in settlements or (settlement_redeem_amount or 0.0) > 0):
+                redeem_amount = _optional_float(
+                    redeem.get("redeem_value_usdc")
+                    or redeem.get("redeem_size_usdc")
+                    or redeem.get("amount")
+                )
             expected_redeem_amount = None
             if slug in settlements:
-                expected_redeem_amount = float(settlement.get("redeem_value_usdc") or 0.0)
+                expected_redeem_amount = float(settlement_redeem_amount or 0.0)
             trade = TradeRecord(
                 trade_id=idx,
                 market_slug=slug,
@@ -951,9 +959,32 @@ class TradeJournalDashboardSource:
                 redeem_amount=redeem_amount,
                 is_settled=slug in settlements,
                 expected_redeem_amount=expected_redeem_amount,
+                realized_pnl=cycle_pnl.get(slug),
             )
             trades.append(trade)
         return trades
+
+    @staticmethod
+    def _cycle_pnl_by_slug(conn: sqlite3.Connection) -> dict[str, float]:
+        rows = conn.execute(
+            """
+            SELECT payload_json
+            FROM strategy_events
+            WHERE event_type = 'MARKET_CYCLE_PNL'
+            ORDER BY id DESC
+            LIMIT 1000
+            """
+        ).fetchall()
+        out: dict[str, float] = {}
+        for row in rows:
+            payload = _json_loads(row["payload_json"])
+            slug = str(payload.get("slug") or payload.get("market_slug") or "")
+            if not slug or slug in out:
+                continue
+            pnl = _optional_float(payload.get("cycle_combined_pnl_usdc"))
+            if pnl is not None:
+                out[slug] = pnl
+        return out
 
     @staticmethod
     def _settlement_by_slug(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -1018,6 +1049,8 @@ class TradeJournalDashboardSource:
             if not trade.is_settled or trade.exit_price is not None or trade.redeem_amount is not None:
                 continue
             value = max(0.0, trade.expected_redeem_amount if trade.expected_redeem_amount is not None else trade.qty)
+            if value <= 0:
+                continue
             count += 1
             total += value
         return count, total

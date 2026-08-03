@@ -17,6 +17,7 @@ class TradeRecord:
     redeem_amount: Optional[float]
     is_settled: bool
     expected_redeem_amount: Optional[float] = None
+    realized_pnl: Optional[float] = None
 
 
 @dataclass
