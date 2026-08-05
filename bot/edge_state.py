@@ -7,12 +7,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class EdgeState:
-    """Probability-vs-price diagnostics shared by entry and exit paths.
-
-    This object is intentionally observational for the first rollout. It
-    records both midpoint and executable-price edges without changing order
-    behavior by itself.
-    """
+    """Probability-vs-price diagnostics for shadow and future entry gates."""
 
     model_probability_up: Decimal | None
     market_probability_up: Decimal | None
@@ -20,7 +15,13 @@ class EdgeState:
     up_ask: Decimal | None
     down_bid: Decimal | None
     down_ask: Decimal | None
+    fee_buffer: Decimal
+    slippage_buffer: Decimal
+    adverse_selection_buffer: Decimal
+    model_error_buffer: Decimal
     total_cost_buffer: Decimal
+    quote_age_sec: Decimal | None
+    max_quote_age_sec: Decimal
     up_edge_vs_mid: Decimal | None
     up_edge_vs_ask: Decimal | None
     down_edge_vs_ask: Decimal | None
@@ -28,8 +29,31 @@ class EdgeState:
     down_net_edge_vs_ask: Decimal | None
 
     @property
+    def diagnostic_edge_available(self) -> bool:
+        return (
+            self.model_probability_up is not None
+            and self.market_probability_up is not None
+        )
+
+    @property
+    def executable_edge_available(self) -> bool:
+        return (
+            self.model_probability_up is not None
+            and (self.up_ask is not None or self.down_ask is not None)
+        )
+
+    @property
+    def fresh_executable_edge_available(self) -> bool:
+        return (
+            self.executable_edge_available
+            and self.quote_age_sec is not None
+            and self.quote_age_sec <= self.max_quote_age_sec
+        )
+
+    @property
     def edge_available(self) -> bool:
-        return self.model_probability_up is not None and self.market_probability_up is not None
+        """Backward-compatible alias for diagnostic availability."""
+        return self.diagnostic_edge_available
 
     def to_dict(self) -> dict[str, Any]:
         def as_float(value: Decimal | None) -> float | None:
@@ -42,17 +66,33 @@ class EdgeState:
             "up_ask": as_float(self.up_ask),
             "down_bid": as_float(self.down_bid),
             "down_ask": as_float(self.down_ask),
+            "fee_buffer": as_float(self.fee_buffer),
+            "slippage_buffer": as_float(self.slippage_buffer),
+            "adverse_selection_buffer": as_float(self.adverse_selection_buffer),
+            "model_error_buffer": as_float(self.model_error_buffer),
             "total_cost_buffer": as_float(self.total_cost_buffer),
+            "quote_age_sec": as_float(self.quote_age_sec),
+            "max_quote_age_sec": as_float(self.max_quote_age_sec),
             "up_edge_vs_mid": as_float(self.up_edge_vs_mid),
             "up_edge_vs_ask": as_float(self.up_edge_vs_ask),
             "down_edge_vs_ask": as_float(self.down_edge_vs_ask),
             "up_net_edge_vs_ask": as_float(self.up_net_edge_vs_ask),
             "down_net_edge_vs_ask": as_float(self.down_net_edge_vs_ask),
             "edge_available": self.edge_available,
+            "diagnostic_edge_available": self.diagnostic_edge_available,
+            "executable_edge_available": self.executable_edge_available,
+            "fresh_executable_edge_available": self.fresh_executable_edge_available,
         }
 
 
-def _positive(value: Decimal | None) -> Decimal | None:
+def _probability(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    value = Decimal(str(value))
+    return value if Decimal("0") <= value <= Decimal("1") else None
+
+
+def _price(value: Decimal | None) -> Decimal | None:
     if value is None:
         return None
     value = Decimal(str(value))
@@ -65,6 +105,10 @@ def _subtract(left: Decimal | None, right: Decimal | None) -> Decimal | None:
     return left - right
 
 
+def _buffer(value: Decimal | None) -> Decimal:
+    return max(Decimal("0"), Decimal(str(value or "0")))
+
+
 def build_edge_state(
     *,
     model_probability_up: Decimal | None,
@@ -73,30 +117,39 @@ def build_edge_state(
     up_ask: Decimal | None,
     down_bid: Decimal | None,
     down_ask: Decimal | None,
-    total_cost_buffer: Decimal,
+    total_cost_buffer: Decimal | None = None,
+    fee_buffer: Decimal | None = None,
+    slippage_buffer: Decimal | None = None,
+    adverse_selection_buffer: Decimal | None = None,
+    model_error_buffer: Decimal | None = None,
+    quote_age_sec: Decimal | None = None,
+    max_quote_age_sec: Decimal = Decimal("2"),
 ) -> EdgeState:
-    model = _positive(model_probability_up)
-    market = _positive(market_mid)
-    up_bid = _positive(up_bid)
-    up_ask = _positive(up_ask)
-    down_bid = _positive(down_bid)
-    down_ask = _positive(down_ask)
-    cost = max(Decimal("0"), Decimal(str(total_cost_buffer)))
+    model = _probability(model_probability_up)
+    market = _probability(market_mid)
+    up_bid = _price(up_bid)
+    up_ask = _price(up_ask)
+    down_bid = _price(down_bid)
+    down_ask = _price(down_ask)
 
-    # p(UP) - p(market) is a diagnostic market-implied edge. Executable
-    # edges use asks and therefore include the actual price paid by a taker.
+    fee = _buffer(fee_buffer)
+    slippage = _buffer(slippage_buffer)
+    adverse = _buffer(adverse_selection_buffer)
+    model_error = _buffer(model_error_buffer)
+    component_total = fee + slippage + adverse + model_error
+    legacy_total = _buffer(total_cost_buffer)
+    cost = max(component_total, legacy_total)
+    age = Decimal(str(quote_age_sec)) if quote_age_sec is not None else None
+    max_age = max(Decimal("0"), Decimal(str(max_quote_age_sec)))
+
     up_edge_vs_mid = _subtract(model, market)
     down_edge_vs_ask = _subtract(
         (Decimal("1") - model) if model is not None else None,
         down_ask,
     )
     up_edge_vs_ask = _subtract(model, up_ask)
-    up_net_edge_vs_ask = (
-        up_edge_vs_ask - cost if up_edge_vs_ask is not None else None
-    )
-    down_net_edge_vs_ask = (
-        down_edge_vs_ask - cost if down_edge_vs_ask is not None else None
-    )
+    up_net_edge_vs_ask = up_edge_vs_ask - cost if up_edge_vs_ask is not None else None
+    down_net_edge_vs_ask = down_edge_vs_ask - cost if down_edge_vs_ask is not None else None
 
     return EdgeState(
         model_probability_up=model,
@@ -105,7 +158,13 @@ def build_edge_state(
         up_ask=up_ask,
         down_bid=down_bid,
         down_ask=down_ask,
+        fee_buffer=fee,
+        slippage_buffer=slippage,
+        adverse_selection_buffer=adverse,
+        model_error_buffer=model_error,
         total_cost_buffer=cost,
+        quote_age_sec=age,
+        max_quote_age_sec=max_age,
         up_edge_vs_mid=up_edge_vs_mid,
         up_edge_vs_ask=up_edge_vs_ask,
         down_edge_vs_ask=down_edge_vs_ask,

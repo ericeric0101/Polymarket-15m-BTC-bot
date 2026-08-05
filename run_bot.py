@@ -46,6 +46,7 @@ from loguru import logger
 
 # Import our phases
 from bot.inventory import InventoryLedger
+from bot.edge_state import build_edge_state
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.enums import ActiveSide, MarketPhase
@@ -1888,6 +1889,99 @@ class IntegratedBTCStrategy(
                         getattr(self, "entry_quality_allow_size_down", False)
                     ),
                 )
+                if side == "buy" and quote_ctx.quote is not None and quote_ctx.fair is not None:
+                    try:
+                        outcome_side = self._side_for_instrument_id(inst_id).value
+                    except Exception:
+                        outcome_side = self.active_side.value
+                    quote_bid, quote_ask = quote_ctx.quote
+                    market_mid_outcome = (quote_bid + quote_ask) / Decimal("2")
+                    model_probability_outcome = quote_ctx.fair
+                    if outcome_side == ActiveSide.DOWN.value:
+                        model_probability_up = Decimal("1") - model_probability_outcome
+                        market_mid_up = Decimal("1") - market_mid_outcome
+                        up_bid = None
+                        up_ask = None
+                        down_bid = quote_bid
+                        down_ask = quote_ask
+                    else:
+                        model_probability_up = model_probability_outcome
+                        market_mid_up = market_mid_outcome
+                        up_bid = quote_bid
+                        up_ask = quote_ask
+                        down_bid = None
+                        down_ask = None
+                    planned_fee_ps = (
+                        Decimal(str(quote_data[8]))
+                        if isinstance(quote_data, (tuple, list)) and len(quote_data) > 8
+                        else Decimal("0")
+                    )
+                    planned_other_cost_ps = (
+                        Decimal(str(quote_data[9]))
+                        if isinstance(quote_data, (tuple, list)) and len(quote_data) > 9
+                        else Decimal("0")
+                    )
+                    quote_age_sec = None
+                    if float(getattr(self, "last_quote_update_ts", 0.0)) > 0:
+                        quote_age_sec = Decimal(str(max(
+                            0.0,
+                            now_ts - float(self.last_quote_update_ts),
+                        )))
+                    edge_state = build_edge_state(
+                        model_probability_up=model_probability_up,
+                        market_mid=market_mid_up,
+                        up_bid=up_bid,
+                        up_ask=up_ask,
+                        down_bid=down_bid,
+                        down_ask=down_ask,
+                        fee_buffer=planned_fee_ps,
+                        slippage_buffer=planned_other_cost_ps,
+                        quote_age_sec=quote_age_sec,
+                        max_quote_age_sec=Decimal(str(getattr(self, "quote_stale_sec", 2.0))),
+                    )
+                    planned_entry_price = (
+                        Decimal(str(quote_data[0]))
+                        if isinstance(quote_data, (tuple, list)) and quote_data
+                        else None
+                    )
+                    planned_maker_net_edge = None
+                    if planned_entry_price is not None:
+                        planned_maker_net_edge = (
+                            model_probability_outcome
+                            - planned_entry_price
+                            - planned_fee_ps
+                            - planned_other_cost_ps
+                        )
+                    edge_payload = {
+                        **edge_state.to_dict(),
+                        "event_ts": now_ts,
+                        "slug": current_slug,
+                        "instrument_id": str(inst_id),
+                        "outcome_side": outcome_side,
+                        "entry_mode": buy_entry_eval.entry_mode,
+                        "candidate_entry_price": float(planned_entry_price) if planned_entry_price is not None else None,
+                        "planned_maker_net_edge": float(planned_maker_net_edge) if planned_maker_net_edge is not None else None,
+                        "decision": "SKIP" if buy_entry_eval.skip else "ELIGIBLE",
+                        "decision_reason": buy_entry_eval.reason or "shadow_only",
+                        "loss_history_tail": list(getattr(self, "recent_fill_pnl_results", [])[-5:]),
+                        "recovery_size_multiplier": float(getattr(self, "loss_recovery_size_multiplier", 1.0)),
+                        "recovery_min_edge_addition": float(getattr(self, "loss_recovery_min_edge_addition", 0)),
+                        "effective_size_multiplier": float(
+                            buy_entry_eval.size_multiplier
+                            * Decimal(str(getattr(self, "loss_recovery_size_multiplier", 1.0)))
+                        ),
+                        "effective_min_expected_net_usdc": float(
+                            buy_entry_eval.min_expected_net_usdc
+                            + Decimal(str(getattr(self, "loss_recovery_min_edge_addition", 0)))
+                        ),
+                    }
+                    self._db_order_event(
+                        event_type="ENTRY_EDGE_OBSERVATION",
+                        side=side.upper(),
+                        status="SHADOW",
+                        reason="shadow_only",
+                        payload=edge_payload,
+                    )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
                     diag_payload = buy_entry_eval.payload or {}
