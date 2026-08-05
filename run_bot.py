@@ -1953,7 +1953,7 @@ class IntegratedBTCStrategy(
                     try:
                         other_side = ActiveSide.DOWN if outcome_side == ActiveSide.UP.value else ActiveSide.UP
                         other_inst_id = self._instrument_for_side(other_side)
-                        other_quote = self._get_quote_for_instrument(other_inst_id)
+                        other_quote = getattr(self, "latest_quote_by_inst", {}).get(str(other_inst_id))
                         other_quote_ts = getattr(self, "last_quote_update_ts_by_inst", {}).get(str(other_inst_id))
                         if other_quote is not None:
                             other_bid, other_ask = other_quote

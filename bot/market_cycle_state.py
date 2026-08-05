@@ -25,6 +25,7 @@ class MarketCycleState:
     sell_reject_pause_until_by_inst: dict[str, float] = field(default_factory=dict)
     conditional_balance_cache_by_token: dict[str, Any] = field(default_factory=dict)
     latest_quote_depth_by_inst: dict[str, Any] = field(default_factory=dict)
+    latest_quote_by_inst: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     last_quote_update_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_edge_observation_signature_by_inst: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     last_edge_observation_ts_by_inst: dict[str, float] = field(default_factory=dict)
@@ -62,6 +63,7 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy._sell_reject_pause_until_by_inst = state.sell_reject_pause_until_by_inst
     strategy._conditional_balance_cache_by_token = state.conditional_balance_cache_by_token
     strategy.latest_quote_depth_by_inst = state.latest_quote_depth_by_inst
+    strategy.latest_quote_by_inst = state.latest_quote_by_inst
     strategy.last_quote_update_ts_by_inst = state.last_quote_update_ts_by_inst
     strategy._last_edge_observation_signature_by_inst = state.last_edge_observation_signature_by_inst
     strategy._last_edge_observation_ts_by_inst = state.last_edge_observation_ts_by_inst

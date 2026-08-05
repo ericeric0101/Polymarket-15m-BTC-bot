@@ -301,6 +301,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
 
         strategy.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
+        getattr(strategy, "latest_quote_by_inst", {})[str(tick.instrument_id)] = (bid_decimal, ask_decimal)
         quote_event_ts = quote_tick_event_timestamp(tick, time.time())
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = quote_event_ts
         mid_price = (bid_decimal + ask_decimal) / 2

@@ -480,6 +480,7 @@ def initialize_strategy_settings(
     strategy.quote_reload_cooldown_sec = config.market_data.quote_reload_cooldown_sec
     strategy.last_quote_update_ts = 0.0
     strategy.last_quote_update_ts_by_inst = {}
+    strategy.latest_quote_by_inst = {}
     strategy._last_edge_observation_signature_by_inst = {}
     strategy._last_edge_observation_ts_by_inst = {}
     strategy.quote_pause_until_ts = 0.0
