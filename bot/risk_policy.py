@@ -41,6 +41,25 @@ class FillCooldownPolicy:
     def next_buy_cooldown_until(self, now_ts: float) -> float:
         return now_ts + self.config.post_fill_buy_cooldown_sec
 
+    @staticmethod
+    def _loss_streak(history: list[float]) -> int:
+        streak = 0
+        for pnl in reversed(history):
+            if pnl >= 0:
+                break
+            streak += 1
+        return streak
+
+    def recovery_size_multiplier(self, history: list[float]) -> float:
+        """Conservatively scale new exposure after recent losses."""
+        streak = self._loss_streak(history)
+        return {0: 1.0, 1: 0.75, 2: 0.50}.get(streak, 0.35)
+
+    def recovery_min_edge_addition(self, history: list[float]) -> float:
+        """Require a little more edge after losses, not a tiny stop-loss loop."""
+        streak = self._loss_streak(history)
+        return min(0.02, 0.01 * streak)
+
     def register_realized_pnl(
         self,
         recent_fill_pnl_results: list[float],
@@ -60,4 +79,7 @@ class FillCooldownPolicy:
             return updated, current_quote_pause_until_ts, False, 0.0
         total_loss = float(sum(tail))
         pause_until = max(current_quote_pause_until_ts, now_ts + self.config.loss_pause_sec)
-        return [], pause_until, True, total_loss
+        # Preserve the tail. Clearing it at the exact moment the pause fires
+        # hides the regime that caused the pause and allows immediate full-risk
+        # trading when the timer expires.
+        return updated, pause_until, True, total_loss

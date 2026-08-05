@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Protocol
 from loguru import logger
 
 from bot.enums import ActiveSide, MarketPhase
+from bot.edge_state import build_edge_state
 from bot.market_data import extract_market_start_ts_from_slug
 from bot.signal_engine import SignalEngine
 from execution.maker_engine import MakerEngine
@@ -499,6 +500,20 @@ class SideDecisionMixin:
         inputs["fair_up"] = float(fair_up) if fair_up is not None else None
         inputs["fair_down"] = float(fair_down) if fair_down is not None else None
 
+        # P0 edge state is initially observational. It keeps the market mid
+        # as an implied-probability baseline and records model-vs-price edge
+        # without turning this path into an aggressive taker strategy.
+        edge_state = build_edge_state(
+            model_probability_up=fair_up,
+            market_mid=market_mid,
+            up_bid=None,
+            up_ask=None,
+            down_bid=None,
+            down_ask=None,
+            total_cost_buffer=Decimal("0"),
+        )
+        inputs.update({"edge_mode": "shadow_only", **edge_state.to_dict()})
+
         # --- Decision ---
         score = Decimal(str(round(signals.composite_score, 6)))
         min_confidence = float(getattr(self, 'side_signal_min_confidence', 0.15))
@@ -701,7 +716,11 @@ class SideDecisionMixin:
             self.side_pending_flip_since_ts = 0.0
             self._sync_active_instrument()
             if old_side != side:
-                thesis_epoch = self._bump_thesis_epoch(str(self.current_market_slug or ""))
+                thesis_epoch = (
+                    self._bump_thesis_epoch(str(self.current_market_slug or ""))
+                    if hasattr(self, "_bump_thesis_epoch")
+                    else int(getattr(self, "thesis_epoch", 0))
+                )
                 self._cancel_stale_buy_orders_after_side_change(
                     old_side=old_side,
                     new_side=side,

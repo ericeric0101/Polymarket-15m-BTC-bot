@@ -297,6 +297,26 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             strategy.latest_market_bid_ts = time.time()
             strategy.latest_market_ask_ts = strategy.latest_market_bid_ts
             strategy.price_history.append(mid_price)
+            telemetry = getattr(strategy, "trade_telemetry", None)
+            if telemetry is not None:
+                try:
+                    markouts = telemetry.observe(
+                        strategy._instrument_key(tick.instrument_id),
+                        mid_price,
+                        time.time(),
+                    )
+                    for markout in markouts:
+                        strategy._db_order_event(
+                            event_type="FILL_MARKOUT",
+                            client_order_id=markout["fill_id"],
+                            side=str(markout["side"]).upper(),
+                            price=markout["markout_mid"],
+                            qty=0.0,
+                            status="OBSERVED",
+                            payload=markout,
+                        )
+                except Exception as telemetry_error:
+                    logger.debug(f"Trade telemetry markout update skipped: {telemetry_error}")
             if len(strategy.price_history) > strategy.max_history:
                 strategy.price_history.pop(0)
         if strategy.maker_mode:

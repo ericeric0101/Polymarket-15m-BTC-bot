@@ -34,6 +34,7 @@ from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
 from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
+from bot.trade_telemetry import TradeTelemetry
 
 
 def initialize_strategy_settings(
@@ -479,6 +480,8 @@ def initialize_strategy_settings(
     strategy.quote_reload_cooldown_sec = config.market_data.quote_reload_cooldown_sec
     strategy.last_quote_update_ts = 0.0
     strategy.quote_pause_until_ts = 0.0
+    strategy.loss_recovery_size_multiplier = 1.0
+    strategy.loss_recovery_min_edge_addition = Decimal("0")
     strategy.post_fill_buy_cooldown_sec = config.maker.post_fill_buy_cooldown_sec
     strategy.buy_cooldown_until_ts = 0.0
     strategy.max_consecutive_losses = config.maker.max_consecutive_losses
@@ -585,6 +588,7 @@ def initialize_strategy_settings(
     strategy.fee_rate_fetch_interval_sec = config.market_data.fee_rate_fetch_interval_sec
     strategy._fee_rate_local_cache_by_token = {}
     strategy.latest_market_bid = None
+    strategy.trade_telemetry = TradeTelemetry()
     strategy.latest_market_ask = None
     strategy.latest_market_bid_ts = 0.0
     strategy.latest_market_ask_ts = 0.0

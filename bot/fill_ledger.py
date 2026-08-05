@@ -211,8 +211,16 @@ class FillLedgerMixin:
     ) -> None:
         if side_for_ledger != "buy" or not current_slug:
             return
-        budget_key = self._market_buy_budget_key(current_slug)
-        thesis_epoch = self._current_thesis_epoch(current_slug)
+        thesis_epoch = (
+            self._current_thesis_epoch(current_slug)
+            if hasattr(self, "_current_thesis_epoch")
+            else int(getattr(self, "thesis_epoch", 0))
+        )
+        budget_key = (
+            self._market_buy_budget_key(current_slug)
+            if hasattr(self, "_market_buy_budget_key")
+            else f"{current_slug}:{thesis_epoch}"
+        )
         counted_ids = self.market_buy_counted_order_ids_by_slug.setdefault(budget_key, set())
         if not filled_id or filled_id in counted_ids:
             return
@@ -284,6 +292,8 @@ class FillLedgerMixin:
         self.market_cycle_realized_net_usdc = followup.market_cycle_realized_net_usdc
         self.recent_fill_pnl_results = followup.recent_fill_pnl_results
         self.quote_pause_until_ts = followup.quote_pause_until_ts
+        self.loss_recovery_size_multiplier = followup.loss_recovery_size_multiplier
+        self.loss_recovery_min_edge_addition = followup.loss_recovery_min_edge_addition
         if fill_side_norm == "buy" and self.post_fill_buy_cooldown_sec > 0:
             logger.info(
                 f"Post-fill buy cooldown activated: {self.post_fill_buy_cooldown_sec}s "

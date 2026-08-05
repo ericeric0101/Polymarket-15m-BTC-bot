@@ -2046,7 +2046,14 @@ class IntegratedBTCStrategy(
                     reduce_only_tail_sell_block=reduce_only_tail_sell_block,
                     reduce_only_no_new_sell_last_sec=self.maker_reduce_only_no_new_sell_last_sec,
                     forced_sell_only=forced_sell_only,
-                    min_expected_net_usdc=min_expected_net_usdc,
+                    min_expected_net_usdc=(
+                        min_expected_net_usdc
+                        + (
+                            Decimal(str(getattr(self, "loss_recovery_min_edge_addition", 0)))
+                            if side == "buy"
+                            else Decimal("0")
+                        )
+                    ),
                     now_ts=now_ts,
                     sell_pause_until=sell_pause_until,
                     is_dry_run_mode=self._is_dry_run_mode(),
@@ -2079,7 +2086,12 @@ class IntegratedBTCStrategy(
                     trend_buy_penalty_discount=self.trend_buy_penalty_discount,
                     trend_buy_score=self.side_decision_score,
                     trend_buy_size_multiplier=self.trend_buy_size_multiplier,
-                    entry_size_multiplier=buy_entry_eval.size_multiplier,
+                    entry_size_multiplier=(
+                        buy_entry_eval.size_multiplier
+                        * Decimal(str(getattr(self, "loss_recovery_size_multiplier", 1)))
+                        if side == "buy"
+                        else buy_entry_eval.size_multiplier
+                    ),
                     entry_quality=buy_entry_eval.payload,
                 )
                 desired_entry = apply_entry_quality_quote_placement(

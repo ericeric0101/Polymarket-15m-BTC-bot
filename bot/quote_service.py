@@ -235,6 +235,8 @@ def compute_loss_sell_policy(
     if confirmed_adverse_exit_active:
         return True, "confirmed_adverse_exit"
     if allow_regime_loss_sell:
+        if stop_loss_regime_armed:
+            return True, "armed_thesis_bad"
         return True, "forced_exit_thesis_bad"
     if in_true_last_resort:
         return True, f"true_last_resort(<{true_last_resort_sec:.0f}s)"
@@ -364,8 +366,6 @@ def evaluate_buy_entry_controls(
     bi_side_enabled: bool,
     active_side_locked: bool,
     active_side_value: str,
-    locked_side_entry_blocked: bool,
-    locked_side_entry_block_reason: str,
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
     directional_first_entry_min_score_abs_new: Decimal,
@@ -374,8 +374,6 @@ def evaluate_buy_entry_controls(
     maker_reload_min_expected_net_multiplier: Decimal,
     current_inst_inventory_qty: Decimal,
     maker_reload_inventory_threshold_shares: Decimal,
-    max_locked_side_position: Decimal,
-    inventory_full_behavior: str,
     current_slug: str,
     inst_id: Any,
     market_buy_count: int = 0,
@@ -400,6 +398,11 @@ def evaluate_buy_entry_controls(
     down_high_price_spot_strike_avg_max: Decimal = Decimal("0"),
     shadow_payload: dict[str, Any] | None = None,
     entry_quality_allow_size_down: bool = False,
+    latest_observation_supports_locked_side: bool | None = None,
+    locked_side_entry_blocked: bool = False,
+    locked_side_entry_block_reason: str = "",
+    max_locked_side_position: Decimal = Decimal("999999"),
+    inventory_full_behavior: str = "STOP_BUY",
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
@@ -488,7 +491,11 @@ def evaluate_buy_entry_controls(
     if (
         active_side_txt in {"UP", "DOWN"}
         and spot_minus_strike_avg is not None
-        and entry_spot_strike_avg_min_abs > 0
+        and (
+            entry_spot_strike_avg_min_abs > 0
+            or (active_side_txt == "UP" and spot_minus_strike_avg < 0)
+            or (active_side_txt == "DOWN" and spot_minus_strike_avg > 0)
+        )
     ):
         spot_avg_supports = (
             spot_minus_strike_avg >= entry_spot_strike_avg_min_abs
@@ -1270,6 +1277,8 @@ def maybe_apply_continuation_entry(
     if str(inst_id) != str(active_instrument_id):
         return desired_entry
     if current_inventory_qty > 0:
+        return desired_entry
+    if int(market_buy_count) <= 0:
         return desired_entry
     active_side_txt = str(active_side_value or "NONE").upper()
     if active_side_txt == "UP":

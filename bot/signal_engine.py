@@ -106,6 +106,11 @@ class SignalEngineConfig:
     w_btc_max: float = 0.35       # btc weight at t_ratio=1.0
     w_strike_max: float = 0.25    # strike weight at t_ratio=1.0
 
+    # Market mid remains a useful implied-probability baseline, but its
+    # directional contribution is deliberately capped so the bot does not
+    # blindly chase Polymarket's own repricing.
+    market_alpha_scale: float = 0.65
+
     # Market cycle duration (sec) for t_ratio normalisation
     market_duration_sec: float = 900.0
 
@@ -226,24 +231,17 @@ class SignalEngine:
         sig.w_btc = self.config.w_btc_max * t_ratio
         sig.w_strike = self.config.w_strike_max * t_ratio
 
-        # Normalise weights to sum to 1.0
-        w_total = sig.w_market + sig.w_btc + sig.w_strike
-        if w_total > 0:
-            sig.w_market /= w_total
-            sig.w_btc /= w_total
-            sig.w_strike /= w_total
-
         # ---------------------------------------------------
         # Layer 1: Market Consensus
         # ---------------------------------------------------
-        available_layers = 0
+        market_available = False
         if market_mid is not None:
             mid_f = float(market_mid)
             if 0.01 < mid_f < 0.99:
+                market_available = True
                 # Linear mapping: mid=0.50 → 0, mid=0.75 → +0.50, mid=0.25 → -0.50
                 sig.market_consensus = (mid_f - 0.50) * 2.0
                 sig.market_consensus = max(-1.0, min(1.0, sig.market_consensus))
-                available_layers += 1
 
                 # Mid-price momentum: EMA fast vs slow crossover
                 fast_v = self._mid_ema_fast.value
@@ -259,13 +257,13 @@ class SignalEngine:
         # ---------------------------------------------------
         fast_v = self._btc_ema_fast.value
         slow_v = self._btc_ema_slow.value
-        if fast_v is not None and slow_v is not None and slow_v > 0:
-            # Positive slope when fast > slow (BTC rising)
+        btc_available = fast_v is not None and slow_v is not None and slow_v > 0
+        if btc_available:
+            # Positive slope when fast > slow
             slope_pct = (fast_v - slow_v) / slow_v
             norm = self.config.btc_trend_norm_pct
             if norm > 0:
                 sig.btc_trend = max(-1.0, min(1.0, slope_pct / norm))
-            available_layers += 1
 
         # ---------------------------------------------------
         # Layer 3: Strike Proximity z-score
@@ -273,20 +271,41 @@ class SignalEngine:
         spot_f = float(spot) if spot is not None else 0.0
         strike_f = float(strike) if strike is not None else 0.0
         sigma_f = float(sigma) if sigma is not None else 0.0
-        if spot_f > 0 and strike_f > 0 and sigma_f > 0 and t_left > 0:
+        strike_available = spot_f > 0 and strike_f > 0 and sigma_f > 0 and t_left > 0
+        if strike_available:
             # z-score in σ√T units
             t_years = t_left / (365.0 * 24.0 * 3600.0)
             denom = strike_f * sigma_f * math.sqrt(max(1e-12, t_years))
             if denom > 0:
                 z = (spot_f - strike_f) / denom
                 sig.strike_proximity = math.tanh(z)  # compress to [-1, +1]
-                available_layers += 1
+            else:
+                strike_available = False
+
+        # Only available layers participate in the composite. This prevents
+        # an un-warmed EMA or missing strike from retaining weight while
+        # contributing a zero signal.
+        raw_weights = {
+            "market": sig.w_market if market_available else 0.0,
+            "btc": sig.w_btc if btc_available else 0.0,
+            "strike": sig.w_strike if strike_available else 0.0,
+        }
+        weight_sum = sum(raw_weights.values())
+        if weight_sum <= 0:
+            sig.w_market = sig.w_btc = sig.w_strike = 0.0
+        else:
+            sig.w_market = raw_weights["market"] / weight_sum
+            sig.w_btc = raw_weights["btc"] / weight_sum
+            sig.w_strike = raw_weights["strike"] / weight_sum
 
         # ---------------------------------------------------
         # Composite score
         # ---------------------------------------------------
         # Blend market momentum into market signal (30% momentum, 70% level)
-        effective_market = 0.70 * sig.market_consensus + 0.30 * sig.market_momentum
+        market_alpha_scale = max(0.0, min(1.0, self.config.market_alpha_scale))
+        effective_market = market_alpha_scale * (
+            0.70 * sig.market_consensus + 0.30 * sig.market_momentum
+        )
 
         sig.composite_score = (
             sig.w_market * effective_market
@@ -295,14 +314,13 @@ class SignalEngine:
         )
         sig.composite_score = max(-1.0, min(1.0, sig.composite_score))
 
-        # ---------------------------------------------------
-        # Confidence
-        # ---------------------------------------------------
-        # Confidence = |composite_score| * data-availability factor
-        # All 3 layers available → factor = 1.0
-        # Missing layers reduce confidence proportionally
-        data_factor = available_layers / 3.0
-        sig.confidence = abs(sig.composite_score) * data_factor
+        # Confidence reflects the strength of the usable composite. Missing
+        # layers have already been excluded and reweighted above, so do not
+        # apply a second ``available_layers / 3`` penalty here. A later
+        # freshness/data-quality layer can reduce this value when a source is
+        # stale; absence alone must not double-penalize the signal.
+        has_signal = weight_sum > 0
+        sig.confidence = abs(sig.composite_score) if has_signal else 0.0
 
         return sig
 

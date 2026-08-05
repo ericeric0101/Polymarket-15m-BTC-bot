@@ -596,6 +596,20 @@ class PositionManager:
                 adverse_hits=state.adverse_hits,
             )
 
+        if (
+            state.lifecycle != PositionLifecycle.ENTRY_PROTECTED
+            and not bool(getattr(state, "pending_reported", False))
+            and decision_state.metadata.get("would_pending_confirmation") == "1"
+        ):
+            state.pending_reported = True
+            return StopLossRegimeDecision(
+                status="pending",
+                reason=(
+                    "state_machine_pending "
+                    f"phase={decision_state.phase.value} "
+                    f"regime={decision_state.regime.value}"
+                ),
+            )
         state.lifecycle = PositionLifecycle.LONG
         self.reset_stop_loss_regime(inst_key)
         return StopLossRegimeDecision(
@@ -607,6 +621,6 @@ class PositionManager:
                 f"pressure={float(decision_state.pressure):+.4f} "
                 f"legacy(entry={decision_state.metadata.get('would_hold_entry_protection')},"
                 f"thesis={decision_state.metadata.get('would_hold_thesis_not_opposite')},"
-                f"pending={decision_state.metadata.get('would_pending_confirmation')})"
+                f"pending={'0' if bool(getattr(state, 'pending_reported', False)) else decision_state.metadata.get('would_pending_confirmation')})"
             ),
         )

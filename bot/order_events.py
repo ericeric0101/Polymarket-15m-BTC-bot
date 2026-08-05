@@ -124,6 +124,34 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                 entry_mode=filled_entry_mode,
                 now_ts=time.time(),
             )
+    telemetry = getattr(strategy, "trade_telemetry", None)
+    if telemetry is not None and fill_side_norm and fill_qty_dec > 0:
+        try:
+            telemetry.record_fill(
+                fill_id=filled_id,
+                instrument_key=str(strategy._instrument_key(filled_inst)),
+                side=fill_side_norm,
+                fill_price=fill_price_dec,
+                qty=fill_qty_dec,
+                filled_ts=time.time(),
+                reference_mid=(
+                    (strategy.latest_market_bid + strategy.latest_market_ask) / Decimal("2")
+                    if strategy.latest_market_bid is not None and strategy.latest_market_ask is not None
+                    else None
+                ),
+                model_probability=(
+                    Decimal(str(filled_directional_snapshot["p_fair"]))
+                    if filled_directional_snapshot.get("p_fair") is not None else None
+                ),
+                edge_ps=(
+                    Decimal(str(filled_directional_snapshot["directional_edge_ps"]))
+                    if filled_directional_snapshot.get("directional_edge_ps") is not None else None
+                ),
+                liquidity_class=liquidity_class,
+            )
+        except Exception as telemetry_error:
+            logger.debug(f"Trade telemetry fill record skipped: {telemetry_error}")
+
     if (
         side_for_ledger == "buy"
         and bool(getattr(strategy, "bi_side_enabled", False))

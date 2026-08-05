@@ -9,7 +9,6 @@ from execution.rebate_model import estimate_taker_fee_usdc
 
 @dataclass(frozen=True)
 class ExitEngineConfig:
-    hold_to_redeem_enabled: bool
     min_hold_sec: int
     stop_loss_usdc: Decimal
     stop_loss_confirmations: int
@@ -24,6 +23,7 @@ class ExitEngineConfig:
     conviction_stop_loss_multiplier: Decimal
     conviction_extra_confirmations: int
     hold_band_requires_locked: bool
+    hold_to_redeem_enabled: bool = False
     early_profit_hold_enabled: bool = True
     early_profit_hold_min_hold_sec: int = 60
     early_profit_hold_max_profit_ps: Decimal = Decimal("0.08")
@@ -42,6 +42,13 @@ class ExitEngineConfig:
     absolute_max_loss_enabled: bool = True
     absolute_max_loss_usdc: Decimal = Decimal("1.50")
     absolute_max_loss_min_hold_sec: int = 60
+    profit_run_trailing_drawdown_ratio: Decimal = Decimal("0.45")
+    profit_run_trailing_drawdown_floor_ps: Decimal = Decimal("0.04")
+    profit_run_trailing_spread_multiplier: Decimal = Decimal("2.0")
+    profit_run_near_settlement_sec: int = 120
+    profit_run_near_settlement_widening: Decimal = Decimal("1.25")
+    adaptive_min_hold_floor_sec: int = 30
+    adaptive_min_hold_horizon_sec: int = 900
 
 
 class ExitPolicyEngine:
@@ -59,6 +66,41 @@ class ExitPolicyEngine:
         if snapshot.best_bid >= self.config.conviction_band_min_price and score_abs >= self.config.conviction_band_min_score_abs:
             return "conviction"
         return "neutral"
+
+    def _effective_min_hold_sec(self, time_left_sec: float | None) -> float:
+        """Reduce only the loss-gate hold requirement near settlement."""
+        configured = max(0.0, float(self.config.min_hold_sec))
+        floor = max(0.0, float(self.config.adaptive_min_hold_floor_sec))
+        if time_left_sec is None or self.config.adaptive_min_hold_horizon_sec <= 0:
+            return max(floor, configured)
+        ratio = max(0.0, min(1.0, float(time_left_sec) / float(self.config.adaptive_min_hold_horizon_sec)))
+        return max(floor, configured * ratio)
+
+    def _effective_trailing_drawdown(
+        self,
+        peak_profit_ps: Decimal,
+        snapshot: MarketSnapshot,
+    ) -> Decimal:
+        """Scale trailing release to profit size and market noise."""
+        ratio_threshold = peak_profit_ps * self.config.profit_run_trailing_drawdown_ratio
+        spread_threshold = max(Decimal("0"), snapshot.spread) * self.config.profit_run_trailing_spread_multiplier
+        legacy_threshold = max(
+            self.config.profit_run_trailing_drawdown_floor_ps,
+            self.config.profit_run_trailing_drawdown_ps,
+            spread_threshold,
+        )
+        # Preserve the established release behavior for ordinary runs. Only
+        # unusually large winners receive a wider proportional allowance.
+        if peak_profit_ps > Decimal("0.25"):
+            threshold = max(legacy_threshold, min(ratio_threshold, legacy_threshold * Decimal("1.5")))
+        else:
+            threshold = legacy_threshold
+        if (
+            snapshot.time_left_sec is not None
+            and snapshot.time_left_sec <= self.config.profit_run_near_settlement_sec
+        ):
+            threshold *= self.config.profit_run_near_settlement_widening
+        return threshold
 
     @staticmethod
     def _spot_strike_supports(snapshot: MarketSnapshot, position: PositionState) -> bool:
@@ -133,13 +175,18 @@ class ExitPolicyEngine:
         #
         # When triggered: returns "neutral" so the position is released
         # from HOLD_IN_BAND for normal exit logic (passive sell).
-        current_profit_ps = snapshot.best_bid - position.avg_entry_price
+        current_profit_reference = max(
+            snapshot.best_bid,
+            snapshot.fair if snapshot.fair is not None else snapshot.best_bid,
+        )
+        current_profit_ps = current_profit_reference - position.avg_entry_price
         drawdown_from_peak = peak_profit_ps - current_profit_ps
+        trailing_threshold = self._effective_trailing_drawdown(peak_profit_ps, snapshot)
         if (
             self.config.profit_run_enabled
             and position.hold_sec >= float(self.config.early_profit_hold_min_hold_sec)
             and peak_profit_ps >= self.config.profit_run_min_profit_ps
-            and drawdown_from_peak >= self.config.profit_run_trailing_drawdown_ps
+            and drawdown_from_peak >= trailing_threshold
         ):
             return (
                 "neutral",
@@ -150,16 +197,36 @@ class ExitPolicyEngine:
                     "peak_profit_ps": str(peak_profit_ps),
                     "current_profit_ps": str(current_profit_ps),
                     "drawdown_from_peak": str(drawdown_from_peak),
-                    "trailing_threshold": str(self.config.profit_run_trailing_drawdown_ps),
+                    "trailing_threshold": str(trailing_threshold),
                 },
             )
-        if signal.locked and spot_strike_supports:
+        if (
+            signal.locked
+            and spot_strike_supports
+            and (
+                score_abs >= self.config.profit_run_min_score_abs
+                or fair_edge_ps >= self.config.recycle_locked_side_min_fair_edge_ps
+            )
+        ):
             return (
                 "continue",
                 "recycle_locked_side_hold",
                 {
                     **shared_meta,
                     "exit_intent": "continue",
+                },
+            )
+        if (
+            score_abs < self.config.profit_run_min_score_abs
+            and fair_edge_ps < self.config.recycle_locked_side_min_fair_edge_ps
+        ):
+            return (
+                "neutral",
+                "soft_winner_de_risk",
+                {
+                    **shared_meta,
+                    "exit_intent": "de_risk",
+                    "score_abs": str(score_abs),
                 },
             )
         return (
@@ -283,16 +350,6 @@ class ExitPolicyEngine:
             "locked_side_invalidated": "1" if locked_side_invalidated else "0",
             "confirmed_adverse_exit_active": "1" if confirmed_adverse_exit_active else "0",
         }
-        if self.config.hold_to_redeem_enabled and position.qty > 0:
-            return ExitDecision(
-                decision_type=ExitDecisionType.HOLD_TO_REDEEM,
-                reason="hold_to_redeem_enabled",
-                net_if_exit=net_if_exit,
-                gross_if_exit=gross_if_exit,
-                exit_fee_est=exit_fee_est,
-                exit_px_effective=exit_px_effective,
-                metadata=base_metadata,
-            )
         signal_side = str(signal.active_side).upper()
         signal_is_none = signal_side == "NONE"
         explicit_offside = (not signal.matches_position) and not signal_is_none
@@ -319,6 +376,22 @@ class ExitPolicyEngine:
             if external_offside_confirmed is not None
             else strong_opposite
         )
+        confirmed_reversal = bool(
+            locked_side_invalidated
+            or thesis_weakened
+            or offside_confirmed
+            or confirmed_adverse_exit_active
+        )
+        if self.config.hold_to_redeem_enabled and position.qty > 0 and not confirmed_reversal:
+            return ExitDecision(
+                decision_type=ExitDecisionType.HOLD_TO_REDEEM,
+                reason="hold_to_redeem_enabled",
+                net_if_exit=net_if_exit,
+                gross_if_exit=gross_if_exit,
+                exit_fee_est=exit_fee_est,
+                exit_px_effective=exit_px_effective,
+                metadata=base_metadata,
+            )
 
         profitable_intent, profitable_reason, profitable_meta = self._classify_profitable_exit_intent(
             snapshot=snapshot,
@@ -332,6 +405,17 @@ class ExitPolicyEngine:
             profitable_intent = "neutral"
             profitable_reason = ""
             profitable_meta = {}
+
+        if profitable_reason == "soft_winner_de_risk":
+            return ExitDecision(
+                decision_type=ExitDecisionType.DE_RISK,
+                reason=profitable_reason,
+                net_if_exit=net_if_exit,
+                gross_if_exit=gross_if_exit,
+                exit_fee_est=exit_fee_est,
+                exit_px_effective=exit_px_effective,
+                metadata={**base_metadata, **profitable_meta},
+            )
 
         if (
             self.config.stop_loss_hold_on_none_signal
@@ -379,6 +463,7 @@ class ExitPolicyEngine:
             )
 
         stop_loss_threshold = abs(self.config.stop_loss_usdc)
+        effective_min_hold_sec = self._effective_min_hold_sec(snapshot.time_left_sec)
         required_confirmations = self.config.stop_loss_confirmations
         if band == "conviction":
             stop_loss_threshold *= max(Decimal("1"), self.config.conviction_stop_loss_multiplier)
@@ -386,7 +471,7 @@ class ExitPolicyEngine:
         catastrophic_stop_loss_candidate = (
             self.config.catastrophic_stop_loss_enabled
             and not snapshot.stop_loss_disabled_in_tail
-            and position.hold_sec >= max(0, self.config.min_hold_sec)
+            and position.hold_sec >= effective_min_hold_sec
             and price_adverse
             and net_if_exit <= -abs(self.config.catastrophic_stop_loss_usdc)
             # Relaxed gate: require that the thesis is NOT fully healthy.
@@ -410,7 +495,7 @@ class ExitPolicyEngine:
             catastrophic_stop_loss_candidate
             or (
                 not snapshot.stop_loss_disabled_in_tail
-                and position.hold_sec >= max(0, self.config.min_hold_sec)
+                and position.hold_sec >= effective_min_hold_sec
                 and price_adverse
                 and net_if_exit <= -stop_loss_threshold
                 and (

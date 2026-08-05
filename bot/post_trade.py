@@ -13,6 +13,8 @@ class FillFollowupResult:
     quote_pause_until_ts: float
     triggered_loss_pause: bool
     total_loss: float
+    loss_recovery_size_multiplier: float = 1.0
+    loss_recovery_min_edge_addition: float = 0.0
 
 
 @dataclass
@@ -133,6 +135,13 @@ def apply_fill_followup(
             current_quote_pause_until_ts=quote_pause_until_ts,
         )
 
+    recovery_size_multiplier = fill_cooldown_policy.recovery_size_multiplier(
+        recent_fill_pnl_results
+    )
+    recovery_min_edge_addition = fill_cooldown_policy.recovery_min_edge_addition(
+        recent_fill_pnl_results
+    )
+
     return FillFollowupResult(
         buy_cooldown_until_ts=buy_cooldown_until_ts,
         market_cycle_realized_net_usdc=market_cycle_realized_net_usdc,
@@ -140,6 +149,8 @@ def apply_fill_followup(
         quote_pause_until_ts=quote_pause_until_ts,
         triggered_loss_pause=triggered_loss_pause,
         total_loss=total_loss,
+        loss_recovery_size_multiplier=recovery_size_multiplier,
+        loss_recovery_min_edge_addition=recovery_min_edge_addition,
     )
 
 
