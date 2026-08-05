@@ -21,6 +21,8 @@ class EdgeState:
     model_error_buffer: Decimal
     total_cost_buffer: Decimal
     quote_age_sec: Decimal | None
+    up_quote_age_sec: Decimal | None
+    down_quote_age_sec: Decimal | None
     max_quote_age_sec: Decimal
     up_edge_vs_mid: Decimal | None
     up_edge_vs_ask: Decimal | None
@@ -40,6 +42,30 @@ class EdgeState:
         return (
             self.model_probability_up is not None
             and (self.up_ask is not None or self.down_ask is not None)
+        )
+
+    @property
+    def up_executable_edge_available(self) -> bool:
+        return self.model_probability_up is not None and self.up_ask is not None
+
+    @property
+    def down_executable_edge_available(self) -> bool:
+        return self.model_probability_up is not None and self.down_ask is not None
+
+    @property
+    def up_fresh_executable_edge_available(self) -> bool:
+        return (
+            self.up_executable_edge_available
+            and self.up_quote_age_sec is not None
+            and self.up_quote_age_sec <= self.max_quote_age_sec
+        )
+
+    @property
+    def down_fresh_executable_edge_available(self) -> bool:
+        return (
+            self.down_executable_edge_available
+            and self.down_quote_age_sec is not None
+            and self.down_quote_age_sec <= self.max_quote_age_sec
         )
 
     @property
@@ -72,6 +98,9 @@ class EdgeState:
             "model_error_buffer": as_float(self.model_error_buffer),
             "total_cost_buffer": as_float(self.total_cost_buffer),
             "quote_age_sec": as_float(self.quote_age_sec),
+            "up_quote_age_sec": as_float(self.up_quote_age_sec),
+            "down_quote_age_sec": as_float(self.down_quote_age_sec),
+            "observed_quote_age_sec": as_float(self.quote_age_sec),
             "max_quote_age_sec": as_float(self.max_quote_age_sec),
             "up_edge_vs_mid": as_float(self.up_edge_vs_mid),
             "up_edge_vs_ask": as_float(self.up_edge_vs_ask),
@@ -82,6 +111,10 @@ class EdgeState:
             "diagnostic_edge_available": self.diagnostic_edge_available,
             "executable_edge_available": self.executable_edge_available,
             "fresh_executable_edge_available": self.fresh_executable_edge_available,
+            "up_executable_edge_available": self.up_executable_edge_available,
+            "down_executable_edge_available": self.down_executable_edge_available,
+            "up_fresh_executable_edge_available": self.up_fresh_executable_edge_available,
+            "down_fresh_executable_edge_available": self.down_fresh_executable_edge_available,
         }
 
 
@@ -96,7 +129,7 @@ def _price(value: Decimal | None) -> Decimal | None:
     if value is None:
         return None
     value = Decimal(str(value))
-    return value if value > 0 else None
+    return value if Decimal("0") < value <= Decimal("1") else None
 
 
 def _subtract(left: Decimal | None, right: Decimal | None) -> Decimal | None:
@@ -123,6 +156,8 @@ def build_edge_state(
     adverse_selection_buffer: Decimal | None = None,
     model_error_buffer: Decimal | None = None,
     quote_age_sec: Decimal | None = None,
+    up_quote_age_sec: Decimal | None = None,
+    down_quote_age_sec: Decimal | None = None,
     max_quote_age_sec: Decimal = Decimal("2"),
 ) -> EdgeState:
     model = _probability(model_probability_up)
@@ -139,7 +174,15 @@ def build_edge_state(
     component_total = fee + slippage + adverse + model_error
     legacy_total = _buffer(total_cost_buffer)
     cost = max(component_total, legacy_total)
-    age = Decimal(str(quote_age_sec)) if quote_age_sec is not None else None
+    def _age(value: Decimal | None) -> Decimal | None:
+        if value is None:
+            return None
+        parsed = Decimal(str(value))
+        return parsed if parsed >= 0 else None
+
+    age = _age(quote_age_sec)
+    up_age = _age(up_quote_age_sec if up_quote_age_sec is not None else quote_age_sec)
+    down_age = _age(down_quote_age_sec if down_quote_age_sec is not None else quote_age_sec)
     max_age = max(Decimal("0"), Decimal(str(max_quote_age_sec)))
 
     up_edge_vs_mid = _subtract(model, market)
@@ -164,6 +207,8 @@ def build_edge_state(
         model_error_buffer=model_error,
         total_cost_buffer=cost,
         quote_age_sec=age,
+        up_quote_age_sec=up_age,
+        down_quote_age_sec=down_age,
         max_quote_age_sec=max_age,
         up_edge_vs_mid=up_edge_vs_mid,
         up_edge_vs_ask=up_edge_vs_ask,

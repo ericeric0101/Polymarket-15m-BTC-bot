@@ -16,6 +16,21 @@ from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_
 from bot.ops import log_strategy_run_stop, stop_event_threads
 
 
+def quote_tick_event_timestamp(tick: Any, fallback_now: float) -> float:
+    """Return QuoteTick event time in epoch seconds, with safe fallback."""
+    try:
+        raw = float(getattr(tick, "ts_event", 0) or 0)
+        if raw > 1e17:
+            raw /= 1e9
+        elif raw > 1e11:
+            raw /= 1e3
+        if raw > 0:
+            return raw
+    except Exception:
+        pass
+    return float(fallback_now)
+
+
 def align_price_to_tick(strategy: Any, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
     """Align quote price to current instrument tick size and precision."""
     aligned = price
@@ -286,6 +301,8 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
 
         strategy.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
+        quote_event_ts = quote_tick_event_timestamp(tick, time.time())
+        getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = quote_event_ts
         mid_price = (bid_decimal + ask_decimal) / 2
         strategy._append_real_mid_price(tick.instrument_id, mid_price)
         preferred_inst = strategy._instrument_for_side(strategy.active_side) or strategy._primary_instrument_for_market()

@@ -78,3 +78,86 @@ def test_edge_state_accepts_probability_zero_and_tracks_cost_breakdown_and_quote
     assert state.executable_edge_available is True
     assert state.fresh_executable_edge_available is True
     assert state.to_dict()["quote_age_sec"] == 0.8
+
+
+def test_edge_state_rejects_invalid_binary_prices():
+    state = build_edge_state(
+        model_probability_up=Decimal("0.6"),
+        market_mid=Decimal("0.5"),
+        up_bid=Decimal("1.2"),
+        up_ask=Decimal("-0.1"),
+        down_bid=None,
+        down_ask=None,
+    )
+
+    assert state.up_bid is None
+    assert state.up_ask is None
+
+
+def test_edge_state_rejects_negative_quote_age_as_not_fresh():
+    state = build_edge_state(
+        model_probability_up=Decimal("0.6"),
+        market_mid=Decimal("0.5"),
+        up_bid=Decimal("0.49"),
+        up_ask=Decimal("0.51"),
+        down_bid=None,
+        down_ask=None,
+        quote_age_sec=Decimal("-1"),
+        max_quote_age_sec=Decimal("2"),
+    )
+
+    assert state.quote_age_sec is None
+    assert state.fresh_executable_edge_available is False
+
+
+def test_edge_state_exposes_side_specific_freshness():
+    state = build_edge_state(
+        model_probability_up=Decimal("0.6"),
+        market_mid=Decimal("0.5"),
+        up_bid=Decimal("0.49"),
+        up_ask=Decimal("0.51"),
+        down_bid=Decimal("0.40"),
+        down_ask=Decimal("0.42"),
+        up_quote_age_sec=Decimal("0.5"),
+        down_quote_age_sec=Decimal("3"),
+        max_quote_age_sec=Decimal("2"),
+    )
+
+    assert state.up_executable_edge_available is True
+    assert state.down_executable_edge_available is True
+    assert state.up_fresh_executable_edge_available is True
+    assert state.down_fresh_executable_edge_available is False
+    assert state.to_dict()["observed_quote_age_sec"] is None
+
+
+def test_edge_state_exact_stale_boundary_is_still_fresh():
+    state = build_edge_state(
+        model_probability_up=Decimal("0.6"),
+        market_mid=Decimal("0.5"),
+        up_bid=Decimal("0.49"),
+        up_ask=Decimal("0.51"),
+        down_bid=None,
+        down_ask=None,
+        quote_age_sec=Decimal("2"),
+        max_quote_age_sec=Decimal("2"),
+    )
+
+    assert state.fresh_executable_edge_available is True
+
+
+def test_edge_state_keeps_down_book_as_down_executable_quote():
+    state = build_edge_state(
+        model_probability_up=Decimal("0.6"),
+        market_mid=Decimal("0.55"),
+        up_bid=None,
+        up_ask=None,
+        down_bid=Decimal("0.39"),
+        down_ask=Decimal("0.40"),
+        down_quote_age_sec=Decimal("0.2"),
+        max_quote_age_sec=Decimal("2"),
+    )
+
+    assert state.up_executable_edge_available is False
+    assert state.down_executable_edge_available is True
+    assert state.down_fresh_executable_edge_available is True
+    assert state.down_ask == Decimal("0.40")

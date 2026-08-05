@@ -8,6 +8,59 @@ from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.models import QuoteIntentState, QuoteMode
 
 
+def should_emit_edge_observation(
+    instrument_key: str,
+    signature: tuple[Any, ...],
+    now_ts: float,
+    last_signature_by_inst: dict[str, tuple[Any, ...]],
+    last_ts_by_inst: dict[str, float],
+    min_interval_sec: float = 1.0,
+) -> bool:
+    """Throttle duplicate edge snapshots without suppressing quote changes."""
+    key = str(instrument_key)
+    previous_signature = last_signature_by_inst.get(key)
+    previous_ts = float(last_ts_by_inst.get(key, 0.0))
+    if previous_signature == signature and float(now_ts) - previous_ts < float(min_interval_sec):
+        return False
+    last_signature_by_inst[key] = signature
+    last_ts_by_inst[key] = float(now_ts)
+    return True
+
+
+@dataclass(frozen=True)
+class QuotePlan:
+    price: Decimal
+    quantity: Decimal
+    allowed: bool
+    robust_net_usdc: Decimal
+    execution_penalty_usdc: Decimal
+    directional_edge_per_share: Decimal
+    directional_edge_usdc: Decimal
+    fair_price: Decimal
+    fee_per_share: Decimal
+    other_cost_per_share: Decimal
+
+
+def parse_quote_plan(quote_data: Any) -> QuotePlan | None:
+    if not isinstance(quote_data, (tuple, list)) or len(quote_data) < 10:
+        return None
+    try:
+        return QuotePlan(
+            price=Decimal(str(quote_data[0])),
+            quantity=Decimal(str(quote_data[1].shares if hasattr(quote_data[1], "shares") else quote_data[1])),
+            allowed=bool(quote_data[2]),
+            robust_net_usdc=Decimal(str(quote_data[3])),
+            execution_penalty_usdc=Decimal(str(quote_data[4])),
+            directional_edge_per_share=Decimal(str(quote_data[5])),
+            directional_edge_usdc=Decimal(str(quote_data[6])),
+            fair_price=Decimal(str(quote_data[7])),
+            fee_per_share=Decimal(str(quote_data[8])),
+            other_cost_per_share=Decimal(str(quote_data[9])),
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+
+
 @dataclass
 class QuoteInstrumentContext:
     inst_id: Any
@@ -17,6 +70,7 @@ class QuoteInstrumentContext:
     instrument: Any
     tick: Decimal
     token_id: str | None
+    quote_ts: float | None
     dynamic_fee_rate: Decimal | None
     fee_rate_val: Decimal
     bid_levels: Any
@@ -1415,8 +1469,10 @@ async def build_quote_instrument_context(
     get_orderbook_levels_fn: Callable[[str | None], Any],
     latest_quote_depth_by_inst: dict[str, tuple[Any, Any]],
     maker_econ_fee_rate_decimal: Decimal,
+    latest_quote_ts_by_inst: dict[str, float] | None = None,
 ) -> QuoteInstrumentContext:
     inst_key = instrument_key_fn(inst_id)
+    quote_ts = (latest_quote_ts_by_inst or {}).get(str(inst_id))
     quote = get_quote_for_instrument_fn(inst_id)
     if quote is None:
         return QuoteInstrumentContext(
@@ -1427,6 +1483,7 @@ async def build_quote_instrument_context(
             instrument=None,
             tick=Decimal("0.01"),
             token_id=None,
+            quote_ts=quote_ts,
             dynamic_fee_rate=None,
             fee_rate_val=maker_econ_fee_rate_decimal,
             bid_levels=None,
@@ -1454,6 +1511,7 @@ async def build_quote_instrument_context(
         instrument=instrument,
         tick=tick,
         token_id=token_id,
+        quote_ts=quote_ts,
         dynamic_fee_rate=dynamic_fee_rate,
         fee_rate_val=maker_econ_fee_rate_decimal,
         bid_levels=bid_levels,

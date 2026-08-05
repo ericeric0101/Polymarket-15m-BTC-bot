@@ -107,6 +107,8 @@ from bot.quoting import (
 )
 from bot.quote_service import (
     apply_entry_quality_quote_placement,
+    parse_quote_plan,
+    should_emit_edge_observation,
     apply_forced_exit_sell_pricing,
     apply_high_entry_price_size_adjustment,
     apply_locked_side_recycle_sell_pricing,
@@ -1566,6 +1568,7 @@ class IntegratedBTCStrategy(
                 get_dynamic_fee_rate_fn=self._get_dynamic_fee_rate,
                 get_orderbook_levels_fn=self._get_orderbook_levels_for_token,
                 latest_quote_depth_by_inst=self.latest_quote_depth_by_inst,
+                latest_quote_ts_by_inst=getattr(self, "last_quote_update_ts_by_inst", {}),
                 maker_econ_fee_rate_decimal=self.maker_econ_fee_rate_decimal,
             )
             inst_key = quote_ctx.inst_key
@@ -1896,10 +1899,13 @@ class IntegratedBTCStrategy(
                         outcome_side = self.active_side.value
                     quote_bid, quote_ask = quote_ctx.quote
                     market_mid_outcome = (quote_bid + quote_ask) / Decimal("2")
+                    spread_ps = max(Decimal("0"), quote_ask - quote_bid)
+                    relative_spread = spread_ps / market_mid_outcome if market_mid_outcome > 0 else None
                     model_probability_outcome = quote_ctx.fair
                     if outcome_side == ActiveSide.DOWN.value:
                         model_probability_up = Decimal("1") - model_probability_outcome
                         market_mid_up = Decimal("1") - market_mid_outcome
+                        market_mid_source = "synthetic_from_down_book"
                         up_bid = None
                         up_ask = None
                         down_bid = quote_bid
@@ -1907,26 +1913,17 @@ class IntegratedBTCStrategy(
                     else:
                         model_probability_up = model_probability_outcome
                         market_mid_up = market_mid_outcome
+                        market_mid_source = "direct_up_book"
                         up_bid = quote_bid
                         up_ask = quote_ask
                         down_bid = None
                         down_ask = None
-                    planned_fee_ps = (
-                        Decimal(str(quote_data[8]))
-                        if isinstance(quote_data, (tuple, list)) and len(quote_data) > 8
-                        else Decimal("0")
-                    )
-                    planned_other_cost_ps = (
-                        Decimal(str(quote_data[9]))
-                        if isinstance(quote_data, (tuple, list)) and len(quote_data) > 9
-                        else Decimal("0")
-                    )
+                    quote_plan = parse_quote_plan(quote_data)
+                    planned_fee_ps = quote_plan.fee_per_share if quote_plan is not None else Decimal("0")
+                    planned_other_cost_ps = quote_plan.other_cost_per_share if quote_plan is not None else Decimal("0")
                     quote_age_sec = None
-                    if float(getattr(self, "last_quote_update_ts", 0.0)) > 0:
-                        quote_age_sec = Decimal(str(max(
-                            0.0,
-                            now_ts - float(self.last_quote_update_ts),
-                        )))
+                    if quote_ctx.quote_ts is not None:
+                        quote_age_sec = Decimal(str(now_ts - float(quote_ctx.quote_ts)))
                     edge_state = build_edge_state(
                         model_probability_up=model_probability_up,
                         market_mid=market_mid_up,
@@ -1937,13 +1934,11 @@ class IntegratedBTCStrategy(
                         fee_buffer=planned_fee_ps,
                         slippage_buffer=planned_other_cost_ps,
                         quote_age_sec=quote_age_sec,
+                        up_quote_age_sec=quote_age_sec if outcome_side == ActiveSide.UP.value else None,
+                        down_quote_age_sec=quote_age_sec if outcome_side == ActiveSide.DOWN.value else None,
                         max_quote_age_sec=Decimal(str(getattr(self, "quote_stale_sec", 2.0))),
                     )
-                    planned_entry_price = (
-                        Decimal(str(quote_data[0]))
-                        if isinstance(quote_data, (tuple, list)) and quote_data
-                        else None
-                    )
+                    planned_entry_price = quote_plan.price if quote_plan is not None else None
                     planned_maker_net_edge = None
                     if planned_entry_price is not None:
                         planned_maker_net_edge = (
@@ -1952,15 +1947,47 @@ class IntegratedBTCStrategy(
                             - planned_fee_ps
                             - planned_other_cost_ps
                         )
+                    complementary_ask_sum = None
+                    complementary_bid_sum = None
+                    complementary_quote_ts = None
+                    try:
+                        other_side = ActiveSide.DOWN if outcome_side == ActiveSide.UP.value else ActiveSide.UP
+                        other_inst_id = self._instrument_for_side(other_side)
+                        other_quote = self._get_quote_for_instrument(other_inst_id)
+                        other_quote_ts = getattr(self, "last_quote_update_ts_by_inst", {}).get(str(other_inst_id))
+                        if other_quote is not None:
+                            other_bid, other_ask = other_quote
+                            complementary_bid_sum = quote_bid + other_bid
+                            complementary_ask_sum = quote_ask + other_ask
+                            complementary_quote_ts = other_quote_ts
+                    except Exception:
+                        pass
                     edge_payload = {
                         **edge_state.to_dict(),
                         "event_ts": now_ts,
+                        "quote_ts": quote_ctx.quote_ts,
                         "slug": current_slug,
                         "instrument_id": str(inst_id),
                         "outcome_side": outcome_side,
+                        "observed_side": outcome_side,
+                        "observed_outcome_mid": float(market_mid_outcome),
+                        "market_mid_source": market_mid_source,
+                        "spread_ps": float(spread_ps),
+                        "relative_spread": float(relative_spread) if relative_spread is not None else None,
+                        "complementary_bid_sum": float(complementary_bid_sum) if complementary_bid_sum is not None else None,
+                        "complementary_ask_sum": float(complementary_ask_sum) if complementary_ask_sum is not None else None,
+                        "complementary_quote_ts": complementary_quote_ts,
+                        "complementary_quote_age_sec": (
+                            float(now_ts - complementary_quote_ts)
+                            if complementary_quote_ts is not None
+                            else None
+                        ),
+                        "buffer_mode": "untrained_shadow",
                         "entry_mode": buy_entry_eval.entry_mode,
-                        "candidate_entry_price": float(planned_entry_price) if planned_entry_price is not None else None,
-                        "planned_maker_net_edge": float(planned_maker_net_edge) if planned_maker_net_edge is not None else None,
+                        "candidate_entry_price_per_share": float(planned_entry_price) if planned_entry_price is not None else None,
+                        "planned_maker_net_edge_per_share": float(planned_maker_net_edge) if planned_maker_net_edge is not None else None,
+                        "planned_fee_per_share": float(planned_fee_ps),
+                        "planned_other_cost_per_share": float(planned_other_cost_ps),
                         "decision": "SKIP" if buy_entry_eval.skip else "ELIGIBLE",
                         "decision_reason": buy_entry_eval.reason or "shadow_only",
                         "loss_history_tail": list(getattr(self, "recent_fill_pnl_results", [])[-5:]),
@@ -1975,13 +2002,34 @@ class IntegratedBTCStrategy(
                             + Decimal(str(getattr(self, "loss_recovery_min_edge_addition", 0)))
                         ),
                     }
-                    self._db_order_event(
-                        event_type="ENTRY_EDGE_OBSERVATION",
-                        side=side.upper(),
-                        status="SHADOW",
-                        reason="shadow_only",
-                        payload=edge_payload,
+                    if not hasattr(self, "_last_edge_observation_signature_by_inst"):
+                        self._last_edge_observation_signature_by_inst = {}
+                    if not hasattr(self, "_last_edge_observation_ts_by_inst"):
+                        self._last_edge_observation_ts_by_inst = {}
+                    edge_signature = (
+                        current_slug,
+                        str(inst_id),
+                        str(planned_entry_price),
+                        str(model_probability_outcome),
+                        buy_entry_eval.entry_mode,
+                        buy_entry_eval.skip,
                     )
+                    should_emit_edge = should_emit_edge_observation(
+                        str(inst_id),
+                        edge_signature,
+                        now_ts,
+                        self._last_edge_observation_signature_by_inst,
+                        self._last_edge_observation_ts_by_inst,
+                        min_interval_sec=1.0,
+                    )
+                    if should_emit_edge:
+                        self._db_order_event(
+                            event_type="ENTRY_EDGE_OBSERVATION",
+                            side=side.upper(),
+                            status="SHADOW",
+                            reason="shadow_only",
+                            payload=edge_payload,
+                        )
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
                     diag_payload = buy_entry_eval.payload or {}

@@ -479,6 +479,9 @@ def initialize_strategy_settings(
     strategy.quote_invalid_tick_reload_threshold = config.market_data.quote_invalid_tick_reload_threshold
     strategy.quote_reload_cooldown_sec = config.market_data.quote_reload_cooldown_sec
     strategy.last_quote_update_ts = 0.0
+    strategy.last_quote_update_ts_by_inst = {}
+    strategy._last_edge_observation_signature_by_inst = {}
+    strategy._last_edge_observation_ts_by_inst = {}
     strategy.quote_pause_until_ts = 0.0
     strategy.loss_recovery_size_multiplier = 1.0
     strategy.loss_recovery_min_edge_addition = Decimal("0")
