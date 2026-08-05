@@ -177,17 +177,22 @@ class TakerExitMixin:
                     False,
                 )
             )
+            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            opened_ts = float(state.get("opened_ts", 0.0))
+            hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
             invalidation_recovery_candidate = (
                 hold_to_redeem
                 and invalidation_recovery_enabled
                 and confirmed_locked_side_invalidated
+                # A confirmed invalidation remains a separate safeguard from a
+                # normal price-stop, but it still needs an entry protection window.
+                and hold_sec >= float(getattr(self, "taker_exit_min_hold_sec", 0))
                 and time_left_sec is not None
                 and int(getattr(self, "taker_exit_max_time_left_sec", 0)) > 0
                 and time_left_sec <= float(getattr(self, "taker_exit_max_time_left_sec", 0))
                 and best_bid >= Decimal(str(getattr(self, "taker_exit_disable_if_bid_below", Decimal("0"))))
                 and best_bid >= Decimal(str(getattr(self, "taker_exit_min_bid", Decimal("0"))))
             )
-            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)
             # After a high-cost BUY fill, avoid active exits below cost during cooldown.
@@ -213,8 +218,6 @@ class TakerExitMixin:
                 continue
 
             entry_fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
-            opened_ts = float(state.get("opened_ts", 0.0))
-            hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
             slip = max(Decimal("0"), self.taker_exit_slippage_buffer_pct)
             snapshot = MarketSnapshot(
                 instrument_id=inst_key,

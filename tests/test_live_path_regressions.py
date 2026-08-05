@@ -2601,6 +2601,10 @@ def test_app_config_reads_extended_env(monkeypatch):
     monkeypatch.setenv("TRADE_DB_PATH", "./logs/custom.db")
     monkeypatch.setenv("REGIME_GUARD_N_MARKETS", "6")
     monkeypatch.setenv("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC", "60")
+    monkeypatch.setenv("TAKER_EXIT_ONLY_AFTER_INVALIDATION", "1")
+    monkeypatch.setenv("TAKER_EXIT_MAX_TIME_LEFT_SEC", "720")
+    monkeypatch.setenv("TAKER_EXIT_MIN_HOLD_SEC", "120")
+    monkeypatch.setenv("TAKER_EXIT_MIN_RECOVERY_RATIO", "0.50")
 
     cfg = AppConfig.from_env(enable_terminal_dashboard=False)
 
@@ -2612,6 +2616,10 @@ def test_app_config_reads_extended_env(monkeypatch):
     assert cfg.market_data.polymarket_chainlink_twap_enabled is True
     assert cfg.market_data.polymarket_chainlink_twap_window_sec == 60
     assert cfg.market_data.require_twap_reference_spot is True
+    assert cfg.exit.taker_exit_only_after_invalidation is True
+    assert cfg.exit.taker_exit_max_time_left_sec == 720
+    assert cfg.exit.taker_exit_min_hold_sec == 120
+    assert cfg.exit.taker_exit_min_recovery_ratio == Decimal("0.50")
 
 
 def test_polymarket_chainlink_twap_subscribe_payload_uses_60s_topic():
