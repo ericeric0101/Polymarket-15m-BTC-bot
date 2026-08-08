@@ -144,8 +144,50 @@ class StrategyLifecycleMixin:
             if hasattr(self, "_settle_shadow_simulation"):
                 self._settle_shadow_simulation(slug=slug, spot=spot, strike=strike)
 
+            if spot <= 0 or strike <= 0:
+                logger.warning(
+                    f"Settlement: cannot determine outcome. spot={spot} strike={strike} "
+                    f"inv={inv} slug={slug}"
+                )
+                return
+
+            if spot < 1000 and strike > 1000:
+                logger.warning(
+                    f"Settlement: invalid spot/strike scale mismatch. "
+                    f"spot={spot:.6f} strike={strike:.2f} inv={inv} slug={slug}. "
+                    "Skipping settlement PnL to avoid false outcome."
+                )
+                self._db_strategy_event("MARKET_SETTLEMENT_INVALID_DATA", {
+                    "slug": slug,
+                    "spot": spot,
+                    "strike": strike,
+                    "inventory_shares": inv,
+                    "reason": "spot_strike_scale_mismatch",
+                })
+                return
+
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
+                # Persist the market label even with no trade. This is required
+                # for deterministic replay against every observed market.
+                self._db_strategy_event(
+                    "MARKET_SETTLEMENT",
+                    {
+                        "slug": slug,
+                        "spot": spot,
+                        "strike": strike,
+                        "outcome": "UP" if spot >= strike else "DOWN",
+                        "outcome_only": True,
+                        "reference_source": str(getattr(self, "latest_external_spot_source", "") or ""),
+                        "active_side": self.active_side.value,
+                        "inventory_side": None,
+                        "inventory_shares": 0.0,
+                        "redeem_per_share": 0.0,
+                        "redeem_value_usdc": 0.0,
+                        "inventory_cost_usdc": 0.0,
+                        "settlement_pnl_usdc": 0.0,
+                    },
+                )
                 cycle_fill_realized = float(self.market_cycle_realized_net_usdc)
                 self._append_cycle_and_maybe_trigger_regime_guard(
                     cycle_combined_pnl=cycle_fill_realized,
@@ -172,28 +214,6 @@ class StrategyLifecycleMixin:
                         pnl_usdc=cycle_fill_realized,
                     )
                 self.market_cycle_realized_net_usdc = Decimal("0")
-                return
-
-            if spot <= 0 or strike <= 0:
-                logger.warning(
-                    f"Settlement: cannot determine outcome. spot={spot} strike={strike} "
-                    f"inv={inv} slug={slug}"
-                )
-                return
-
-            if spot < 1000 and strike > 1000:
-                logger.warning(
-                    f"Settlement: invalid spot/strike scale mismatch. "
-                    f"spot={spot:.6f} strike={strike:.2f} inv={inv} slug={slug}. "
-                    "Skipping settlement PnL to avoid false outcome."
-                )
-                self._db_strategy_event("MARKET_SETTLEMENT_INVALID_DATA", {
-                    "slug": slug,
-                    "spot": spot,
-                    "strike": strike,
-                    "inventory_shares": inv,
-                    "reason": "spot_strike_scale_mismatch",
-                })
                 return
 
             settlement = compute_settlement_summary(

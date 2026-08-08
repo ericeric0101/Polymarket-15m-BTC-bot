@@ -366,6 +366,11 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         quote_event_ts = quote_tick_event_timestamp(tick, quote_received_ts)
         preferred_inst = strategy._instrument_for_side(strategy.active_side) or strategy._primary_instrument_for_market()
         is_preferred_quote = preferred_inst is None or tick.instrument_id == preferred_inst
+        # Receipt time proves the subscribed transport remains alive. It is
+        # deliberately independent from the exchange event timestamp below.
+        getattr(strategy, "last_quote_received_ts_by_inst", {})[str(tick.instrument_id)] = quote_received_ts
+        if is_preferred_quote:
+            strategy.last_valid_quote_ts = quote_received_ts
         quote_is_fresh = quote_event_is_fresh(
             received_ts=quote_received_ts,
             event_ts=quote_event_ts,
@@ -373,18 +378,15 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             clock_skew_tolerance_sec=getattr(strategy, "quote_event_clock_skew_tolerance_sec", Decimal("0.25")),
         )
         if not quote_is_fresh:
-            if is_preferred_quote:
-                # Store source event time, not receipt time: a stream can keep
-                # delivering old snapshots and otherwise hide a real outage.
-                strategy.last_valid_quote_ts = min(quote_event_ts, quote_received_ts)
-                strategy.consecutive_invalid_quote_ticks += 1
-                strategy._maybe_run_quote_watchdog(trigger="stale_quote_event")
+            # A cached transport heartbeat or old exchange event is not valid
+            # pricing. Do not update the executable quote state, but do retain
+            # the receipt timestamp above so the watchdog can distinguish an
+            # idle connected socket from a dead transport.
             return
 
         strategy.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
         getattr(strategy, "latest_quote_by_inst", {})[str(tick.instrument_id)] = (bid_decimal, ask_decimal)
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = quote_event_ts
-        getattr(strategy, "last_quote_received_ts_by_inst", {})[str(tick.instrument_id)] = quote_received_ts
         pending_instruments = getattr(strategy, "quote_recovery_pending_instruments", set())
         if str(tick.instrument_id) in pending_instruments:
             # A single valid quote proves the data connection recovered. The normal
@@ -402,7 +404,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                 quote_received_ts,
             )
         if is_preferred_quote:
-            strategy.last_valid_quote_ts = min(quote_event_ts, quote_received_ts)
+            strategy.last_valid_quote_ts = quote_received_ts
             strategy.consecutive_invalid_quote_ticks = 0
             strategy.latest_market_bid = bid_decimal
             strategy.latest_market_ask = ask_decimal

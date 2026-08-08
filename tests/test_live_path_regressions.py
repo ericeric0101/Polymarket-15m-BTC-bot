@@ -6,7 +6,11 @@ import time
 from decimal import Decimal
 from types import SimpleNamespace
 
-from bot.adapter_overrides import install_runtime_compatibility_overrides
+from bot.adapter_overrides import (
+    install_runtime_compatibility_overrides,
+    should_emit_quote_heartbeat,
+    should_emit_transport_heartbeat,
+)
 from bot.app_config import AppConfig
 from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.execution_events import is_benign_cancel_reject_reason, reconcile_benign_cancel_reject
@@ -14,11 +18,13 @@ from bot.edge_observation import build_quote_age_telemetry
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
+from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import resolve_bi_side_market_selection
-from bot.market_runtime import quote_event_is_fresh, refresh_quote_tick_subscriptions
-from bot.adapter_overrides import should_emit_quote_heartbeat
+from bot.market_runtime import handle_quote_tick, quote_event_is_fresh, refresh_quote_tick_subscriptions
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
+from bot.ops import should_run_quote_watchdog
+from bot.launcher import _strategy_requested_rollover
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -2838,6 +2844,48 @@ def test_app_config_disables_short_window_auto_tune_by_default(monkeypatch):
     assert config.maker.auto_tune_interval_sec == 3600
 
 
+def test_no_inventory_settlement_records_outcome_for_journal_replay():
+    class Host(StrategyLifecycleMixin):
+        def __init__(self):
+            self.inventory_delta_shares = Decimal("0")
+            self.live_inventory_cost = {}
+            self.latest_external_spot = Decimal("65100")
+            self.last_external_spot = None
+            self._binance_ws_price = None
+            self._binance_ws_price_ts = 0.0
+            self.external_spot_history = []
+            self.current_market_slug = "btc-updown-15m-test"
+            self.market_strike_cache_by_slug = {self.current_market_slug: Decimal("65000")}
+            self.market_cycle_realized_net_usdc = Decimal("0")
+            self.recent_market_combined_pnls = []
+            self.active_side = ActiveSide.UP
+            self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
+            self._cycle_total_trades = 0
+            self._cycle_total_wins = 0
+            self.terminal_dashboard = None
+            self.events = []
+
+        def _settle_shadow_simulation(self, **_kwargs):
+            return None
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+        def _append_cycle_and_maybe_trigger_regime_guard(self, **_kwargs):
+            return None
+
+        def _update_terminal_dashboard_snapshot(self):
+            return None
+
+    host = Host()
+    host._record_market_settlement()
+
+    settlement = next(payload for event_type, payload in host.events if event_type == "MARKET_SETTLEMENT")
+    assert settlement["outcome"] == "UP"
+    assert settlement["outcome_only"] is True
+    assert settlement["reference_source"] == "polymarket_chainlink_twap_60s_ws"
+
+
 def test_market_cycle_state_binding_replaces_per_market_containers():
     strategy = SimpleNamespace()
     first = MarketCycleState()
@@ -4160,6 +4208,127 @@ def test_quote_event_freshness_uses_source_event_time_not_receive_time():
         max_age_sec=30.0,
         clock_skew_tolerance_sec=Decimal("0.25"),
     )
+
+
+def test_transport_heartbeat_keeps_quiet_connected_book_out_of_watchdog():
+    now_ts = 100.0
+    assert should_emit_transport_heartbeat(is_connected=True, has_quote=True)
+    should_run, stale_for = should_run_quote_watchdog(
+        now_ts=now_ts,
+        last_quote_watchdog_check_ts=0.0,
+        quote_healthcheck_interval_sec=1.0,
+        last_valid_quote_ts=now_ts,
+        quote_stale_sec=30.0,
+        consecutive_invalid_quote_ticks=0,
+        quote_invalid_tick_reload_threshold=80,
+    )
+    assert not should_run
+    assert stale_for == 0.0
+
+
+def test_dead_transport_still_triggers_quote_watchdog():
+    should_run, stale_for = should_run_quote_watchdog(
+        now_ts=135.0,
+        last_quote_watchdog_check_ts=0.0,
+        quote_healthcheck_interval_sec=1.0,
+        last_valid_quote_ts=100.0,
+        quote_stale_sec=30.0,
+        consecutive_invalid_quote_ticks=0,
+        quote_invalid_tick_reload_threshold=80,
+    )
+    assert should_run
+    assert stale_for == 35.0
+
+
+def test_stale_exchange_event_stays_rejected_when_transport_is_alive():
+    assert should_emit_transport_heartbeat(is_connected=True, has_quote=True)
+    assert not quote_event_is_fresh(
+        received_ts=100.0,
+        event_ts=69.9,
+        max_age_sec=30.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+
+
+def test_stale_transport_heartbeat_updates_liveness_without_updating_quote_state():
+    class Price:
+        def __init__(self, value):
+            self.value = Decimal(value)
+
+        def as_decimal(self):
+            return self.value
+
+    class Strategy:
+        _stopping = False
+        instrument_id = "up-token"
+        current_market_instruments = ["up-token"]
+        stale_quote_synth_max_age_sec = 10.0
+        latest_market_bid_ts = 0.0
+        latest_market_ask_ts = 0.0
+        latest_market_bid = None
+        latest_market_ask = None
+        active_side = ActiveSide.UP
+        quote_stale_sec = 30.0
+        quote_event_clock_skew_tolerance_sec = Decimal("0.25")
+        last_valid_quote_ts = 0.0
+        consecutive_invalid_quote_ticks = 0
+
+        def __init__(self):
+            self.last_quote_received_ts_by_inst = {}
+            self.latest_quote_by_inst = {}
+            self.latest_quote_depth_by_inst = {}
+            self.watchdog_triggers = []
+
+        def _instrument_for_side(self, _side):
+            return "up-token"
+
+        def _primary_instrument_for_market(self):
+            return "up-token"
+
+        def _maybe_run_quote_watchdog(self, trigger):
+            self.watchdog_triggers.append(trigger)
+
+    strategy = Strategy()
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        bid_price=Price("0.60"),
+        ask_price=Price("0.61"),
+        bid_size=Price("10"),
+        ask_size=Price("10"),
+        ts_event=1,
+    )
+
+    handle_quote_tick(strategy, tick)
+
+    assert strategy.last_quote_received_ts_by_inst["up-token"] > 0
+    assert strategy.last_valid_quote_ts > 0
+    assert strategy.latest_quote_by_inst == {}
+    assert strategy.watchdog_triggers == []
+
+
+def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():
+    class Strategy:
+        _rollover_requested_flag = True
+
+    class Trader:
+        def __init__(self):
+            self._strategies = [Strategy()]
+
+        def strategies(self):
+            return self._strategies
+
+    class Node:
+        def __init__(self):
+            self.trader = Trader()
+
+        def dispose(self):
+            self.trader = None
+
+    node = Node()
+    requested_before_dispose = _strategy_requested_rollover(node)
+    node.dispose()
+    assert requested_before_dispose
+    assert _strategy_requested_rollover(node) is False
 
 
 def test_unchanged_top_of_book_emits_bounded_heartbeat():

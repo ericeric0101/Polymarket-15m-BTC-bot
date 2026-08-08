@@ -60,6 +60,19 @@ def _install_fresh_main_thread_event_loop() -> None:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def _strategy_requested_rollover(node: Optional[TradingNode]) -> bool:
+    """Read strategy rollover state before disposing the trading node."""
+    if node is None:
+        return False
+    try:
+        return any(
+            getattr(strategy, "_rollover_requested_flag", False)
+            for strategy in node.trader.strategies()
+        )
+    except Exception:
+        return False
+
+
 def _request_clob_l2_api_creds_direct(*, client, clob_host: str) -> Optional[Dict[str, str]]:
     """
     Direct HTTP fallback for CLOB API-key create/derive using py-clob's signer headers.
@@ -453,6 +466,7 @@ def run_integrated_bot(
         cycle_started_at = time.time()
         node: Optional[TradingNode] = None
         rollover_requested = threading.Event()
+        strategy_requested_rollover = False
         rollover_stop = threading.Event()
         rollover_thread: Optional[threading.Thread] = None
 
@@ -494,6 +508,10 @@ def run_integrated_bot(
             rollover_stop.set()
             if rollover_thread and rollover_thread.is_alive():
                 rollover_thread.join(timeout=1)
+            strategy_requested_rollover = _strategy_requested_rollover(node)
+            if strategy_requested_rollover:
+                rollover_requested.set()
+                logger.info("Strategy requested rollover (stale instruments)")
             if node is not None:
                 try:
                     node.dispose()
@@ -501,16 +519,6 @@ def run_integrated_bot(
                     logger.warning(f"Node dispose raised: {e}")
             _install_fresh_main_thread_event_loop()
             logger.info(f"Bot cycle {cycle_idx} stopped")
-
-        try:
-            strategies = node.trader.strategies() if node else []
-            for strat in strategies:
-                if getattr(strat, "_rollover_requested_flag", False):
-                    rollover_requested.set()
-                    logger.info("Strategy requested rollover (stale instruments)")
-                    break
-        except Exception:
-            pass
 
         if user_stopped:
             break

@@ -26,6 +26,11 @@ def should_emit_quote_heartbeat(
     return now_ns - last_emit_ns >= int(max(0.1, heartbeat_sec) * 1_000_000_000)
 
 
+def should_emit_transport_heartbeat(*, is_connected: bool, has_quote: bool) -> bool:
+    """Return whether a cached quote should carry a transport-liveness heartbeat."""
+    return is_connected and has_quote
+
+
 def install_runtime_compatibility_overrides() -> None:
     _install_polymarket_data_overrides()
     _install_polymarket_execution_overrides()
@@ -59,6 +64,8 @@ def _install_polymarket_data_overrides() -> None:
         return
 
     original_init = cls.__init__
+    original_connect = cls._connect
+    original_disconnect = cls._disconnect
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -77,6 +84,39 @@ def _install_polymarket_data_overrides() -> None:
                 0.1,
                 float(os.getenv("POLYMARKET_QUOTE_HEARTBEAT_SEC", "5")),
             )
+        if not hasattr(self, "_quote_transport_heartbeat_task"):
+            self._quote_transport_heartbeat_task = None
+
+    async def quote_transport_heartbeat(self) -> None:
+        """Publish cached quotes while the protocol-level WebSocket remains connected.
+
+        The cached quote retains its original exchange timestamp. Strategy code can
+        therefore observe transport liveness without treating this as fresh pricing.
+        """
+        while True:
+            await asyncio.sleep(float(getattr(self, "_quote_heartbeat_sec", 5.0)))
+            is_connected = bool(self._ws_client.is_connected())
+            for instrument_id, quote in tuple(getattr(self, "_last_quotes", {}).items()):
+                if instrument_id not in self.subscribed_quote_ticks():
+                    continue
+                if should_emit_transport_heartbeat(
+                    is_connected=is_connected,
+                    has_quote=quote is not None,
+                ):
+                    self._handle_data(quote)
+
+    async def patched_connect(self) -> None:
+        await original_connect(self)
+        task = getattr(self, "_quote_transport_heartbeat_task", None)
+        if task is None or task.done():
+            self._quote_transport_heartbeat_task = self.create_task(quote_transport_heartbeat(self))
+
+    async def patched_disconnect(self) -> None:
+        task = getattr(self, "_quote_transport_heartbeat_task", None)
+        if task is not None:
+            task.cancel()
+            self._quote_transport_heartbeat_task = None
+        await original_disconnect(self)
 
     def patched_log_drop_quote_warning_throttled(self, instrument_id, reason: str) -> None:
         key = f"{instrument_id}:{reason}"
@@ -205,6 +245,8 @@ def _install_polymarket_data_overrides() -> None:
             self._handle_data(quote)
 
     cls.__init__ = patched_init
+    cls._connect = patched_connect
+    cls._disconnect = patched_disconnect
     cls._log_drop_quote_warning_throttled = patched_log_drop_quote_warning_throttled
     cls._log_tick_size_warning_throttled = patched_log_tick_size_warning_throttled
     cls._handle_quote = patched_handle_quote
