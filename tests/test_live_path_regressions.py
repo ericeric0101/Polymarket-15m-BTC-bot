@@ -9,11 +9,15 @@ from types import SimpleNamespace
 from bot.adapter_overrides import install_runtime_compatibility_overrides
 from bot.app_config import AppConfig
 from bot.entry_quality import evaluate_entry_quality_adjustment
+from bot.execution_events import is_benign_cancel_reject_reason, reconcile_benign_cancel_reject
+from bot.edge_observation import build_quote_age_telemetry
 from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle import resolve_bi_side_market_selection
+from bot.market_runtime import quote_event_is_fresh, refresh_quote_tick_subscriptions
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
+from bot.process_lock import ProcessLock
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -155,6 +159,7 @@ class DummyStrategyForFill(FillLedgerMixin):
         self.side_decision_due_ts = 0.0
         self.side_decision_reason = ""
         self.market_buy_count_by_slug = {}
+        self.market_buy_count_total_by_slug = {}
         self.market_buy_counted_order_ids_by_slug = {}
         self._thesis_epoch_by_slug = {}
         self.market_max_buy_events_per_market = 2
@@ -1069,6 +1074,7 @@ def test_partial_fills_only_increment_market_buy_count_once():
     IntegratedBTCStrategy.on_order_filled(strategy, second_fill)
 
     assert strategy.market_buy_count_by_slug["btc-updown-15m-test:0"] == 1
+    assert strategy.market_buy_count_total_by_slug["btc-updown-15m-test"] == 1
     assert strategy.market_buy_counted_order_ids_by_slug["btc-updown-15m-test:0"] == {"BUY-1"}
     count_events = [evt for evt, _ in strategy.strategy_events if evt == "MARKET_BUY_COUNT_UPDATED"]
     assert count_events == ["MARKET_BUY_COUNT_UPDATED"]
@@ -2358,6 +2364,45 @@ def test_buy_submit_quote_guard_skips_when_book_drifted_too_far():
     assert should_skip is True
 
 
+def test_buy_submit_quote_guard_allows_recent_planned_snapshot_with_relaxed_limit():
+    strategy = DummyBuyDriftStrategy()
+    strategy.maker_buy_planned_quote_max_age_sec = 10.0
+
+    should_skip = IntegratedBTCStrategy._should_skip_buy_submit_for_quote_drift(
+        strategy,
+        instrument_id="inst-down",
+        quote_now=(Decimal("0.42"), Decimal("0.43")),
+        directional_snapshot={
+            "planned_best_bid": Decimal("0.42"),
+            "planned_best_ask": Decimal("0.43"),
+            "planned_quote_ts": time.time() - 2.0,
+        },
+        instrument=None,
+    )
+
+    assert should_skip is False
+
+
+def test_buy_submit_quote_guard_rejects_old_cached_top_of_book():
+    strategy = DummyBuyDriftStrategy()
+    strategy.maker_buy_planned_quote_max_age_sec = 10.0
+    strategy.last_quote_received_ts_by_inst = {"inst-down": time.time() - 10.1}
+
+    should_skip = IntegratedBTCStrategy._should_skip_buy_submit_for_quote_drift(
+        strategy,
+        instrument_id="inst-down",
+        quote_now=(Decimal("0.42"), Decimal("0.43")),
+        directional_snapshot={
+            "planned_best_bid": Decimal("0.42"),
+            "planned_best_ask": Decimal("0.43"),
+            "planned_quote_ts": time.time(),
+        },
+        instrument=None,
+    )
+
+    assert should_skip is True
+
+
 def test_fill_liquidity_classification_prefers_matched_maker_when_raw_side_unknown_and_no_commission():
     classification = classify_fill_liquidity(
         liquidity_side="",
@@ -2605,6 +2650,11 @@ def test_app_config_reads_extended_env(monkeypatch):
     monkeypatch.setenv("TAKER_EXIT_MAX_TIME_LEFT_SEC", "720")
     monkeypatch.setenv("TAKER_EXIT_MIN_HOLD_SEC", "120")
     monkeypatch.setenv("TAKER_EXIT_MIN_RECOVERY_RATIO", "0.50")
+    monkeypatch.setenv("QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC", "0.25")
+    monkeypatch.setenv("SHADOW_SIMULATION_FILL_TIMEOUT_SEC", "75")
+    monkeypatch.setenv("SHADOW_SIMULATION_MAX_QUOTE_AGE_SEC", "1.5")
+    monkeypatch.setenv("SHADOW_SIMULATION_AGED_QUOTE_MAX_AGE_SEC", "20")
+    monkeypatch.setenv("MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC", "10")
 
     cfg = AppConfig.from_env(enable_terminal_dashboard=False)
 
@@ -2620,6 +2670,66 @@ def test_app_config_reads_extended_env(monkeypatch):
     assert cfg.exit.taker_exit_max_time_left_sec == 720
     assert cfg.exit.taker_exit_min_hold_sec == 120
     assert cfg.exit.taker_exit_min_recovery_ratio == Decimal("0.50")
+    assert cfg.market_data.quote_event_clock_skew_tolerance_sec == Decimal("0.25")
+    assert cfg.operations.shadow_simulation_enabled is True
+    assert cfg.operations.shadow_simulation_fill_timeout_sec == 75.0
+    assert cfg.operations.shadow_simulation_max_quote_age_sec == 1.5
+    assert cfg.operations.shadow_simulation_aged_quote_max_age_sec == 20.0
+    assert cfg.maker.buy_planned_quote_max_age_sec == 10.0
+
+
+def test_edge_observation_quote_age_uses_tolerance_only_for_small_future_event_time():
+    normal = build_quote_age_telemetry(observation_ts=100.2, quote_ts=100.0)
+    tolerated = build_quote_age_telemetry(
+        observation_ts=100.0,
+        quote_ts=100.2,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+    invalid = build_quote_age_telemetry(
+        observation_ts=100.0,
+        quote_ts=100.3,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+
+    assert normal.raw_age_sec == Decimal("0.2")
+    assert normal.effective_age_sec == Decimal("0.2")
+    assert normal.tolerance_applied is False
+    assert tolerated.raw_age_sec == Decimal("-0.2")
+    assert tolerated.effective_age_sec == Decimal("0")
+    assert tolerated.clock_skew_sec == Decimal("0.2")
+    assert tolerated.tolerance_applied is True
+    assert invalid.effective_age_sec is None
+    assert invalid.tolerance_applied is False
+
+
+def test_process_lock_rejects_second_local_owner(tmp_path):
+    lock_path = tmp_path / "bot.lock"
+    first = ProcessLock(lock_path)
+    second = ProcessLock(lock_path)
+
+    assert first.acquire() is True
+    assert second.acquire() is False
+    first.release()
+    assert second.acquire() is True
+    second.release()
+
+
+def test_benign_cancel_reject_recognizes_already_canceled_exchange_reply():
+    assert is_benign_cancel_reject_reason("{'order': 'the order is already canceled'}")
+    assert is_benign_cancel_reject_reason("matched orders can't be canceled")
+    assert not is_benign_cancel_reject_reason("insufficient balance")
+
+
+def test_benign_cancel_reject_clears_order_without_order_object():
+    active_orders = {
+        "sell:inst-up": {
+            "client_order_id": "BTC-15M-MAKER-SELL-1",
+            "order": None,
+        }
+    }
+
+    assert reconcile_benign_cancel_reject("BTC-15M-MAKER-SELL-1", active_orders)
+    assert active_orders == {}
 
 
 def test_polymarket_chainlink_twap_subscribe_payload_uses_60s_topic():
@@ -3020,7 +3130,7 @@ def test_value_entry_size_multiplier_flows_into_submit_qty():
     assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.6
 
 
-def test_high_entry_price_size_adjustment_halves_submit_qty():
+def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchange_minimum():
     desired_entry = {
         "should_quote": True,
         "price": Decimal("0.71"),
@@ -3050,14 +3160,37 @@ def test_high_entry_price_size_adjustment_halves_submit_qty():
             fee_equivalent_usdc=Decimal("0"),
         ),
         directional_snapshot=snapshot,
-        target_qty_override=Decimal("10.8"),
+        target_qty_override=Decimal("6.0"),
     )
 
-    assert strategy.submitted_orders, "expected submit_order to be called"
-    submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
-    assert submitted_qty == Decimal("5.400000")
+    assert not strategy.submitted_orders
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
     assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.5
     assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
+
+
+def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum():
+    strategy = DummyTrendSubmitStrategy()
+    strategy.maker_min_shares = Decimal("5.4")
+    strategy.maker_exchange_min_shares = Decimal("5.0")
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.71"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+        directional_snapshot={"size_multiplier": Decimal("0.5")},
+        target_qty_override=Decimal("6.0"),
+    )
+
+    assert not strategy.submitted_orders
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
 
 
 def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
@@ -3930,3 +4063,52 @@ def test_continuation_entry_still_works_after_market_has_prior_buy():
 
     assert out["should_quote"] is True
     assert out["entry_mode"] == "continuation"
+
+
+def test_quote_watchdog_refresh_clears_stale_cache_and_replaces_subscriptions():
+    class DummyStrategy:
+        def __init__(self):
+            self.current_market_instruments = ["up-token", "down-token"]
+            self.latest_quote_by_inst = {"up-token": (Decimal("0.60"), Decimal("0.61"))}
+            self.latest_quote_depth_by_inst = {"up-token": (Decimal("1"), Decimal("1"))}
+            self.last_quote_update_ts_by_inst = {"up-token": 1.0}
+            self.last_quote_received_ts_by_inst = {"up-token": 1.0}
+            self.unsubscribed = []
+            self.subscribed = []
+
+        def unsubscribe_quote_ticks(self, instrument_id):
+            self.unsubscribed.append(instrument_id)
+
+        def subscribe_quote_ticks(self, instrument_id):
+            self.subscribed.append(instrument_id)
+
+    strategy = DummyStrategy()
+    refresh_quote_tick_subscriptions(strategy)
+
+    assert strategy.unsubscribed == ["up-token", "down-token"]
+    assert strategy.subscribed == ["up-token", "down-token"]
+    assert strategy.latest_quote_by_inst == {}
+    assert strategy.last_quote_update_ts_by_inst == {}
+    assert strategy.quote_recovery_pending_instruments == {"up-token", "down-token"}
+    assert strategy.quote_recovery_attempts == 0
+
+
+def test_quote_event_freshness_uses_source_event_time_not_receive_time():
+    assert quote_event_is_fresh(
+        received_ts=100.0,
+        event_ts=99.9,
+        max_age_sec=30.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+    assert quote_event_is_fresh(
+        received_ts=100.0,
+        event_ts=100.15,
+        max_age_sec=30.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+    assert not quote_event_is_fresh(
+        received_ts=100.0,
+        event_ts=69.9,
+        max_age_sec=30.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )

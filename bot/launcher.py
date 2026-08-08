@@ -40,6 +40,7 @@ from bot.market_discovery import (
     resolve_btc_15m_market_slugs,
     resolve_primary_btc_15m_instrument_ids,
 )
+from bot.process_lock import ProcessLock
 from run_bot import (
     IntegratedBTCStrategy,
 )
@@ -264,7 +265,7 @@ def init_redis():
 def run_integrated_bot(
     simulation: bool = True,
     enable_grafana: bool = True,
-    test_mode: bool = False,
+    test_mode: bool = True,
     enable_terminal_dashboard: bool = False,
 ):
     startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -541,6 +542,19 @@ def run_integrated_bot(
         time.sleep(auto_rollover_cooldown_sec)
 
 
+def acquire_live_process_lock() -> ProcessLock | None:
+    """Prevent two live launchers on the same host from sharing one wallet."""
+    lock_path = os.getenv("LIVE_PROCESS_LOCK_PATH", "/tmp/polymarket-btc-15m-live.lock")
+    lock = ProcessLock(lock_path)
+    if lock.acquire():
+        return lock
+    logger.error(
+        f"Another local live bot process already holds {lock_path}. "
+        "Refusing to start a second wallet writer."
+    )
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Integrated BTC 15-Min Trading Bot")
     parser.add_argument(
@@ -573,7 +587,9 @@ def main():
 
     simulation = not args.live
     enable_grafana = not args.no_grafana
-    test_mode = args.test_mode
+    # The CLOB execution client is always live-capable. Dry-run must therefore
+    # be enabled explicitly for every invocation that did not opt into --live.
+    test_mode = bool(args.test_mode or not args.live)
     enable_terminal_dashboard = args.terminal_dashboard
     app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
 
@@ -608,9 +624,16 @@ def main():
             print("Cancelled.")
             return
 
-    run_integrated_bot(
-        simulation=simulation,
-        enable_grafana=enable_grafana,
-        test_mode=test_mode,
-        enable_terminal_dashboard=enable_terminal_dashboard,
-    )
+    live_lock = acquire_live_process_lock() if not simulation else None
+    if not simulation and live_lock is None:
+        return
+    try:
+        run_integrated_bot(
+            simulation=simulation,
+            enable_grafana=enable_grafana,
+            test_mode=test_mode,
+            enable_terminal_dashboard=enable_terminal_dashboard,
+        )
+    finally:
+        if live_lock is not None:
+            live_lock.release()

@@ -146,6 +146,122 @@ class TradeJournalDB:
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_stop failed: {e}")
 
+    def load_market_guard_counts(self, slug: str) -> Dict[str, int]:
+        """Recover per-market risk limits after a process or node restart."""
+        slug = str(slug or "")
+        if not slug:
+            return {"buy_count": 0, "protective_exit_count": 0}
+        try:
+            with self._connect() as conn:
+                buy_row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT client_order_id)
+                    FROM order_events
+                    WHERE event_type='ORDER_FILLED'
+                      AND side='BUY'
+                      AND json_extract(payload_json, '$.slug')=?
+                    """,
+                    (slug,),
+                ).fetchone()
+                exit_row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT fill.client_order_id)
+                    FROM order_events AS fill
+                    JOIN order_events AS submit
+                      ON submit.client_order_id=fill.client_order_id
+                    WHERE fill.event_type='ORDER_FILLED'
+                      AND fill.side='SELL'
+                      AND submit.event_type='ORDER_TAKER_EXIT_SUBMIT'
+                      AND submit.reason IN ('stop_loss', 'invalidation_recovery', 'offside_near_close')
+                      AND json_extract(fill.payload_json, '$.slug')=?
+                    """,
+                    (slug,),
+                ).fetchone()
+            return {
+                "buy_count": int(buy_row[0] or 0),
+                "protective_exit_count": int(exit_row[0] or 0),
+            }
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_market_guard_counts failed: {e}")
+            return {"buy_count": 0, "protective_exit_count": 0}
+
+    def reconcile_redeem_cycle(self, slug: str, redeem_value_usdc: float) -> Optional[Dict[str, float]]:
+        """Rebuild missing cycle PnL when redemption happens after a restart."""
+        slug = str(slug or "")
+        if not slug:
+            return None
+        try:
+            with self._connect() as conn:
+                existing = conn.execute(
+                    """
+                    SELECT 1 FROM strategy_events
+                    WHERE event_type='MARKET_CYCLE_PNL'
+                      AND json_extract(payload_json, '$.slug')=?
+                    LIMIT 1
+                    """,
+                    (slug,),
+                ).fetchone()
+                if existing:
+                    return None
+                row = conn.execute(
+                    """
+                    SELECT
+                      COALESCE(SUM(CASE WHEN side='BUY' THEN price * qty ELSE 0 END), 0.0) AS buy_cost,
+                      COALESCE(SUM(CASE WHEN side='SELL' THEN price * qty -
+                        COALESCE(CAST(json_extract(payload_json, '$.effective_fee_usdc') AS REAL), 0.0)
+                      ELSE 0 END), 0.0) AS sell_proceeds
+                    FROM order_events
+                    WHERE event_type='ORDER_FILLED'
+                      AND json_extract(payload_json, '$.slug')=?
+                    """,
+                    (slug,),
+                ).fetchone()
+            buy_cost = float(row[0] or 0.0)
+            sell_proceeds = float(row[1] or 0.0)
+            if buy_cost <= 0 and sell_proceeds <= 0:
+                return None
+            redeem_value = max(0.0, float(redeem_value_usdc or 0.0))
+            return {
+                "buy_cost_usdc": buy_cost,
+                "sell_proceeds_usdc": sell_proceeds,
+                "redeem_value_usdc": redeem_value,
+                "cycle_combined_pnl_usdc": redeem_value + sell_proceeds - buy_cost,
+            }
+        except Exception as e:
+            logger.debug(f"TradeJournalDB reconcile_redeem_cycle failed: {e}")
+            return None
+
+    def load_shadow_simulation(self, slug: str) -> Optional[Dict[str, Any]]:
+        """Return the latest lifecycle state for a dry-run shadow simulation."""
+        slug = str(slug or "")
+        if not slug:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM order_events
+                    WHERE event_type IN (
+                      'SHADOW_SIM_ENTRY_CANDIDATE',
+                      'SHADOW_SIM_ENTRY_FILLED',
+                      'SHADOW_SIM_ENTRY_EXPIRED',
+                      'SHADOW_SIM_SETTLED'
+                    )
+                      AND json_extract(payload_json, '$.slug')=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (slug,),
+                ).fetchone()
+            if not row or not row[0]:
+                return None
+            payload = json.loads(row[0])
+            return payload if isinstance(payload, dict) else None
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_shadow_simulation failed: {e}")
+            return None
+
     def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         sql = "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)"
         try:

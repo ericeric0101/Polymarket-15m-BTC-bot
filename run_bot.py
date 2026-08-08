@@ -47,6 +47,7 @@ from loguru import logger
 # Import our phases
 from bot.inventory import InventoryLedger
 from bot.edge_state import build_edge_state
+from bot.edge_observation import build_quote_age_telemetry
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.enums import ActiveSide, MarketPhase
@@ -76,6 +77,7 @@ from bot.market_runtime import (
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
 from bot.recovery import StrategyRecoveryMixin
+from bot.shadow_simulation import ShadowSimulationMixin
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
     evaluate_market_phase,
@@ -110,6 +112,7 @@ from bot.quote_service import (
     parse_quote_plan,
     should_emit_edge_observation,
     apply_forced_exit_sell_pricing,
+    apply_fractional_kelly_sizing,
     apply_high_entry_price_size_adjustment,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
@@ -142,6 +145,7 @@ from bot.smart_money import (
     extract_token_id_from_instrument_id,
 )
 from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
+from bot.probability_calibration import calibrate_probability
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.market_discovery import (
@@ -204,6 +208,7 @@ class IntegratedBTCStrategy(
     PricingRuntimeMixin,
     QuoteRuntimeMixin,
     StrategyRecoveryMixin,
+    ShadowSimulationMixin,
     StrategyLifecycleMixin,
     Strategy,
 ):
@@ -249,7 +254,7 @@ class IntegratedBTCStrategy(
         )
 
         if test_mode:
-            logger.info("⚠️  TEST MODE ACTIVE - Trading every minute!")
+            logger.warning("DRY-RUN MODE ACTIVE - orders will be recorded but not submitted.")
         logger.info("Integrated BTC strategy initialized.")
 
     def _record_dashboard_error(self, message: str) -> None:
@@ -1576,7 +1581,24 @@ class IntegratedBTCStrategy(
             if quote_ctx.quote is None or quote_ctx.fair is None:
                 continue
             inst_bid, inst_ask = quote_ctx.quote
-            fair = quote_ctx.fair
+            raw_fair = quote_ctx.fair
+            outcome_side = self._side_for_instrument_id(inst_id).value
+            market_mid = (inst_bid + inst_ask) / Decimal("2")
+            fair = calibrate_probability(
+                raw_probability=raw_fair,
+                market_mid=market_mid,
+                side=outcome_side,
+                enabled=bool(getattr(self, "probability_calibration_enabled", True)),
+                up_model_weight=Decimal(str(getattr(self, "probability_calibration_up_model_weight", Decimal("0.65")))),
+                down_model_weight=Decimal(str(getattr(self, "probability_calibration_down_model_weight", Decimal("0.35")))),
+            )
+            quote_ctx.fair = fair
+            quote_ctx.diag_context.update({
+                "raw_fair": raw_fair,
+                "calibrated_fair": fair,
+                "market_mid": market_mid,
+                "probability_calibration_enabled": bool(getattr(self, "probability_calibration_enabled", True)),
+            })
             self.rebate_reporter.record_api_health(self.fee_rate_client.get_health_snapshot())
             if quote_ctx.dynamic_fee_rate is not None:
                 pass
@@ -1718,7 +1740,10 @@ class IntegratedBTCStrategy(
                 thesis_epoch = self._current_thesis_epoch(current_slug)
                 market_buy_budget_key = self._market_buy_budget_key(current_slug)
                 market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
-                market_buy_count = int(self.market_buy_count_by_slug.get(market_buy_budget_key, 0))
+                market_buy_count = max(
+                    int(self.market_buy_count_by_slug.get(market_buy_budget_key, 0)),
+                    int(getattr(self, "market_buy_count_total_by_slug", {}).get(current_slug, 0)),
+                )
                 if (
                     side == "buy"
                     and current_slug
@@ -1854,6 +1879,7 @@ class IntegratedBTCStrategy(
                     side_score=self.side_decision_score,
                     directional_entry_min_score_abs_new=self.directional_entry_min_score_abs_new,
                     directional_first_entry_min_score_abs_new=self.directional_first_entry_min_score_abs_new,
+                    first_entry_max_time_left_sec=int(getattr(self, "first_entry_max_time_left_sec", 0)),
                     locked_side_score_abs=Decimal(str(getattr(self, "active_side_lock_score_abs", Decimal("0")))),
                     maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
                     maker_reload_min_expected_net_multiplier=self.maker_reload_min_expected_net_multiplier,
@@ -1921,9 +1947,20 @@ class IntegratedBTCStrategy(
                     quote_plan = parse_quote_plan(quote_data)
                     planned_fee_ps = quote_plan.fee_per_share if quote_plan is not None else Decimal("0")
                     planned_other_cost_ps = quote_plan.other_cost_per_share if quote_plan is not None else Decimal("0")
-                    quote_age_sec = None
-                    if quote_ctx.quote_ts is not None:
-                        quote_age_sec = Decimal(str(now_ts - float(quote_ctx.quote_ts)))
+                    # This is intentionally sampled at emission time. ``now_ts`` is
+                    # the quote-cycle start and may predate a quote received while
+                    # asynchronous quote evaluation is still running.
+                    observation_ts = time.time()
+                    quote_age = build_quote_age_telemetry(
+                        observation_ts=observation_ts,
+                        quote_ts=quote_ctx.quote_ts,
+                        clock_skew_tolerance_sec=getattr(
+                            self,
+                            "quote_event_clock_skew_tolerance_sec",
+                            Decimal("0.25"),
+                        ),
+                    )
+                    quote_age_sec = quote_age.effective_age_sec
                     edge_state = build_edge_state(
                         model_probability_up=model_probability_up,
                         market_mid=market_mid_up,
@@ -1964,8 +2001,19 @@ class IntegratedBTCStrategy(
                         pass
                     edge_payload = {
                         **edge_state.to_dict(),
-                        "event_ts": now_ts,
+                        "event_ts": observation_ts,
                         "quote_ts": quote_ctx.quote_ts,
+                        "quote_age_raw_sec": (
+                            float(quote_age.raw_age_sec)
+                            if quote_age.raw_age_sec is not None
+                            else None
+                        ),
+                        "quote_clock_skew_sec": (
+                            float(quote_age.clock_skew_sec)
+                            if quote_age.clock_skew_sec is not None
+                            else None
+                        ),
+                        "quote_timestamp_tolerance_applied": quote_age.tolerance_applied,
                         "slug": current_slug,
                         "instrument_id": str(inst_id),
                         "outcome_side": outcome_side,
@@ -1978,7 +2026,7 @@ class IntegratedBTCStrategy(
                         "complementary_ask_sum": float(complementary_ask_sum) if complementary_ask_sum is not None else None,
                         "complementary_quote_ts": complementary_quote_ts,
                         "complementary_quote_age_sec": (
-                            float(now_ts - complementary_quote_ts)
+                            float(observation_ts - complementary_quote_ts)
                             if complementary_quote_ts is not None
                             else None
                         ),
@@ -2833,6 +2881,18 @@ class IntegratedBTCStrategy(
                             )
                         ),
                     )
+                    desired_entry = apply_fractional_kelly_sizing(
+                        desired_entry=desired_entry,
+                        side=side,
+                        enabled=bool(getattr(self, "kelly_sizing_enabled", False)),
+                        available_collateral_usdc=getattr(self, "_cached_usdc_balance", None),
+                        fraction=Decimal(str(getattr(self, "kelly_sizing_fraction", Decimal("0.25")))),
+                        max_collateral_fraction=Decimal(str(getattr(self, "kelly_sizing_max_collateral_fraction", Decimal("0.10")))),
+                        base_quantity=self._compute_maker_order_qty(
+                            Decimal(str(desired_entry.get("price", "0"))),
+                            int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
+                        ),
+                    )
                     self._emit_buy_observe_diagnostic(
                         inst_id=inst_id,
                         desired_entry=desired_entry,
@@ -2919,6 +2979,7 @@ class IntegratedBTCStrategy(
 
         # Recover local inventory tracking if the strategy restarted mid-market.
         self._rehydrate_inventory_state_on_startup()
+        self._restore_market_risk_guards_from_trade_db_on_startup()
         self._recover_market_strike_from_trade_db_on_startup()
 
         log_strategy_run_start(
@@ -3119,6 +3180,9 @@ class IntegratedBTCStrategy(
         """
         if not self.auto_redeem_enabled:
             return
+        if self._is_dry_run_mode():
+            logger.info(f"Auto redeem skipped in dry-run mode: reason={reason}")
+            return
 
         def _runner() -> None:
             if not self._redeem_job_lock.acquire(blocking=False):
@@ -3141,6 +3205,12 @@ class IntegratedBTCStrategy(
                 self._last_redeem_run_ts = now_ts
                 if self.terminal_dashboard:
                     self.terminal_dashboard.increment_redeem()
+
+                def _record_redeem_event(event_type: str, payload: Dict[str, Any]) -> None:
+                    self._db_strategy_event(event_type, payload)
+                    if event_type == "REDEEM_EXECUTED":
+                        self._reconcile_redeem_cycle_pnl(payload)
+
                 run_auto_redeem_script(
                     repo_root=Path(__file__).parent,
                     reason=reason,
@@ -3149,7 +3219,7 @@ class IntegratedBTCStrategy(
                     auto_redeem_timeout_sec=int(self.auto_redeem_timeout_sec),
                     logger_info_fn=logger.info,
                     logger_warning_fn=logger.warning,
-                    db_strategy_event_fn=self._db_strategy_event,
+                    db_strategy_event_fn=_record_redeem_event,
                 )
             except Exception as e:
                 logger.warning(f"Auto redeem failed (reason={reason}): {e}")
@@ -3171,6 +3241,9 @@ class IntegratedBTCStrategy(
             self._try_merge_yes_no_positions()
 
     def _try_merge_yes_no_positions(self) -> None:
+        if self._is_dry_run_mode():
+            logger.info("YES/NO merge skipped in dry-run mode")
+            return
         try_merge_yes_no_positions(
             strategy=self,
             logger_info_fn=logger.info,
@@ -3192,6 +3265,24 @@ class IntegratedBTCStrategy(
             logger_info_fn=logger.info,
             logger_warning_fn=logger.warning,
         )
+
+    def _request_quote_stream_node_rollover(self, trigger: str, now_ts: float) -> None:
+        """Escalate a failed resubscribe to a clean data-client rebuild by the launcher."""
+        if self._stopping or getattr(self, "_quote_stream_rollover_requested", False):
+            return
+        self._quote_stream_rollover_requested = True
+        self._rollover_requested_flag = True
+        self._stopping = True
+        logger.error(f"Quote stream recovery exhausted; requesting node rollover: trigger={trigger}")
+        self._db_strategy_event(
+            "QUOTE_WATCHDOG_NODE_ROLLOVER",
+            {"trigger": trigger, "instrument": str(self.instrument_id) if self.instrument_id else None, "ts": now_ts},
+        )
+        try:
+            if hasattr(self, "_trader") and hasattr(self._trader, "node"):
+                self._trader.node.stop()
+        except Exception as exc:
+            logger.error(f"Quote stream node rollover stop failed: {exc}")
 
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
@@ -3216,16 +3307,24 @@ class IntegratedBTCStrategy(
         self.last_quote_watchdog_reload_ts = reload_ts
         new_instrument = str(self.instrument_id) if self.instrument_id else None
         if selected_ok and self.instrument_id is not None:
-            logger.warning(f"Quote watchdog recovery complete: {prev_instrument} -> {new_instrument}")
+            from bot.market_runtime import refresh_quote_tick_subscriptions
+
+            refresh_quote_tick_subscriptions(self)
+            self.quote_recovery_attempts = int(getattr(self, "quote_recovery_attempts", 0)) + 1
+            self.quote_recovery_started_ts = now_ts
+            logger.warning(
+                "Quote watchdog resubscribed; awaiting first fresh quote: "
+                f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s"
+            )
             self._db_strategy_event(
-                "QUOTE_WATCHDOG_RECOVERED",
+                "QUOTE_WATCHDOG_RESUBSCRIBED",
                 {
                     "instrument_before": prev_instrument,
                     "instrument_after": new_instrument,
+                    "grace_sec": self.quote_resubscribe_grace_sec,
                 },
             )
             self.consecutive_invalid_quote_ticks = 0
-            self.last_valid_quote_ts = now_ts
             return
 
         logger.error("Quote watchdog recovery failed: no BTC 15-min instrument selected")
@@ -3271,6 +3370,16 @@ class IntegratedBTCStrategy(
                 return
             now_ts = time.time()
             self._emit_strategy_status(now_ts)
+            recovery_started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0))
+            pending_instruments = getattr(self, "quote_recovery_pending_instruments", set())
+            if pending_instruments and recovery_started_ts > 0:
+                recovery_age = now_ts - recovery_started_ts
+                if recovery_age >= float(self.quote_resubscribe_grace_sec):
+                    if int(getattr(self, "quote_recovery_attempts", 0)) >= 1:
+                        self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts)
+                        return
+                    self._trigger_quote_watchdog_reload("quote_subscription_timeout", now_ts)
+                continue
             stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else None
             if stale_for is None or stale_for < self.quote_stale_sec:
                 continue

@@ -8,6 +8,60 @@ from loguru import logger
 
 
 class StrategyDBRuntimeMixin:
+    def _restore_market_risk_guards_from_trade_db_on_startup(self) -> None:
+        if not self.trade_db or not self.current_market_slug:
+            return
+        slug = str(self.current_market_slug)
+        counts = self.trade_db.load_market_guard_counts(slug)
+        buy_count = int(counts.get("buy_count", 0))
+        protective_exit_count = int(counts.get("protective_exit_count", 0))
+        if buy_count <= 0 and protective_exit_count <= 0:
+            return
+        budget_key = self._market_buy_budget_key(slug)
+        self.market_buy_count_total_by_slug[slug] = max(
+            int(self.market_buy_count_total_by_slug.get(slug, 0)), buy_count
+        )
+        self.market_buy_count_by_slug[budget_key] = max(
+            int(self.market_buy_count_by_slug.get(budget_key, 0)), buy_count
+        )
+        self.market_stop_loss_count_by_slug[slug] = max(
+            int(self.market_stop_loss_count_by_slug.get(slug, 0)), protective_exit_count
+        )
+        logger.warning(
+            "Recovered market risk guards from trade journal: "
+            f"slug={slug} buys={buy_count} protective_exits={protective_exit_count}"
+        )
+        self._db_strategy_event(
+            "MARKET_RISK_GUARDS_RECOVERED",
+            {
+                "slug": slug,
+                "market_buy_count": buy_count,
+                "market_stop_loss_count": protective_exit_count,
+            },
+        )
+
+    def _reconcile_redeem_cycle_pnl(self, redeem_payload: Dict[str, Any]) -> None:
+        if not self.trade_db:
+            return
+        slug = str(redeem_payload.get("slug") or redeem_payload.get("market_slug") or "")
+        redeem_value = redeem_payload.get("redeem_size_usdc")
+        if not slug or redeem_value is None:
+            return
+        reconciled = self.trade_db.reconcile_redeem_cycle(slug, float(redeem_value))
+        if reconciled is None:
+            return
+        self._db_strategy_event(
+            "MARKET_CYCLE_PNL",
+            {
+                "slug": slug,
+                "active_side": "RECONCILED",
+                "cycle_fill_realized_usdc": reconciled["sell_proceeds_usdc"] - reconciled["buy_cost_usdc"],
+                "cycle_settlement_pnl_usdc": reconciled["redeem_value_usdc"],
+                "cycle_combined_pnl_usdc": reconciled["cycle_combined_pnl_usdc"],
+                "source": "redeem_reconciliation",
+                **reconciled,
+            },
+        )
     def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         if not self.trade_db:
             return

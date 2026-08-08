@@ -123,6 +123,27 @@ class StrategyLifecycleMixin:
                 )
                 self.inventory_delta_shares = Decimal(str(ledger_inv))
 
+            spot = 0.0
+            if self.latest_external_spot is not None and self.latest_external_spot > 0:
+                spot = float(self.latest_external_spot)
+            elif self.last_external_spot is not None and self.last_external_spot > 0:
+                spot = float(self.last_external_spot)
+            elif self._binance_ws_price is not None and self._binance_ws_price > 0:
+                ws_age = time.time() - float(self._binance_ws_price_ts or 0.0)
+                if ws_age <= 60.0:
+                    spot = float(self._binance_ws_price)
+            if spot <= 0 and self.external_spot_history:
+                _, hist_px = self.external_spot_history[-1]
+                if hist_px > 0:
+                    spot = float(hist_px)
+
+            slug = self.current_market_slug or ""
+            strike = 0.0
+            if slug and slug in self.market_strike_cache_by_slug:
+                strike = float(self.market_strike_cache_by_slug[slug])
+            if hasattr(self, "_settle_shadow_simulation"):
+                self._settle_shadow_simulation(slug=slug, spot=spot, strike=strike)
+
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
                 cycle_fill_realized = float(self.market_cycle_realized_net_usdc)
@@ -152,25 +173,6 @@ class StrategyLifecycleMixin:
                     )
                 self.market_cycle_realized_net_usdc = Decimal("0")
                 return
-
-            spot = 0.0
-            if self.latest_external_spot is not None and self.latest_external_spot > 0:
-                spot = float(self.latest_external_spot)
-            elif self.last_external_spot is not None and self.last_external_spot > 0:
-                spot = float(self.last_external_spot)
-            elif self._binance_ws_price is not None and self._binance_ws_price > 0:
-                ws_age = time.time() - float(self._binance_ws_price_ts or 0.0)
-                if ws_age <= 60.0:
-                    spot = float(self._binance_ws_price)
-            if spot <= 0 and self.external_spot_history:
-                _, hist_px = self.external_spot_history[-1]
-                if hist_px > 0:
-                    spot = float(hist_px)
-
-            slug = self.current_market_slug or ""
-            strike = 0.0
-            if slug and slug in self.market_strike_cache_by_slug:
-                strike = float(self.market_strike_cache_by_slug[slug])
 
             if spot <= 0 or strike <= 0:
                 logger.warning(

@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Optional
 
 from bot.entry_quality import evaluate_entry_quality_adjustment
+from bot.probability_calibration import fractional_kelly_stake_fraction
 from bot.models import QuoteIntentState, QuoteMode
 
 
@@ -227,6 +228,57 @@ def apply_high_entry_price_size_adjustment(
     return desired_entry
 
 
+def apply_fractional_kelly_sizing(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    enabled: bool,
+    available_collateral_usdc: Decimal | None,
+    fraction: Decimal,
+    max_collateral_fraction: Decimal,
+    base_quantity: Decimal | None = None,
+) -> dict[str, Any]:
+    """Cap a BUY by conservative fractional-Kelly collateral budget."""
+    if side != "buy" or not enabled or not desired_entry.get("should_quote", False):
+        return desired_entry
+    if available_collateral_usdc is None or available_collateral_usdc <= 0:
+        return desired_entry
+    try:
+        price = Decimal(str(desired_entry.get("price")))
+        probability = Decimal(str(desired_entry.get("p_fair")))
+        multiplier = max(Decimal("0"), Decimal(str(desired_entry.get("size_multiplier", "1"))))
+    except Exception:
+        return desired_entry
+    if price <= 0:
+        return desired_entry
+    stake_fraction = fractional_kelly_stake_fraction(
+        probability=probability,
+        entry_price=price,
+        fraction=fraction,
+    )
+    stake_fraction = min(stake_fraction, max(Decimal("0"), max_collateral_fraction))
+    if stake_fraction <= 0:
+        desired_entry["should_quote"] = False
+        desired_entry["diag_reason"] = "kelly_no_positive_calibrated_edge"
+        desired_entry["kelly_sizing"] = {"stake_fraction": Decimal("0")}
+        return desired_entry
+    max_qty = (available_collateral_usdc * stake_fraction) / price
+    existing_target = desired_entry.get("target_qty_override")
+    unadjusted_target = existing_target if existing_target is not None else base_quantity
+    reduced_target = Decimal(str(unadjusted_target)) * multiplier if unadjusted_target is not None else None
+    # Kelly is a risk cap, never a mechanism to increase configured size.
+    desired_entry["target_qty_override"] = min(max_qty, reduced_target) if reduced_target is not None else max_qty
+    # The previously applied high/weak multiplier is embodied in the target.
+    desired_entry["size_multiplier"] = Decimal("1")
+    desired_entry["kelly_sizing"] = {
+        "stake_fraction": stake_fraction,
+        "available_collateral_usdc": available_collateral_usdc,
+        "target_qty": desired_entry["target_qty_override"],
+        "model_fraction": fraction,
+    }
+    return desired_entry
+
+
 def compute_loss_sell_policy(
     *,
     thesis_weakened: bool,
@@ -423,6 +475,7 @@ def evaluate_buy_entry_controls(
     side_score: Decimal,
     directional_entry_min_score_abs_new: Decimal,
     directional_first_entry_min_score_abs_new: Decimal,
+    first_entry_max_time_left_sec: int = 0,
     locked_side_score_abs: Decimal = Decimal("0"),
     maker_min_expected_net_usdc: Decimal,
     maker_reload_min_expected_net_multiplier: Decimal,
@@ -524,6 +577,27 @@ def evaluate_buy_entry_controls(
                 "locked_side_score_abs": float(abs(locked_side_score_abs)),
                 "required_score_abs": float(directional_first_entry_min_score_abs_new),
                 "engine": "new_signal",
+            },
+        )
+    if (
+        current_inst_inventory_qty <= 0
+        and int(market_buy_count) <= 0
+        and first_entry_max_time_left_sec > 0
+        and time_left_sec is not None
+        and time_left_sec > float(first_entry_max_time_left_sec)
+    ):
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW",
+            reason="first_entry_too_early",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "time_left_sec": float(time_left_sec),
+                "max_time_left_sec": int(first_entry_max_time_left_sec),
+                "engine": "entry_timing",
             },
         )
     if abs(side_score) < directional_entry_min_score_abs_new:

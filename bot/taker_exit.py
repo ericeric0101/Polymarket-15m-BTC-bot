@@ -31,6 +31,7 @@ class TakerExitHost(Protocol):
     taker_exit_cooldown_sec: int
     taker_exit_eval_interval_sec: float
     taker_exit_only_after_invalidation: bool
+    taker_exit_require_twap_confirmation: bool
     taker_exit_max_time_left_sec: int
     taker_exit_min_bid: Decimal
     taker_exit_min_recovery_ratio: Decimal
@@ -178,6 +179,22 @@ class TakerExitMixin:
                 )
             )
             avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            strike = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+            reference_spot = getattr(self, "latest_external_spot", None)
+            reference_source = str(getattr(self, "latest_external_spot_source", "") or "")
+            reference_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+            twap_fresh = reference_ts > 0 and (now_ts - reference_ts) <= 5.0
+            held_side = self._side_for_instrument_id(inst_id).value
+            twap_confirms_adverse = bool(
+                strike is not None
+                and reference_spot is not None
+                and str(reference_source).startswith("polymarket_chainlink_twap_")
+                and twap_fresh
+                and (
+                    (held_side == "UP" and Decimal(str(reference_spot)) <= Decimal(str(strike)))
+                    or (held_side == "DOWN" and Decimal(str(reference_spot)) >= Decimal(str(strike)))
+                )
+            )
             opened_ts = float(state.get("opened_ts", 0.0))
             hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
             invalidation_recovery_candidate = (
@@ -192,6 +209,10 @@ class TakerExitMixin:
                 and time_left_sec <= float(getattr(self, "taker_exit_max_time_left_sec", 0))
                 and best_bid >= Decimal(str(getattr(self, "taker_exit_disable_if_bid_below", Decimal("0"))))
                 and best_bid >= Decimal(str(getattr(self, "taker_exit_min_bid", Decimal("0"))))
+                and (
+                    not bool(getattr(self, "taker_exit_require_twap_confirmation", True))
+                    or twap_confirms_adverse
+                )
             )
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)

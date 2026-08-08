@@ -34,6 +34,7 @@ class FillLedgerHost(Protocol):
     recent_fill_pnl_results: list[Any]
     quote_pause_until_ts: float
     market_buy_count_by_slug: dict[str, int]
+    market_buy_count_total_by_slug: dict[str, int]
     market_buy_counted_order_ids_by_slug: dict[str, set[str]]
     market_max_buy_events_per_market: int
 
@@ -227,6 +228,8 @@ class FillLedgerMixin:
         counted_ids.add(filled_id)
         new_buy_count = int(self.market_buy_count_by_slug.get(budget_key, 0)) + 1
         self.market_buy_count_by_slug[budget_key] = new_buy_count
+        total_count = int(self.market_buy_count_total_by_slug.get(current_slug, 0)) + 1
+        self.market_buy_count_total_by_slug[current_slug] = total_count
         self._db_strategy_event(
             "MARKET_BUY_COUNT_UPDATED",
             {
@@ -234,6 +237,7 @@ class FillLedgerMixin:
                 "thesis_epoch": thesis_epoch,
                 "budget_key": budget_key,
                 "count": new_buy_count,
+                "market_total_count": total_count,
                 "max_per_market": int(self.market_max_buy_events_per_market),
                 "instrument_id": str(filled_inst) if filled_inst else None,
                 "client_order_id": filled_id,

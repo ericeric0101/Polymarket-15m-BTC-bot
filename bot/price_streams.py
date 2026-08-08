@@ -82,6 +82,7 @@ def build_polymarket_chainlink_subscribe_payload(
     use_twap: bool = True,
     window_seconds: int = 60,
     symbol: str = "btc/usd",
+    include_spot: bool = False,
 ) -> dict[str, Any]:
     if use_twap:
         topic = POLYMARKET_CHAINLINK_TWAP_TOPIC_BY_WINDOW.get(int(window_seconds))
@@ -91,15 +92,22 @@ def build_polymarket_chainlink_subscribe_payload(
     else:
         topic = "crypto_prices_chainlink"
         filters = ""
+    subscriptions = [
+        {
+            "topic": topic,
+            "type": "update" if use_twap else "*",
+            "filters": filters,
+        }
+    ]
+    # The rolling TWAP is the resolution reference; raw ticks are retained for
+    # the settlement pricer's volatility/history diagnostics.
+    if use_twap and include_spot:
+        subscriptions.append(
+            {"topic": "crypto_prices_chainlink", "type": "*", "filters": ""}
+        )
     return {
         "action": "subscribe",
-        "subscriptions": [
-            {
-                "topic": topic,
-                "type": "update" if use_twap else "*",
-                "filters": filters,
-            }
-        ],
+        "subscriptions": subscriptions,
     }
 
 

@@ -118,6 +118,7 @@ class SpotPricerMixin:
                         use_twap=use_twap,
                         window_seconds=twap_window,
                         symbol=twap_symbol,
+                        include_spot=use_twap,
                     )
                     mode = f"TWAP {twap_window}s" if use_twap else "spot"
                     logger.info(f"✓ Polymarket Chainlink WS connected ({mode})")
@@ -130,18 +131,22 @@ class SpotPricerMixin:
                         tick = extract_polymarket_chainlink_tick(raw)
                         if tick is None:
                             continue
-                        self._polymarket_chainlink_price = tick.price
-                        self._polymarket_chainlink_price_ts = tick.received_at_ts
-                        self._polymarket_chainlink_event_ts_ms = tick.updated_at_ms
+                        # Preserve the raw Chainlink stream separately.  The
+                        # TWAP stream remains the trading reference.
+                        if not self._is_twap_spot_source(tick.source):
+                            self._polymarket_chainlink_price = tick.price
+                            self._polymarket_chainlink_price_ts = tick.received_at_ts
+                            self._polymarket_chainlink_event_ts_ms = tick.updated_at_ms
                         if self._is_twap_spot_source(tick.source):
                             self._polymarket_chainlink_twap_price = tick.price
                             self._polymarket_chainlink_twap_price_ts = tick.received_at_ts
                             self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
-                        self._record_polymarket_chainlink_observation(
-                            tick.price,
-                            tick.received_at_ts,
-                        )
+                        if not self._is_twap_spot_source(tick.source):
+                            self._record_polymarket_chainlink_observation(
+                                tick.price,
+                                tick.received_at_ts,
+                            )
             except Exception as exc:
                 logger.debug(
                     f"Polymarket Chainlink WS error: {exc}; reconnect in {reconnect_delay:.0f}s"
@@ -354,6 +359,59 @@ class SpotPricerMixin:
         max_len = int(getattr(self, "polymarket_chainlink_history_max", 1200) or 1200)
         if len(history) > max_len:
             history.pop(0)
+
+    def _final_twap_observation(self, *, now_ts: float, end_ts: float, window_sec: int) -> tuple[Optional[Decimal], float]:
+        """Return the observed partial final-window average from raw ticks.
+
+        The result is intentionally unavailable until the final resolution
+        window and until a raw tick covers part of that interval.  That avoids
+        inventing a path from the rolling TWAP value itself.
+        """
+        window = max(1.0, float(window_sec))
+        start_ts = float(end_ts) - window
+        if now_ts <= start_ts:
+            return None, 0.0
+        records = sorted(
+            (
+                (float(ts), Decimal(str(price)))
+                for ts, price in getattr(self, "polymarket_chainlink_history", [])
+                if float(ts) <= now_ts and Decimal(str(price)) > 0
+            ),
+            key=lambda item: item[0],
+        )
+        if not records:
+            return None, 0.0
+        previous = None
+        for record in records:
+            if record[0] <= start_ts:
+                previous = record
+            else:
+                break
+        if previous is None:
+            return None, 0.0
+        cursor = start_ts
+        last_price = previous[1]
+        weighted_sum = Decimal("0")
+        observed_sec = 0.0
+        for ts, price in records:
+            if ts <= start_ts:
+                continue
+            segment_end = min(ts, now_ts)
+            if segment_end > cursor:
+                duration = segment_end - cursor
+                weighted_sum += last_price * Decimal(str(duration))
+                observed_sec += duration
+                cursor = segment_end
+            last_price = price
+            if cursor >= now_ts:
+                break
+        if cursor < now_ts:
+            duration = now_ts - cursor
+            weighted_sum += last_price * Decimal(str(duration))
+            observed_sec += duration
+        if observed_sec <= 0:
+            return None, 0.0
+        return weighted_sum / Decimal(str(observed_sec)), observed_sec
 
     def _resolve_opening_strike_from_history(self, start_ts: int) -> Optional[tuple]:
         return resolve_opening_strike_from_history(
@@ -781,8 +839,24 @@ class SpotPricerMixin:
                         self._last_strike_fallback_log_ts = time.time()
                 else:
                     now_ts = time.time()
+                    twap_window_sec = int(
+                        getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60
+                    )
+                    observed_twap_avg, observed_twap_sec = self._final_twap_observation(
+                        now_ts=now_ts,
+                        end_ts=float(end_ts) if end_ts is not None else now_ts + time_left_sec,
+                        window_sec=twap_window_sec,
+                    )
                     if now_ts - self._last_digital_pricer_log_ts >= 60:
-                        up_prob = MakerEngine.digital_up_probability(
+                        up_prob = MakerEngine.twap_settlement_up_probability(
+                            spot=float(external),
+                            strike=float(strike),
+                            sigma_annual=float(sigma),
+                            time_left_sec=time_left_sec,
+                            twap_window_sec=twap_window_sec,
+                            observed_window_avg=float(observed_twap_avg) if observed_twap_avg is not None else None,
+                            observed_window_sec=observed_twap_sec,
+                        ) if self._is_twap_spot_source(self.latest_external_spot_source or "") else MakerEngine.digital_up_probability(
                             spot=float(external),
                             strike=float(strike),
                             sigma_annual=float(sigma),
@@ -832,6 +906,27 @@ class SpotPricerMixin:
                 outcome=outcome,
                 pricer_mode=self.maker_fair_pricer_mode
             )
+            # ``calculate_fair_price`` owns the drift/digital fallback.  For
+            # a locked TWAP market replace only its digital probability with
+            # an average-settlement approximation, preserving token outcome.
+            if (
+                self.maker_fair_pricer_mode == "digital"
+                and strike is not None
+                and self._is_twap_spot_source(self.latest_external_spot_source or "")
+            ):
+                up_prob = MakerEngine.twap_settlement_up_probability(
+                    spot=float(external),
+                    strike=float(strike),
+                    sigma_annual=float(sigma),
+                    time_left_sec=time_left_sec,
+                    twap_window_sec=int(getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60),
+                    observed_window_avg=(
+                        float(observed_twap_avg) if "observed_twap_avg" in locals() and observed_twap_avg is not None else None
+                    ),
+                    observed_window_sec=(observed_twap_sec if "observed_twap_sec" in locals() else 0.0),
+                )
+                fair = up_prob if outcome != "down" else Decimal("1") - up_prob
+                self.last_digital_pricer_diagnostics["settlement_model"] = "twap_average_approx"
 
             self.last_external_spot = external
         else:

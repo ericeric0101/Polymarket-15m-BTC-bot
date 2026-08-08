@@ -139,6 +139,54 @@ class MakerEngine:
         return Decimal(str(p))
 
     @staticmethod
+    def twap_settlement_up_probability(
+        spot: float,
+        strike: float,
+        sigma_annual: float,
+        time_left_sec: float,
+        twap_window_sec: int = 60,
+        observed_window_avg: Optional[float] = None,
+        observed_window_sec: float = 0.0,
+    ) -> Decimal:
+        """Approximate probability that the final rolling TWAP clears strike.
+
+        For a Brownian price path, the average of a future window has lower
+        conditional variance than a terminal snapshot.  Before the final
+        window, the equivalent variance horizon is ``T - 2W/3``.  During the
+        final window the exact observed partial integral is not yet available
+        from RTDS, so retain the conservative terminal horizon instead of
+        fabricating it.  Raw Chainlink ticks are now retained for the next
+        stage, where that integral can be computed directly.
+        """
+        window = max(1.0, float(twap_window_sec))
+        horizon = float(time_left_sec)
+        observed_sec = max(0.0, min(window, float(observed_window_sec)))
+        if observed_window_avg is not None and observed_sec > 0:
+            remaining_sec = max(0.0, window - observed_sec)
+            if remaining_sec <= 0:
+                return Decimal("1") if float(observed_window_avg) >= strike else Decimal("0")
+            # The remaining segment must average at least this level for the
+            # complete 60-second settlement average to clear the strike.
+            required_remaining_avg = (
+                window * float(strike) - observed_sec * float(observed_window_avg)
+            ) / remaining_sec
+            return MakerEngine.digital_up_probability(
+                spot=spot,
+                strike=required_remaining_avg,
+                sigma_annual=sigma_annual,
+                # Average a future residual path rather than a terminal tick.
+                time_left_sec=max(1.0, remaining_sec / 3.0),
+            )
+        if horizon > window:
+            horizon = max(1.0, horizon - (2.0 * window / 3.0))
+        return MakerEngine.digital_up_probability(
+            spot=spot,
+            strike=strike,
+            sigma_annual=sigma_annual,
+            time_left_sec=horizon,
+        )
+
+    @staticmethod
     def implied_sigma_from_market_mid(
         market_mid: float,
         spot: float,

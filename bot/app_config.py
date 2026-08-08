@@ -81,6 +81,9 @@ class MakerConfig:
     high_entry_price_size_adjust_enabled: bool
     high_entry_price_size_adjust_threshold: Decimal
     high_entry_price_size_adjust_multiplier: Decimal
+    kelly_sizing_enabled: bool
+    kelly_sizing_fraction: Decimal
+    kelly_sizing_max_collateral_fraction: Decimal
     external_entry_confirmation_enabled: bool
     external_entry_confirmation_shadow_enabled: bool
     external_entry_confirmation_book_mid_threshold_ps: Decimal
@@ -136,6 +139,7 @@ class MakerConfig:
     pennying_min_edge: Decimal
     requote_max_per_sec: float
     requote_hysteresis_ticks: Decimal
+    buy_planned_quote_max_age_sec: float
     execution_penalty_enable: bool
     execution_penalty_floor_usdc: Decimal
     execution_slippage_spread_mult: Decimal
@@ -233,6 +237,10 @@ class MakerConfig:
             raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD must be >= 0")
         if self.high_entry_price_size_adjust_multiplier <= 0:
             raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER must be > 0")
+        if self.kelly_sizing_fraction < 0 or self.kelly_sizing_fraction > 1:
+            raise ValueError("KELLY_SIZING_FRACTION must be in [0, 1]")
+        if self.kelly_sizing_max_collateral_fraction < 0 or self.kelly_sizing_max_collateral_fraction > 1:
+            raise ValueError("KELLY_SIZING_MAX_COLLATERAL_FRACTION must be in [0, 1]")
         if self.reload_inventory_threshold_shares < 0:
             raise ValueError("MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES must be >= 0")
         if self.continuation_entry_size_multiplier <= 0:
@@ -290,6 +298,10 @@ class SideDecisionConfig:
     entry_spot_strike_lookback_sec: int
     entry_spot_strike_avg_min_abs: Decimal
     entry_fair_edge_min_ps: Decimal
+    first_entry_max_time_left_sec: int
+    probability_calibration_enabled: bool
+    probability_calibration_up_model_weight: Decimal
+    probability_calibration_down_model_weight: Decimal
     down_high_price_threshold: Decimal
     down_high_price_min_score_abs: Decimal
     down_high_price_min_robust_net_usdc: Decimal
@@ -320,6 +332,14 @@ class SideDecisionConfig:
             raise ValueError("ENTRY_SPOT_STRIKE_LOOKBACK_SEC must be >= 0")
         if self.entry_fair_edge_min_ps < 0:
             raise ValueError("ENTRY_FAIR_EDGE_MIN_PS must be >= 0")
+        if self.first_entry_max_time_left_sec < 0:
+            raise ValueError("FIRST_ENTRY_MAX_TIME_LEFT_SEC must be >= 0")
+        for weight in (
+            self.probability_calibration_up_model_weight,
+            self.probability_calibration_down_model_weight,
+        ):
+            if weight < 0 or weight > 1:
+                raise ValueError("Probability calibration model weights must be in [0, 1]")
         if self.down_high_price_threshold < 0:
             raise ValueError("DOWN_HIGH_PRICE_THRESHOLD must be >= 0")
         if self.down_high_price_min_score_abs < 0:
@@ -354,6 +374,7 @@ class ExitConfig:
     taker_exit_stop_loss_max_spread_pct: Decimal
     taker_exit_wait_for_sell_quote_sec: int
     taker_exit_only_after_invalidation: bool
+    taker_exit_require_twap_confirmation: bool
     taker_exit_max_time_left_sec: int
     taker_exit_min_bid: Decimal
     taker_exit_min_recovery_ratio: Decimal
@@ -453,8 +474,10 @@ class MarketDataConfig:
     market_strike_gamma_warn_interval_sec: int
     quote_healthcheck_interval_sec: int
     quote_stale_sec: int
+    quote_event_clock_skew_tolerance_sec: Decimal
     quote_invalid_tick_reload_threshold: int
     quote_reload_cooldown_sec: int
+    quote_resubscribe_grace_sec: int
     stale_quote_synth_max_age_sec: float
     fee_rate_fetch_interval_sec: int
     fee_rate_cache_ttl_sec: int
@@ -488,6 +511,10 @@ class OperationsConfig:
     sell_balance_retry_pause_sec: float
     trade_db_enabled: bool
     trade_db_path: str
+    shadow_simulation_enabled: bool
+    shadow_simulation_fill_timeout_sec: float
+    shadow_simulation_max_quote_age_sec: float
+    shadow_simulation_aged_quote_max_age_sec: float
 
 
 @dataclass(frozen=True)
@@ -606,6 +633,11 @@ class AppConfig:
                     "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER",
                     "0.5",
                 ),
+                kelly_sizing_enabled=_env_bool("KELLY_SIZING_ENABLED", False),
+                kelly_sizing_fraction=_env_decimal("KELLY_SIZING_FRACTION", "0.25"),
+                kelly_sizing_max_collateral_fraction=_env_decimal(
+                    "KELLY_SIZING_MAX_COLLATERAL_FRACTION", "0.10"
+                ),
                 external_entry_confirmation_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_ENABLED", False),
                 external_entry_confirmation_shadow_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_SHADOW_ENABLED", True),
                 external_entry_confirmation_book_mid_threshold_ps=_env_decimal(
@@ -703,6 +735,10 @@ class AppConfig:
                 pennying_min_edge=_env_decimal("MAKER_PENNYING_MIN_EDGE", "0.005"),
                 requote_max_per_sec=_env_float("MAX_REQUOTE_PER_SEC", 1.0),
                 requote_hysteresis_ticks=_env_decimal("REQUOTE_HYSTERESIS_TICKS", "1"),
+                buy_planned_quote_max_age_sec=max(
+                    0.5,
+                    _env_float("MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC", 10.0),
+                ),
                 execution_penalty_enable=_env_bool_inverted("MAKER_EXECUTION_PENALTY_ENABLE", True),
                 execution_penalty_floor_usdc=_env_decimal("MAKER_EXECUTION_PENALTY_FLOOR_USDC", "0.001"),
                 execution_slippage_spread_mult=_env_decimal("MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT", "0.15"),
@@ -852,6 +888,10 @@ class AppConfig:
                 entry_spot_strike_lookback_sec=max(0, _env_int("ENTRY_SPOT_STRIKE_LOOKBACK_SEC", 0)),
                 entry_spot_strike_avg_min_abs=_env_decimal("ENTRY_SPOT_STRIKE_AVG_MIN_ABS", "0"),
                 entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0"),
+                first_entry_max_time_left_sec=max(0, _env_int("FIRST_ENTRY_MAX_TIME_LEFT_SEC", 600)),
+                probability_calibration_enabled=_env_bool_inverted("PROBABILITY_CALIBRATION_ENABLED", True),
+                probability_calibration_up_model_weight=_env_decimal("PROBABILITY_CALIBRATION_UP_MODEL_WEIGHT", "0.65"),
+                probability_calibration_down_model_weight=_env_decimal("PROBABILITY_CALIBRATION_DOWN_MODEL_WEIGHT", "0.35"),
                 down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "1"),
                 down_high_price_min_score_abs=_env_decimal("DOWN_HIGH_PRICE_MIN_SCORE_ABS", "0.25"),
                 down_high_price_min_robust_net_usdc=_env_decimal("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC", "0.15"),
@@ -898,6 +938,9 @@ class AppConfig:
                 taker_exit_stop_loss_max_spread_pct=_env_decimal("TAKER_EXIT_STOP_LOSS_MAX_SPREAD_PCT", "0.03"),
                 taker_exit_wait_for_sell_quote_sec=max(0, _env_int("TAKER_EXIT_WAIT_FOR_SELL_QUOTE_SEC", 20)),
                 taker_exit_only_after_invalidation=_env_bool("TAKER_EXIT_ONLY_AFTER_INVALIDATION", False),
+                taker_exit_require_twap_confirmation=_env_bool_inverted(
+                    "TAKER_EXIT_REQUIRE_TWAP_CONFIRMATION", True
+                ),
                 taker_exit_max_time_left_sec=max(0, _env_int("TAKER_EXIT_MAX_TIME_LEFT_SEC", 0)),
                 taker_exit_min_bid=_env_decimal("TAKER_EXIT_MIN_BID", "0"),
                 taker_exit_min_recovery_ratio=_env_decimal("TAKER_EXIT_MIN_RECOVERY_RATIO", "0"),
@@ -980,8 +1023,13 @@ class AppConfig:
                 market_strike_gamma_warn_interval_sec=max(30, _env_int("MARKET_STRIKE_GAMMA_WARN_INTERVAL_SEC", 120)),
                 quote_healthcheck_interval_sec=_env_int("QUOTE_HEALTHCHECK_INTERVAL_SEC", 10),
                 quote_stale_sec=_env_int("QUOTE_STALE_SEC", 30),
+                quote_event_clock_skew_tolerance_sec=max(
+                    Decimal("0"),
+                    _env_decimal("QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC", "0.25"),
+                ),
                 quote_invalid_tick_reload_threshold=_env_int("QUOTE_INVALID_TICK_RELOAD_THRESHOLD", 80),
                 quote_reload_cooldown_sec=_env_int("QUOTE_RELOAD_COOLDOWN_SEC", 60),
+                quote_resubscribe_grace_sec=max(5, _env_int("QUOTE_RESUBSCRIBE_GRACE_SEC", 12)),
                 stale_quote_synth_max_age_sec=_env_float("STALE_QUOTE_SYNTH_MAX_AGE_SEC", 10.0),
                 fee_rate_fetch_interval_sec=max(5, _env_int("FEE_RATE_FETCH_INTERVAL_SEC", fee_rate_cache_ttl_sec)),
                 fee_rate_cache_ttl_sec=fee_rate_cache_ttl_sec,
@@ -1010,5 +1058,18 @@ class AppConfig:
                 sell_balance_retry_pause_sec=max(1.0, _env_float("SELL_BALANCE_RETRY_PAUSE_SEC", 3.0)),
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
                 trade_db_path=_env_str("TRADE_DB_PATH", "./logs/trade_journal.db"),
+                shadow_simulation_enabled=_env_bool_inverted("SHADOW_SIMULATION_ENABLED", True),
+                shadow_simulation_fill_timeout_sec=max(
+                    5.0,
+                    _env_float("SHADOW_SIMULATION_FILL_TIMEOUT_SEC", 90.0),
+                ),
+                shadow_simulation_max_quote_age_sec=max(
+                    0.1,
+                    _env_float("SHADOW_SIMULATION_MAX_QUOTE_AGE_SEC", 2.0),
+                ),
+                shadow_simulation_aged_quote_max_age_sec=max(
+                    0.1,
+                    _env_float("SHADOW_SIMULATION_AGED_QUOTE_MAX_AGE_SEC", 30.0),
+                ),
             ),
         )

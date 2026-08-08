@@ -12,6 +12,7 @@ from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.enums import ActiveSide
+from bot.edge_observation import build_quote_age_telemetry
 from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_selection
 from bot.ops import log_strategy_run_stop, stop_event_threads
 
@@ -29,6 +30,22 @@ def quote_tick_event_timestamp(tick: Any, fallback_now: float) -> float:
     except Exception:
         pass
     return float(fallback_now)
+
+
+def quote_event_is_fresh(
+    *,
+    received_ts: float,
+    event_ts: float,
+    max_age_sec: float,
+    clock_skew_tolerance_sec: Decimal | float,
+) -> bool:
+    """Return whether an exchange quote is current enough to drive execution."""
+    age = build_quote_age_telemetry(
+        observation_ts=received_ts,
+        quote_ts=event_ts,
+        clock_skew_tolerance_sec=clock_skew_tolerance_sec,
+    )
+    return age.effective_age_sec is not None and age.effective_age_sec <= Decimal(str(max_age_sec))
 
 
 def align_price_to_tick(strategy: Any, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
@@ -84,6 +101,43 @@ def start_maker_worker(strategy: Any, bid_decimal: Decimal, ask_decimal: Decimal
                 strategy._maker_worker_running = False
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def mark_quote_subscription_pending(
+    strategy: Any,
+    instrument_ids: List[InstrumentId],
+    *,
+    clear_cached_quotes: bool,
+) -> None:
+    """Require a new quote for the current market before declaring its feed healthy."""
+    now_ts = time.time()
+    instrument_keys = {str(inst_id) for inst_id in instrument_ids}
+    strategy.quote_subscription_started_ts = now_ts
+    strategy.quote_recovery_started_ts = now_ts
+    strategy.quote_recovery_pending_instruments = instrument_keys
+    strategy.quote_recovery_attempts = 0
+    if not clear_cached_quotes:
+        return
+    for inst_key in instrument_keys:
+        getattr(strategy, "latest_quote_by_inst", {}).pop(inst_key, None)
+        getattr(strategy, "latest_quote_depth_by_inst", {}).pop(inst_key, None)
+        getattr(strategy, "last_quote_update_ts_by_inst", {}).pop(inst_key, None)
+        getattr(strategy, "last_quote_received_ts_by_inst", {}).pop(inst_key, None)
+
+
+def refresh_quote_tick_subscriptions(strategy: Any) -> None:
+    """Replace subscriptions instead of relying on an idempotent subscribe after a feed stall."""
+    instrument_ids = list(getattr(strategy, "current_market_instruments", []) or [])
+    mark_quote_subscription_pending(strategy, instrument_ids, clear_cached_quotes=True)
+    for inst_id in instrument_ids:
+        try:
+            strategy.unsubscribe_quote_ticks(inst_id)
+        except Exception as exc:
+            logger.debug(f"Quote unsubscribe skipped for {inst_id}: {exc}")
+        try:
+            strategy.subscribe_quote_ticks(inst_id)
+        except Exception as exc:
+            logger.warning(f"Quote resubscribe failed for {inst_id}: {exc}")
 
 
 def find_btc_instrument(strategy: Any) -> bool:
@@ -218,6 +272,14 @@ def find_btc_instrument(strategy: Any) -> bool:
         previous_slug=previous_slug,
         current_slug=str(strategy.current_market_slug or ""),
     )
+    if hasattr(strategy, "_restore_shadow_simulation_for_slug"):
+        strategy._restore_shadow_simulation_for_slug(strategy.current_market_slug or "")
+    if strategy.current_market_slug != previous_slug:
+        mark_quote_subscription_pending(
+            strategy,
+            strategy.current_market_instruments,
+            clear_cached_quotes=True,
+        )
     for inst_id in strategy.current_market_instruments:
         strategy.subscribe_quote_ticks(inst_id)
     return True
@@ -300,15 +362,47 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             bid_decimal = max(Decimal("0.01"), mid_tmp - Decimal("0.005"))
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
 
+        quote_received_ts = time.time()
+        quote_event_ts = quote_tick_event_timestamp(tick, quote_received_ts)
+        preferred_inst = strategy._instrument_for_side(strategy.active_side) or strategy._primary_instrument_for_market()
+        is_preferred_quote = preferred_inst is None or tick.instrument_id == preferred_inst
+        quote_is_fresh = quote_event_is_fresh(
+            received_ts=quote_received_ts,
+            event_ts=quote_event_ts,
+            max_age_sec=float(strategy.quote_stale_sec),
+            clock_skew_tolerance_sec=getattr(strategy, "quote_event_clock_skew_tolerance_sec", Decimal("0.25")),
+        )
+        if not quote_is_fresh:
+            if is_preferred_quote:
+                # Store source event time, not receipt time: a stream can keep
+                # delivering old snapshots and otherwise hide a real outage.
+                strategy.last_valid_quote_ts = min(quote_event_ts, quote_received_ts)
+                strategy.consecutive_invalid_quote_ticks += 1
+                strategy._maybe_run_quote_watchdog(trigger="stale_quote_event")
+            return
+
         strategy.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
         getattr(strategy, "latest_quote_by_inst", {})[str(tick.instrument_id)] = (bid_decimal, ask_decimal)
-        quote_event_ts = quote_tick_event_timestamp(tick, time.time())
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = quote_event_ts
+        getattr(strategy, "last_quote_received_ts_by_inst", {})[str(tick.instrument_id)] = quote_received_ts
+        pending_instruments = getattr(strategy, "quote_recovery_pending_instruments", set())
+        if str(tick.instrument_id) in pending_instruments:
+            # A single valid quote proves the data connection recovered. The normal
+            # preferred-side freshness watchdog continues to protect execution.
+            pending_instruments.clear()
+            strategy.quote_recovery_started_ts = 0.0
+            strategy.quote_recovery_attempts = 0
         mid_price = (bid_decimal + ask_decimal) / 2
         strategy._append_real_mid_price(tick.instrument_id, mid_price)
-        preferred_inst = strategy._instrument_for_side(strategy.active_side) or strategy._primary_instrument_for_market()
-        if preferred_inst is None or tick.instrument_id == preferred_inst:
-            strategy.last_valid_quote_ts = time.time()
+        if hasattr(strategy, "_shadow_simulation_on_quote"):
+            strategy._shadow_simulation_on_quote(
+                tick.instrument_id,
+                bid_decimal,
+                ask_decimal,
+                quote_received_ts,
+            )
+        if is_preferred_quote:
+            strategy.last_valid_quote_ts = min(quote_event_ts, quote_received_ts)
             strategy.consecutive_invalid_quote_ticks = 0
             strategy.latest_market_bid = bid_decimal
             strategy.latest_market_ask = ask_decimal

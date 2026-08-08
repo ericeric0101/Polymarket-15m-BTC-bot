@@ -90,8 +90,47 @@ def submit_maker_quote(
                 )
             )
         )
-        min_buy_qty = max(strategy.maker_min_shares, strategy.maker_exchange_min_shares)
-        qty_dec = max(qty_dec * size_multiplier, min_buy_qty)
+        adjusted_qty = qty_dec * size_multiplier
+        exchange_min_qty = max(
+            strategy.maker_exchange_min_shares,
+            Decimal(str(10 ** (-precision))),
+        )
+        # A risk size-down that falls below the venue minimum must be skipped,
+        # not rounded back up. Rounding turned a configured 50% high-price
+        # reduction into nearly full exposure.
+        if size_multiplier < Decimal("1") and adjusted_qty + Decimal("0.000001") < exchange_min_qty:
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN",
+                side="BUY",
+                price=float(limit_price),
+                qty=float(adjusted_qty),
+                status="SKIPPED",
+                reason="risk_adjusted_size_below_exchange_min",
+                payload={
+                    "unadjusted_qty": float(qty_dec),
+                    "adjusted_qty": float(adjusted_qty),
+                    "size_multiplier": float(size_multiplier),
+                    "exchange_min_qty": float(exchange_min_qty),
+                },
+            )
+            logger.info(
+                "Skip maker BUY quote: risk-adjusted quantity below exchange minimum "
+                f"({float(adjusted_qty):.4f} < {float(exchange_min_qty):.4f})"
+            )
+            return
+        if target_qty_override is not None and adjusted_qty + Decimal("0.000001") < exchange_min_qty:
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN",
+                side="BUY",
+                price=float(limit_price),
+                qty=float(adjusted_qty),
+                status="SKIPPED",
+                reason="target_quantity_below_exchange_min",
+                payload={"exchange_min_qty": float(exchange_min_qty)},
+            )
+            return
+        min_buy_qty = exchange_min_qty if size_multiplier < Decimal("1") else max(strategy.maker_min_shares, exchange_min_qty)
+        qty_dec = max(adjusted_qty, min_buy_qty)
     if qty_dec <= 0:
         return
     inst_key = strategy._instrument_key(instrument_id)
@@ -226,16 +265,25 @@ def submit_maker_quote(
         return
 
     if strategy._is_dry_run_mode():
-        strategy._db_order_event(
-            event_type="ORDER_DRY_RUN_SKIP",
-            side=side.upper(),
-            price=float(limit_price),
-            qty=float(qty_dec),
-            status="SKIPPED",
-            reason="test_mode_dry_run",
-            expected_net_usdc=float(econ.expected_net_usdc),
-            payload={"instrument_id": str(instrument_id)},
-        )
+        if side == "buy" and hasattr(strategy, "_record_shadow_simulated_entry"):
+            strategy._record_shadow_simulated_entry(
+                instrument_id=instrument_id,
+                limit_price=limit_price,
+                qty=qty_dec,
+                econ=econ,
+                directional_snapshot=directional_snapshot,
+            )
+        else:
+            strategy._db_order_event(
+                event_type="ORDER_DRY_RUN_SKIP",
+                side=side.upper(),
+                price=float(limit_price),
+                qty=float(qty_dec),
+                status="SKIPPED",
+                reason="test_mode_dry_run",
+                expected_net_usdc=float(econ.expected_net_usdc),
+                payload={"instrument_id": str(instrument_id)},
+            )
         return
     if not instrument_id or not instrument:
         return

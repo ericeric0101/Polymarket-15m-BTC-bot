@@ -82,6 +82,7 @@ def initialize_strategy_settings(
     strategy.maker_mode = config.maker.maker_mode
     strategy.quote_refresh_sec = config.maker.quote_refresh_sec
     strategy.maker_half_spread = config.maker.half_spread
+    strategy.maker_buy_planned_quote_max_age_sec = config.maker.buy_planned_quote_max_age_sec
     strategy.maker_quote_size_usdc = config.maker.quote_size_usdc
     strategy.maker_min_shares = config.maker.min_shares
     strategy.maker_exchange_min_shares = config.maker.exchange_min_shares
@@ -98,6 +99,11 @@ def initialize_strategy_settings(
     )
     strategy.maker_high_entry_price_size_adjust_multiplier = (
         config.maker.high_entry_price_size_adjust_multiplier
+    )
+    strategy.kelly_sizing_enabled = config.maker.kelly_sizing_enabled
+    strategy.kelly_sizing_fraction = config.maker.kelly_sizing_fraction
+    strategy.kelly_sizing_max_collateral_fraction = (
+        config.maker.kelly_sizing_max_collateral_fraction
     )
     strategy.entry_confirmation_engine = EntryConfirmationEngine(
         EntryConfirmationConfig(
@@ -322,6 +328,7 @@ def initialize_strategy_settings(
     strategy.taker_exit_skip_log_interval_sec = config.exit.taker_exit_skip_log_interval_sec
     strategy.taker_exit_disable_stop_loss_last_sec = config.exit.taker_exit_disable_stop_loss_last_sec
     strategy.taker_exit_stop_loss_confirmations = config.exit.taker_exit_stop_loss_confirmations
+    strategy.taker_exit_require_twap_confirmation = config.exit.taker_exit_require_twap_confirmation
     strategy.stop_loss_reentry_cooldown_sec = config.exit.stop_loss_reentry_cooldown_sec
     strategy.exit_conviction_band_min_price = config.exit.exit_conviction_band_min_price
     strategy.exit_hold_band_min_price = config.exit.exit_hold_band_min_price
@@ -347,6 +354,10 @@ def initialize_strategy_settings(
     strategy.maker_urgent_exit_min_confirmations = config.exit.maker_urgent_exit_min_confirmations
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
     strategy.directional_first_entry_min_score_abs_new = config.side.directional_first_entry_min_score_abs_new
+    strategy.first_entry_max_time_left_sec = config.side.first_entry_max_time_left_sec
+    strategy.probability_calibration_enabled = config.side.probability_calibration_enabled
+    strategy.probability_calibration_up_model_weight = config.side.probability_calibration_up_model_weight
+    strategy.probability_calibration_down_model_weight = config.side.probability_calibration_down_model_weight
     strategy.side_thesis_weak_requires_opposite_side_new = config.side.side_thesis_weak_requires_opposite_side_new
     strategy.side_thesis_weak_opposite_score_abs_new = config.side.side_thesis_weak_opposite_score_abs_new
     strategy.side_thesis_weak_confirmations_new = config.side.side_thesis_weak_confirmations_new
@@ -476,13 +487,17 @@ def initialize_strategy_settings(
     strategy.quote_healthcheck_interval_sec = config.market_data.quote_healthcheck_interval_sec
     strategy.strategy_status_interval_sec = config.observability.strategy_status_interval_sec
     strategy.quote_stale_sec = config.market_data.quote_stale_sec
+    strategy.quote_event_clock_skew_tolerance_sec = config.market_data.quote_event_clock_skew_tolerance_sec
     strategy.quote_invalid_tick_reload_threshold = config.market_data.quote_invalid_tick_reload_threshold
     strategy.quote_reload_cooldown_sec = config.market_data.quote_reload_cooldown_sec
+    strategy.quote_resubscribe_grace_sec = config.market_data.quote_resubscribe_grace_sec
     strategy.last_quote_update_ts = 0.0
     strategy.last_quote_update_ts_by_inst = {}
     strategy.latest_quote_by_inst = {}
     strategy._last_edge_observation_signature_by_inst = {}
     strategy._last_edge_observation_ts_by_inst = {}
+    strategy.last_quote_received_ts_by_inst = {}
+    strategy.market_buy_count_total_by_slug = {}
     strategy.quote_pause_until_ts = 0.0
     strategy.loss_recovery_size_multiplier = 1.0
     strategy.loss_recovery_min_edge_addition = Decimal("0")
@@ -502,6 +517,11 @@ def initialize_strategy_settings(
     strategy.consecutive_invalid_quote_ticks = 0
     strategy.last_quote_watchdog_check_ts = 0.0
     strategy.last_quote_watchdog_reload_ts = 0.0
+    strategy.quote_subscription_started_ts = 0.0
+    strategy.quote_recovery_started_ts = 0.0
+    strategy.quote_recovery_pending_instruments = set()
+    strategy.quote_recovery_attempts = 0
+    strategy._quote_stream_rollover_requested = False
     maker_config = MakerEngineConfig(
         maker_half_spread=strategy.maker_half_spread,
         maker_quote_size_usdc=strategy.maker_quote_size_usdc,
@@ -713,5 +733,10 @@ def initialize_strategy_settings(
     strategy.trade_db = TradeJournalDB(
         db_path=config.operations.trade_db_path,
     ) if strategy.trade_db_enabled else None
+    strategy.shadow_simulation_enabled = config.operations.shadow_simulation_enabled
+    strategy.shadow_simulation_fill_timeout_sec = config.operations.shadow_simulation_fill_timeout_sec
+    strategy.shadow_simulation_max_quote_age_sec = config.operations.shadow_simulation_max_quote_age_sec
+    strategy.shadow_simulation_aged_quote_max_age_sec = config.operations.shadow_simulation_aged_quote_max_age_sec
+    strategy._shadow_simulations_by_slug = {}
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

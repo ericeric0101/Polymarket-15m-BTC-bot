@@ -20,6 +20,21 @@ class RejectResult:
     rejected_inst_key: str
 
 
+def is_benign_cancel_reject_reason(reason: str) -> bool:
+    """Whether an exchange cancel rejection confirms the order is terminal."""
+    normalized = str(reason or "").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "already canceled",
+            "already cancelled",
+            "order can't be found",
+            "order cannot be found",
+            "matched orders can't be canceled",
+        )
+    )
+
+
 def reconcile_cancel_ack(
     canceled_id: str,
     event: Any,
@@ -84,7 +99,8 @@ def reconcile_benign_cancel_reject(
 ) -> bool:
     for order_key, state in list(active_maker_orders.items()):
         order = state.get("order")
-        if order and str(order.client_order_id) == rejected_id:
+        state_coid = str(state.get("client_order_id", "") or "")
+        if (order and str(order.client_order_id) == rejected_id) or (state_coid and state_coid == rejected_id):
             active_maker_orders.pop(order_key, None)
             return True
     return False

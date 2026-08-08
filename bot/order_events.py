@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from bot.execution_events import (
+    is_benign_cancel_reject_reason,
     reconcile_benign_cancel_reject,
     reconcile_cancel_ack,
     reconcile_rejected_order,
@@ -211,6 +212,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                 f"cooldown={strategy.maker_high_cost_exit_cooldown_sec}s"
             )
     strategy._clear_pending_taker_exit_for_order(filled_id)
+    protective_exit_reasons = {"stop_loss", "invalidation_recovery", "offside_near_close"}
     if taker_exit_reason == "stop_loss" and strategy.stop_loss_reentry_cooldown_sec > 0:
         inst_key = strategy._instrument_key(filled_inst)
         if inst_key:
@@ -223,6 +225,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                 "Stop-loss re-entry cooldown armed: "
                 f"inst={inst_key} cooldown={strategy.stop_loss_reentry_cooldown_sec}s"
             )
+    if taker_exit_reason in protective_exit_reasons:
         current_slug = str(strategy.current_market_slug or "")
         if current_slug:
             new_count = int(strategy.market_stop_loss_count_by_slug.get(current_slug, 0)) + 1
@@ -233,6 +236,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                     "slug": current_slug,
                     "count": new_count,
                     "max_per_market": int(strategy.market_stop_loss_max_per_market),
+                    "reason": taker_exit_reason,
                     "instrument_id": str(filled_inst) if filled_inst else None,
                     "client_order_id": filled_id,
                 },
@@ -406,14 +410,16 @@ def handle_order_cancel_rejected(strategy: Any, event: Any) -> None:
     strategy._clear_pending_taker_exit_for_order(rejected_id)
     reason = str(getattr(event, "reason", "") or "").lower()
 
-    logger.warning(f"OrderCancelRejected for {rejected_id}: {reason}")
-
-    if "already canceled or matched" in reason or "order can't be found" in reason:
+    if is_benign_cancel_reject_reason(reason):
         if reconcile_benign_cancel_reject(
             rejected_id=rejected_id,
             active_maker_orders=strategy.active_maker_orders,
         ):
-            logger.info(f"Clearing {rejected_id} from active_maker_orders due to benign CancelReject.")
+            logger.debug(
+                f"Cancel already complete; cleared {rejected_id} from active_maker_orders."
+            )
+        else:
+            logger.debug(f"Cancel already complete for {rejected_id}: {reason}")
 
         strategy._db_order_event(
             event_type="ORDER_CANCEL_REJECTED",
@@ -423,6 +429,9 @@ def handle_order_cancel_rejected(strategy: Any, event: Any) -> None:
             status="CANCEL_REJECTED_RECONCILED",
             reason=reason,
         )
+        return
+
+    logger.warning(f"OrderCancelRejected for {rejected_id}: {reason}")
 
 
 def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "ORDER REJECTED") -> None:

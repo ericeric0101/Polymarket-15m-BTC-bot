@@ -8,10 +8,12 @@ import time
 from datetime import timezone
 from typing import Any, Callable, Dict, Optional
 
+from bot.process_lock import ProcessLock
 from dashboard_state import DashboardState, TradeRecord
 from telegram_notifier import TelegramNotifier
 
 logger = logging.getLogger(__name__)
+_telegram_polling_lock: ProcessLock | None = None
 
 try:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -308,10 +310,32 @@ class TelegramBotController:
 
 
 def start_telegram_bot_thread(state: DashboardState) -> Optional[threading.Thread]:
+    global _telegram_polling_lock
+    if os.getenv("TELEGRAM_CONTROLLER_ENABLED", "1").strip().lower() in ("0", "false", "no", "off"):
+        logger.info("Telegram bot controller disabled by TELEGRAM_CONTROLLER_ENABLED")
+        return None
     if Application is None:
         logger.warning("Telegram bot disabled; install python-telegram-bot>=20")
         return None
     if not os.getenv("TELEGRAM_BOT_TOKEN") or not os.getenv("TELEGRAM_OWNER_CHAT_ID"):
         logger.warning("Telegram bot disabled; TELEGRAM_BOT_TOKEN or TELEGRAM_OWNER_CHAT_ID missing")
         return None
-    return TelegramBotController(state).start_background_thread()
+    if _telegram_polling_lock is None:
+        lock_path = os.getenv(
+            "TELEGRAM_POLLING_LOCK_PATH",
+            "/tmp/polymarket-btc-15m-telegram-polling.lock",
+        )
+        lock = ProcessLock(lock_path)
+        if not lock.acquire():
+            logger.warning(
+                "Telegram bot controller not started: another local process holds the polling lock."
+            )
+            return None
+        _telegram_polling_lock = lock
+    try:
+        return TelegramBotController(state).start_background_thread()
+    except Exception:
+        if _telegram_polling_lock is not None:
+            _telegram_polling_lock.release()
+            _telegram_polling_lock = None
+        raise

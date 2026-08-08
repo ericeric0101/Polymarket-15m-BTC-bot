@@ -16,6 +16,7 @@ class MarketCycleState:
     side_stop_loss_penalty_until_by_market_side: dict[str, float] = field(default_factory=dict)
     market_stop_loss_count_by_slug: dict[str, int] = field(default_factory=dict)
     market_buy_count_by_slug: dict[str, int] = field(default_factory=dict)
+    market_buy_count_total_by_slug: dict[str, int] = field(default_factory=dict)
     thesis_epoch_by_slug: dict[str, int] = field(default_factory=dict)
     market_buy_counted_order_ids_by_slug: dict[str, set[str]] = field(default_factory=dict)
     taker_exit_reason_by_client_order_id: dict[str, str] = field(default_factory=dict)
@@ -26,7 +27,9 @@ class MarketCycleState:
     conditional_balance_cache_by_token: dict[str, Any] = field(default_factory=dict)
     latest_quote_depth_by_inst: dict[str, Any] = field(default_factory=dict)
     latest_quote_by_inst: dict[str, tuple[Any, Any]] = field(default_factory=dict)
+    # Exchange event timestamps are telemetry; local receipt timestamps gate execution.
     last_quote_update_ts_by_inst: dict[str, float] = field(default_factory=dict)
+    last_quote_received_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_edge_observation_signature_by_inst: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     last_edge_observation_ts_by_inst: dict[str, float] = field(default_factory=dict)
     maker_profit_run_peak_bid_by_inst: dict[str, Any] = field(default_factory=dict)
@@ -54,6 +57,7 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy.side_stop_loss_penalty_until_by_market_side = state.side_stop_loss_penalty_until_by_market_side
     strategy.market_stop_loss_count_by_slug = state.market_stop_loss_count_by_slug
     strategy.market_buy_count_by_slug = state.market_buy_count_by_slug
+    strategy.market_buy_count_total_by_slug = state.market_buy_count_total_by_slug
     strategy._thesis_epoch_by_slug = state.thesis_epoch_by_slug
     strategy.market_buy_counted_order_ids_by_slug = state.market_buy_counted_order_ids_by_slug
     strategy.taker_exit_reason_by_client_order_id = state.taker_exit_reason_by_client_order_id
@@ -65,6 +69,7 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy.latest_quote_depth_by_inst = state.latest_quote_depth_by_inst
     strategy.latest_quote_by_inst = state.latest_quote_by_inst
     strategy.last_quote_update_ts_by_inst = state.last_quote_update_ts_by_inst
+    strategy.last_quote_received_ts_by_inst = state.last_quote_received_ts_by_inst
     strategy._last_edge_observation_signature_by_inst = state.last_edge_observation_signature_by_inst
     strategy._last_edge_observation_ts_by_inst = state.last_edge_observation_ts_by_inst
     strategy.maker_profit_run_peak_bid_by_inst = state.maker_profit_run_peak_bid_by_inst

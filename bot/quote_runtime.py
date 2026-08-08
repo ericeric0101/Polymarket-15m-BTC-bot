@@ -70,10 +70,32 @@ class QuoteRuntimeMixin:
         if planned_bid <= 0 or planned_ask <= 0 or planned_quote_ts <= 0:
             return False
         quote_age_sec = max(0.0, time.time() - planned_quote_ts)
-        if quote_age_sec > 1.5:
+        max_quote_age_sec = float(
+            getattr(self, "maker_buy_planned_quote_max_age_sec", 10.0)
+        )
+        received_quote_ts = getattr(self, "last_quote_received_ts_by_inst", {}).get(
+            str(instrument_id)
+        )
+        if received_quote_ts is not None:
+            try:
+                received_quote_age_sec = max(0.0, time.time() - float(received_quote_ts))
+            except (TypeError, ValueError):
+                received_quote_age_sec = None
+            if (
+                received_quote_age_sec is not None
+                and received_quote_age_sec > max_quote_age_sec
+            ):
+                logger.warning(
+                    "Skip BUY quote: cached top-of-book has not been received recently "
+                    f"(inst={self._instrument_key(instrument_id)}, "
+                    f"age={received_quote_age_sec:.2f}s, max_age={max_quote_age_sec:.2f}s)"
+                )
+                return True
+        if quote_age_sec > max_quote_age_sec:
             logger.warning(
                 "Skip BUY quote: planned quote snapshot is stale "
-                f"(inst={self._instrument_key(instrument_id)}, age={quote_age_sec:.2f}s)"
+                f"(inst={self._instrument_key(instrument_id)}, age={quote_age_sec:.2f}s, "
+                f"max_age={max_quote_age_sec:.2f}s)"
             )
             return True
         current_bid, current_ask = quote_now
