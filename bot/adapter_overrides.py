@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import threading
 from decimal import Decimal, InvalidOperation
@@ -10,6 +11,19 @@ import httpx
 import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 from loguru import logger
 from py_clob_client_v2.exceptions import PolyApiException
+
+
+def should_emit_quote_heartbeat(
+    *,
+    quote_unchanged: bool,
+    now_ns: int,
+    last_emit_ns: int,
+    heartbeat_sec: float,
+) -> bool:
+    """Keep a subscribed top-of-book fresh when only deeper book levels change."""
+    if not quote_unchanged:
+        return True
+    return now_ns - last_emit_ns >= int(max(0.1, heartbeat_sec) * 1_000_000_000)
 
 
 def install_runtime_compatibility_overrides() -> None:
@@ -56,6 +70,13 @@ def _install_polymarket_data_overrides() -> None:
             self._tick_size_warn_last_ts = {}
         if not hasattr(self, "_tick_size_warn_throttle_sec"):
             self._tick_size_warn_throttle_sec = 60.0
+        if not hasattr(self, "_quote_heartbeat_emit_ns"):
+            self._quote_heartbeat_emit_ns = {}
+        if not hasattr(self, "_quote_heartbeat_sec"):
+            self._quote_heartbeat_sec = max(
+                0.1,
+                float(os.getenv("POLYMARKET_QUOTE_HEARTBEAT_SEC", "5")),
+            )
 
     def patched_log_drop_quote_warning_throttled(self, instrument_id, reason: str) -> None:
         key = f"{instrument_id}:{reason}"
@@ -142,15 +163,23 @@ def _install_polymarket_data_overrides() -> None:
             )
 
             last_quote = self._last_quotes.get(instrument.id)
-            if last_quote is not None and (
+            quote_unchanged = last_quote is not None and (
                 quote.bid_price == last_quote.bid_price
                 and quote.ask_price == last_quote.ask_price
                 and quote.bid_size == last_quote.bid_size
                 and quote.ask_size == last_quote.ask_size
+            )
+            last_emit_ns = int(getattr(self, "_quote_heartbeat_emit_ns", {}).get(instrument.id, 0) or 0)
+            if not should_emit_quote_heartbeat(
+                quote_unchanged=quote_unchanged,
+                now_ns=now_ns,
+                last_emit_ns=last_emit_ns,
+                heartbeat_sec=float(getattr(self, "_quote_heartbeat_sec", 5.0)),
             ):
                 return
 
             self._last_quotes[instrument.id] = quote
+            self._quote_heartbeat_emit_ns[instrument.id] = now_ns
             self._handle_data(quote)
 
     def patched_handle_book_snapshot(self, instrument, ws_message) -> None:
@@ -172,6 +201,7 @@ def _install_polymarket_data_overrides() -> None:
                 )
                 return
             self._last_quotes[instrument.id] = quote
+            self._quote_heartbeat_emit_ns[instrument.id] = now_ns
             self._handle_data(quote)
 
     cls.__init__ = patched_init

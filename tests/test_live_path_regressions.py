@@ -16,6 +16,7 @@ from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import quote_event_is_fresh, refresh_quote_tick_subscriptions
+from bot.adapter_overrides import should_emit_quote_heartbeat
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
 from bot.pricing_runtime import PricingRuntimeMixin
@@ -998,6 +999,7 @@ class DummySpotPricerStrategy(SpotPricerMixin):
         self.latest_external_spot_source_ts = 1000.2
         self.current_market_slug = "btc-updown-15m-test"
         self._logged_first_spot = False
+        self.strategy_events = []
         self.cache = SimpleNamespace(instrument=lambda _inst: SimpleNamespace(info={"question": ""}))
 
     def _normalize_instrument_id(self, instrument_id):
@@ -1014,6 +1016,9 @@ class DummySpotPricerStrategy(SpotPricerMixin):
 
     def _fetch_binance_open_price_sync(self, start_ts):
         return Decimal("66602.20")
+
+    def _db_strategy_event(self, event_type, payload=None):
+        self.strategy_events.append((event_type, payload or {}))
 
 
 class DummySellableQtyStrategy(PricingRuntimeMixin):
@@ -1189,6 +1194,39 @@ def test_ghost_inventory_reconcile_recovers_cost_basis_from_recent_buy_order():
     assert restored == Decimal("10.8")
     assert strategy.live_inventory_cost["inst-down"]["avg_entry_price"] == Decimal("0.64")
     assert strategy.strategy_events[-1][1]["avg_entry_recovered"] is True
+
+
+def test_ghost_inventory_reconcile_clears_stale_sell_state_before_requoting():
+    strategy = DummySellableQtyStrategy()
+    strategy.live_inventory_cost = {}
+    strategy.inventory_delta_shares = Decimal("0")
+    strategy.active_maker_orders = {
+        "sell": {
+            "side": "sell",
+            "instrument_id": "inst-down",
+            "order": SimpleNamespace(client_order_id="SELL-1"),
+        },
+        "other-market-sell": {
+            "side": "sell",
+            "instrument_id": "inst-up",
+            "order": SimpleNamespace(client_order_id="SELL-2"),
+        },
+    }
+    strategy.strategy_events = []
+    strategy._db_strategy_event = lambda event_type, payload=None: strategy.strategy_events.append((event_type, payload or {}))
+
+    restored = IntegratedBTCStrategy._reconcile_ghost_inventory(
+        strategy,
+        instrument_id="inst-down",
+        confirmed_qty=Decimal("0"),
+        onchain_qty=Decimal("5.4"),
+    )
+
+    assert restored == Decimal("5.4")
+    assert strategy.inventory_delta_shares == Decimal("5.4")
+    assert "sell" not in strategy.active_maker_orders
+    assert "other-market-sell" in strategy.active_maker_orders
+    assert strategy.strategy_events[-1][1]["cleared_sell_orders"] == ["SELL-1"]
 
 
 def test_polymarket_user_trade_decimal_fallback_handles_empty_maker_fields():
@@ -2790,6 +2828,16 @@ def test_app_config_rejects_invalid_patch_mode(monkeypatch):
         assert "patch mode" in str(exc)
 
 
+def test_app_config_disables_short_window_auto_tune_by_default(monkeypatch):
+    monkeypatch.delenv("MAKER_AUTO_TUNE", raising=False)
+    monkeypatch.delenv("MAKER_AUTO_TUNE_INTERVAL_SEC", raising=False)
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.maker.auto_tune_enabled is False
+    assert config.maker.auto_tune_interval_sec == 3600
+
+
 def test_market_cycle_state_binding_replaces_per_market_containers():
     strategy = SimpleNamespace()
     first = MarketCycleState()
@@ -4111,4 +4159,46 @@ def test_quote_event_freshness_uses_source_event_time_not_receive_time():
         event_ts=69.9,
         max_age_sec=30.0,
         clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+
+
+def test_unchanged_top_of_book_emits_bounded_heartbeat():
+    assert should_emit_quote_heartbeat(
+        quote_unchanged=False,
+        now_ns=1_000_000_000,
+        last_emit_ns=999_000_000,
+        heartbeat_sec=5.0,
+    )
+
+
+def test_stale_twap_degrades_to_fresh_binance_instead_of_stopping_pipeline():
+    strategy = DummySpotPricerStrategy()
+    now_ts = time.time()
+    strategy.require_twap_reference_spot = True
+    strategy.external_spot_source_delta_abs_max_usd = Decimal("0")
+    strategy._polymarket_chainlink_twap_price = Decimal("65000")
+    strategy._polymarket_chainlink_twap_price_ts = now_ts - 11.0
+    strategy._polymarket_chainlink_twap_window_sec = 60
+    strategy._polymarket_chainlink_price = Decimal("65001")
+    strategy._polymarket_chainlink_price_ts = now_ts
+    strategy._binance_ws_price = Decimal("64999")
+    strategy._binance_ws_price_ts = now_ts
+    strategy.strategy_events = []
+
+    price = asyncio.run(strategy._fetch_external_spot_price())
+
+    assert price == Decimal("64999")
+    assert strategy.latest_external_spot_source == "binance_ws"
+    assert strategy.strategy_events[-1][0] == "TWAP_REFERENCE_DEGRADED"
+    assert not should_emit_quote_heartbeat(
+        quote_unchanged=True,
+        now_ns=5_999_000_000,
+        last_emit_ns=1_000_000_000,
+        heartbeat_sec=5.0,
+    )
+    assert should_emit_quote_heartbeat(
+        quote_unchanged=True,
+        now_ns=6_000_000_000,
+        last_emit_ns=1_000_000_000,
+        heartbeat_sec=5.0,
     )

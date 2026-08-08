@@ -85,8 +85,8 @@ A production-grade algorithmic trading bot for **Polymarket's 15-minute BTC pric
 ## 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/polymarket-btc-15m-bot.git
-cd polymarket-btc-15m-bot
+git clone https://github.com/ericeric0101/Polymarket-15m-BTC-bot.git
+cd Polymarket-15m-BTC-bot
 ```
 ## 2. Set Up Virtual Environment
 
@@ -174,8 +174,8 @@ MAKER_MAX_CONSECUTIVE_DENIED=5
 MAKER_ORDER_TTL_SEC=20
 MAKER_REQUOTE_THRESHOLD=0.002
 MAKER_BALANCE_PAUSE_SEC=60
-MAKER_AUTO_TUNE=1
-MAKER_AUTO_TUNE_INTERVAL_SEC=300
+MAKER_AUTO_TUNE=0
+MAKER_AUTO_TUNE_INTERVAL_SEC=3600
 EXTERNAL_SPOT_TIMEOUT_SEC=2.5
 POLYMARKET_CLOB_BASE_URL=https://clob.polymarket.com
 FEE_RATE_CACHE_TTL_SEC=300
@@ -284,7 +284,6 @@ polymarket-btc-15m-bot/
 │   ├── pure_signal_probe.py
 │   ├── pure_probe_report.py
 │   ├── pnl_reconcile_report.py
-│   └── patch_*.py
 │
 ├── .env.example                 # Template for environment variables
 ├── .gitignore
@@ -324,11 +323,11 @@ python -m py_compile monitoring/*.py
 
 Important note on runtime patches:
 
-- `run_bot.py` auto-applies local compatibility patches on startup
-- several scripts under `scripts/patch_*.py` modify `venv/site-packages`
-- these are runtime-critical in the current setup
+- `bot.launcher` installs the explicitly configured process-local compatibility overrides
+- no repository script rewrites `venv/site-packages`
+- the active override surface is version-pinned and covered by live-path tests
 
-Read [`LEGACY_PATCH_STATUS.md`](docs/LEGACY_PATCH_STATUS.md) before cleaning up `core/` or patch scripts.
+Read [`LEGACY_PATCH_STATUS.md`](docs/LEGACY_PATCH_STATUS.md) before changing adapter compatibility behavior.
 
 🤝 Contributing
 Contributions are welcome! Here's how you can help:

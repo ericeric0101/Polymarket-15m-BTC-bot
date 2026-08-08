@@ -3288,6 +3288,12 @@ class IntegratedBTCStrategy(
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
         """
+        trigger_source = str(trigger).split("|", 1)[0]
+        trigger_counts = getattr(self, "quote_watchdog_trigger_counts", None)
+        if not isinstance(trigger_counts, dict):
+            trigger_counts = {}
+            self.quote_watchdog_trigger_counts = trigger_counts
+        trigger_counts[trigger_source] = int(trigger_counts.get(trigger_source, 0)) + 1
         selected_ok, reload_ts, _stale_for, prev_instrument = handle_quote_watchdog_recovery(
             trigger=trigger,
             now_ts=now_ts,
@@ -3301,6 +3307,7 @@ class IntegratedBTCStrategy(
             find_btc_instrument_fn=self._find_btc_instrument,
             logger_warning_fn=logger.warning,
             logger_error_fn=logger.error,
+            trigger_count=trigger_counts[trigger_source],
         )
         if reload_ts == self.last_quote_watchdog_reload_ts:
             return
@@ -3322,6 +3329,8 @@ class IntegratedBTCStrategy(
                     "instrument_before": prev_instrument,
                     "instrument_after": new_instrument,
                     "grace_sec": self.quote_resubscribe_grace_sec,
+                    "trigger": trigger,
+                    "trigger_count": trigger_counts[trigger_source],
                 },
             )
             self.consecutive_invalid_quote_ticks = 0

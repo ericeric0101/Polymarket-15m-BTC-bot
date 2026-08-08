@@ -27,6 +27,10 @@ paper_trades.json
 .vscode/
 .idea/
 
+# Generated AI/context exports and local diff bundles
+repomix-output.xml
+full_diff.patch
+
 # Prometheus TSDB data
 data/
 

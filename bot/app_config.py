@@ -764,8 +764,10 @@ class AppConfig:
                 fee_rate_legacy_bps_default=_env_int("MAKER_FEE_RATE_BPS_DEFAULT", 0),
                 econ_fee_rate_decimal=econ_fee_rate_decimal,
                 max_order_usdc=_env_decimal("MAKER_MAX_ORDER_USDC", "1.0"),
-                auto_tune_enabled=_env_bool_inverted("MAKER_AUTO_TUNE", True),
-                auto_tune_interval_sec=_env_int("MAKER_AUTO_TUNE_INTERVAL_SEC", 300),
+                # Online tuning is experimental. It must be explicitly enabled
+                # after an offline replay establishes a stable baseline.
+                auto_tune_enabled=_env_bool("MAKER_AUTO_TUNE", False),
+                auto_tune_interval_sec=max(3600, _env_int("MAKER_AUTO_TUNE_INTERVAL_SEC", 3600)),
                 momentum_filter_pct=_env_decimal("MAKER_MOMENTUM_FILTER_PCT", "0.06"),
                 momentum_buy_filter_pct=_env_decimal(
                     "MAKER_MOMENTUM_BUY_FILTER_PCT",

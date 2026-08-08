@@ -160,6 +160,7 @@ def handle_quote_watchdog_recovery(
     find_btc_instrument_fn: Callable[[], bool],
     logger_warning_fn: Callable[[str], None],
     logger_error_fn: Callable[[str], None],
+    trigger_count: int | None = None,
 ) -> tuple[bool, float, float | None, str | None]:
     if now_ts - last_quote_watchdog_reload_ts < quote_reload_cooldown_sec:
         return False, last_quote_watchdog_reload_ts, None, None
@@ -177,6 +178,7 @@ def handle_quote_watchdog_recovery(
             "stale_for_sec": stale_for,
             "invalid_ticks": consecutive_invalid_quote_ticks,
             "instrument_before": prev_instrument,
+            "trigger_count": trigger_count,
         },
     )
     cancel_active_maker_orders_fn()

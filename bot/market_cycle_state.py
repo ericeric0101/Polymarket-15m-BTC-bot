@@ -27,7 +27,8 @@ class MarketCycleState:
     conditional_balance_cache_by_token: dict[str, Any] = field(default_factory=dict)
     latest_quote_depth_by_inst: dict[str, Any] = field(default_factory=dict)
     latest_quote_by_inst: dict[str, tuple[Any, Any]] = field(default_factory=dict)
-    # Exchange event timestamps are telemetry; local receipt timestamps gate execution.
+    # Event timestamps are the source-of-truth for quote freshness; receipt
+    # timestamps remain available to diagnose transport latency separately.
     last_quote_update_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_quote_received_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_edge_observation_signature_by_inst: dict[str, tuple[Any, ...]] = field(default_factory=dict)

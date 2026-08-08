@@ -297,10 +297,31 @@ class SpotPricerMixin:
             logger.debug(f"Polymarket Chainlink TWAP WS price stale ({age:.1f}s)")
 
         if require_twap:
-            return None
+            # The final outcome is TWAP-based, but pausing the whole signal
+            # pipeline during a short public-feed hiccup is worse than clearly
+            # marking a degraded reference source. Snapshot fallback remains
+            # disabled in this strict mode; Binance is the next source below.
+            now_ts = time.time()
+            last_warn_ts = float(getattr(self, "_last_twap_stale_fallback_warn_ts", 0.0) or 0.0)
+            if now_ts - last_warn_ts >= 30.0:
+                logger.warning(
+                    "Polymarket Chainlink TWAP stale; using degraded external fallback until TWAP recovers"
+                )
+                self._last_twap_stale_fallback_warn_ts = now_ts
+                if hasattr(self, "_db_strategy_event"):
+                    try:
+                        self._db_strategy_event(
+                            "TWAP_REFERENCE_DEGRADED",
+                            {
+                                "twap_age_sec": (time.time() - twap_ts) if twap_ts > 0 else None,
+                                "fallback_preference": "binance_ws_then_coinbase_http",
+                            },
+                        )
+                    except Exception:
+                        pass
 
-        # Legacy fallback: Polymarket Chainlink snapshot WS if explicitly allowed.
-        if self._polymarket_chainlink_price is not None:
+        # Legacy snapshot is allowed only when strict TWAP alignment is disabled.
+        if not require_twap and self._polymarket_chainlink_price is not None:
             age = time.time() - self._polymarket_chainlink_price_ts
             if age < 10.0:
                 price = self._polymarket_chainlink_price

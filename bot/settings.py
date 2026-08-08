@@ -517,6 +517,7 @@ def initialize_strategy_settings(
     strategy.consecutive_invalid_quote_ticks = 0
     strategy.last_quote_watchdog_check_ts = 0.0
     strategy.last_quote_watchdog_reload_ts = 0.0
+    strategy.quote_watchdog_trigger_counts = {}
     strategy.quote_subscription_started_ts = 0.0
     strategy.quote_recovery_started_ts = 0.0
     strategy.quote_recovery_pending_instruments = set()
