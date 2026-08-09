@@ -340,7 +340,7 @@ class MakerEngine:
             
         return VolatilityRegime.NORMAL, Decimal("1.0"), Decimal("1.0"), False
 
-    def _estimate_side_execution_penalty_usdc(
+    def _execution_penalty_components(
         self,
         side: str,
         quote_price: Decimal,
@@ -353,7 +353,7 @@ class MakerEngine:
         bid_levels: Optional[List[Tuple[Decimal, Decimal]]],
         ask_levels: Optional[List[Tuple[Decimal, Decimal]]],
         recent_vol: Optional[Decimal],
-    ) -> Decimal:
+    ) -> dict[str, Decimal]:
         """
         Minimal execution-risk proxy (depth-aware when available):
         - Slippage proxy from current top-of-book spread and touch depth.
@@ -361,7 +361,14 @@ class MakerEngine:
         - Floor penalty to avoid overfitting to optimistic micro snapshots.
         """
         if not self.config.maker_execution_penalty_enable:
-            return Decimal("0")
+            return {
+                "slippage_usdc": Decimal("0"),
+                "vwap_usdc": Decimal("0"),
+                "non_atomic_usdc": Decimal("0"),
+                "floor_usdc": Decimal("0"),
+                "total_usdc": Decimal("0"),
+                "recent_vol": max(Decimal("0"), recent_vol or Decimal("0")),
+            }
 
         spread = max(Decimal("0"), inst_ask - inst_bid)
         book_levels = bid_levels if side == "buy" else ask_levels
@@ -417,8 +424,16 @@ class MakerEngine:
 
         vol = max(Decimal("0"), recent_vol or Decimal("0"))
         non_atomic_penalty = notional * vol * self.config.maker_execution_non_atomic_vol_mult
-        total_penalty = slippage_penalty + vwap_penalty + non_atomic_penalty
-        return max(self.config.maker_execution_penalty_floor_usdc, total_penalty)
+        raw_total = slippage_penalty + vwap_penalty + non_atomic_penalty
+        floor_penalty = max(Decimal("0"), self.config.maker_execution_penalty_floor_usdc - raw_total)
+        return {
+            "slippage_usdc": slippage_penalty,
+            "vwap_usdc": vwap_penalty,
+            "non_atomic_usdc": non_atomic_penalty,
+            "floor_usdc": floor_penalty,
+            "total_usdc": max(self.config.maker_execution_penalty_floor_usdc, raw_total),
+            "recent_vol": vol,
+        }
 
     def generate_quote_plan(
         self,
@@ -512,7 +527,7 @@ class MakerEngine:
         )
 
         side_plan = {}
-        bid_exec_penalty = self._estimate_side_execution_penalty_usdc(
+        bid_exec_components = self._execution_penalty_components(
             side="buy",
             quote_price=quote_bid,
             quote_shares=bid_econ.shares,
@@ -525,7 +540,7 @@ class MakerEngine:
             ask_levels=ask_levels,
             recent_vol=recent_vol,
         )
-        ask_exec_penalty = self._estimate_side_execution_penalty_usdc(
+        ask_exec_components = self._execution_penalty_components(
             side="sell",
             quote_price=quote_ask,
             quote_shares=ask_econ.shares,
@@ -538,6 +553,8 @@ class MakerEngine:
             ask_levels=ask_levels,
             recent_vol=recent_vol,
         )
+        bid_exec_penalty = bid_exec_components["total_usdc"]
+        ask_exec_penalty = ask_exec_components["total_usdc"]
         
         # Determine allowed sides based on modes and inventory reduction
         allowed_buy = True
@@ -627,6 +644,7 @@ class MakerEngine:
                 fair_price,
                 bid_fee_ps + bid_taker_leakage_ps,
                 bid_exec_penalty_ps + bid_adverse_ps,
+                bid_exec_components,
             )
         else:
             side_plan["buy"] = (
@@ -640,6 +658,7 @@ class MakerEngine:
                 fair_price,
                 bid_fee_ps + bid_taker_leakage_ps,
                 bid_exec_penalty_ps + bid_adverse_ps,
+                bid_exec_components,
             )
             
         if allowed_sell:
@@ -655,6 +674,7 @@ class MakerEngine:
                 fair_price,
                 ask_fee_ps,
                 ask_exec_penalty_ps + ask_adverse_ps,
+                ask_exec_components,
             )
         else:
             side_plan["sell"] = (
@@ -668,6 +688,7 @@ class MakerEngine:
                 fair_price,
                 ask_fee_ps,
                 ask_exec_penalty_ps + ask_adverse_ps,
+                ask_exec_components,
             )
 
         return side_plan

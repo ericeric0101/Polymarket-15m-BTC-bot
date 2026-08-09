@@ -1386,6 +1386,16 @@ def test_no_extra_flip_without_material_held_inventory():
     assert strategy.strategy_events == []
 
 
+def test_pre_entry_flip_is_allowed_but_inventory_disables_it():
+    flat = DummySideFlipStrategy(held_qty=Decimal("0"))
+    flat.bi_side_allow_pre_entry_flip = True
+    assert flat._pre_entry_flip_allowed(proposed_side=ActiveSide.DOWN) is True
+
+    held = DummySideFlipStrategy(held_qty=Decimal("0.01"))
+    held.bi_side_allow_pre_entry_flip = True
+    assert held._pre_entry_flip_allowed(proposed_side=ActiveSide.DOWN) is False
+
+
 def test_new_signal_flip_uses_new_scale_thresholds():
     strategy = DummySideFlipStrategy(held_qty=Decimal("2.0"))
     strategy.side_decision_engine_new = True

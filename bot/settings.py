@@ -183,6 +183,8 @@ def initialize_strategy_settings(
     strategy.maker_execution_non_atomic_vol_mult = config.maker.execution_non_atomic_vol_mult
     strategy.maker_execution_depth_impact_mult = config.maker.execution_depth_impact_mult
     strategy.maker_execution_vwap_mult = config.maker.execution_vwap_mult
+    strategy.maker_execution_vwap_entry_risk_weight = config.maker.execution_vwap_entry_risk_weight
+    strategy.maker_execution_vwap_full_risk_last_sec = config.maker.execution_vwap_full_risk_last_sec
     strategy.maker_buy_taker_leakage_prob = config.maker.buy_taker_leakage_prob
     strategy.orderbook_fetch_interval_sec = config.maker.orderbook_fetch_interval_sec
     strategy.orderbook_levels_limit = config.maker.orderbook_levels_limit
@@ -219,6 +221,7 @@ def initialize_strategy_settings(
     strategy.bi_side_decision_grace_sec = config.side.decision_grace_sec
     strategy.bi_side_lock_until_reduce_only = config.side.lock_until_reduce_only
     strategy.bi_side_allow_intramarket_flip = config.side.allow_intramarket_flip
+    strategy.bi_side_allow_pre_entry_flip = config.side.allow_pre_entry_flip
     strategy.bi_side_min_score_up = config.side.min_score_up
     strategy.bi_side_max_score_down = config.side.max_score_down
     strategy.bi_side_mixed_low = config.side.mixed_low

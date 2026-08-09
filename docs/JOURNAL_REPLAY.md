@@ -40,3 +40,18 @@ shadow-only and can fill only when a later ask reaches the passive limit:
 Enable this independent telemetry with `FAIR_EDGE_BUCKET_SHADOW_ENABLED=1`.
 It must not be interpreted as live or executable PnL until enough passive fills
 and settlements accumulate.
+
+## Calibration Diagnostics
+
+Inspect the execution penalty components before changing any cost multiplier:
+
+```bash
+./.venv/bin/python scripts/execution_penalty_report.py --hours 168
+```
+
+Measure TWAP model calibration from the first recorded observation in each
+settled market before changing probability weights:
+
+```bash
+./.venv/bin/python scripts/twap_fair_calibration_report.py --hours 168
+```

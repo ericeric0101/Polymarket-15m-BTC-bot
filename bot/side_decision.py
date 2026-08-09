@@ -336,7 +336,23 @@ class SideDecisionMixin:
         return (now_ts - pending_since) >= min_persist
 
     def _pre_entry_flip_allowed(self, *, proposed_side: ActiveSide) -> bool:
-        return False
+        """Permit a confirmed reversal only before the strategy owns inventory."""
+        if not bool(getattr(self, "bi_side_allow_pre_entry_flip", True)):
+            return False
+        if not self.active_side_locked or proposed_side in (ActiveSide.NONE, self.active_side):
+            return False
+        try:
+            if Decimal(str(getattr(self, "inventory_delta_shares", Decimal("0")))) > 0:
+                return False
+        except (ArithmeticError, TypeError, ValueError):
+            return False
+        for state in getattr(self, "live_inventory_cost", {}).values():
+            try:
+                if Decimal(str(state.get("qty", "0"))) > 0:
+                    return False
+            except (AttributeError, ArithmeticError, TypeError, ValueError):
+                return False
+        return True
 
     def _populate_spot_source_inputs(
         self,

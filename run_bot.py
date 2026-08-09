@@ -2035,10 +2035,15 @@ class IntegratedBTCStrategy(
                         ),
                         "buffer_mode": "untrained_shadow",
                         "entry_mode": buy_entry_eval.entry_mode,
+                        "time_left_sec": time_left_sec_global,
                         "candidate_entry_price_per_share": float(planned_entry_price) if planned_entry_price is not None else None,
                         "planned_maker_net_edge_per_share": float(planned_maker_net_edge) if planned_maker_net_edge is not None else None,
                         "planned_fee_per_share": float(planned_fee_ps),
                         "planned_other_cost_per_share": float(planned_other_cost_ps),
+                        "execution_penalty_components": {
+                            key: float(value)
+                            for key, value in quote_plan.execution_penalty_components.items()
+                        },
                         "decision": "SKIP" if buy_entry_eval.skip else "ELIGIBLE",
                         "decision_reason": buy_entry_eval.reason or "shadow_only",
                         "loss_history_tail": list(getattr(self, "recent_fill_pnl_results", [])[-5:]),
@@ -2286,6 +2291,28 @@ class IntegratedBTCStrategy(
                         else buy_entry_eval.size_multiplier
                     ),
                     entry_quality=buy_entry_eval.payload,
+                    entry_is_flat=(
+                        current_inst_inventory_qty <= Decimal("0")
+                        and other_held_inventory_qty <= Decimal("0")
+                    ),
+                    entry_signal_confirmed=(
+                        bool(self.active_side_locked)
+                        and self._latest_observation_supports_locked_side(
+                            self.active_side,
+                            self.side_decision_score,
+                        )
+                        and not bool(locked_side_runtime.entry_blocked)
+                    ),
+                    execution_vwap_entry_risk_weight=getattr(
+                        self,
+                        "maker_execution_vwap_entry_risk_weight",
+                        Decimal("1"),
+                    ),
+                    execution_vwap_full_risk_last_sec=float(getattr(
+                        self,
+                        "maker_execution_vwap_full_risk_last_sec",
+                        0.0,
+                    )),
                 )
                 if buy_entry_eval.shadow_only:
                     desired_entry["fair_edge_bucket_shadow"] = buy_entry_eval.fair_edge_bucket

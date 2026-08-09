@@ -146,6 +146,8 @@ class MakerConfig:
     execution_non_atomic_vol_mult: Decimal
     execution_depth_impact_mult: Decimal
     execution_vwap_mult: Decimal
+    execution_vwap_entry_risk_weight: Decimal
+    execution_vwap_full_risk_last_sec: float
     buy_taker_leakage_prob: Decimal
     orderbook_fetch_interval_sec: int
     orderbook_levels_limit: int
@@ -267,6 +269,7 @@ class SideDecisionConfig:
     decision_grace_sec: int
     lock_until_reduce_only: bool
     allow_intramarket_flip: bool
+    allow_pre_entry_flip: bool
     min_score_up: Decimal
     max_score_down: Decimal
     mixed_low: Decimal
@@ -746,6 +749,14 @@ class AppConfig:
                 execution_non_atomic_vol_mult=_env_decimal("MAKER_EXECUTION_NON_ATOMIC_VOL_MULT", "0.2"),
                 execution_depth_impact_mult=_env_decimal("MAKER_EXECUTION_DEPTH_IMPACT_MULT", "1.0"),
                 execution_vwap_mult=_env_decimal("MAKER_EXECUTION_VWAP_MULT", "0.5"),
+                execution_vwap_entry_risk_weight=min(
+                    Decimal("1"),
+                    max(Decimal("0"), _env_decimal("MAKER_EXECUTION_VWAP_ENTRY_RISK_WEIGHT", "0.25")),
+                ),
+                execution_vwap_full_risk_last_sec=max(
+                    0.0,
+                    _env_float("MAKER_EXECUTION_VWAP_FULL_RISK_LAST_SEC", 180.0),
+                ),
                 buy_taker_leakage_prob=buy_taker_leakage_prob,
                 orderbook_fetch_interval_sec=max(1, _env_int("ORDERBOOK_FETCH_INTERVAL_SEC", 5)),
                 orderbook_levels_limit=max(1, _env_int("ORDERBOOK_LEVELS_LIMIT", 10)),
@@ -854,6 +865,7 @@ class AppConfig:
                 decision_grace_sec=max(0, _env_int("BI_SIDE_DECISION_GRACE_SEC", 30)),
                 lock_until_reduce_only=_env_bool_inverted("BI_SIDE_LOCK_UNTIL_REDUCE_ONLY", True),
                 allow_intramarket_flip=_env_bool("BI_SIDE_ALLOW_INTRAMARKET_FLIP", False),
+                allow_pre_entry_flip=_env_bool_inverted("BI_SIDE_ALLOW_PRE_ENTRY_FLIP", True),
                 min_score_up=_env_decimal("BI_SIDE_MIN_SCORE_UP", "1"),
                 max_score_down=_env_decimal("BI_SIDE_MAX_SCORE_DOWN", "-1"),
                 mixed_low=_env_decimal("BI_SIDE_MIXED_LOW", "-1"),

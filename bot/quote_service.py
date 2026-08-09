@@ -40,6 +40,7 @@ class QuotePlan:
     fair_price: Decimal
     fee_per_share: Decimal
     other_cost_per_share: Decimal
+    execution_penalty_components: dict[str, Decimal]
 
 
 def parse_quote_plan(quote_data: Any) -> QuotePlan | None:
@@ -57,6 +58,10 @@ def parse_quote_plan(quote_data: Any) -> QuotePlan | None:
             fair_price=Decimal(str(quote_data[7])),
             fee_per_share=Decimal(str(quote_data[8])),
             other_cost_per_share=Decimal(str(quote_data[9])),
+            execution_penalty_components={
+                str(key): Decimal(str(value))
+                for key, value in (quote_data[10].items() if len(quote_data) > 10 and isinstance(quote_data[10], dict) else [])
+            },
         )
     except (ArithmeticError, TypeError, ValueError):
         return None
@@ -135,6 +140,7 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "fee_ps": desired.get("fee_ps"),
         "other_cost_ps": desired.get("other_cost_ps"),
         "exec_penalty_usdc": desired.get("exec_penalty"),
+        "execution_penalty_components": desired.get("execution_penalty_components"),
         "robust_net_usdc": desired.get("robust_net"),
         "planned_best_bid": desired.get("planned_best_bid"),
         "planned_best_ask": desired.get("planned_best_ask"),
@@ -813,6 +819,57 @@ def compute_trend_robust_net(
     """
     discounted_penalty = exec_penalty * trend_penalty_discount
     return expected_net - discounted_penalty - taker_leakage
+
+
+def apply_entry_vwap_risk_weight(
+    *,
+    expected_net: Decimal,
+    raw_robust_net: Decimal | None,
+    raw_execution_penalty: Decimal | None,
+    execution_penalty_components: dict[str, Decimal] | None,
+    entry_is_flat: bool,
+    entry_signal_confirmed: bool,
+    time_left_sec: float | None,
+    vwap_entry_risk_weight: Decimal,
+    vwap_full_risk_last_sec: float,
+) -> tuple[Decimal | None, Decimal | None, dict[str, Decimal], bool]:
+    """Weight forced-exit VWAP risk by the chance it applies to a new entry."""
+    components = dict(execution_penalty_components or {})
+    if raw_robust_net is None or raw_execution_penalty is None:
+        return raw_robust_net, raw_execution_penalty, components, False
+
+    raw_vwap = max(Decimal("0"), components.get("vwap_usdc", Decimal("0")))
+    weight = min(Decimal("1"), max(Decimal("0"), vwap_entry_risk_weight))
+    eligible = (
+        raw_vwap > 0
+        and weight < Decimal("1")
+        and entry_is_flat
+        and entry_signal_confirmed
+        and time_left_sec is not None
+        and time_left_sec > max(0.0, vwap_full_risk_last_sec)
+    )
+    if not eligible:
+        components.update({
+            "vwap_raw_usdc": raw_vwap,
+            "vwap_risk_weight": Decimal("1"),
+            "total_raw_usdc": raw_execution_penalty,
+            "total_effective_usdc": raw_execution_penalty,
+        })
+        return raw_robust_net, raw_execution_penalty, components, False
+
+    effective_vwap = raw_vwap * weight
+    effective_penalty = raw_execution_penalty - raw_vwap + effective_vwap
+    # The raw robust net already contains execution penalty and taker leakage.
+    taker_leakage = expected_net - raw_execution_penalty - raw_robust_net
+    effective_robust = expected_net - effective_penalty - taker_leakage
+    components.update({
+        "vwap_raw_usdc": raw_vwap,
+        "vwap_effective_usdc": effective_vwap,
+        "vwap_risk_weight": weight,
+        "total_raw_usdc": raw_execution_penalty,
+        "total_effective_usdc": effective_penalty,
+    })
+    return effective_robust, effective_penalty, components, True
 
 
 def attach_desired_entry_runtime_metadata(
@@ -1679,6 +1736,10 @@ def build_desired_quote_entry(
     decision_phase: str = "",
     decision_regime: str = "",
     decision_pressure: float | None = None,
+    entry_is_flat: bool = False,
+    entry_signal_confirmed: bool = False,
+    execution_vwap_entry_risk_weight: Decimal = Decimal("1"),
+    execution_vwap_full_risk_last_sec: float = 0.0,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -1690,6 +1751,39 @@ def build_desired_quote_entry(
     p_fair = quote_data[7] if len(quote_data) > 7 else None
     fee_ps = quote_data[8] if len(quote_data) > 8 else None
     other_cost_ps = quote_data[9] if len(quote_data) > 9 else None
+    execution_penalty_components = quote_data[10] if len(quote_data) > 10 else None
+
+    vwap_risk_adjusted = False
+    if side == "buy":
+        robust_net, exec_penalty, execution_penalty_components, vwap_risk_adjusted = (
+            apply_entry_vwap_risk_weight(
+                expected_net=econ.expected_net_usdc,
+                raw_robust_net=robust_net if isinstance(robust_net, Decimal) else None,
+                raw_execution_penalty=exec_penalty if isinstance(exec_penalty, Decimal) else None,
+                execution_penalty_components=(
+                    execution_penalty_components
+                    if isinstance(execution_penalty_components, dict)
+                    else None
+                ),
+                entry_is_flat=entry_is_flat,
+                entry_signal_confirmed=entry_signal_confirmed,
+                time_left_sec=time_left_sec,
+                vwap_entry_risk_weight=execution_vwap_entry_risk_weight,
+                vwap_full_risk_last_sec=execution_vwap_full_risk_last_sec,
+            )
+        )
+        # This must never override phase/risk controls. It only re-evaluates
+        # an econ-gated new BUY using its expected, rather than worst-case,
+        # forced-exit VWAP cost.
+        if (
+            not should_quote
+            and not reduce_only_reason
+            and not forced_sell_only
+            and not side_disable_reason_by_side.get(side)
+            and isinstance(robust_net, Decimal)
+            and robust_net >= min_expected_net_usdc
+        ):
+            should_quote = True
 
     diag_reason = ""
     if not should_quote:
@@ -1864,6 +1958,8 @@ def build_desired_quote_entry(
         "p_fair": p_fair,
         "fee_ps": fee_ps,
         "other_cost_ps": other_cost_ps,
+        "execution_penalty_components": execution_penalty_components,
+        "execution_vwap_risk_adjusted": vwap_risk_adjusted,
         "entry_mode": entry_mode if side == "buy" else "",
         "size_multiplier": (
             max(Decimal("0"), entry_size_multiplier)
