@@ -735,9 +735,11 @@ def initialize_strategy_settings(
         db_path=config.operations.trade_db_path,
     ) if strategy.trade_db_enabled else None
     strategy.shadow_simulation_enabled = config.operations.shadow_simulation_enabled
+    strategy.fair_edge_bucket_shadow_enabled = config.operations.fair_edge_bucket_shadow_enabled
     strategy.shadow_simulation_fill_timeout_sec = config.operations.shadow_simulation_fill_timeout_sec
     strategy.shadow_simulation_max_quote_age_sec = config.operations.shadow_simulation_max_quote_age_sec
     strategy.shadow_simulation_aged_quote_max_age_sec = config.operations.shadow_simulation_aged_quote_max_age_sec
     strategy._shadow_simulations_by_slug = {}
+    strategy._fair_edge_bucket_shadow_by_id = {}
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

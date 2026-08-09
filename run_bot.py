@@ -1887,6 +1887,9 @@ class IntegratedBTCStrategy(
                     maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
                     max_locked_side_position=self.max_locked_side_position,
                     inventory_full_behavior=self.inventory_full_behavior,
+                    allow_fair_edge_shadow=bool(
+                        getattr(self, "fair_edge_bucket_shadow_enabled", False)
+                    ),
                     current_slug=current_slug,
                     inst_id=inst_id,
                     market_buy_count=market_buy_count,
@@ -2284,6 +2287,8 @@ class IntegratedBTCStrategy(
                     ),
                     entry_quality=buy_entry_eval.payload,
                 )
+                if buy_entry_eval.shadow_only:
+                    desired_entry["fair_edge_bucket_shadow"] = buy_entry_eval.fair_edge_bucket
                 desired_entry = apply_entry_quality_quote_placement(
                     desired_entry=desired_entry,
                     side=side,
@@ -2950,6 +2955,7 @@ class IntegratedBTCStrategy(
         target_version: Optional[int] = None,
         loss_sell_reason: str = "",
         target_qty_override: Optional[Decimal] = None,
+        fair_edge_bucket_shadow: Optional[str] = None,
     ) -> None:
         if self.dashboard_state is not None and self.dashboard_state.bot_paused:
             return
@@ -2964,6 +2970,7 @@ class IntegratedBTCStrategy(
             target_version=target_version,
             loss_sell_reason=loss_sell_reason,
             target_qty_override=target_qty_override,
+            fair_edge_bucket_shadow=fair_edge_bucket_shadow,
         )
     
     def on_start(self):

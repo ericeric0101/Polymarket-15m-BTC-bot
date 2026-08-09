@@ -41,6 +41,150 @@ class ShadowSimulationMixin:
             and getattr(self, "trade_db", None) is not None
         )
 
+    def _fair_edge_bucket_shadow_enabled_for_run(self) -> bool:
+        """Allow safe counterfactual entry research in either dry-run or live mode."""
+        return bool(
+            getattr(self, "fair_edge_bucket_shadow_enabled", False)
+            and getattr(self, "trade_db", None) is not None
+        )
+
+    def _record_fair_edge_bucket_shadow_entry(
+        self,
+        *,
+        instrument_id: Any,
+        limit_price: Decimal,
+        qty: Decimal,
+        econ: Any,
+        directional_snapshot: Optional[Dict[str, Any]],
+        bucket: str,
+    ) -> None:
+        """Persist a submit-time-approved, never-live counterfactual BUY."""
+        if not self._fair_edge_bucket_shadow_enabled_for_run():
+            return
+        slug = str(getattr(self, "current_market_slug", "") or "")
+        bucket = str(bucket or "")
+        if not slug or not bucket:
+            return
+        side = self._side_for_instrument_id(instrument_id).value
+        simulation_id = f"fair-edge-shadow:{slug}:{side.lower()}:{bucket}"
+        states = getattr(self, "_fair_edge_bucket_shadow_by_id", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._fair_edge_bucket_shadow_by_id = states
+        if simulation_id in states:
+            return
+        now_ts = time.time()
+        snapshot = directional_snapshot or {}
+        fair = _as_float(snapshot.get("p_fair"))
+        entry_price = float(limit_price)
+        state: Dict[str, Any] = {
+            "simulation_id": simulation_id,
+            "slug": slug,
+            "instrument_id": str(instrument_id),
+            "side": side,
+            "bucket": bucket,
+            "status": "PENDING",
+            "entry_price": entry_price,
+            "qty": float(qty),
+            "fair": fair,
+            "fair_minus_entry": (fair - entry_price) if fair is not None else None,
+            "created_ts": now_ts,
+            "expires_ts": now_ts + float(getattr(self, "shadow_simulation_fill_timeout_sec", 90.0)),
+            "expected_net_usdc": _as_float(getattr(econ, "expected_net_usdc", None)),
+            "expected_rebate_usdc": _as_float(getattr(econ, "expected_rebate_usdc", None)),
+            "side_score": _as_float(getattr(self, "side_decision_score", None)),
+            "side_reason": str(getattr(self, "side_decision_reason", "") or ""),
+            "planned_quote_ts": _as_float(snapshot.get("planned_quote_ts")),
+            "planned_best_bid": _as_float(snapshot.get("planned_best_bid")),
+            "planned_best_ask": _as_float(snapshot.get("planned_best_ask")),
+            "directional_edge_ps": _as_float(snapshot.get("directional_edge_ps")),
+            "directional_edge_usdc": _as_float(snapshot.get("directional_edge_usdc")),
+            "robust_net_usdc": _as_float(snapshot.get("robust_net_usdc")),
+            "entry_mode": str(snapshot.get("entry_mode") or ""),
+            "size_multiplier": _as_float(snapshot.get("size_multiplier")),
+            "time_left_sec": max(
+                0.0,
+                float(getattr(self, "current_market_end_timestamp", now_ts) or now_ts) - now_ts,
+            ),
+            "submit_path": "all_live_gates_except_entry_fair_edge",
+        }
+        states[simulation_id] = state
+        self._db_order_event(
+            event_type="FAIR_EDGE_BUCKET_SHADOW_CANDIDATE",
+            client_order_id=simulation_id,
+            side=side,
+            price=entry_price,
+            qty=float(qty),
+            status="PENDING",
+            reason="fair_edge_counterfactual_submit_path_approved",
+            expected_net_usdc=state["expected_net_usdc"],
+            payload=state,
+        )
+
+    def _fair_edge_bucket_shadow_on_quote(
+        self,
+        instrument_id: Any,
+        bid: Decimal,
+        ask: Decimal,
+        now_ts: float,
+    ) -> None:
+        if not self._fair_edge_bucket_shadow_enabled_for_run():
+            return
+        states = getattr(self, "_fair_edge_bucket_shadow_by_id", {})
+        for state in list(states.values()):
+            if str(state.get("instrument_id")) != str(instrument_id):
+                continue
+            status = str(state.get("status") or "")
+            if status != "PENDING":
+                continue
+            if now_ts > float(state.get("expires_ts") or 0.0):
+                state.update({"status": "EXPIRED", "expired_ts": now_ts})
+                self._db_order_event(
+                    event_type="FAIR_EDGE_BUCKET_SHADOW_EXPIRED",
+                    client_order_id=state["simulation_id"], side=state["side"],
+                    price=state["entry_price"], qty=state["qty"], status="EXPIRED",
+                    reason="ask_not_reached_before_timeout", payload=state,
+                )
+                continue
+            if ask > Decimal(str(state["entry_price"])):
+                continue
+            state.update({
+                "status": "FILLED", "filled_ts": now_ts,
+                "fill_bid": float(bid), "fill_ask": float(ask),
+                "fill_mid": float((bid + ask) / Decimal("2")),
+            })
+            self._db_order_event(
+                event_type="FAIR_EDGE_BUCKET_SHADOW_FILLED",
+                client_order_id=state["simulation_id"], side=state["side"],
+                price=state["entry_price"], qty=state["qty"], status="FILLED",
+                reason="later_ask_reached_passive_limit", payload=state,
+            )
+
+    def _settle_fair_edge_bucket_shadow_simulations(
+        self, *, slug: str, spot: float, strike: float
+    ) -> None:
+        if not self._fair_edge_bucket_shadow_enabled_for_run() or spot <= 0 or strike <= 0:
+            return
+        outcome = "UP" if spot >= strike else "DOWN"
+        for state in list(getattr(self, "_fair_edge_bucket_shadow_by_id", {}).values()):
+            if str(state.get("slug")) != str(slug) or str(state.get("status")) != "FILLED":
+                continue
+            won = str(state.get("side") or "").upper() == outcome
+            price = Decimal(str(state["entry_price"]))
+            qty = Decimal(str(state["qty"]))
+            gross_pnl = qty * ((Decimal("1") - price) if won else -price)
+            state.update({
+                "status": "SETTLED", "outcome": outcome, "won": won,
+                "settlement_spot": spot, "settlement_strike": strike,
+                "simulated_gross_pnl_usdc": float(gross_pnl),
+            })
+            self._db_order_event(
+                event_type="FAIR_EDGE_BUCKET_SHADOW_SETTLED",
+                client_order_id=state["simulation_id"], side=state["side"],
+                price=state["entry_price"], qty=state["qty"], status="SETTLED",
+                reason="twap_reference_settlement", payload=state,
+            )
+
     def _load_shadow_simulation_for_slug(self, slug: str) -> Optional[Dict[str, Any]]:
         cached = getattr(self, "_shadow_simulations_by_slug", {}).get(slug)
         if cached is not None:
@@ -52,6 +196,7 @@ class ShadowSimulationMixin:
 
     def _restore_shadow_simulation_for_slug(self, slug: str) -> Optional[Dict[str, Any]]:
         """Rehydrate an in-progress simulation after a strategy/node restart."""
+        self._restore_fair_edge_bucket_shadow_for_slug(slug)
         if not self._shadow_simulation_enabled_for_run():
             return None
         slug = str(slug or "")
@@ -65,6 +210,30 @@ class ShadowSimulationMixin:
                 f"slug={slug} status={state.get('status', 'UNKNOWN')}"
             )
         return state
+
+    def _restore_fair_edge_bucket_shadow_for_slug(self, slug: str) -> None:
+        """Rehydrate counterfactual states so node rollover cannot discard samples."""
+        if not self._fair_edge_bucket_shadow_enabled_for_run() or not self.trade_db:
+            return
+        slug = str(slug or "")
+        if not slug:
+            return
+        states = getattr(self, "_fair_edge_bucket_shadow_by_id", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._fair_edge_bucket_shadow_by_id = states
+        restored = 0
+        for state in self.trade_db.load_fair_edge_bucket_shadow_simulations(slug):
+            simulation_id = str(state.get("simulation_id") or "")
+            if not simulation_id or simulation_id in states:
+                continue
+            states[simulation_id] = state
+            restored += 1
+        if restored:
+            logger.info(
+                "Fair-edge bucket shadow candidates restored after restart: "
+                f"slug={slug} count={restored}"
+            )
 
     def _shadow_quote_age_sec(self, instrument_id: Any, now_ts: float) -> Optional[float]:
         quote_received_ts = _as_float(
@@ -206,6 +375,7 @@ class ShadowSimulationMixin:
         ask: Decimal,
         now_ts: float,
     ) -> None:
+        self._fair_edge_bucket_shadow_on_quote(instrument_id, bid, ask, now_ts)
         if not self._shadow_simulation_enabled_for_run():
             return
         slug = str(getattr(self, "current_market_slug", "") or "")
@@ -297,6 +467,7 @@ class ShadowSimulationMixin:
             )
 
     def _settle_shadow_simulation(self, *, slug: str, spot: float, strike: float) -> None:
+        self._settle_fair_edge_bucket_shadow_simulations(slug=slug, spot=spot, strike=strike)
         if not self._shadow_simulation_enabled_for_run() or spot <= 0 or strike <= 0:
             return
         state = self._load_shadow_simulation_for_slug(slug)

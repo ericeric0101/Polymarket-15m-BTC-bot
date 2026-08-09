@@ -13,10 +13,12 @@ class _ShadowHost(ShadowSimulationMixin):
         self.run_id = "shadow-test"
         self.current_market_slug = "btc-updown-15m-test"
         self.shadow_simulation_enabled = True
+        self.fair_edge_bucket_shadow_enabled = True
         self.shadow_simulation_fill_timeout_sec = 90.0
         self.shadow_simulation_max_quote_age_sec = 2.0
         self.shadow_simulation_aged_quote_max_age_sec = 30.0
         self._shadow_simulations_by_slug = {}
+        self._fair_edge_bucket_shadow_by_id = {}
         self.side_decision_score = Decimal("0.42")
         self.side_decision_reason = "test_signal"
         self.latest_external_spot = Decimal("100")
@@ -187,3 +189,62 @@ def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_p
     assert settled is not None
     assert settled["status"] == "SETTLED"
     assert _event_count(db, "SHADOW_SIM_SETTLED") == 1
+
+
+def test_fair_edge_bucket_shadow_requires_passive_fill_and_settles(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _ShadowHost(db)
+    host._record_fair_edge_bucket_shadow_entry(
+        instrument_id="inst-up",
+        limit_price=Decimal("0.68"),
+        qty=Decimal("5"),
+        econ=SimpleNamespace(expected_net_usdc=Decimal("0.12")),
+        directional_snapshot={"p_fair": Decimal("0.64")},
+        bucket="neg_0_05_to_neg_0_02",
+    )
+    assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_CANDIDATE") == 1
+
+    state = next(iter(host._fair_edge_bucket_shadow_by_id.values()))
+    host._shadow_simulation_on_quote(
+        "inst-up", Decimal("0.69"), Decimal("0.70"), state["created_ts"] + 1
+    )
+    assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_FILLED") == 0
+
+    host._shadow_simulation_on_quote(
+        "inst-up", Decimal("0.67"), Decimal("0.68"), state["created_ts"] + 2
+    )
+    assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_FILLED") == 1
+
+    host._settle_shadow_simulation(
+        slug=host.current_market_slug,
+        spot=100.0,
+        strike=99.0,
+    )
+    assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_SETTLED") == 1
+
+
+def test_fair_edge_bucket_shadow_restores_after_restart(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    first_host = _ShadowHost(db)
+    first_host._record_fair_edge_bucket_shadow_entry(
+        instrument_id="inst-up",
+        limit_price=Decimal("0.68"),
+        qty=Decimal("5"),
+        econ=SimpleNamespace(expected_net_usdc=Decimal("0.12")),
+        directional_snapshot={"p_fair": Decimal("0.64")},
+        bucket="neg_0_05_to_neg_0_02",
+    )
+    state = next(iter(first_host._fair_edge_bucket_shadow_by_id.values()))
+    first_host._shadow_simulation_on_quote(
+        "inst-up", Decimal("0.67"), Decimal("0.68"), state["created_ts"] + 1
+    )
+
+    restarted_host = _ShadowHost(db)
+    restarted_host._restore_shadow_simulation_for_slug(restarted_host.current_market_slug)
+    restored = next(iter(restarted_host._fair_edge_bucket_shadow_by_id.values()))
+    assert restored["status"] == "FILLED"
+
+    restarted_host._settle_shadow_simulation(
+        slug=restarted_host.current_market_slug, spot=100.0, strike=99.0
+    )
+    assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_SETTLED") == 1

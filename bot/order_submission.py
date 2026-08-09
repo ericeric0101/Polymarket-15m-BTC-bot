@@ -30,6 +30,7 @@ def submit_maker_quote(
     target_version: Optional[int] = None,
     loss_sell_reason: str = "",
     target_qty_override: Optional[Decimal] = None,
+    fair_edge_bucket_shadow: Optional[str] = None,
 ) -> None:
     instrument_id = strategy._normalize_instrument_id(instrument_id)
     instrument = strategy.cache.instrument(instrument_id) if instrument_id else None
@@ -262,6 +263,18 @@ def submit_maker_quote(
                 "projected_inventory": float(projected_inventory),
             },
         )
+        return
+
+    if fair_edge_bucket_shadow:
+        if side == "buy" and hasattr(strategy, "_record_fair_edge_bucket_shadow_entry"):
+            strategy._record_fair_edge_bucket_shadow_entry(
+                instrument_id=instrument_id,
+                limit_price=limit_price,
+                qty=qty_dec,
+                econ=econ,
+                directional_snapshot=directional_snapshot,
+                bucket=str(fair_edge_bucket_shadow),
+            )
         return
 
     if strategy._is_dry_run_mode():

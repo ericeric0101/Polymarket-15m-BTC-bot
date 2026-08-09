@@ -90,6 +90,23 @@ class BuyEntryEvaluation:
     event_type: str = ""
     reason: str = ""
     payload: dict[str, Any] | None = None
+    shadow_only: bool = False
+    fair_edge_bucket: str = ""
+
+
+def classify_fair_edge_bucket(edge: Decimal) -> str:
+    """Return the stable research bucket for a fair-minus-entry observation."""
+    if edge < Decimal("-0.15"):
+        return "lt_neg_0_15"
+    if edge < Decimal("-0.10"):
+        return "neg_0_15_to_neg_0_10"
+    if edge < Decimal("-0.05"):
+        return "neg_0_10_to_neg_0_05"
+    if edge < Decimal("-0.02"):
+        return "neg_0_05_to_neg_0_02"
+    if edge < Decimal("0"):
+        return "neg_0_02_to_0"
+    return "0_to_0_002"
 
 
 def extract_instrument_tick(instrument: Any, default_tick: str = "0.01") -> Decimal:
@@ -510,6 +527,7 @@ def evaluate_buy_entry_controls(
     locked_side_entry_block_reason: str = "",
     max_locked_side_position: Decimal = Decimal("999999"),
     inventory_full_behavior: str = "STOP_BUY",
+    allow_fair_edge_shadow: bool = False,
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
@@ -521,6 +539,7 @@ def evaluate_buy_entry_controls(
             entry_mode=entry_mode,
             size_multiplier=size_multiplier,
         )
+    fair_edge_shadow_bucket = ""
     if (
         current_inst_inventory_qty >= max_locked_side_position
         and str(inventory_full_behavior or "STOP_BUY").upper() == "STOP_BUY"
@@ -654,23 +673,26 @@ def evaluate_buy_entry_controls(
         and entry_fair_edge_min_ps > 0
         and (fair - candidate_entry_price) < entry_fair_edge_min_ps
     ):
-        return BuyEntryEvaluation(
-            skip=True,
-            min_expected_net_usdc=min_expected_net_usdc,
-            entry_mode=entry_mode,
-            event_type="ORDER_SKIP_ENTRY_FAIR_EDGE_GATE",
-            reason="entry_fair_edge_gate",
-            payload={
-                "slug": current_slug,
-                "instrument_id": str(inst_id),
-                "active_side": active_side_txt,
-                "entry_price": float(candidate_entry_price),
-                "fair": float(fair),
-                "fair_minus_entry": float(fair - candidate_entry_price),
-                "required_min": float(entry_fair_edge_min_ps),
-                "engine": "entry_context",
-            },
-        )
+        if allow_fair_edge_shadow:
+            fair_edge_shadow_bucket = classify_fair_edge_bucket(fair - candidate_entry_price)
+        else:
+            return BuyEntryEvaluation(
+                skip=True,
+                min_expected_net_usdc=min_expected_net_usdc,
+                entry_mode=entry_mode,
+                event_type="ORDER_SKIP_ENTRY_FAIR_EDGE_GATE",
+                reason="entry_fair_edge_gate",
+                payload={
+                    "slug": current_slug,
+                    "instrument_id": str(inst_id),
+                    "active_side": active_side_txt,
+                    "entry_price": float(candidate_entry_price),
+                    "fair": float(fair),
+                    "fair_minus_entry": float(fair - candidate_entry_price),
+                    "required_min": float(entry_fair_edge_min_ps),
+                    "engine": "entry_context",
+                },
+            )
     if (
         active_side_txt == "DOWN"
         and candidate_entry_price is not None
@@ -760,6 +782,8 @@ def evaluate_buy_entry_controls(
         entry_mode=entry_mode,
         size_multiplier=size_multiplier,
         payload=quality_adjustment.as_payload(),
+        shadow_only=bool(fair_edge_shadow_bucket),
+        fair_edge_bucket=fair_edge_shadow_bucket,
     )
 
 

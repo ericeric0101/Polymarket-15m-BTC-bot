@@ -255,9 +255,22 @@ class QuoteRuntimeMixin:
     ) -> None:
         submitted_attempts = 0
 
+        # Fair-edge research candidates must never influence the live order
+        # book. In particular, they cannot cause an existing live quote to be
+        # cancelled merely because their counterfactual target differs.
+        live_desired_quotes = {
+            key: desired
+            for key, desired in desired_quotes.items()
+            if not desired.get("fair_edge_bucket_shadow")
+        }
+        for key, desired in desired_quotes.items():
+            if desired.get("fair_edge_bucket_shadow") and key in self.active_maker_orders:
+                # Keep the real quote untouched; its normal lifecycle will
+                # resume once the fair-edge gate allows a live replacement.
+                live_desired_quotes[key] = {"should_quote": True}
         reconcile_unwanted_quotes(
             active_maker_orders=self.active_maker_orders,
-            desired_quotes=desired_quotes,
+            desired_quotes=live_desired_quotes,
             target_inst_set=target_inst_set,
             now_ts=now_ts,
             cancel_cooldown_sec=float(self.maker_cancel_cooldown_sec),
@@ -294,6 +307,25 @@ class QuoteRuntimeMixin:
             )
 
             current = self.active_maker_orders.get(order_key)
+            if desired.get("fair_edge_bucket_shadow"):
+                # A real open order retains ownership of the order key. The
+                # counterfactual is only submit-time observable when it would
+                # have been a new order, and it must not requote/cancel live.
+                if current:
+                    continue
+                await self._submit_maker_quote(
+                    inst_id,
+                    side,
+                    limit_price,
+                    econ,
+                    dynamic_fee_rate,
+                    directional_snapshot=directional_snapshot,
+                    target_version=target_version,
+                    loss_sell_reason=desired.get("loss_sell_reason", ""),
+                    target_qty_override=desired.get("target_qty_override"),
+                    fair_edge_bucket_shadow=desired.get("fair_edge_bucket_shadow"),
+                )
+                continue
             if should_requote_existing_order(
                 current=current,
                 target_version=target_version,
@@ -329,6 +361,7 @@ class QuoteRuntimeMixin:
                 target_version=target_version,
                 loss_sell_reason=desired.get("loss_sell_reason", ""),
                 target_qty_override=desired.get("target_qty_override"),
+                fair_edge_bucket_shadow=desired.get("fair_edge_bucket_shadow"),
             )
 
         log_no_quote_diagnostics(

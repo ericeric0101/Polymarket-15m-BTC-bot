@@ -4068,6 +4068,37 @@ def test_entry_fair_edge_gate_blocks_thin_entry_buffer():
     assert out.reason == "entry_fair_edge_gate"
 
 
+def test_entry_fair_edge_shadow_keeps_other_entry_controls_and_marks_bucket():
+    out = evaluate_buy_entry_controls(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        locked_side_entry_blocked=False,
+        locked_side_entry_block_reason="",
+        side_score=Decimal("0.28"),
+        directional_entry_min_score_abs_new=Decimal("0.18"),
+        directional_first_entry_min_score_abs_new=Decimal("0.25"),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        maker_reload_min_expected_net_multiplier=Decimal("1.5"),
+        current_inst_inventory_qty=Decimal("1"),
+        maker_reload_inventory_threshold_shares=Decimal("5"),
+        max_locked_side_position=Decimal("8"),
+        inventory_full_behavior="STOP_BUY",
+        current_slug="btc-updown-15m-test",
+        inst_id="inst-up",
+        market_buy_count=1,
+        candidate_entry_price=Decimal("0.68"),
+        fair=Decimal("0.64"),
+        entry_fair_edge_min_ps=Decimal("0.002"),
+        allow_fair_edge_shadow=True,
+    )
+
+    assert out.skip is False
+    assert out.shadow_only is True
+    assert out.fair_edge_bucket == "neg_0_05_to_neg_0_02"
+
+
 def test_down_high_price_gate_requires_stronger_context():
     out = evaluate_buy_entry_controls(
         side="buy",

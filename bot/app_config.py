@@ -512,6 +512,7 @@ class OperationsConfig:
     trade_db_enabled: bool
     trade_db_path: str
     shadow_simulation_enabled: bool
+    fair_edge_bucket_shadow_enabled: bool
     shadow_simulation_fill_timeout_sec: float
     shadow_simulation_max_quote_age_sec: float
     shadow_simulation_aged_quote_max_age_sec: float
@@ -1061,6 +1062,7 @@ class AppConfig:
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
                 trade_db_path=_env_str("TRADE_DB_PATH", "./logs/trade_journal.db"),
                 shadow_simulation_enabled=_env_bool_inverted("SHADOW_SIMULATION_ENABLED", True),
+                fair_edge_bucket_shadow_enabled=_env_bool_inverted("FAIR_EDGE_BUCKET_SHADOW_ENABLED", True),
                 shadow_simulation_fill_timeout_sec=max(
                     5.0,
                     _env_float("SHADOW_SIMULATION_FILL_TIMEOUT_SEC", 90.0),

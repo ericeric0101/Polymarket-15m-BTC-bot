@@ -262,6 +262,41 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load_shadow_simulation failed: {e}")
             return None
 
+    def load_fair_edge_bucket_shadow_simulations(self, slug: str) -> list[Dict[str, Any]]:
+        """Return the latest persisted state for each fair-edge research candidate."""
+        slug = str(slug or "")
+        if not slug:
+            return []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM order_events
+                    WHERE event_type IN (
+                      'FAIR_EDGE_BUCKET_SHADOW_CANDIDATE',
+                      'FAIR_EDGE_BUCKET_SHADOW_FILLED',
+                      'FAIR_EDGE_BUCKET_SHADOW_EXPIRED',
+                      'FAIR_EDGE_BUCKET_SHADOW_SETTLED'
+                    )
+                      AND json_extract(payload_json, '$.slug')=?
+                    ORDER BY id ASC
+                    """,
+                    (slug,),
+                ).fetchall()
+            states: Dict[str, Dict[str, Any]] = {}
+            for (raw_payload,) in rows:
+                payload = json.loads(raw_payload or "{}")
+                if not isinstance(payload, dict):
+                    continue
+                simulation_id = str(payload.get("simulation_id") or "")
+                if simulation_id:
+                    states[simulation_id] = payload
+            return list(states.values())
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_fair_edge_bucket_shadow_simulations failed: {e}")
+            return []
+
     def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         sql = "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)"
         try:
