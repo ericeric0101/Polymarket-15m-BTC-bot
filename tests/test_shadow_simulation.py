@@ -270,6 +270,9 @@ def test_dry_run_submit_uses_active_order_lifecycle_and_local_cancel(tmp_path):
     key = "buy:inst-up"
     assert host.active_maker_orders[key]["dry_run_simulated"] is True
     assert _event_count(db, "ORDER_DRY_RUN_SUBMITTED") == 1
+    created_ts = host.active_maker_orders[key]["created_ts"]
+    assert host._is_order_ttl_expired(key, created_ts + 19.9) is False
+    assert host._is_order_ttl_expired(key, created_ts + 20.0) is True
     host._cancel_maker_order_key(key, reason="requote")
     assert key not in host.active_maker_orders
     assert _event_count(db, "ORDER_DRY_RUN_CANCELLED") == 1
@@ -320,12 +323,22 @@ def test_fair_edge_bucket_shadow_requires_passive_fill_and_settles(tmp_path):
         limit_price=Decimal("0.68"),
         qty=Decimal("5"),
         econ=SimpleNamespace(expected_net_usdc=Decimal("0.12")),
-        directional_snapshot={"p_fair": Decimal("0.64")},
+        directional_snapshot={
+            "p_fair": Decimal("0.64"),
+            "fee_ps": Decimal("0.01"),
+            "other_cost_ps": Decimal("0.02"),
+            "exec_penalty_usdc": Decimal("0.15"),
+            "execution_penalty_components": {"vwap": Decimal("0.10")},
+        },
         bucket="neg_0_05_to_neg_0_02",
     )
     assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_CANDIDATE") == 1
 
     state = next(iter(host._fair_edge_bucket_shadow_by_id.values()))
+    assert state["fee_ps"] == 0.01
+    assert state["other_cost_ps"] == 0.02
+    assert state["exec_penalty_usdc"] == 0.15
+    assert state["execution_penalty_components"] == {"vwap": 0.1}
     host._shadow_simulation_on_quote(
         "inst-up", Decimal("0.69"), Decimal("0.70"), state["created_ts"] + 1
     )

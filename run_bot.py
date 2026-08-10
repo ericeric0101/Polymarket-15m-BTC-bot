@@ -48,6 +48,7 @@ from loguru import logger
 from bot.inventory import InventoryLedger
 from bot.edge_state import build_edge_state
 from bot.edge_observation import build_quote_age_telemetry
+from bot.entry_decision import EntryDecision
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.enums import ActiveSide, MarketPhase
@@ -1546,6 +1547,73 @@ class IntegratedBTCStrategy(
 
         return instruments
 
+    def _record_entry_decision_trace(
+        self,
+        *,
+        now_ts: float,
+        inst_id: Any,
+        side: str,
+        should_quote: bool,
+        reason: str = "",
+        source_event_type: str = "",
+        shadow_only: bool = False,
+        entry_mode: str = "",
+        fair: Any = None,
+        entry_price: Any = None,
+        robust_net_usdc: Any = None,
+        time_left_sec: Optional[float] = None,
+    ) -> None:
+        """Record the existing BUY decision path without changing its outcome."""
+        if side != "buy" or not self.trade_db:
+            return
+
+        def _as_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        decision = EntryDecision.observe(
+            slug=str(self.current_market_slug or ""),
+            instrument_id=inst_id,
+            side=side,
+            should_quote=should_quote,
+            reason=reason,
+            source_event_type=source_event_type,
+            shadow_only=shadow_only,
+            entry_mode=entry_mode,
+            time_left_sec=_as_float(time_left_sec),
+            side_score=_as_float(self.side_decision_score),
+            fair=_as_float(fair),
+            entry_price=_as_float(entry_price),
+            robust_net_usdc=_as_float(robust_net_usdc),
+        )
+        payload = decision.to_payload()
+        payload["decision_stage"] = "pre_submit"
+        signature = (
+            payload["slug"],
+            payload["state"],
+            payload["layer"],
+            payload["final_reason"],
+            payload["entry_mode"],
+            payload["entry_price"],
+            payload["fair"],
+            payload["robust_net_usdc"],
+        )
+        if not hasattr(self, "_last_entry_decision_trace_signature_by_inst"):
+            self._last_entry_decision_trace_signature_by_inst = {}
+            self._last_entry_decision_trace_ts_by_inst = {}
+        inst_key = str(inst_id)
+        last_signature = self._last_entry_decision_trace_signature_by_inst.get(inst_key)
+        last_ts = float(self._last_entry_decision_trace_ts_by_inst.get(inst_key, 0.0))
+        if signature == last_signature and (now_ts - last_ts) < 1.0:
+            return
+        self._last_entry_decision_trace_signature_by_inst[inst_key] = signature
+        self._last_entry_decision_trace_ts_by_inst[inst_key] = now_ts
+        self._db_strategy_event("ENTRY_DECISION_TRACE", payload)
+
     async def _evaluate_quote_targets(
         self,
         *,
@@ -1900,7 +1968,6 @@ class IntegratedBTCStrategy(
                     # Trend-buy params
                     trend_buy_enabled=self.trend_buy_enabled,
                     trend_buy_min_score=self.trend_buy_min_score,
-                    trend_buy_min_net_usdc=self.trend_buy_min_net_usdc,
                     active_instrument_id=self._instrument_for_side(self.active_side),
                     time_left_sec=time_left_sec_global,
                     trend_buy_min_time_left_sec=self.trend_buy_min_time_left_sec,
@@ -2093,6 +2160,20 @@ class IntegratedBTCStrategy(
                 min_expected_net_usdc = buy_entry_eval.min_expected_net_usdc
                 if buy_entry_eval.skip:
                     diag_payload = buy_entry_eval.payload or {}
+                    self._record_entry_decision_trace(
+                        now_ts=now_ts,
+                        inst_id=inst_id,
+                        side=side,
+                        should_quote=False,
+                        reason=buy_entry_eval.reason,
+                        source_event_type=buy_entry_eval.event_type,
+                        shadow_only=buy_entry_eval.shadow_only,
+                        entry_mode=buy_entry_eval.entry_mode,
+                        fair=quote_ctx.fair,
+                        entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
+                        robust_net_usdc=candidate_robust_net,
+                        time_left_sec=time_left_sec_global,
+                    )
                     self._db_buy_path_diagnostic(
                         event_type=buy_entry_eval.event_type,
                         side=side.upper(),
@@ -2285,8 +2366,6 @@ class IntegratedBTCStrategy(
                     time_left_sec=time_left_sec_global,
                     # Trend-buy params
                     entry_mode=buy_entry_eval.entry_mode,
-                    trend_buy_penalty_discount=self.trend_buy_penalty_discount,
-                    trend_buy_score=self.side_decision_score,
                     trend_buy_size_multiplier=self.trend_buy_size_multiplier,
                     entry_size_multiplier=(
                         buy_entry_eval.size_multiplier
@@ -2936,6 +3015,20 @@ class IntegratedBTCStrategy(
                         locked_side_runtime=locked_side_runtime,
                         current_inst_inventory_qty=current_inst_inventory_qty,
                         market_buy_count=market_buy_count,
+                        time_left_sec=time_left_sec_global,
+                    )
+                    self._record_entry_decision_trace(
+                        now_ts=now_ts,
+                        inst_id=inst_id,
+                        side=side,
+                        should_quote=bool(desired_entry.get("should_quote", False)),
+                        reason=str(desired_entry.get("diag_reason", "") or "eligible"),
+                        source_event_type="ENTRY_DECISION_PRE_SUBMIT",
+                        shadow_only=bool(desired_entry.get("fair_edge_bucket_shadow", "")),
+                        entry_mode=str(desired_entry.get("entry_mode", buy_entry_eval.entry_mode) or ""),
+                        fair=quote_ctx.fair,
+                        entry_price=desired_entry.get("price"),
+                        robust_net_usdc=desired_entry.get("robust_net", candidate_robust_net),
                         time_left_sec=time_left_sec_global,
                     )
                 desired_quotes[order_key] = desired_entry

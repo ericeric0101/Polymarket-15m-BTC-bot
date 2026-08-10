@@ -267,8 +267,6 @@ def initialize_strategy_settings(
     strategy.continuation_entry_size_multiplier = config.maker.continuation_entry_size_multiplier
     strategy.trend_buy_enabled = config.maker.trend_buy_enabled
     strategy.trend_buy_min_score = config.maker.trend_buy_min_score
-    strategy.trend_buy_min_net_usdc = config.maker.trend_buy_min_net_usdc
-    strategy.trend_buy_penalty_discount = config.maker.trend_buy_penalty_discount
     strategy.trend_buy_min_time_left_sec = config.maker.trend_buy_min_time_left_sec
     strategy.trend_buy_max_price_premium_ps = config.maker.trend_buy_max_price_premium_ps
     strategy.trend_buy_size_multiplier = config.maker.trend_buy_size_multiplier

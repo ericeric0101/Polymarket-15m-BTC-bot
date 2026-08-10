@@ -185,7 +185,10 @@ def apply_weak_pfair_size_adjustment(
         return desired_entry
 
     prior_multiplier = Decimal(str(desired_entry.get("size_multiplier", Decimal("1")) or "1"))
-    adjusted_multiplier = max(Decimal("0"), prior_multiplier * multiplier)
+    # Risk reductions are caps, not independent leverage multipliers. A weak
+    # p_fair and a high entry price should still produce the configured half
+    # position, not an accidental quarter position below the venue minimum.
+    adjusted_multiplier = max(Decimal("0"), min(prior_multiplier, multiplier))
     desired_entry["size_multiplier"] = adjusted_multiplier
     desired_entry["weak_pfair_size_adjustment"] = {
         "p_fair": p_fair,
@@ -199,7 +202,7 @@ def apply_weak_pfair_size_adjustment(
     adjustment_reason = (
         f"weak_pfair_size_adjust p_fair={float(p_fair):.4f} "
         f"in [{float(lower):.2f},{float(upper):.2f}] "
-        f"size_mult={float(prior_multiplier):.3f}->{float(adjusted_multiplier):.3f}"
+        f"size_cap={float(prior_multiplier):.3f}->{float(adjusted_multiplier):.3f}"
     )
     desired_entry["diag_reason"] = (
         f"{diag_reason}; {adjustment_reason}" if diag_reason else adjustment_reason
@@ -230,7 +233,7 @@ def apply_high_entry_price_size_adjustment(
         return desired_entry
 
     prior_multiplier = Decimal(str(desired_entry.get("size_multiplier", Decimal("1")) or "1"))
-    adjusted_multiplier = max(Decimal("0"), prior_multiplier * multiplier)
+    adjusted_multiplier = max(Decimal("0"), min(prior_multiplier, multiplier))
     desired_entry["size_multiplier"] = adjusted_multiplier
     desired_entry["high_entry_price_size_adjustment"] = {
         "entry_price": entry_price,
@@ -243,7 +246,7 @@ def apply_high_entry_price_size_adjustment(
     adjustment_reason = (
         f"high_entry_price_size_adjust entry={float(entry_price):.4f} "
         f"> {float(threshold):.2f} "
-        f"size_mult={float(prior_multiplier):.3f}->{float(adjusted_multiplier):.3f}"
+        f"size_cap={float(prior_multiplier):.3f}->{float(adjusted_multiplier):.3f}"
     )
     desired_entry["diag_reason"] = (
         f"{diag_reason}; {adjustment_reason}" if diag_reason else adjustment_reason
@@ -510,7 +513,6 @@ def evaluate_buy_entry_controls(
     # --- Trend-buy params ---
     trend_buy_enabled: bool = False,
     trend_buy_min_score: Decimal = Decimal("0.20"),
-    trend_buy_min_net_usdc: Decimal = Decimal("-0.005"),
     active_instrument_id: Any = None,
     time_left_sec: float | None = None,
     trend_buy_min_time_left_sec: float = 300.0,
@@ -772,7 +774,8 @@ def evaluate_buy_entry_controls(
         )
     ):
         entry_mode = "trend"
-        min_expected_net_usdc = trend_buy_min_net_usdc
+        # Trend is a directional classification only. It cannot relax the
+        # common economics threshold used by every new BUY.
 
     if (
         maker_reload_min_expected_net_multiplier > Decimal("1")
@@ -816,23 +819,6 @@ def _trend_price_premium_ok(
     if best_bid is None or fair is None or fair <= 0:
         return False
     return best_bid <= fair + max_premium
-
-
-def compute_trend_robust_net(
-    expected_net: Decimal,
-    exec_penalty: Decimal,
-    taker_leakage: Decimal,
-    trend_penalty_discount: Decimal,
-) -> Decimal:
-    """Recompute robust_net with discounted exec penalty for trend entries.
-
-    In trend mode the bot accepts thinner edge because the entry thesis is
-    directional conviction, not spread-capture.  The execution penalty —
-    which models forced-liquidation cost — is discounted because trend
-    entries are less likely to need immediate reversal.
-    """
-    discounted_penalty = exec_penalty * trend_penalty_discount
-    return expected_net - discounted_penalty - taker_leakage
 
 
 def apply_entry_vwap_risk_weight(
@@ -1742,8 +1728,6 @@ def build_desired_quote_entry(
     true_last_resort_sec: float = 15.0,
     # --- Trend-buy params (orchestration passes down) ---
     entry_mode: str = "value",
-    trend_buy_penalty_discount: Decimal = Decimal("0.50"),
-    trend_buy_score: Decimal = Decimal("0"),
     trend_buy_size_multiplier: Decimal = Decimal("1"),
     entry_size_multiplier: Decimal = Decimal("1"),
     entry_quality: dict[str, Any] | None = None,
@@ -1817,36 +1801,6 @@ def build_desired_quote_entry(
                 f"side_disabled:{side_disable_reason} robust_net={robust_net_display:.6f} "
                 f"(expected_net={float(econ.expected_net_usdc):.6f}, "
                 f"exec_penalty={exec_penalty_display:.6f})"
-            )
-
-    # --- Trend-buy override: re-evaluate econ gate with discounted penalty ---
-    if (
-        side == "buy"
-        and not should_quote
-        and entry_mode == "trend"
-        and isinstance(robust_net, Decimal)
-        and isinstance(exec_penalty, Decimal)
-    ):
-        # Separate taker_leakage from the MakerEngine robust_net.
-        # MakerEngine computes: robust_net = expected_net - exec_penalty - taker_leakage
-        # So: taker_leakage = expected_net - exec_penalty - robust_net
-        taker_leakage = econ.expected_net_usdc - exec_penalty - robust_net
-        trend_robust = compute_trend_robust_net(
-            expected_net=econ.expected_net_usdc,
-            exec_penalty=exec_penalty,
-            taker_leakage=taker_leakage,
-            trend_penalty_discount=trend_buy_penalty_discount,
-        )
-        if trend_robust >= min_expected_net_usdc:
-            should_quote = True
-            robust_net = trend_robust
-            entry_mode = "trend"
-            diag_reason = (
-                f"trend_buy_entry score={float(trend_buy_score):+.4f} "
-                f"trend_robust_net={float(trend_robust):.6f} "
-                f"(discount={float(trend_buy_penalty_discount):.2f} "
-                f"orig_penalty={exec_penalty_display:.6f}) "
-                f">= min={float(min_expected_net_usdc):.6f}"
             )
 
     if side == "sell":

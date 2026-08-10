@@ -92,6 +92,14 @@ class ShadowSimulationMixin:
             "expires_ts": now_ts + float(getattr(self, "shadow_simulation_fill_timeout_sec", 90.0)),
             "expected_net_usdc": _as_float(getattr(econ, "expected_net_usdc", None)),
             "expected_rebate_usdc": _as_float(getattr(econ, "expected_rebate_usdc", None)),
+            # Capture the submit-time model inputs for the Phase 3 report. These
+            # remain counterfactual estimates, never realized trading costs.
+            "fee_ps": _as_float(snapshot.get("fee_ps")),
+            "other_cost_ps": _as_float(snapshot.get("other_cost_ps")),
+            "exec_penalty_usdc": _as_float(snapshot.get("exec_penalty_usdc")),
+            "execution_penalty_components": _json_safe(
+                snapshot.get("execution_penalty_components")
+            ),
             "side_score": _as_float(getattr(self, "side_decision_score", None)),
             "side_reason": str(getattr(self, "side_decision_reason", "") or ""),
             "planned_quote_ts": _as_float(snapshot.get("planned_quote_ts")),

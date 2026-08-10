@@ -41,6 +41,18 @@ Enable this independent telemetry with `FAIR_EDGE_BUCKET_SHADOW_ENABLED=1`.
 It must not be interpreted as live or executable PnL until enough passive fills
 and settlements accumulate.
 
+To test the negative-edge hypothesis without conflating raw `fair - entry`
+with `robust_net`, use the cost-adjusted companion report:
+
+```bash
+./.venv/bin/python scripts/executable_fair_edge_report.py --hours 168
+```
+
+It reports the recorded submit-time fee buffer, other-cost buffer, and
+execution penalty for **simulated passive fills**. The adjusted number is still
+counterfactual and excludes live exits; it is evidence for or against a narrow
+future policy, not justification for globally allowing negative `robust_net`.
+
 ## Calibration Diagnostics
 
 Inspect the execution penalty components before changing any cost multiplier:

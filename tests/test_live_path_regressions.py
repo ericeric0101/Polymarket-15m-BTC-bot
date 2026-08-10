@@ -38,6 +38,7 @@ from bot.quote_service import (
     apply_entry_quality_quote_placement,
     apply_shadow_entry_veto,
     apply_high_entry_price_size_adjustment,
+    apply_weak_pfair_size_adjustment,
     build_desired_quote_entry,
     compute_loss_sell_policy,
     build_directional_snapshot,
@@ -3088,7 +3089,7 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
     ]
 
 
-def test_trend_buy_size_multiplier_flows_into_submit_qty():
+def test_trend_buy_size_multiplier_flows_into_submit_qty_without_economics_exemption():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up",
         side="buy",
@@ -3101,8 +3102,8 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty():
                 expected_spread_capture_usdc=Decimal("0"),
                 fee_equivalent_usdc=Decimal("0"),
             ),
-            False,
-            Decimal("-0.031"),
+            True,
+            Decimal("0.007"),
             Decimal("0.030"),
             Decimal("0.010"),
             Decimal("0.054"),
@@ -3115,7 +3116,7 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty():
         reduce_only_tail_sell_block=False,
         reduce_only_no_new_sell_last_sec=30,
         forced_sell_only=False,
-        min_expected_net_usdc=Decimal("-0.005"),
+        min_expected_net_usdc=Decimal("0.001"),
         now_ts=0.0,
         sell_pause_until=0.0,
         is_dry_run_mode=False,
@@ -3129,8 +3130,6 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty():
         maker_sell_cost_protect_enabled=False,
         maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
         entry_mode="trend",
-        trend_buy_penalty_discount=Decimal("0.50"),
-        trend_buy_score=Decimal("0.20"),
         trend_buy_size_multiplier=Decimal("1.5"),
     )
     snapshot = build_directional_snapshot(desired_entry)
@@ -3320,6 +3319,83 @@ def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
     assert "entry_quality_quote_placement join_bid 0.7400->0.7000" in out["diag_reason"]
 
 
+def test_weak_and_high_price_risk_caps_produce_half_size_not_quarter_size():
+    desired = {
+        "should_quote": True,
+        "p_fair": Decimal("0.50"),
+        "price": Decimal("0.75"),
+        "size_multiplier": Decimal("1"),
+    }
+    desired = apply_weak_pfair_size_adjustment(
+        desired_entry=desired,
+        side="buy",
+        enabled=True,
+        lower=Decimal("0.47"),
+        upper=Decimal("0.53"),
+        multiplier=Decimal("0.5"),
+    )
+    desired = apply_high_entry_price_size_adjustment(
+        desired_entry=desired,
+        side="buy",
+        enabled=True,
+        threshold=Decimal("0.70"),
+        multiplier=Decimal("0.5"),
+    )
+
+    assert desired["size_multiplier"] == Decimal("0.5")
+    assert desired["weak_pfair_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
+    assert desired["high_entry_price_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
+
+
+def test_trend_mode_cannot_recover_a_negative_robust_net_with_discounted_cost():
+    desired = build_desired_quote_entry(
+        order_key="buy:inst-up",
+        side="buy",
+        inst_id="inst-up",
+        quote_data=(
+            Decimal("0.64"),
+            SimpleNamespace(
+                expected_net_usdc=Decimal("0.007"),
+                expected_rebate_usdc=Decimal("0"),
+                expected_spread_capture_usdc=Decimal("0"),
+                fee_equivalent_usdc=Decimal("0"),
+            ),
+            False,
+            Decimal("-0.031"),
+            Decimal("0.030"),
+            Decimal("0.010"),
+            Decimal("0.054"),
+            Decimal("0.6244"),
+            Decimal("0"),
+            Decimal("0"),
+        ),
+        side_disable_reason_by_side={"buy": "econ_gate"},
+        reduce_only_reason=None,
+        reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"),
+        now_ts=0.0,
+        sell_pause_until=0.0,
+        is_dry_run_mode=False,
+        sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5.0"),
+        avg_entry=Decimal("0"),
+        emergency_window=False,
+        high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+        entry_mode="trend",
+        trend_buy_size_multiplier=Decimal("1"),
+    )
+
+    assert desired["should_quote"] is False
+    assert desired["robust_net"] == Decimal("-0.031")
+    assert desired["diag_reason"].startswith("econ_gate")
+
+
 def test_reduce_only_overrides_trend_buy_quote():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up",
@@ -3361,8 +3437,6 @@ def test_reduce_only_overrides_trend_buy_quote():
         maker_sell_cost_protect_enabled=False,
         maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
         entry_mode="trend",
-        trend_buy_penalty_discount=Decimal("0.50"),
-        trend_buy_score=Decimal("0.51"),
         trend_buy_size_multiplier=Decimal("1.0"),
     )
 
@@ -4003,7 +4077,6 @@ def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
         market_buy_count=0,
         trend_buy_enabled=True,
         trend_buy_min_score=Decimal("0.16"),
-        trend_buy_min_net_usdc=Decimal("0.001"),
         active_instrument_id="inst-down",
         time_left_sec=600.0,
         trend_buy_min_time_left_sec=360.0,

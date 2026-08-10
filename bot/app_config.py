@@ -193,8 +193,6 @@ class MakerConfig:
     continuation_entry_size_multiplier: Decimal
     trend_buy_enabled: bool
     trend_buy_min_score: Decimal
-    trend_buy_min_net_usdc: Decimal
-    trend_buy_penalty_discount: Decimal
     trend_buy_min_time_left_sec: float
     trend_buy_max_price_premium_ps: Decimal
     trend_buy_size_multiplier: Decimal
@@ -831,11 +829,6 @@ class AppConfig:
                 continuation_entry_size_multiplier=_env_decimal("CONTINUATION_ENTRY_SIZE_MULTIPLIER", "1.0"),
                 trend_buy_enabled=_env_bool("TREND_BUY_ENABLED", False),
                 trend_buy_min_score=_env_decimal("TREND_BUY_MIN_SCORE", "0.20"),
-                trend_buy_min_net_usdc=_env_decimal("TREND_BUY_MIN_NET_USDC", "-0.005"),
-                trend_buy_penalty_discount=max(
-                    Decimal("0"),
-                    min(Decimal("1"), _env_decimal("TREND_BUY_PENALTY_DISCOUNT", "0.50")),
-                ),
                 trend_buy_min_time_left_sec=_env_float("TREND_BUY_MIN_TIME_LEFT_SEC", 300.0),
                 trend_buy_max_price_premium_ps=_env_decimal("TREND_BUY_MAX_PRICE_PREMIUM_PS", "0.02"),
                 trend_buy_size_multiplier=_env_decimal("TREND_BUY_SIZE_MULTIPLIER", "1.0"),
