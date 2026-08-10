@@ -1890,6 +1890,10 @@ class IntegratedBTCStrategy(
                     allow_fair_edge_shadow=bool(
                         getattr(self, "fair_edge_bucket_shadow_enabled", False)
                     ),
+                    twap_reference_degraded=bool(
+                        getattr(self, "twap_degraded_block_new_entries", True)
+                        and getattr(self, "_twap_reference_degraded", False)
+                    ),
                     current_slug=current_slug,
                     inst_id=inst_id,
                     market_buy_count=market_buy_count,
@@ -3015,6 +3019,7 @@ class IntegratedBTCStrategy(
         self._rehydrate_inventory_state_on_startup()
         self._restore_market_risk_guards_from_trade_db_on_startup()
         self._recover_market_strike_from_trade_db_on_startup()
+        self._apply_empirical_execution_penalty_calibration()
 
         log_strategy_run_start(
             trade_db=self.trade_db,
@@ -3318,6 +3323,19 @@ class IntegratedBTCStrategy(
         except Exception as exc:
             logger.error(f"Quote stream node rollover stop failed: {exc}")
 
+    def _quote_watchdog_recovery_is_needed(self) -> bool:
+        """Only rebuild a quote stream when it can still affect risk or quoting."""
+        phase = getattr(self, "market_phase", None)
+        phase_value = str(getattr(phase, "value", phase) or "").upper()
+        if phase_value == "ACTIVE":
+            return True
+        try:
+            if Decimal(str(getattr(self, "inventory_delta_shares", "0"))) > 0:
+                return True
+        except (ArithmeticError, TypeError, ValueError):
+            return True
+        return bool(getattr(self, "active_maker_orders", {}))
+
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
@@ -3352,7 +3370,9 @@ class IntegratedBTCStrategy(
 
             refresh_quote_tick_subscriptions(self)
             self.quote_recovery_attempts = int(getattr(self, "quote_recovery_attempts", 0)) + 1
-            self.quote_recovery_started_ts = now_ts
+            # Start the grace period only after the resubscribe call returns.
+            # The call itself can take seconds, especially during rollover.
+            self.quote_recovery_started_ts = time.time()
             logger.warning(
                 "Quote watchdog resubscribed; awaiting first fresh quote: "
                 f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s"
@@ -3416,6 +3436,10 @@ class IntegratedBTCStrategy(
             recovery_started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0))
             pending_instruments = getattr(self, "quote_recovery_pending_instruments", set())
             if pending_instruments and recovery_started_ts > 0:
+                if not self._quote_watchdog_recovery_is_needed():
+                    pending_instruments.clear()
+                    self.quote_recovery_started_ts = 0.0
+                    continue
                 recovery_age = now_ts - recovery_started_ts
                 if recovery_age >= float(self.quote_resubscribe_grace_sec):
                     if int(getattr(self, "quote_recovery_attempts", 0)) >= 1:

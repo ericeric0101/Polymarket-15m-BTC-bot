@@ -534,6 +534,7 @@ def evaluate_buy_entry_controls(
     max_locked_side_position: Decimal = Decimal("999999"),
     inventory_full_behavior: str = "STOP_BUY",
     allow_fair_edge_shadow: bool = False,
+    twap_reference_degraded: bool = False,
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
@@ -546,6 +547,19 @@ def evaluate_buy_entry_controls(
             size_multiplier=size_multiplier,
         )
     fair_edge_shadow_bucket = ""
+    if twap_reference_degraded:
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_TWAP_REFERENCE_DEGRADED",
+            reason="twap_reference_degraded",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "engine": "twap_reference_guard",
+            },
+        )
     if (
         current_inst_inventory_qty >= max_locked_side_position
         and str(inventory_full_behavior or "STOP_BUY").upper() == "STOP_BUY"

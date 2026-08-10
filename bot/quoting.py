@@ -107,6 +107,10 @@ def set_side_should_quote(
     p_fair = existing[7] if len(existing) > 7 else None
     fee_ps = existing[8] if len(existing) > 8 else None
     other_cost_ps = existing[9] if len(existing) > 9 else None
+    # Keep all trailing quote-plan metadata. In particular, index 10 holds
+    # execution_penalty_components, which is needed to discount forced-exit
+    # VWAP risk for a confirmed flat maker entry.
+    trailing_fields = tuple(existing[10:])
     side_plan[plan_side] = (
         lp,
         ec,
@@ -118,6 +122,7 @@ def set_side_should_quote(
         p_fair,
         fee_ps,
         other_cost_ps,
+        *trailing_fields,
     )
     if not new_should_quote and disable_reason:
         side_disable_reason_by_side[plan_side] = str(disable_reason)

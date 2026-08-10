@@ -95,6 +95,22 @@ class OrderRuntimeMixin:
         side = str(state.get("side", "") or "")
         order = state.get("order")
         now_ts = time.time()
+        if bool(state.get("dry_run_simulated", False)) and bool(getattr(self, "_is_dry_run_mode", lambda: False)()):
+            self.active_maker_orders.pop(order_key, None)
+            on_cancel = getattr(self, "_shadow_simulation_on_order_cancel", None)
+            if callable(on_cancel):
+                on_cancel(order_key=order_key, reason=reason)
+            self._db_order_event(
+                event_type="ORDER_DRY_RUN_CANCELLED",
+                client_order_id=str(state.get("dry_run_client_order_id") or order_key),
+                side=side.upper(),
+                price=float(state.get("price", 0) or 0),
+                qty=float(state.get("quantity", 0) or 0),
+                status="CANCELED",
+                reason=f"dry_run_live_lifecycle:{reason}",
+                payload={"order_key": order_key, "target_version": state.get("target_version")},
+            )
+            return
         if state.get("pending_cancel"):
             last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
             if last_cancel_ts > 0 and (now_ts - last_cancel_ts) < self.maker_cancel_cooldown_sec:

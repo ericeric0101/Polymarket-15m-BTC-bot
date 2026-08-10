@@ -148,6 +148,10 @@ class MakerConfig:
     execution_vwap_mult: Decimal
     execution_vwap_entry_risk_weight: Decimal
     execution_vwap_full_risk_last_sec: float
+    execution_empirical_markout_enabled: bool
+    execution_empirical_markout_lookback_hours: float
+    execution_empirical_markout_min_samples: int
+    execution_empirical_markout_horizon_sec: int
     buy_taker_leakage_prob: Decimal
     orderbook_fetch_interval_sec: int
     orderbook_levels_limit: int
@@ -316,6 +320,7 @@ class SideDecisionConfig:
     side_thesis_weak_min_hold_sec_new: int
     btc_ema_fast_sec: float
     btc_ema_slow_sec: float
+    btc_trend_primary_stale_sec: float
     mid_ema_fast_sec: float
     mid_ema_slow_sec: float
     btc_trend_norm_pct: float
@@ -468,6 +473,7 @@ class MarketDataConfig:
     polymarket_chainlink_twap_window_sec: int
     polymarket_chainlink_twap_symbol: str
     require_twap_reference_spot: bool
+    twap_degraded_block_new_entries: bool
     external_spot_source_delta_abs_max_usd: Decimal
     market_strike_anchor_max_lag_sec: int
     market_strike_anchor_near_sec: int
@@ -757,6 +763,21 @@ class AppConfig:
                     0.0,
                     _env_float("MAKER_EXECUTION_VWAP_FULL_RISK_LAST_SEC", 180.0),
                 ),
+                execution_empirical_markout_enabled=_env_bool(
+                    "MAKER_EXECUTION_EMPIRICAL_MARKOUT_ENABLE", True
+                ),
+                execution_empirical_markout_lookback_hours=max(
+                    1.0,
+                    _env_float("MAKER_EXECUTION_EMPIRICAL_MARKOUT_LOOKBACK_HOURS", 168.0),
+                ),
+                execution_empirical_markout_min_samples=max(
+                    1,
+                    _env_int("MAKER_EXECUTION_EMPIRICAL_MARKOUT_MIN_SAMPLES", 5),
+                ),
+                execution_empirical_markout_horizon_sec=max(
+                    1,
+                    _env_int("MAKER_EXECUTION_EMPIRICAL_MARKOUT_HORIZON_SEC", 10),
+                ),
                 buy_taker_leakage_prob=buy_taker_leakage_prob,
                 orderbook_fetch_interval_sec=max(1, _env_int("ORDERBOOK_FETCH_INTERVAL_SEC", 5)),
                 orderbook_levels_limit=max(1, _env_int("ORDERBOOK_LEVELS_LIMIT", 10)),
@@ -918,6 +939,9 @@ class AppConfig:
                 side_thesis_weak_min_hold_sec_new=max(0, _env_int("SIDE_THESIS_WEAK_MIN_HOLD_SEC_NEW", 45)),
                 btc_ema_fast_sec=_env_float("SIDE_SIGNAL_BTC_EMA_FAST_SEC", 3.0),
                 btc_ema_slow_sec=_env_float("SIDE_SIGNAL_BTC_EMA_SLOW_SEC", 10.0),
+                btc_trend_primary_stale_sec=max(
+                    1.0, _env_float("SIDE_SIGNAL_BTC_TREND_PRIMARY_STALE_SEC", 10.0)
+                ),
                 mid_ema_fast_sec=_env_float("SIDE_SIGNAL_MID_EMA_FAST_SEC", 5.0),
                 mid_ema_slow_sec=_env_float("SIDE_SIGNAL_MID_EMA_SLOW_SEC", 20.0),
                 btc_trend_norm_pct=_env_float("SIDE_SIGNAL_BTC_TREND_NORM_PCT", 0.0005),
@@ -1026,6 +1050,9 @@ class AppConfig:
                 polymarket_chainlink_twap_window_sec=polymarket_twap_window_sec,
                 polymarket_chainlink_twap_symbol=_env_str("POLYMARKET_CHAINLINK_TWAP_SYMBOL", "btc/usd").strip().lower() or "btc/usd",
                 require_twap_reference_spot=_env_bool_inverted("REQUIRE_TWAP_REFERENCE_SPOT", True),
+                twap_degraded_block_new_entries=_env_bool_inverted(
+                    "TWAP_DEGRADED_BLOCK_NEW_ENTRIES", True
+                ),
                 external_spot_source_delta_abs_max_usd=max(
                     Decimal("0"),
                     _env_decimal("EXTERNAL_SPOT_SOURCE_DELTA_ABS_MAX_USD", "40"),

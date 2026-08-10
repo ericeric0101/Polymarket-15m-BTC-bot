@@ -47,6 +47,7 @@ class MakerEngineConfig:
         maker_execution_depth_impact_mult: Decimal,
         maker_execution_vwap_mult: Decimal,
         maker_buy_taker_leakage_prob: Decimal,
+        maker_execution_empirical_adverse_markout_per_share: Optional[Decimal] = None,
     ):
         self.maker_half_spread = maker_half_spread
         self.maker_quote_size_usdc = maker_quote_size_usdc
@@ -74,6 +75,11 @@ class MakerEngineConfig:
         self.maker_execution_depth_impact_mult = maker_execution_depth_impact_mult
         self.maker_execution_vwap_mult = maker_execution_vwap_mult
         self.maker_buy_taker_leakage_prob = maker_buy_taker_leakage_prob
+        self.maker_execution_empirical_adverse_markout_per_share = (
+            max(Decimal("0"), maker_execution_empirical_adverse_markout_per_share)
+            if maker_execution_empirical_adverse_markout_per_share is not None
+            else None
+        )
 
 
 class MakerEngine:
@@ -404,7 +410,7 @@ class MakerEngine:
             slippage_penalty = effective_quote_size * spread * self.config.maker_execution_slippage_spread_mult
 
         # Multi-level VWAP add-on (if book levels are available).
-        vwap_penalty = Decimal("0")
+        book_vwap_penalty = Decimal("0")
         if book_levels:
             vwap_price, remaining_qty = _vwap(book_levels, quote_shares)
             if vwap_price is not None and quote_shares > 0:
@@ -416,19 +422,50 @@ class MakerEngine:
                     else:
                         # Sell-side risk = forced cover by buying from asks.
                         impact_pct = max(Decimal("0"), (vwap_price - touch_px) / touch_px)
-                    vwap_penalty += notional * impact_pct * self.config.maker_execution_vwap_mult
+                    book_vwap_penalty += notional * impact_pct * self.config.maker_execution_vwap_mult
             # If requested size exceeds observed levels, penalize exhaustion explicitly.
             if remaining_qty > 0 and quote_shares > 0:
                 exhaustion_ratio = remaining_qty / quote_shares
-                vwap_penalty += notional * exhaustion_ratio * spread * self.config.maker_execution_vwap_mult
+                book_vwap_penalty += notional * exhaustion_ratio * spread * self.config.maker_execution_vwap_mult
+
+        # Order-book VWAP is a stress estimate for an immediate full liquidation.
+        # A real maker-fill adverse markout is a direct measurement of the
+        # expected short-horizon loss after a passive entry. It replaces both
+        # that forced-exit stress and the overlapping non-atomic proxy.
+        vwap_penalty = book_vwap_penalty
+        empirical_markout_penalty: Optional[Decimal] = None
+        use_empirical_markout = False
+        if self.config.maker_execution_empirical_adverse_markout_per_share is not None:
+            empirical_markout_penalty = (
+                quote_shares * self.config.maker_execution_empirical_adverse_markout_per_share
+            )
+            vwap_penalty = Decimal("0")
+            use_empirical_markout = True
 
         vol = max(Decimal("0"), recent_vol or Decimal("0"))
-        non_atomic_penalty = notional * vol * self.config.maker_execution_non_atomic_vol_mult
-        raw_total = slippage_penalty + vwap_penalty + non_atomic_penalty
+        non_atomic_penalty = (
+            Decimal("0")
+            if use_empirical_markout
+            else notional * vol * self.config.maker_execution_non_atomic_vol_mult
+        )
+        raw_total = (
+            slippage_penalty
+            + vwap_penalty
+            + non_atomic_penalty
+            + (empirical_markout_penalty or Decimal("0"))
+        )
         floor_penalty = max(Decimal("0"), self.config.maker_execution_penalty_floor_usdc - raw_total)
         return {
             "slippage_usdc": slippage_penalty,
             "vwap_usdc": vwap_penalty,
+            "book_vwap_usdc": book_vwap_penalty,
+            "empirical_markout_usdc": empirical_markout_penalty or Decimal("0"),
+            "empirical_markout_applied": (
+                Decimal("1") if empirical_markout_penalty is not None else Decimal("0")
+            ),
+            "empirical_markout_replaces_non_atomic": (
+                Decimal("1") if use_empirical_markout else Decimal("0")
+            ),
             "non_atomic_usdc": non_atomic_penalty,
             "floor_usdc": floor_penalty,
             "total_usdc": max(self.config.maker_execution_penalty_floor_usdc, raw_total),

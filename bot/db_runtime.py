@@ -8,6 +8,54 @@ from loguru import logger
 
 
 class StrategyDBRuntimeMixin:
+    def _apply_empirical_execution_penalty_calibration(self) -> None:
+        """Replace synthetic entry stress with observed maker BUY adverse markouts."""
+        engine = getattr(self, "maker_engine", None)
+        config = getattr(engine, "config", None)
+        if not config:
+            return
+        config.maker_execution_empirical_adverse_markout_per_share = None
+        if not getattr(self, "maker_execution_empirical_markout_enabled", False):
+            return
+        if not self.trade_db:
+            return
+
+        lookback_hours = float(self.maker_execution_empirical_markout_lookback_hours)
+        horizon_sec = int(self.maker_execution_empirical_markout_horizon_sec)
+        min_samples = int(self.maker_execution_empirical_markout_min_samples)
+        calibration = self.trade_db.load_maker_buy_markout_calibration(
+            lookback_hours=lookback_hours,
+            horizon_sec=horizon_sec,
+            min_samples=min_samples,
+        )
+        if not calibration:
+            logger.info(
+                "Execution penalty calibration unavailable; retaining book VWAP stress: "
+                f"horizon={horizon_sec}s lookback={lookback_hours:.0f}h min_samples={min_samples}"
+            )
+            return
+
+        adverse_markout_ps = Decimal(str(calibration["adverse_markout_per_share"]))
+        if adverse_markout_ps <= 0:
+            return
+        config.maker_execution_empirical_adverse_markout_per_share = adverse_markout_ps
+        payload = {
+            "source": "maker_buy_adverse_markout",
+            "sample_count": int(calibration["sample_count"]),
+            "horizon_sec": horizon_sec,
+            "lookback_hours": lookback_hours,
+            "adverse_markout_per_share": float(adverse_markout_ps),
+            "risk_cap_at_fixed_shares_usdc": float(
+                adverse_markout_ps * Decimal(str(getattr(self, "maker_fixed_shares", 0)))
+            ),
+        }
+        logger.info(
+            "Execution penalty calibrated from maker BUY fills: "
+            f"samples={payload['sample_count']} horizon={horizon_sec}s "
+            f"adverse_markout=${float(adverse_markout_ps):.6f}/share"
+        )
+        self._db_strategy_event("EXECUTION_PENALTY_CALIBRATED", payload)
+
     def _restore_market_risk_guards_from_trade_db_on_startup(self) -> None:
         if not self.trade_db or not self.current_market_slug:
             return

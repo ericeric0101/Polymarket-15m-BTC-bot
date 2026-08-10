@@ -137,6 +137,11 @@ class SpotPricerMixin:
                             self._polymarket_chainlink_price = tick.price
                             self._polymarket_chainlink_price_ts = tick.received_at_ts
                             self._polymarket_chainlink_event_ts_ms = tick.updated_at_ms
+                            self._update_btc_trend_price(
+                                tick.price,
+                                tick.received_at_ts,
+                                source="polymarket_chainlink_ws",
+                            )
                         if self._is_twap_spot_source(tick.source):
                             self._polymarket_chainlink_twap_price = tick.price
                             self._polymarket_chainlink_twap_price_ts = tick.received_at_ts
@@ -158,6 +163,48 @@ class SpotPricerMixin:
     # Binance WebSocket
     # ------------------------------------------------------------------
 
+    def _update_btc_trend_price(
+        self,
+        price: Decimal,
+        ts: float,
+        *,
+        source: str,
+    ) -> None:
+        """Feed the BTC trend EMA from the preferred fresh raw-spot source.
+
+        Binance aggTrade remains the primary microstructure feed.  Its Futures
+        stream can connect yet remain silent in some network regions, so a
+        fresh raw Chainlink spot tick is used only while Binance is unavailable.
+        The 60-second TWAP is deliberately excluded: it is a settlement
+        reference, not a momentum input.
+        """
+        if price <= 0 or ts <= 0:
+            return
+        now_ts = time.time()
+        primary_stale_sec = float(
+            getattr(self, "side_signal_btc_trend_primary_stale_sec", 10.0) or 10.0
+        )
+        binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)
+        binance_fresh = binance_ts > 0 and (now_ts - binance_ts) <= primary_stale_sec
+        if source != "binance_ws" and binance_fresh:
+            return
+
+        signal_engine = getattr(self, "_signal_engine", None)
+        if signal_engine is None:
+            return
+        try:
+            signal_engine.update_btc_price(price, ts)
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            logger.warning(f"BTC trend tick rejected source={source}: {exc}")
+            return
+
+        previous_source = str(getattr(self, "_btc_trend_source", "unavailable") or "unavailable")
+        self._btc_trend_source = source
+        self._btc_trend_source_ts = ts
+        self._btc_trend_source_price = price
+        if previous_source != source:
+            logger.info(f"BTC trend source switched: {previous_source} -> {source}")
+
     def _start_binance_ws(self) -> None:
         """Start a background thread that streams BTC price from Binance WebSocket."""
         import threading
@@ -174,9 +221,9 @@ class SpotPricerMixin:
 
     def _binance_ws_loop(self) -> None:
         """
-        Persistent WebSocket connection to Binance Futures for BTC/USDT aggTrade.
+        Persistent WebSocket connection to Binance Spot for BTC/USDT aggTrade.
         Per Binance docs:
-        - Base URL: wss://fstream.binance.com
+        - Base URL: wss://stream.binance.com:9443
         - Stream: /ws/btcusdt@aggTrade
         - Connection valid for max 24 hours → reconnect at 23h
         - Server pings every 3 min; must pong within 10 min
@@ -201,7 +248,7 @@ class SpotPricerMixin:
                     reconnect_delay = 1.0  # reset on success
                     connect_ts = time.time()
                     last_pong_ts = connect_ts
-                    logger.info("✓ Binance Futures WS connected (btcusdt@aggTrade)")
+                    logger.info("✓ Binance Spot WS connected (btcusdt@aggTrade)")
                     while not self._binance_ws_stop_event.is_set():
                         # Check 24h reconnect limit
                         now = time.time()
@@ -227,15 +274,13 @@ class SpotPricerMixin:
                             if tick is not None:
                                 self._binance_ws_price = tick.price
                                 self._binance_ws_price_ts = tick.received_at_ts
-                                # Feed into SignalEngine's BTC EMA tracker
-                                _sig_eng = getattr(self, "_signal_engine", None)
-                                if _sig_eng is not None:
-                                    _sig_eng.update_btc_price(
-                                        self._binance_ws_price,
-                                        self._binance_ws_price_ts,
-                                    )
-                        except Exception:
-                            pass
+                                self._update_btc_trend_price(
+                                    tick.price,
+                                    tick.received_at_ts,
+                                    source="binance_ws",
+                                )
+                        except Exception as exc:
+                            logger.warning(f"Binance WS tick processing failed: {exc}")
             except Exception as e:
                 logger.debug(f"Binance WS error: {e}; reconnect in {reconnect_delay:.0f}s")
                 self._binance_ws_stop_event.wait(reconnect_delay)
@@ -272,6 +317,9 @@ class SpotPricerMixin:
             age = time.time() - twap_ts
             if age < 10.0:
                 price = twap_price
+                if bool(getattr(self, "_twap_reference_degraded", False)):
+                    logger.info("Polymarket Chainlink TWAP recovered; new entries may resume")
+                self._twap_reference_degraded = False
                 if (
                     binance_fresh
                     and binance_price is not None
@@ -281,8 +329,8 @@ class SpotPricerMixin:
                     last_warn_ts = float(getattr(self, "_last_spot_source_delta_warn_ts", 0.0) or 0.0)
                     now_ts = time.time()
                     if now_ts - last_warn_ts >= 30.0:
-                        logger.warning(
-                            "Reference spot source delta exceeded guard; using Polymarket Chainlink TWAP as primary: "
+                        logger.info(
+                            "TWAP/spot divergence observed; retaining settlement-aligned TWAP: "
                             f"twap={float(price):.2f} binance={float(binance_price):.2f} "
                             f"delta={float(price - binance_price):+.2f} "
                             f"guard={float(max_delta_abs):.2f}"
@@ -302,6 +350,7 @@ class SpotPricerMixin:
             # marking a degraded reference source. Snapshot fallback remains
             # disabled in this strict mode; Binance is the next source below.
             now_ts = time.time()
+            self._twap_reference_degraded = True
             last_warn_ts = float(getattr(self, "_last_twap_stale_fallback_warn_ts", 0.0) or 0.0)
             if now_ts - last_warn_ts >= 30.0:
                 logger.warning(

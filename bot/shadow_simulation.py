@@ -271,13 +271,20 @@ class ShadowSimulationMixin:
         qty: Decimal,
         econ: Any,
         directional_snapshot: Optional[Dict[str, Any]],
-    ) -> None:
-        """Create one passive-entry candidate. It fills only if a later ask reaches it."""
+        target_version: int = 0,
+        order_key: str = "",
+    ) -> bool:
+        """Create or reprice the paper order that mirrors a live maker BUY.
+
+        The quote runtime owns the decision to cancel/requote.  This mixin only
+        persists that resulting paper order lifecycle and observes a passive
+        fill once a later ask reaches its current limit.
+        """
         if not self._shadow_simulation_enabled_for_run():
-            return
+            return False
         slug = str(getattr(self, "current_market_slug", "") or "")
-        if not slug or self._load_shadow_simulation_for_slug(slug) is not None:
-            return
+        if not slug:
+            return False
 
         now_ts = time.time()
         quote = self._get_quote_for_instrument(instrument_id)
@@ -285,7 +292,6 @@ class ShadowSimulationMixin:
         snapshot = directional_snapshot or {}
         raw_quote_age_sec = self._shadow_quote_age_sec(instrument_id, now_ts)
         quote_freshness_tier = self._shadow_quote_freshness_tier(instrument_id, now_ts)
-        timeout_sec = float(getattr(self, "shadow_simulation_fill_timeout_sec", 90.0))
         simulation_id = f"shadow-sim:{slug}:{side.lower()}"
         quote_ts = _as_float(
             getattr(self, "last_quote_update_ts_by_inst", {}).get(str(instrument_id))
@@ -297,6 +303,14 @@ class ShadowSimulationMixin:
         end_ts = _as_float(getattr(self, "current_market_end_timestamp", None))
         if end_ts is not None:
             time_left_sec = max(0.0, end_ts - now_ts)
+        existing = self._load_shadow_simulation_for_slug(slug)
+        if existing is not None and str(existing.get("status") or "") in {"FILLED", "SETTLED"}:
+            return False
+
+        # A live maker order expires through the same TTL loop before the next
+        # quote is considered.  Dry-run must use that TTL, rather than a
+        # separate 90-second fixed candidate window.
+        live_ttl_sec = float(getattr(self, "maker_order_ttl_sec", 20.0))
         state: Dict[str, Any] = {
             "simulation_id": simulation_id,
             "slug": slug,
@@ -306,7 +320,10 @@ class ShadowSimulationMixin:
             "entry_price": float(limit_price),
             "qty": float(qty),
             "created_ts": now_ts,
-            "expires_ts": now_ts + timeout_sec,
+            "expires_ts": now_ts + live_ttl_sec,
+            "order_key": order_key,
+            "target_version": int(target_version or 0),
+            "live_order_ttl_sec": live_ttl_sec,
             "expected_net_usdc": _as_float(getattr(econ, "expected_net_usdc", None)),
             "expected_rebate_usdc": _as_float(getattr(econ, "expected_rebate_usdc", None)),
             "fair": _as_float(snapshot.get("p_fair")),
@@ -350,22 +367,66 @@ class ShadowSimulationMixin:
             "spot": _as_float(getattr(self, "latest_external_spot", None)),
             "markouts_done": [],
         }
+        if existing is not None:
+            state["simulation_id"] = str(existing.get("simulation_id") or simulation_id)
+            state["first_created_ts"] = float(existing.get("first_created_ts") or existing.get("created_ts") or now_ts)
+            state["submission_count"] = int(existing.get("submission_count", 1) or 1) + 1
+            state["requote_count"] = int(existing.get("requote_count", 0) or 0) + 1
+            state["last_cancel_reason"] = existing.get("last_cancel_reason")
+            event_type = "SHADOW_SIM_ENTRY_REQUOTED"
+            event_reason = "dry_run_live_lifecycle_requote"
+        else:
+            state["first_created_ts"] = now_ts
+            state["submission_count"] = 1
+            state["requote_count"] = 0
+            event_type = "SHADOW_SIM_ENTRY_CANDIDATE"
+            event_reason = "dry_run_live_lifecycle_submit"
         self._shadow_simulations_by_slug[slug] = state
         self._db_order_event(
-            event_type="SHADOW_SIM_ENTRY_CANDIDATE",
-            client_order_id=simulation_id,
+            event_type=event_type,
+            client_order_id=str(state["simulation_id"]),
             side=side,
             price=float(limit_price),
             qty=float(qty),
             status="PENDING",
-            reason="dry_run_passive_maker_candidate",
+            reason=event_reason,
             expected_net_usdc=state["expected_net_usdc"],
             payload=state,
         )
         logger.info(
-            "Shadow simulation candidate: "
+            "Shadow simulation maker quote: "
             f"slug={slug} side={side} qty={float(qty):.4f} px={float(limit_price):.4f} "
-            f"expires_in={timeout_sec:.0f}s"
+            f"ttl={live_ttl_sec:.0f}s target_version={int(target_version or 0)}"
+        )
+        return True
+
+    def _shadow_simulation_on_order_cancel(self, *, order_key: str, reason: str) -> None:
+        """Mirror a local dry-run cancel before the next live-style requote."""
+        if not self._shadow_simulation_enabled_for_run():
+            return
+        slug = str(getattr(self, "current_market_slug", "") or "")
+        state = self._load_shadow_simulation_for_slug(slug) if slug else None
+        if state is None or str(state.get("status") or "") != "PENDING":
+            return
+        if str(state.get("order_key") or "") != str(order_key):
+            return
+        now_ts = time.time()
+        state.update(
+            {
+                "status": "CANCELED",
+                "cancelled_ts": now_ts,
+                "last_cancel_reason": str(reason or "risk"),
+            }
+        )
+        self._db_order_event(
+            event_type="SHADOW_SIM_ENTRY_CANCELLED",
+            client_order_id=str(state["simulation_id"]),
+            side=state["side"],
+            price=state["entry_price"],
+            qty=state["qty"],
+            status="CANCELED",
+            reason=f"dry_run_live_lifecycle:{reason or 'risk'}",
+            payload=state,
         )
 
     def _shadow_simulation_on_quote(
@@ -416,6 +477,9 @@ class ShadowSimulationMixin:
                     ),
                 }
             )
+            for order_key, order_state in list(getattr(self, "active_maker_orders", {}).items()):
+                if str(order_state.get("dry_run_simulation_id") or "") == str(state["simulation_id"]):
+                    self.active_maker_orders.pop(order_key, None)
             self._db_order_event(
                 event_type="SHADOW_SIM_ENTRY_FILLED",
                 client_order_id=state["simulation_id"],

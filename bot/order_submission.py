@@ -277,31 +277,89 @@ def submit_maker_quote(
             )
         return
 
+    quote = strategy._get_quote_for_instrument(instrument_id)
+    if violates_final_crossing_guard(
+        side=side,
+        limit_price=limit_price,
+        quote=quote,
+        maker_use_post_only=strategy.maker_use_post_only,
+        maker_post_only_strict=getattr(strategy, "maker_post_only_strict", False),
+        logger_warning_fn=logger.warning,
+    ):
+        return
+
+    token_qty = float(qty_dec)
+    order_key = strategy._order_key_for(side, instrument_id)
+    created_ts = time.time()
     if strategy._is_dry_run_mode():
-        if side == "buy" and hasattr(strategy, "_record_shadow_simulated_entry"):
-            strategy._record_shadow_simulated_entry(
-                instrument_id=instrument_id,
-                limit_price=limit_price,
-                qty=qty_dec,
-                econ=econ,
-                directional_snapshot=directional_snapshot,
-            )
-        else:
+        if side != "buy" or not hasattr(strategy, "_record_shadow_simulated_entry"):
             strategy._db_order_event(
                 event_type="ORDER_DRY_RUN_SKIP",
                 side=side.upper(),
                 price=float(limit_price),
-                qty=float(qty_dec),
+                qty=token_qty,
                 status="SKIPPED",
-                reason="test_mode_dry_run",
+                reason="dry_run_sell_execution_not_modeled",
                 expected_net_usdc=float(econ.expected_net_usdc),
                 payload={"instrument_id": str(instrument_id)},
             )
+            return
+        accepted = strategy._record_shadow_simulated_entry(
+            instrument_id=instrument_id,
+            limit_price=limit_price,
+            qty=qty_dec,
+            econ=econ,
+            directional_snapshot=directional_snapshot,
+            target_version=int(target_version or 0),
+            order_key=order_key,
+        )
+        if not accepted:
+            return
+        simulation = strategy._load_shadow_simulation_for_slug(
+            str(getattr(strategy, "current_market_slug", "") or "")
+        )
+        simulation_id = str((simulation or {}).get("simulation_id") or "")
+        state = build_active_maker_order_state(
+            order=None,
+            econ=econ,
+            directional_snapshot=directional_snapshot,
+            limit_price=limit_price,
+            side=side,
+            instrument_id=instrument_id,
+            token_id=strategy._extract_token_id_from_instrument(str(instrument_id)),
+            token_qty=token_qty,
+            created_ts=created_ts,
+            target_version=int(target_version or 0),
+            loss_sell_reason=loss_sell_reason,
+        )
+        state.update(
+            {
+                "dry_run_simulated": True,
+                "dry_run_simulation_id": simulation_id,
+                "dry_run_client_order_id": f"DRY-MAKER-{side.upper()}-{int(created_ts * 1000)}",
+            }
+        )
+        strategy.active_maker_orders[order_key] = state
+        strategy._db_order_event(
+            event_type="ORDER_DRY_RUN_SUBMITTED",
+            client_order_id=state["dry_run_client_order_id"],
+            side=side.upper(),
+            price=float(limit_price),
+            qty=token_qty,
+            status="OPEN",
+            reason="dry_run_live_lifecycle_submit",
+            expected_net_usdc=float(econ.expected_net_usdc),
+            payload={
+                "instrument_id": str(instrument_id),
+                "order_key": order_key,
+                "target_version": int(target_version or 0),
+                "simulation_id": simulation_id,
+            },
+        )
         return
     if not instrument_id or not instrument:
         return
 
-    token_qty = float(qty_dec)
     qty = Quantity(token_qty, precision=precision)
     order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
     price_precision = int(getattr(instrument, "price_precision", 3))
@@ -328,20 +386,8 @@ def submit_maker_quote(
     if order is None:
         return
 
-    quote = strategy._get_quote_for_instrument(instrument_id)
-    if violates_final_crossing_guard(
-        side=side,
-        limit_price=limit_price,
-        quote=quote,
-        maker_use_post_only=strategy.maker_use_post_only,
-        maker_post_only_strict=getattr(strategy, "maker_post_only_strict", False),
-        logger_warning_fn=logger.warning,
-    ):
-        return
-
     strategy.submit_order(order)
     strategy.consecutive_denied_orders = 0
-    order_key = strategy._order_key_for(side, instrument_id)
     strategy.active_maker_orders[order_key] = build_active_maker_order_state(
         order=order,
         econ=econ,
@@ -351,7 +397,7 @@ def submit_maker_quote(
         instrument_id=instrument_id,
         token_id=strategy._extract_token_id_from_instrument(str(instrument_id)),
         token_qty=token_qty,
-        created_ts=time.time(),
+        created_ts=created_ts,
         target_version=int(target_version or 0),
         loss_sell_reason=loss_sell_reason,
     )

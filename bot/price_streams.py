@@ -7,7 +7,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 
-BINANCE_AGGTRADE_WS_URL = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+# This feed exists only for the high-frequency BTC trend layer.  Binance Spot
+# reliably pushes aggTrades in our runtime network, while the Futures endpoint
+# can complete a handshake without delivering messages.
+BINANCE_AGGTRADE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
 POLYMARKET_LIVE_WS_URL = "wss://ws-live-data.polymarket.com"
 POLYMARKET_CHAINLINK_TWAP_TOPIC_BY_WINDOW = {
     30: "crypto_prices_twap_thirty",

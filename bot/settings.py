@@ -185,6 +185,10 @@ def initialize_strategy_settings(
     strategy.maker_execution_vwap_mult = config.maker.execution_vwap_mult
     strategy.maker_execution_vwap_entry_risk_weight = config.maker.execution_vwap_entry_risk_weight
     strategy.maker_execution_vwap_full_risk_last_sec = config.maker.execution_vwap_full_risk_last_sec
+    strategy.maker_execution_empirical_markout_enabled = config.maker.execution_empirical_markout_enabled
+    strategy.maker_execution_empirical_markout_lookback_hours = config.maker.execution_empirical_markout_lookback_hours
+    strategy.maker_execution_empirical_markout_min_samples = config.maker.execution_empirical_markout_min_samples
+    strategy.maker_execution_empirical_markout_horizon_sec = config.maker.execution_empirical_markout_horizon_sec
     strategy.maker_buy_taker_leakage_prob = config.maker.buy_taker_leakage_prob
     strategy.orderbook_fetch_interval_sec = config.maker.orderbook_fetch_interval_sec
     strategy.orderbook_levels_limit = config.maker.orderbook_levels_limit
@@ -283,6 +287,7 @@ def initialize_strategy_settings(
     strategy.maker_recycle_sell_discount_ps = config.maker.recycle_sell_discount_ps
     strategy.side_signal_btc_ema_fast_sec = config.side.btc_ema_fast_sec
     strategy.side_signal_btc_ema_slow_sec = config.side.btc_ema_slow_sec
+    strategy.side_signal_btc_trend_primary_stale_sec = config.side.btc_trend_primary_stale_sec
     strategy.side_signal_mid_ema_fast_sec = config.side.mid_ema_fast_sec
     strategy.side_signal_mid_ema_slow_sec = config.side.mid_ema_slow_sec
     strategy.side_signal_btc_trend_norm_pct = config.side.btc_trend_norm_pct
@@ -553,6 +558,7 @@ def initialize_strategy_settings(
         maker_execution_depth_impact_mult=strategy.maker_execution_depth_impact_mult,
         maker_execution_vwap_mult=strategy.maker_execution_vwap_mult,
         maker_buy_taker_leakage_prob=strategy.maker_buy_taker_leakage_prob,
+        maker_execution_empirical_adverse_markout_per_share=None,
     )
     strategy.maker_engine = MakerEngine(maker_config)
     strategy.last_status_log_ts = 0.0
@@ -572,6 +578,8 @@ def initialize_strategy_settings(
     strategy.polymarket_chainlink_twap_window_sec = config.market_data.polymarket_chainlink_twap_window_sec
     strategy.polymarket_chainlink_twap_symbol = config.market_data.polymarket_chainlink_twap_symbol
     strategy.require_twap_reference_spot = config.market_data.require_twap_reference_spot
+    strategy.twap_degraded_block_new_entries = config.market_data.twap_degraded_block_new_entries
+    strategy._twap_reference_degraded = False
     strategy.market_strike_cache_by_slug = {}
     strategy.market_strike_source_by_slug = {}
     strategy.market_strike_provisional_by_slug = {}
@@ -707,6 +715,9 @@ def initialize_strategy_settings(
     strategy.sell_balance_retry_pause_sec = config.operations.sell_balance_retry_pause_sec
     strategy._binance_ws_price = None
     strategy._binance_ws_price_ts = 0.0
+    strategy._btc_trend_source = "unavailable"
+    strategy._btc_trend_source_ts = 0.0
+    strategy._btc_trend_source_price = None
     strategy._binance_ws_stop_event = threading.Event()
     strategy._binance_ws_thread = None
     strategy._polymarket_chainlink_price = None

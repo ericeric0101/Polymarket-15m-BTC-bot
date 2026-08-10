@@ -380,6 +380,12 @@ class SideDecisionMixin:
         binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)
         inputs["binance_spot_price"] = float(binance_px) if binance_px is not None else None
         inputs["binance_spot_age_sec"] = max(0.0, now_ts - binance_ts) if binance_ts > 0 else None
+        trend_source = str(getattr(self, "_btc_trend_source", "unavailable") or "unavailable")
+        trend_ts = float(getattr(self, "_btc_trend_source_ts", 0.0) or 0.0)
+        trend_px = getattr(self, "_btc_trend_source_price", None)
+        inputs["btc_trend_source"] = trend_source
+        inputs["btc_trend_source_age_sec"] = max(0.0, now_ts - trend_ts) if trend_ts > 0 else None
+        inputs["btc_trend_source_price"] = float(trend_px) if trend_px is not None else None
 
         poly_px = getattr(self, "_polymarket_chainlink_price", None)
         poly_ts = float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0)

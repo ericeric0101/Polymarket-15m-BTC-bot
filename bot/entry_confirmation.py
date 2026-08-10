@@ -170,7 +170,14 @@ class EntryConfirmationEngine:
                     p_fair_dec is not None
                     and self.config.weak_pfair_lower <= p_fair_dec <= self.config.weak_pfair_upper
                 )
-                if is_weak and self.config.skip_strong_conflict:
+                # A deeply one-sided book against the selected token is a
+                # stronger contradiction than a near-50/50 model reading.
+                # Do not reduce into that contradiction in live mode.
+                strong_conflict = (
+                    state == "conflict"
+                    or confidence >= Decimal("0.80")
+                )
+                if self.config.skip_strong_conflict and (strong_conflict or is_weak):
                     action = "skip"
                 else:
                     action = "reduce_size"

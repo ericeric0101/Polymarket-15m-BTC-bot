@@ -17,6 +17,19 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _json_default(value: Any) -> Any:
+    """Keep journal payloads queryable when strategy telemetry uses Decimal."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=_json_default)
+
+
 class TradeJournalDB:
     """
     Lightweight SQLite writer.
@@ -116,7 +129,7 @@ class TradeJournalDB:
                         int(maker_mode),
                         instrument_id,
                         selected_slug,
-                        json.dumps(notes or {}, ensure_ascii=False),
+                        _json_dumps(notes or {}),
                     ),
                 )
                 conn.commit()
@@ -140,7 +153,7 @@ class TradeJournalDB:
                 merged_notes = {**existing_notes, **(notes or {})}
                 conn.execute(
                     update_sql,
-                    (_utc_now_iso(), json.dumps(merged_notes, ensure_ascii=False), run_id),
+                    (_utc_now_iso(), _json_dumps(merged_notes), run_id),
                 )
                 conn.commit()
         except Exception as e:
@@ -184,6 +197,50 @@ class TradeJournalDB:
         except Exception as e:
             logger.debug(f"TradeJournalDB load_market_guard_counts failed: {e}")
             return {"buy_count": 0, "protective_exit_count": 0}
+
+    def load_maker_buy_markout_calibration(
+        self,
+        *,
+        lookback_hours: float,
+        horizon_sec: int,
+        min_samples: int,
+    ) -> Optional[Dict[str, float | int]]:
+        """Return observed adverse BUY markout per share for entry-risk calibration."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                      COUNT(*) AS sample_count,
+                      AVG(
+                        CASE
+                          WHEN CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL) < 0
+                          THEN -CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL)
+                          ELSE 0
+                        END
+                      ) AS adverse_markout_per_share
+                    FROM order_events
+                    WHERE event_type='FILL_MARKOUT'
+                      AND side='BUY'
+                      AND json_extract(payload_json, '$.liquidity_class')='maker'
+                      AND CAST(json_extract(payload_json, '$.horizon_sec') AS INTEGER)=?
+                      AND julianday(ts) >= julianday('now', ?)
+                    """,
+                    (int(horizon_sec), f"-{float(lookback_hours):g} hours"),
+                ).fetchone()
+            sample_count = int(row[0] or 0) if row else 0
+            adverse = float(row[1] or 0.0) if row else 0.0
+            if sample_count < int(min_samples) or adverse <= 0:
+                return None
+            return {
+                "sample_count": sample_count,
+                "adverse_markout_per_share": adverse,
+                "horizon_sec": float(horizon_sec),
+                "lookback_hours": float(lookback_hours),
+            }
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
+            return None
 
     def reconcile_redeem_cycle(self, slug: str, redeem_value_usdc: float) -> Optional[Dict[str, float]]:
         """Rebuild missing cycle PnL when redemption happens after a restart."""
@@ -244,6 +301,8 @@ class TradeJournalDB:
                     FROM order_events
                     WHERE event_type IN (
                       'SHADOW_SIM_ENTRY_CANDIDATE',
+                      'SHADOW_SIM_ENTRY_REQUOTED',
+                      'SHADOW_SIM_ENTRY_CANCELLED',
                       'SHADOW_SIM_ENTRY_FILLED',
                       'SHADOW_SIM_ENTRY_EXPIRED',
                       'SHADOW_SIM_SETTLED'
@@ -307,7 +366,7 @@ class TradeJournalDB:
                         _utc_now_iso(),
                         run_id,
                         event_type,
-                        json.dumps(payload or {}, ensure_ascii=False),
+                        _json_dumps(payload or {}),
                     ),
                 )
                 conn.commit()
@@ -358,7 +417,7 @@ class TradeJournalDB:
                         fee_rate_bps,
                         expected_net_usdc,
                         commission_usdc,
-                        json.dumps(payload or {}, ensure_ascii=False),
+                        _json_dumps(payload or {}),
                     ),
                 )
                 conn.commit()

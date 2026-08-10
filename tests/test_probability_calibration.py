@@ -60,6 +60,29 @@ def test_first_entry_time_window_blocks_only_a_new_market_entry():
     assert allowed.skip is False
 
 
+def test_twap_degraded_reference_blocks_new_buy_entries():
+    out = evaluate_buy_entry_controls(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        side_score=Decimal("0.30"),
+        directional_entry_min_score_abs_new=Decimal("0.20"),
+        directional_first_entry_min_score_abs_new=Decimal("0.20"),
+        maker_min_expected_net_usdc=Decimal("0.01"),
+        maker_reload_min_expected_net_multiplier=Decimal("1"),
+        current_inst_inventory_qty=Decimal("0"),
+        maker_reload_inventory_threshold_shares=Decimal("5"),
+        current_slug="test",
+        inst_id="up",
+        twap_reference_degraded=True,
+    )
+
+    assert out.skip is True
+    assert out.event_type == "ORDER_SKIP_TWAP_REFERENCE_DEGRADED"
+    assert out.reason == "twap_reference_degraded"
+
+
 def test_twap_probability_uses_shorter_variance_horizon_before_final_window():
     terminal = MakerEngine.digital_up_probability(101, 100, 0.50, 600)
     twap = MakerEngine.twap_settlement_up_probability(101, 100, 0.50, 600, 60)
