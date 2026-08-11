@@ -16,7 +16,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
 from loguru import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +33,7 @@ from bot.market_data import (  # noqa: E402
     record_external_spot_observation,
     resolve_opening_strike_from_history,
 )
+from bot.runtime_env import load_runtime_env  # noqa: E402
 from bot.lifecycle import collect_btc_market_candidates, select_market_outcome_instruments  # noqa: E402
 from execution.maker_engine import MakerEngine  # noqa: E402
 from monitoring.trade_journal_db import TradeJournalDB  # noqa: E402
@@ -54,7 +54,7 @@ from nautilus_trader.model.data import QuoteTick  # noqa: E402
 from nautilus_trader.model.identifiers import InstrumentId  # noqa: E402
 from nautilus_trader.trading.strategy import Strategy  # noqa: E402
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_runtime_env(repo_root=PROJECT_ROOT)
 
 try:
     from py_clob_client_v2.client import ClobClient  # type: ignore

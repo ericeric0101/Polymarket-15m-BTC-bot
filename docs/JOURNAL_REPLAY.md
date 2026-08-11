@@ -3,7 +3,7 @@
 Run the dry-run executable replay before changing entry parameters:
 
 ```bash
-./.venv/bin/python scripts/replay_journal_signals.py --hours 168 --selection first --shares 6
+./.venv/bin/python scripts/replay_journal_signals.py --hours 168
 ```
 
 The default `dry-run-fill` mode selects `SHADOW_SIM_ENTRY_FILLED` records only.

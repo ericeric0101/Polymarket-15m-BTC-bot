@@ -1,5 +1,8 @@
 # Polymarket V2 Remaining Work
 
+> Historical status note from 2026-04-19. It is preserved for migration
+> context and is not a current operational checklist.
+
 This note tracks the remaining V1-era assumptions or incomplete V2 migration items in the repository as of 2026-04-19.
 
 ## Summary

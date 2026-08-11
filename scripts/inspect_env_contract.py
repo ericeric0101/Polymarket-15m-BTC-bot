@@ -8,16 +8,16 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-OPERATOR_KEYS = frozenset(
-    line.partition("=")[0]
-    for line in (Path(__file__).parents[1] / "config" / "operator.env.example")
-    .read_text(encoding="utf-8")
-    .splitlines()
-    if line and not line.startswith("#") and "=" in line
-)
+from bot.runtime_env import CORE_ENV_KEYS, SENSITIVE_ENV_KEYS
+
+OPERATOR_KEYS = CORE_ENV_KEYS
 
 
 def _keys(path: Path) -> set[str]:
@@ -48,6 +48,16 @@ def _code_keys(repo_root: Path) -> set[str]:
     return keys
 
 
+def _profile_keys(repo_root: Path) -> set[str]:
+    profile_dir = repo_root / "config" / "profiles"
+    if not profile_dir.is_dir():
+        return set()
+    keys: set[str] = set()
+    for path in profile_dir.glob("*.env"):
+        keys.update(_keys(path))
+    return keys
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env", default=".env", help="environment file to inspect")
@@ -65,11 +75,24 @@ def main() -> int:
         raise SystemExit(f"known-key reference not found: {known_path}")
 
     keys = _keys(env_path)
-    known_keys = _keys(known_path) | _code_keys(Path(__file__).parents[1])
+    repo_root = Path(__file__).parents[1]
+    known_keys = (
+        _keys(known_path)
+        | _code_keys(repo_root)
+        | _profile_keys(repo_root)
+        | OPERATOR_KEYS
+        | SENSITIVE_ENV_KEYS
+    )
     operator = keys & OPERATOR_KEYS
-    advanced = (keys & known_keys) - OPERATOR_KEYS
+    local_only = keys & SENSITIVE_ENV_KEYS - OPERATOR_KEYS
+    advanced = (keys & known_keys) - OPERATOR_KEYS - SENSITIVE_ENV_KEYS
     unknown = keys - known_keys
-    print(f"total_keys={len(keys)} operator_keys={len(operator)} advanced_keys={len(advanced)} unknown_keys={len(unknown)}")
+    print(
+        f"total_keys={len(keys)} operator_keys={len(operator)} "
+        f"local_only_keys={len(local_only)} advanced_keys={len(advanced)} unknown_keys={len(unknown)}"
+    )
+    if args.list and local_only:
+        print("local_only_keys=" + ",".join(sorted(local_only)))
     if args.list and advanced:
         print("advanced_keys=" + ",".join(sorted(advanced)))
     if args.list and unknown:

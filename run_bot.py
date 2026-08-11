@@ -41,11 +41,11 @@ from nautilus_trader.model.identifiers import InstrumentId, ClientOrderId
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.objects import Price, Quantity
-from dotenv import load_dotenv
 from loguru import logger
 
 # Import our phases
 from bot.inventory import InventoryLedger
+from bot.runtime_env import load_runtime_env
 from bot.edge_state import build_edge_state
 from bot.edge_observation import build_quote_age_telemetry
 from bot.entry_decision import EntryDecision
@@ -159,7 +159,7 @@ from alert_watcher import AlertWatcher
 from dashboard_state import DashboardState, TradeRecord
 from telegram_notifier import TelegramNotifier
 
-load_dotenv()
+load_runtime_env(repo_root=project_root)
 
 
 def detect_runtime_git_revision(repo_root: Path) -> str:
@@ -1455,8 +1455,11 @@ class IntegratedBTCStrategy(
         projected = self.inventory_delta_shares
         if side.lower() == "sell":
             projected = self._get_confirmed_inventory_qty_for_instrument(inst_id)
-        
-        # Calculate in-flight volume for the SAME side
+
+        # A pending BUY consumes the single per-market inventory budget even
+        # when it is for the opposite outcome.  A locked-side flip can submit
+        # DOWN while an UP cancellation is still awaiting venue confirmation;
+        # counting only the current instrument would permit both to fill.
         target_side_str = "BUY" if side.lower() == "buy" else "SELL"
         in_flight_qty = Decimal("0")
         inst_target = str(inst_id) if inst_id else None
@@ -1465,11 +1468,13 @@ class IntegratedBTCStrategy(
             o_side = str(state.get("side", "")).upper()
             if o_side != target_side_str:
                 continue
-                
+
             o_inst = str(state.get("instrument_id", ""))
-            if inst_target and o_inst != inst_target:
+            # SELL capacity remains token-specific. BUY capacity is shared by
+            # both outcomes of the current binary market.
+            if side.lower() == "sell" and inst_target and o_inst != inst_target:
                 continue
-                
+
             # If the order is in our active dict, assume its REMAINING quantity is occupying inventory capacity
             # regardless of whether it lacks a VenueOrderId yet or is pending cancel.
             o_qty = Decimal(str(state.get("quantity", "0")))

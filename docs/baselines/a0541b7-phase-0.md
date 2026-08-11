@@ -1,5 +1,8 @@
 # Phase 0 Baseline: `a0541b7`
 
+> Historical comparison baseline. Its commands and parameter values are not
+> the current deployment configuration.
+
 Captured before the five-layer decision-chain implementation. This document is
 a comparison anchor only; no settings were changed while it was collected.
 

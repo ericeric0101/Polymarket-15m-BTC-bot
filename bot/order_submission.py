@@ -226,24 +226,58 @@ def submit_maker_quote(
 
     projected_inventory = strategy._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
     if side == "buy" and projected_inventory > strategy.maker_max_inventory_shares:
-        logger.warning(
-            "Skip maker quote: projected inventory would exceed max "
-            f"(side={side}, qty={float(qty_dec):.6f}, projected={float(projected_inventory):.6f}, "
-            f"max={float(strategy.maker_max_inventory_shares):.6f})"
+        requested_qty = qty_dec
+        excess_qty = projected_inventory - strategy.maker_max_inventory_shares
+        capped_qty = qty_dec - excess_qty
+        exchange_min_qty = max(
+            strategy.maker_exchange_min_shares,
+            Decimal(str(10 ** (-precision))),
+        )
+        if capped_qty + Decimal("0.000001") < exchange_min_qty:
+            logger.warning(
+                "Skip maker BUY quote: remaining market inventory capacity is below exchange minimum "
+                f"(requested={float(requested_qty):.6f}, remaining={float(capped_qty):.6f}, "
+                f"min={float(exchange_min_qty):.6f}, max={float(strategy.maker_max_inventory_shares):.6f})"
+            )
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_INVENTORY_CAP",
+                side="BUY",
+                price=float(limit_price),
+                qty=float(requested_qty),
+                status="SKIPPED",
+                reason="remaining_inventory_capacity_below_exchange_min",
+                payload={
+                    "current_inventory": float(strategy.inventory_delta_shares),
+                    "requested_qty": float(requested_qty),
+                    "remaining_capacity_qty": float(max(Decimal("0"), capped_qty)),
+                    "exchange_min_qty": float(exchange_min_qty),
+                    "projected_inventory": float(projected_inventory),
+                    "max_inventory": float(strategy.maker_max_inventory_shares),
+                },
+            )
+            return
+        qty_dec = capped_qty
+        projected_inventory = strategy._project_inventory_after_fill(side, qty_dec, instrument_id=instrument_id)
+        logger.info(
+            "Maker BUY qty capped to remaining market inventory capacity: "
+            f"{float(requested_qty):.6f} -> {float(qty_dec):.6f} "
+            f"(projected={float(projected_inventory):.6f}/{float(strategy.maker_max_inventory_shares):.6f})"
         )
         strategy._db_order_event(
-            event_type="ORDER_SKIP_INVENTORY_CAP",
-            side=side.upper(),
+            event_type="ORDER_BUY_QTY_CAPPED_INVENTORY",
+            side="BUY",
             price=float(limit_price),
             qty=float(qty_dec),
-            reason="projected_inventory_exceeds_max",
+            status="CAPPED",
+            reason="remaining_market_inventory_capacity",
             payload={
                 "current_inventory": float(strategy.inventory_delta_shares),
+                "requested_qty": float(requested_qty),
+                "submitted_qty": float(qty_dec),
                 "projected_inventory": float(projected_inventory),
                 "max_inventory": float(strategy.maker_max_inventory_shares),
             },
         )
-        return
     if side == "sell" and projected_inventory < Decimal("0"):
         confirmed_qty = strategy._get_confirmed_inventory_qty_for_instrument(instrument_id=instrument_id)
         logger.info(

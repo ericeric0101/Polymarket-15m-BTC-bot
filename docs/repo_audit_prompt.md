@@ -1,3 +1,8 @@
+> Tooling prompt, not an operational strategy specification. It contains
+> generic market-making assumptions that may differ from the current
+> directional five-layer strategy. Current behavior is defined by
+> [STRATEGY_RULES.md](STRATEGY_RULES.md).
+
 You are a senior quant engineer and trading system auditor.
 
 Your task is to perform a deep analysis of this repository.

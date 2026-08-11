@@ -17,7 +17,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, List, Optional
 
-from dotenv import load_dotenv
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -28,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.wallet_ops import ensure_balance_clob_client, refresh_collateral_balance
+from bot.runtime_env import load_runtime_env
 
 LOCAL_TZ = timezone(timedelta(hours=8))
 TZ_LABEL = "UTC+8"
@@ -62,7 +62,7 @@ def _time_ago(iso_str: str) -> str:
         return "-"
 
 
-load_dotenv(PROJECT_ROOT / ".env")
+load_runtime_env(repo_root=PROJECT_ROOT)
 
 
 # ── Data ────────────────────────────────────────────────────────────────

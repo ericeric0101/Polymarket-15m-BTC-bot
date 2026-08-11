@@ -1,4 +1,8 @@
 # AI Codebase Analysis Specification
+
+> Tooling guidance for repository audits, not a live strategy specification.
+> When its generic market-making language conflicts with current runtime
+> behavior, [STRATEGY_RULES.md](STRATEGY_RULES.md) takes precedence.
 Version: 1.0
 
 This document defines how AI assistants should analyze this repository.

@@ -1,5 +1,8 @@
 # Directional Market Maker Refactor Plan
 
+> Historical refactor proposal. It may describe superseded assumptions; use
+> [STRATEGY_RULES.md](STRATEGY_RULES.md) for current behavior.
+
 ## Goal
 
 Shift the strategy from:

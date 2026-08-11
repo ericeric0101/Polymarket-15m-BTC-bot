@@ -1,0 +1,214 @@
+"""Load a versioned strategy profile plus a small local deployment environment.
+
+The profile contains reviewed strategy defaults.  ``.env`` contains secrets and
+the supported operator overrides.  Existing process environment variables keep
+the highest priority, which makes shell/CI overrides predictable.
+"""
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Mapping, MutableMapping
+
+from dotenv import dotenv_values
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROFILE_DIR = PROJECT_ROOT / "config" / "profiles"
+DEFAULT_PROFILE = "btc15_twap_v3"
+
+# Supported day-to-day deployment surface. Advanced values belong in the
+# versioned profile so a strategy change is reviewed as code, not hidden in a
+# machine-local file. Keep this list to 55 keys.
+CORE_ENV_KEYS = frozenset(
+    {
+        "STRATEGY_PROFILE",
+        "POLYMARKET_PK",
+        "POLYMARKET_FUNDER",
+        "POLYGON_RPC_URL",
+        "POLYMARKET_API_KEY",
+        "POLYMARKET_API_SECRET",
+        "POLYMARKET_PASSPHRASE",
+        "POLYMARKET_SIGNATURE_TYPE",
+        "POLYMARKET_CHAIN_ID",
+        "POLYMARKET_CLOB_BASE_URL",
+        "POLYMARKET_GAMMA_API",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_OWNER_CHAT_ID",
+        "POLYMARKET_CHAINLINK_TWAP_ENABLED",
+        "POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC",
+        "REQUIRE_TWAP_REFERENCE_SPOT",
+        "TWAP_DEGRADED_BLOCK_NEW_ENTRIES",
+        "QUOTE_STALE_SEC",
+        "QUOTE_RESUBSCRIBE_GRACE_SEC",
+        "AUTO_NODE_ROLLOVER_ENABLED",
+        "AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT",
+        "ENTRY_SCORE_MIN",
+        "FIRST_ENTRY_SCORE_MIN",
+        "FIRST_ENTRY_MAX_TIME_LEFT_SEC",
+        "ENTRY_MIN_TIME_LEFT_SEC",
+        "ENTRY_MAX_FAIR_PRICE",
+        "EXTERNAL_CONFIRMATION_ENABLED",
+        "EXTERNAL_CONFLICT_BOOK_MID_THRESHOLD_PS",
+        "EXTERNAL_CONFLICT_ACTION",
+        "ENTRY_MIN_ROBUST_NET_USDC",
+        "EXECUTION_COST_MODE",
+        "EXECUTION_COST_LOOKBACK_HOURS",
+        "EXECUTION_COST_MIN_SAMPLES",
+        "MARKET_TARGET_SHARES",
+        "HIGH_PRICE_THRESHOLD",
+        "HIGH_PRICE_TARGET_SHARES",
+        "MARKET_MAX_POSITION_SHARES",
+        "MARKET_MAX_BUY_EVENTS",
+        "ORDER_POST_ONLY",
+        "ORDER_TTL_SEC",
+        "ORDER_REQUOTE_MIN_AGE_SEC",
+        "ORDER_REQUOTE_HYSTERESIS_TICKS",
+        "HOLD_TO_REDEEM",
+        "RECOVERY_EXIT_ENABLED",
+        "RECOVERY_EXIT_REQUIRE_TWAP_CONFIRMATION",
+        "RECOVERY_EXIT_MAX_TIME_LEFT_SEC",
+        "RECOVERY_EXIT_MIN_HOLD_SEC",
+        "AUTO_REDEEM_ENABLED",
+        "TRADE_DB_ENABLED",
+        "TRADE_DB_PATH",
+        "DASHBOARD_THEME",
+        "TERMINAL_DASHBOARD",
+        "FAIR_EDGE_BUCKET_SHADOW_ENABLED",
+        "SHADOW_SIMULATION_ENABLED",
+        "STARTUP_VERBOSE",
+    }
+)
+
+# Secrets and host-specific credentials must never be migrated into a tracked
+# profile even if they are not part of the 55-key operator surface.
+SENSITIVE_ENV_KEYS = frozenset(
+    {
+        "POLYMARKET_WALLET_ADDRESS",
+        "REDIS_HOST",
+        "REDIS_PORT",
+        "REDIS_DB",
+        "REDIS_USERNAME",
+        "REDIS_PASSWORD",
+        "POLYGON_RPC_URL",
+        "POLYMARKET_PK",
+        "POLYMARKET_API_KEY",
+        "POLYMARKET_API_SECRET",
+        "POLYMARKET_PASSPHRASE",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_OWNER_CHAT_ID",
+        "TELEGRAM_POLLING_LOCK_PATH",
+        "LIVE_PROCESS_LOCK_PATH",
+    }
+)
+
+# Canonical names in .env map to legacy names until later phases can remove the
+# legacy AppConfig fields. The mapping is intentionally one-way.
+CANONICAL_TO_LEGACY = {
+    "ENTRY_SCORE_MIN": "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW",
+    "FIRST_ENTRY_SCORE_MIN": "DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW",
+    "FIRST_ENTRY_MAX_TIME_LEFT_SEC": "FIRST_ENTRY_MAX_TIME_LEFT_SEC",
+    "ENTRY_MAX_FAIR_PRICE": "MAKER_MAX_FAIR_PRICE",
+    "EXTERNAL_CONFIRMATION_ENABLED": "EXTERNAL_ENTRY_CONFIRMATION_ENABLED",
+    "EXTERNAL_CONFLICT_BOOK_MID_THRESHOLD_PS": "EXTERNAL_ENTRY_CONFIRMATION_BOOK_MID_THRESHOLD_PS",
+    "ENTRY_MIN_ROBUST_NET_USDC": "MAKER_MIN_EXPECTED_NET_USDC",
+    "EXECUTION_COST_LOOKBACK_HOURS": "MAKER_EXECUTION_EMPIRICAL_MARKOUT_LOOKBACK_HOURS",
+    "EXECUTION_COST_MIN_SAMPLES": "MAKER_EXECUTION_EMPIRICAL_MARKOUT_MIN_SAMPLES",
+    "MARKET_TARGET_SHARES": "MAKER_FIXED_SHARES",
+    "HIGH_PRICE_THRESHOLD": "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD",
+    "MARKET_MAX_BUY_EVENTS": "MARKET_MAX_BUY_EVENTS_PER_MARKET",
+    "ORDER_POST_ONLY": "MAKER_POST_ONLY",
+    "ORDER_TTL_SEC": "MAKER_ORDER_TTL_SEC",
+    "ORDER_REQUOTE_MIN_AGE_SEC": "MAKER_REQUOTE_MIN_AGE_SEC",
+    "ORDER_REQUOTE_HYSTERESIS_TICKS": "REQUOTE_HYSTERESIS_TICKS",
+    "RECOVERY_EXIT_ENABLED": "TAKER_EXIT_ENABLED",
+    "RECOVERY_EXIT_REQUIRE_TWAP_CONFIRMATION": "TAKER_EXIT_REQUIRE_TWAP_CONFIRMATION",
+    "RECOVERY_EXIT_MAX_TIME_LEFT_SEC": "TAKER_EXIT_MAX_TIME_LEFT_SEC",
+    "RECOVERY_EXIT_MIN_HOLD_SEC": "TAKER_EXIT_MIN_HOLD_SEC",
+}
+
+
+def _set_if_not_external(
+    environ: MutableMapping[str, str], name: str, value: str | None, external_keys: set[str]
+) -> None:
+    if value is not None and name not in external_keys:
+        environ[name] = value
+
+
+def _profile_path(profile_name: str, repo_root: Path) -> Path:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", profile_name):
+        raise ValueError(f"Invalid STRATEGY_PROFILE: {profile_name!r}")
+    path = repo_root / "config" / "profiles" / f"{profile_name}.env"
+    if not path.is_file():
+        raise FileNotFoundError(f"Strategy profile not found: {path}")
+    return path
+
+
+def _apply_canonical_aliases(environ: MutableMapping[str, str], external_keys: set[str]) -> None:
+    for canonical, legacy in CANONICAL_TO_LEGACY.items():
+        value = environ.get(canonical)
+        if value is not None and legacy not in external_keys:
+            environ[legacy] = value
+
+    if "ENTRY_MIN_TIME_LEFT_SEC" in environ and "MAKER_MIN_MINUTES_TO_CLOSE" not in external_keys:
+        seconds = float(environ["ENTRY_MIN_TIME_LEFT_SEC"])
+        if seconds < 0:
+            raise ValueError("ENTRY_MIN_TIME_LEFT_SEC must be >= 0")
+        environ["MAKER_MIN_MINUTES_TO_CLOSE"] = str(seconds / 60.0)
+
+    if "EXTERNAL_CONFLICT_ACTION" in environ and "EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT" not in external_keys:
+        action = environ["EXTERNAL_CONFLICT_ACTION"].strip().lower()
+        if action not in {"skip", "size_down"}:
+            raise ValueError("EXTERNAL_CONFLICT_ACTION must be 'skip' or 'size_down'")
+        environ["EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT"] = "1" if action == "skip" else "0"
+
+    if "EXECUTION_COST_MODE" in environ and "MAKER_EXECUTION_EMPIRICAL_MARKOUT_ENABLE" not in external_keys:
+        mode = environ["EXECUTION_COST_MODE"].strip().lower()
+        if mode not in {"empirical_markout", "book_proxy"}:
+            raise ValueError("EXECUTION_COST_MODE must be 'empirical_markout' or 'book_proxy'")
+        environ["MAKER_EXECUTION_EMPIRICAL_MARKOUT_ENABLE"] = "1" if mode == "empirical_markout" else "0"
+
+    if "HIGH_PRICE_TARGET_SHARES" in environ and "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER" not in external_keys:
+        target = float(environ["MARKET_TARGET_SHARES"])
+        high_price_target = float(environ["HIGH_PRICE_TARGET_SHARES"])
+        if target <= 0 or high_price_target <= 0 or high_price_target > target:
+            raise ValueError("HIGH_PRICE_TARGET_SHARES must be > 0 and <= MARKET_TARGET_SHARES")
+        environ["MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_ENABLED"] = "1"
+        environ["MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER"] = str(high_price_target / target)
+
+    if "MARKET_MAX_POSITION_SHARES" in environ:
+        value = environ["MARKET_MAX_POSITION_SHARES"]
+        if "MAKER_MAX_INVENTORY_SHARES" not in external_keys:
+            environ["MAKER_MAX_INVENTORY_SHARES"] = value
+        if "MAX_LOCKED_SIDE_POSITION" not in external_keys:
+            environ["MAX_LOCKED_SIDE_POSITION"] = value
+
+
+def load_runtime_env(
+    *,
+    repo_root: Path | None = None,
+    env_path: Path | None = None,
+    environ: MutableMapping[str, str] | None = None,
+) -> Path:
+    """Load profile then local .env without overriding shell-provided values."""
+    root = (repo_root or PROJECT_ROOT).resolve()
+    local_env_path = (env_path or (root / ".env")).resolve()
+    target_environ = os.environ if environ is None else environ
+    external_keys = set(target_environ)
+    local_values: Mapping[str, str | None] = (
+        dotenv_values(local_env_path) if local_env_path.is_file() else {}
+    )
+    profile_name = (
+        target_environ.get("STRATEGY_PROFILE")
+        or local_values.get("STRATEGY_PROFILE")
+        or DEFAULT_PROFILE
+    )
+    profile_path = _profile_path(str(profile_name), root)
+
+    for key, value in dotenv_values(profile_path).items():
+        _set_if_not_external(target_environ, key, value, external_keys)
+    for key, value in local_values.items():
+        _set_if_not_external(target_environ, key, value, external_keys)
+    _apply_canonical_aliases(target_environ, external_keys)
+    return profile_path

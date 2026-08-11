@@ -1,5 +1,8 @@
 # Pure 15-Min Strategy Spec
 
+> Research specification only. It is not the live order path or deployment
+> configuration; see [STRATEGY_RULES.md](STRATEGY_RULES.md) for current rules.
+
 ## Goal
 
 Design a minimal BTC 15-minute Polymarket strategy around only four live inputs:

@@ -1,92 +1,91 @@
 # Strategy Rules
 
-This file consolidates the current BTC 15-minute live strategy into a single place.
-It is intentionally operational, not aspirational.
+This is the operational source of truth for the current BTC 15-minute
+strategy. It describes deployed behavior, not research ideas or superseded
+V1/V2 plans.
 
-## Live Path
+## Objective
 
-Current live path:
+Trade a selected side of a BTC 15-minute binary market with passive maker
+orders while constraining tail loss, stale-data risk, and total market
+exposure. A high win rate alone is not an objective: every allowed entry must
+also clear the configured live economics model.
 
-- `/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/run_bot.py`
-- `/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot/`
-- `/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/execution/`
+## Market Data and Direction
 
-The rules below describe the live maker-mode behavior, not the old `core/strategy_brain`
-stack.
+- The preferred reference is Polymarket/Chainlink 60-second TWAP.
+- A degraded external reference is allowed only under its configured policy.
+- The direction engine selects one side: `UP`, `DOWN`, or `NONE`.
+- A locked direction can be invalidated when the supporting evidence reverses;
+  invalidation blocks new risk rather than silently switching an existing
+  position to the other side.
 
-## Entry
+## Entry Contract
 
-The bot enters only after all of these are true:
+The order of checks is fixed. A failure emits one final journal reason from the
+first failing layer.
 
-- market phase is tradable
-- strike is known or locked via fallback
-- `active_side` is set and, for directional action, normally `locked`
-- quote economics pass `econ_gate`
-- balance and inventory guards allow the order
-- trend protection / reduce-only / stop-loss penalties do not block the side
+| Layer | Requirement | Result on failure |
+| --- | --- | --- |
+| Hard safety | Fresh valid quote/reference data, valid market phase, no configured external/book conflict | No candidate order |
+| Direction | Locked side and adequate score | No candidate order |
+| Model consistency | Valid strike/spot/fair estimate and high-price risk control | No candidate order |
+| Economics | `robust_net` clears `ENTRY_MIN_ROBUST_NET_USDC` | No candidate order |
+| Execution | Passive limit is valid; TTL, hysteresis, balance, and projected inventory cap pass | Submit or simulate an order |
 
-Entry is quote-driven, not taker-driven.
+`robust_net` is deliberately singular:
 
-## Hold
+```text
+robust_net = expected_value - empirical_execution_cost - fees
+```
 
-The bot can hold inventory while:
+Do not add a trend-specific penalty discount or hidden negative-net exception.
+The negative `fair - entry` bands are recorded in shadow telemetry only. A
+future live policy requires a separately documented, cost-inclusive,
+out-of-sample result and an explicit bounded range.
 
-- the position still matches the current confirmed side thesis
-- exit policy stays in `HOLD_IN_BAND` or `HOLD_TO_REDEEM`
-- high-cost cooldown or other protections defer active exit
+## Score and Time Rules
 
-Inventory is tracked by local fill ledger (`live_inventory_cost`) and not just by
-external balances.
+- First filled entry of a market: `max(FIRST_ENTRY_SCORE_MIN, ENTRY_SCORE_MIN)`.
+- Later entry: `ENTRY_SCORE_MIN`.
+- First-entry timing uses `FIRST_ENTRY_MAX_TIME_LEFT_SEC`.
+- `ENTRY_MIN_TIME_LEFT_SEC` blocks only new tail-end risk.
+- `REDUCE_ONLY` always blocks new buys regardless of score or economics.
 
-## Exit
+## Size and Exposure
 
-There are three main exit families:
+- `MARKET_TARGET_SHARES` is the normal market target: 10 shares.
+- Above `HIGH_PRICE_THRESHOLD`, target is `HIGH_PRICE_TARGET_SHARES`: 5 shares.
+- `MARKET_MAX_POSITION_SHARES` is a hard projected cap: 10 shares.
+- `MARKET_MAX_BUY_EVENTS` permits replacement attempts after partial fills, but
+  it never permits the projected combined `UP` and `DOWN` exposure to exceed
+  the market cap.
+- A remaining quantity below the venue minimum is skipped; it is not rounded
+  up beyond the cap.
 
-1. Normal maker exit
-   - inventory is sold by ordinary maker quote logic
+## Order Lifecycle
 
-2. Maker urgent exit
-   - only after confirmed off-side state
-   - requires `active_side_locked == True`
-   - requires consecutive confirmations
-   - requires unrealized loss threshold
-   - now includes replacement grace so an urgent exit is not rapidly repriced lower
+- New entries are passive maker limits according to `ORDER_POST_ONLY`.
+- Requotes use `ORDER_REQUOTE_MIN_AGE_SEC` and
+  `ORDER_REQUOTE_HYSTERESIS_TICKS` to avoid churn.
+- Orders expire at `ORDER_TTL_SEC`; cancellation state is reconciled before a
+  replacement can increase exposure.
+- Dry run uses the same target, TTL, hysteresis, cancellation, and
+  submit-time controls as live. The only deliberate difference is that it
+  does not submit a wallet order.
 
-3. Taker exit
-   - emergency path
-   - used only when explicitly enabled and when exit policy decides it is necessary
+## Exit and Settlement
 
-## Restart / Recovery
+- Confirmed inventory is eligible for normal passive reduction.
+- `HOLD_TO_REDEEM` may carry qualifying inventory through settlement.
+- Recovery exits require the configured TWAP confirmation and timing guards;
+  they are not a high-frequency reaction to small noise.
+- The settlement journal records both traded markets and outcome-only markets
+  so replay can distinguish skipped opportunities from trade outcomes.
 
-Mid-market restarts are supported only because startup recovery rehydrates:
+## Change Discipline
 
-- open inventory quantity from position cache
-- cost basis from recent fill history
-
-Recovered startup inventory is forced into sell-only mode until flattened.
-
-## Current Strategic Constraints
-
-These are deliberate current biases, based on recent live behavior:
-
-- avoid carrying wrong-side inventory to settlement
-- prefer reducing panic exit chasing over forcing immediate full stop-out
-- avoid enabling broad taker-exit behavior
-- treat `UP` and `DOWN` as potentially asymmetric in practice
-
-## Known Weaknesses
-
-- `run_bot.py` still owns too many responsibilities
-- many guards still interact in ways that are hard to attribute after the fact
-- side asymmetry (`UP` vs `DOWN`) is observed but not yet fully parameterized
-- urgent exit timing still needs live validation after recent tightening
-
-## What To Change Carefully
-
-High-risk knobs and flows:
-
-- side confirmation / lock rules
-- urgent exit confirmation and replacement behavior
-- buy-count and re-entry rules
-- startup rehydrate and sell-only recovery path
-- any code touching Nautilus adapter behavior or runtime patch scripts
+For each strategy change: preserve a baseline, make one causal change, run the
+full test suite, compare a replay over the same interval, and then observe
+dry-run or limited live behavior. Do not combine threshold, cost, sizing, and
+exit changes in one experiment.

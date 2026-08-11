@@ -907,12 +907,15 @@ class AppConfig:
                 flip_min_score_up_held_new=_env_decimal("BI_SIDE_FLIP_MIN_SCORE_UP_HELD_NEW", str(held_flip_default)),
                 flip_max_score_down_held_new=_env_decimal("BI_SIDE_FLIP_MAX_SCORE_DOWN_HELD_NEW", str(-held_flip_default)),
                 directional_entry_min_score_abs_new=_env_decimal("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW", str(entry_score_abs_default)),
-                directional_first_entry_min_score_abs_new=min(
+                directional_first_entry_min_score_abs_new=max(
                     _env_decimal(
                         "DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW",
                         str(entry_score_abs_default),
                     ),
-                    max(entry_score_abs_default, Decimal("0.18")),
+                    _env_decimal(
+                        "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW",
+                        str(entry_score_abs_default),
+                    ),
                 ),
                 entry_spot_strike_lookback_sec=max(0, _env_int("ENTRY_SPOT_STRIKE_LOOKBACK_SEC", 0)),
                 entry_spot_strike_avg_min_abs=_env_decimal("ENTRY_SPOT_STRIKE_AVG_MIN_ABS", "0"),

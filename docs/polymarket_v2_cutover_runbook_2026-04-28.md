@@ -1,5 +1,8 @@
 # Polymarket V2 Cutover Runbook
 
+> Historical cutover record from 2026-04-28. The referenced V1 worktree is no
+> longer an operating dependency; use [readme_ZH.md](readme_ZH.md) instead.
+
 Target cutover window: 2026-04-28 around 11:00 UTC.
 
 This runbook assumes:

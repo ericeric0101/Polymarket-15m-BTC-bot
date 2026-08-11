@@ -1,5 +1,9 @@
 # Decision Chain: Phase 4 and Phase 5
 
+> Historical implementation record. Current rules and operator-facing names
+> are consolidated in [STRATEGY_RULES.md](STRATEGY_RULES.md) and
+> [configuration.md](configuration.md).
+
 ## Phase 4: one economics rule for every new BUY
 
 `TREND_BUY_MIN_NET_USDC` and `TREND_BUY_PENALTY_DISCOUNT` were removed.

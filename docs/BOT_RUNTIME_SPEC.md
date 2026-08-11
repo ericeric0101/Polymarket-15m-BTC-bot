@@ -1,119 +1,66 @@
-# BOT Runtime Spec
+# BTC 15-Minute Runtime Specification
 
-## Core identity
+This is the current runtime contract. Historical V1 and early-V2 design notes
+are not operating instructions.
 
-- Strategy type: `7-phase` market lifecycle bot
-- Trading style: `UP-only`, `maker-first`, `risk-first`
-- Primary goal: buy `UP` below fair value, sell `UP` inventory above cost, and only hold to settlement when confidence is high enough
+## Scope
 
-## What the bot trades
+- Market: Polymarket `btc-updown-15m-*` binary markets.
+- Sides: the strategy may select `UP`, `DOWN`, or `NONE`; it does not trade a
+  side when the decision is `NONE`.
+- Mode: maker-first entries, controlled recovery exits, and optional hold to
+  redeem.
+- Pricing: Chainlink 60-second TWAP is preferred. A fresh external spot feed
+  may be used only through the configured degraded-feed policy.
 
-- Only the `UP` outcome of the current BTC 15-minute market
-- `MAKER_QUOTE_SIDES=both` means:
-  - rest `BUY` quotes on `UP`
-  - rest `SELL` quotes to reduce `UP` inventory
-- `DOWN` is never traded directly
-- `DOWN` pressure is only expressed indirectly through:
-  - fair price deterioration
-  - directional edge gate
-  - regime guard
-  - cooldown / reduce-only behavior
+## Lifecycle
 
-## Market lifecycle
+`WAITING -> ACTIVE -> REDUCE_ONLY -> SETTLING -> WAITING` is the market
+lifecycle. `REDUCE_ONLY` blocks new risk. `SETTLING` cancels outstanding maker
+orders, journals the result, and starts discovery for the next market.
 
-1. `WAITING`
-   - no valid current market
-   - search next BTC 15m market
-2. `ACTIVE`
-   - normal maker quoting
-   - may place `BUY` and `SELL` quotes on `UP`
-3. `REDUCE_ONLY`
-   - near market end
-   - no fresh `BUY` risk
-   - prioritize inventory reduction
-4. `SETTLING`
-   - market finished
-   - cancel maker quotes
-   - compute settlement PnL
-   - wait grace period before next search
+## Entry Decision Chain
 
-## Entry rules
+Every candidate is evaluated in this fixed order:
 
-- Default action is to quote `BUY` on `UP`
-- Bot will refuse entry when any of these hold:
-  - expected net edge is too small
-  - directional edge gate is not met
-  - post-fill buy cooldown is active
-  - momentum filter says market is falling too fast
-  - regime guard is active
-  - reduce-only mode is active
-  - projected inventory exceeds cap
+1. **Hard safety:** valid, fresh market data; usable TWAP/reference spot; no
+   configured external/book conflict; lifecycle permits new risk.
+2. **Direction:** one `UP`, `DOWN`, or `NONE` side decision. The first entry
+   requires `max(FIRST_ENTRY_SCORE_MIN, ENTRY_SCORE_MIN)`; later entries use
+   `ENTRY_SCORE_MIN`.
+3. **Model consistency:** strike/spot sanity, calibrated fair probability, and
+   high-price risk/reward limits.
+4. **Economics:** one `robust_net` calculation using expected value, empirical
+   execution cost, and fees. Negative fair-edge bands remain shadow research,
+   not an implicit live exception.
+5. **Execution:** passive order construction, TTL/requote rules, and inventory
+   limits. Normal target is 10 shares, reduced to 5 above the high-price
+   threshold; projected per-market exposure cannot exceed 10 shares.
 
-## Exit rules
+The journal records a final reason for every rejected candidate so a replay
+can distinguish safety, direction, model, economics, and execution blocks.
 
-- First preference: maker `SELL` on `UP` inventory
-- If enough profit is available, bot may use taker exit to lock profit quickly
-- Taker exit is also allowed for controlled stop-loss / max-hold / near-close handling
-- Bot may suppress sells when:
-  - hold-to-settlement gate says inventory is worth carrying
-  - high-cost exit cooldown is active
-  - sell price is below protected cost threshold
+## Exits and Redemption
 
-## Hold to settlement
+- `HOLD_TO_REDEEM=1` permits eligible winning inventory to settle and redeem.
+- Recovery exits are restricted by the configured TWAP confirmation, minimum
+  hold, and remaining-time controls.
+- Normal maker exits reduce confirmed inventory only. On restart, recovered
+  inventory is sell-only until reconciled.
+- Auto-redeem is operationally separate from order placement and requires
+  working Polygon allowances and gas.
 
-- Hold is allowed only when all are true:
-  - inventory is small enough
-  - avg entry is high enough to justify redeem path
-  - enough time remains
-- Hold is not the default behavior
-- Hold is a selective override for small, high-confidence `UP` inventory
+## Modes
 
-## Cooldown rules
+- `./.venv/bin/python run_bot.py`: dry run. It executes the live decision and
+  simulated order lifecycle but does not submit wallet orders.
+- `./.venv/bin/python run_bot.py --live`: real wallet orders after the live
+  confirmation prompt.
+- `./.venv/bin/python run_bot.py --preflight-only`: validates startup inputs
+  without running the strategy.
 
-- Post-fill buy cooldown:
-  - after a `BUY` fill, temporarily stop new `BUY` quotes
-- Consecutive loss cooldown:
-  - after repeated realized losses, pause all quoting
-- Regime guard cooldown:
-  - after repeated bad market cycles, switch to conservative / paused behavior
-- High-cost fill cooldown:
-  - after expensive `BUY` fills, avoid bad active exits below cost
-- Taker reject cooldown:
-  - after taker exit reject, delay repeated taker exit attempts
+## Authority
 
-## Risk controls
-
-- `UP` inventory cap
-- projected inventory guard before submit
-- conditional token balance guard before sell
-- cancel/requote throttling
-- quote health watchdog
-- orderbook missing pause
-- balance / allowance pause
-- reduce-only tail guard
-- automatic reset of per-market state on rollover
-
-## Fair price model
-
-- Recommended mode: `digital`
-- Inputs:
-  - external BTC spot
-  - parsed strike
-  - time to expiry
-  - estimated short-horizon sigma
-- If strike is unavailable, bot falls back temporarily until opening strike can be locked
-
-## Recommended operational stance
-
-- Use `test_mode` / dry run first after parameter changes
-- Keep inventory cap small
-- Keep directional edge gate enabled
-- Keep hold-to-settlement inventory cap small
-- Keep auto-redeem disabled until live behavior is stable
-
-## Intent of the current defaults
-
-- Trade less, but with cleaner `UP` selection
-- Reduce unnecessary averaging into weak `UP`
-- Allow fast taker profit capture when edge is already won
-- Use settlement hold only as an exception, not as the baseline exit path
+Use [configuration.md](configuration.md) for configuration precedence,
+[STRATEGY_RULES.md](STRATEGY_RULES.md) for operational rules, and
+[readme_ZH.md](readme_ZH.md) for the Traditional Chinese runbook.

@@ -5,7 +5,7 @@ from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from loguru import logger
-from dotenv import load_dotenv
+from bot.runtime_env import load_runtime_env
 
 from nautilus_trader.adapters.polymarket import POLYMARKET
 from nautilus_trader.adapters.polymarket import (
@@ -30,7 +30,7 @@ from nautilus_trader.model.objects import Quantity, Price
 from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId
 from nautilus_trader.trading.strategy import Strategy
 
-load_dotenv()
+load_runtime_env()
 
 
 def current_btc_15m_slug() -> str:

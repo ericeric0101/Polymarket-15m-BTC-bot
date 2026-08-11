@@ -3298,6 +3298,83 @@ def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum(
     assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
 
 
+def test_partial_fill_buy_is_capped_to_remaining_market_inventory_capacity():
+    strategy = DummyTrendSubmitStrategy()
+    strategy.maker_max_inventory_shares = Decimal("10")
+    strategy.inventory_delta_shares = Decimal("4")
+    strategy._compute_maker_order_qty = lambda _price, _precision: Decimal("10")
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.60"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+    )
+
+    assert strategy.submitted_orders[0].quantity.as_decimal() == Decimal("6.000000")
+    cap_event = next(
+        event for event in strategy.order_events
+        if event["event_type"] == "ORDER_BUY_QTY_CAPPED_INVENTORY"
+    )
+    assert cap_event["payload"]["requested_qty"] == 10.0
+    assert cap_event["payload"]["submitted_qty"] == 6.0
+
+
+def test_buy_is_skipped_when_remaining_market_capacity_is_below_exchange_minimum():
+    strategy = DummyTrendSubmitStrategy()
+    strategy.maker_max_inventory_shares = Decimal("10")
+    strategy.inventory_delta_shares = Decimal("5.4")
+    strategy._compute_maker_order_qty = lambda _price, _precision: Decimal("10")
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.60"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+    )
+
+    assert not strategy.submitted_orders
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_INVENTORY_CAP"
+    assert strategy.order_events[-1]["reason"] == "remaining_inventory_capacity_below_exchange_min"
+
+
+def test_projected_buy_inventory_counts_pending_opposite_outcome_order():
+    strategy = SimpleNamespace(
+        instrument_id="inst-down",
+        inventory_delta_shares=Decimal("0"),
+        active_maker_orders={
+            "buy:inst-up": {
+                "side": "buy",
+                "instrument_id": "inst-up",
+                "quantity": Decimal("10"),
+                "filled_qty": Decimal("0"),
+            }
+        },
+        _get_confirmed_inventory_qty_for_instrument=lambda _inst: Decimal("0"),
+    )
+
+    projected = IntegratedBTCStrategy._project_inventory_after_fill(
+        strategy,
+        "buy",
+        Decimal("10"),
+        instrument_id="inst-down",
+    )
+
+    assert projected == Decimal("20")
+
+
 def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
     desired_entry = {
         "should_quote": True,

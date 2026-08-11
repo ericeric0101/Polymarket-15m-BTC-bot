@@ -1,5 +1,9 @@
 # Bi-Side Design
 
+> Historical design record. The current operational rules are in
+> [STRATEGY_RULES.md](STRATEGY_RULES.md); do not use this proposal as a live
+> configuration reference.
+
 ## 目的
 
 這份文件定義 BTC 15 分鐘市場的 `bi-side` 單一 bot 設計稿。
