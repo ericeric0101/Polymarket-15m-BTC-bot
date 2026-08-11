@@ -7,8 +7,16 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from bot.adapter_overrides import (
+    build_transport_heartbeat_quote,
+    coalesce_price_changes_by_asset,
     install_runtime_compatibility_overrides,
+    position_fetch_retry_delay_sec,
+    record_quote_data_engine_queue_depth,
+    quote_provenance_for_tick,
+    record_quote_provenance,
+    retain_latest_quote,
     should_emit_quote_heartbeat,
+    should_publish_order_book_deltas,
     should_emit_transport_heartbeat,
 )
 from bot.app_config import AppConfig
@@ -20,7 +28,13 @@ from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import resolve_bi_side_market_selection
-from bot.market_runtime import handle_quote_tick, quote_event_is_fresh, refresh_quote_tick_subscriptions
+from bot.market_runtime import (
+    handle_quote_tick,
+    quote_event_is_fresh,
+    quote_tick_adapter_timestamp,
+    quote_transport_is_fresh,
+    refresh_quote_tick_subscriptions,
+)
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
 from bot.ops import should_run_quote_watchdog
@@ -70,6 +84,48 @@ from run_bot import IntegratedBTCStrategy
 class DummyOrder:
     def __init__(self, client_order_id: str) -> None:
         self.client_order_id = client_order_id
+
+
+def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
+    changes = [
+        SimpleNamespace(asset_id="up", price="0.50"),
+        SimpleNamespace(asset_id="down", price="0.49"),
+        SimpleNamespace(asset_id="up", price="0.51"),
+        SimpleNamespace(asset_id="down", price="0.48"),
+    ]
+
+    groups = coalesce_price_changes_by_asset(changes)
+
+    assert [[change.price for change in group] for group in groups] == [
+        ["0.50", "0.51"],
+        ["0.49", "0.48"],
+    ]
+
+
+def test_retain_latest_quote_replaces_undelivered_tick_per_instrument():
+    pending: dict[str, object] = {}
+    first = SimpleNamespace(instrument_id="up-token", bid_price="0.50")
+    second = SimpleNamespace(instrument_id="up-token", bid_price="0.51")
+    other = SimpleNamespace(instrument_id="down-token", bid_price="0.49")
+
+    retain_latest_quote(pending, first)
+    retain_latest_quote(pending, other)
+    retain_latest_quote(pending, second)
+
+    assert list(pending) == ["up-token", "down-token"]
+    assert pending["up-token"] is second
+    assert pending["down-token"] is other
+
+
+def test_position_fetch_retries_only_http_429_with_bounded_backoff():
+    assert position_fetch_retry_delay_sec(RuntimeError("HTTP 429: Failed to fetch positions"), 0) == 1.0
+    assert position_fetch_retry_delay_sec(RuntimeError("HTTP 429: Failed to fetch positions"), 3) == 8.0
+    assert position_fetch_retry_delay_sec(RuntimeError("HTTP 500: Failed to fetch positions"), 0) is None
+
+
+def test_order_book_deltas_publish_only_when_explicitly_subscribed():
+    assert should_publish_order_book_deltas(has_delta_subscription=True)
+    assert not should_publish_order_book_deltas(has_delta_subscription=False)
 
 
 class DummyProfitHoldStrategy:
@@ -4495,6 +4551,282 @@ def test_stale_transport_heartbeat_updates_liveness_without_updating_quote_state
     assert strategy.last_valid_quote_ts > 0
     assert strategy.latest_quote_by_inst == {}
     assert strategy.watchdog_triggers == []
+
+
+def test_quote_transport_telemetry_records_adapter_source_and_stale_age():
+    class Price:
+        def __init__(self, value):
+            self.value = Decimal(value)
+
+        def as_decimal(self):
+            return self.value
+
+    class Strategy:
+        _stopping = False
+        instrument_id = "up-token"
+        current_market_instruments = ["up-token"]
+        stale_quote_synth_max_age_sec = 10.0
+        latest_market_bid_ts = 0.0
+        latest_market_ask_ts = 0.0
+        latest_market_bid = None
+        latest_market_ask = None
+        active_side = ActiveSide.UP
+        quote_stale_sec = 30.0
+        quote_event_clock_skew_tolerance_sec = Decimal("0.25")
+        last_valid_quote_ts = 0.0
+        consecutive_invalid_quote_ticks = 0
+
+        def __init__(self):
+            self.last_quote_received_ts_by_inst = {}
+            self.latest_quote_by_inst = {}
+            self.latest_quote_depth_by_inst = {}
+            self.events = []
+
+        def _instrument_for_side(self, _side):
+            return "up-token"
+
+        def _primary_instrument_for_market(self):
+            return "up-token"
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    strategy = Strategy()
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        bid_price=Price("0.60"),
+        ask_price=Price("0.61"),
+        bid_size=Price("10"),
+        ask_size=Price("10"),
+        ts_event=1,
+    )
+    record_quote_provenance(tick, source="transport_heartbeat")
+
+    assert quote_provenance_for_tick(tick)["source"] == "transport_heartbeat"
+    handle_quote_tick(strategy, tick)
+
+    assert strategy.events
+    event_type, payload = strategy.events[-1]
+    assert event_type == "QUOTE_TRANSPORT_TELEMETRY"
+    assert payload["quote_source"] == "transport_heartbeat"
+    assert payload["quote_is_fresh"] is False
+    assert payload["quote_age_raw_sec"] > 30
+    assert payload["raw_ws_received_ts"] is None
+
+
+def test_quote_provenance_retains_raw_websocket_ingress_timestamp():
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        ts_event=1,
+        ts_init=2,
+    )
+
+    record_quote_provenance(
+        tick,
+        source="ws_price_change",
+        raw_ws_received_ts=1234.5,
+    )
+
+    provenance = quote_provenance_for_tick(tick)
+    assert provenance["source"] == "ws_price_change"
+    assert provenance["raw_ws_received_ts"] == 1234.5
+
+
+def test_quote_provenance_retains_data_engine_queue_depth():
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        ts_event=1,
+        ts_init=2,
+    )
+    record_quote_provenance(tick, source="ws_price_change")
+
+    record_quote_data_engine_queue_depth(tick, 37)
+
+    assert quote_provenance_for_tick(tick)["data_engine_queue_depth"] == 37
+
+
+def test_transport_heartbeat_uses_distinct_tick_provenance():
+    class QuoteTick:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    quote = SimpleNamespace(
+        instrument_id="up-token",
+        bid_price="0.60",
+        ask_price="0.61",
+        bid_size="10",
+        ask_size="11",
+        ts_event=1,
+        ts_init=2,
+    )
+    data_mod = SimpleNamespace(QuoteTick=QuoteTick)
+    record_quote_provenance(quote, source="ws_price_change")
+
+    heartbeat = build_transport_heartbeat_quote(data_mod, quote, 3)
+    record_quote_provenance(heartbeat, source="transport_heartbeat")
+
+    assert quote_provenance_for_tick(quote)["source"] == "ws_price_change"
+    assert quote_provenance_for_tick(heartbeat)["source"] == "transport_heartbeat"
+
+
+def test_native_clob_snapshot_uses_adapter_emit_time_not_old_book_timestamp():
+    now_ts = time.time()
+
+    assert quote_transport_is_fresh(
+        received_ts=now_ts,
+        adapter_emitted_ts=now_ts,
+        max_age_sec=30.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+    assert not quote_transport_is_fresh(
+        received_ts=now_ts,
+        adapter_emitted_ts=now_ts - 31.0,
+        max_age_sec=30.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+
+
+def test_quote_adapter_timestamp_uses_nautilus_ts_init_not_exchange_event_time():
+    now_ts = time.time()
+    tick = SimpleNamespace(
+        ts_event=int((now_ts - 90.0) * 1_000_000_000),
+        ts_init=int(now_ts * 1_000_000_000),
+    )
+
+    assert abs(quote_tick_adapter_timestamp(tick, 0.0) - now_ts) < 0.01
+
+
+def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_fresh():
+    class Price:
+        def __init__(self, value):
+            self.value = Decimal(value)
+
+        def as_decimal(self):
+            return self.value
+
+    class Strategy:
+        _stopping = False
+        instrument_id = "up-token"
+        current_market_instruments = ["up-token"]
+        stale_quote_synth_max_age_sec = 10.0
+        latest_market_bid_ts = 0.0
+        latest_market_ask_ts = 0.0
+        latest_market_bid = None
+        latest_market_ask = None
+        active_side = ActiveSide.UP
+        quote_stale_sec = 30.0
+        quote_event_clock_skew_tolerance_sec = Decimal("0.25")
+        last_valid_quote_ts = 0.0
+        consecutive_invalid_quote_ticks = 0
+        maker_mode = False
+        max_history = 100
+
+        def __init__(self):
+            self.last_quote_received_ts_by_inst = {}
+            self.last_quote_update_ts_by_inst = {}
+            self.latest_quote_by_inst = {}
+            self.latest_quote_depth_by_inst = {}
+            self.price_history = []
+            self.events = []
+
+        def _instrument_for_side(self, _side):
+            return "up-token"
+
+        def _primary_instrument_for_market(self):
+            return "up-token"
+
+        def _append_real_mid_price(self, *_args):
+            pass
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    now_ts = time.time()
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        bid_price=Price("0.60"),
+        ask_price=Price("0.61"),
+        bid_size=Price("10"),
+        ask_size=Price("10"),
+        ts_event=int((now_ts - 90.0) * 1_000_000_000),
+        ts_init=int(now_ts * 1_000_000_000),
+    )
+    record_quote_provenance(tick, source="ws_snapshot")
+
+    strategy = Strategy()
+    handle_quote_tick(strategy, tick)
+
+    assert strategy.latest_quote_by_inst["up-token"] == (Decimal("0.60"), Decimal("0.61"))
+    assert abs(strategy.last_quote_update_ts_by_inst["up-token"] - now_ts) < 0.01
+    assert strategy.events[-1][1]["quote_is_fresh"] is True
+
+
+def test_quote_recovery_waits_for_both_binary_outcomes_before_clearing_pending_set():
+    class Price:
+        def __init__(self, value):
+            self.value = Decimal(value)
+
+        def as_decimal(self):
+            return self.value
+
+    class Strategy:
+        _stopping = False
+        instrument_id = "up-token"
+        current_market_instruments = ["up-token", "down-token"]
+        stale_quote_synth_max_age_sec = 10.0
+        latest_market_bid_ts = 0.0
+        latest_market_ask_ts = 0.0
+        latest_market_bid = None
+        latest_market_ask = None
+        active_side = ActiveSide.UP
+        quote_stale_sec = 30.0
+        quote_event_clock_skew_tolerance_sec = Decimal("0.25")
+        last_valid_quote_ts = 0.0
+        consecutive_invalid_quote_ticks = 0
+        quote_recovery_started_ts = 123.0
+        quote_recovery_attempts = 1
+
+        def __init__(self):
+            self.last_quote_received_ts_by_inst = {}
+            self.latest_quote_by_inst = {}
+            self.latest_quote_depth_by_inst = {}
+            self.last_quote_update_ts_by_inst = {}
+            self.quote_recovery_pending_instruments = {"up-token", "down-token"}
+
+        def _instrument_for_side(self, _side):
+            return "up-token"
+
+        def _primary_instrument_for_market(self):
+            return "up-token"
+
+        def _append_real_mid_price(self, *_args):
+            pass
+
+        def _maybe_run_quote_watchdog(self, _trigger):
+            raise AssertionError("fresh quote must not trigger the watchdog")
+
+    strategy = Strategy()
+    fresh_tick = SimpleNamespace(
+        instrument_id="down-token",
+        bid_price=Price("0.40"),
+        ask_price=Price("0.41"),
+        bid_size=Price("10"),
+        ask_size=Price("10"),
+        ts_event=int(time.time() * 1_000_000_000),
+    )
+
+    handle_quote_tick(strategy, fresh_tick)
+
+    assert strategy.quote_recovery_pending_instruments == {"up-token"}
+    assert strategy.quote_recovery_started_ts == 123.0
+    assert strategy.quote_recovery_attempts == 1
+
+    fresh_tick.instrument_id = "up-token"
+    handle_quote_tick(strategy, fresh_tick)
+
+    assert strategy.quote_recovery_pending_instruments == set()
+    assert strategy.quote_recovery_started_ts == 0.0
+    assert strategy.quote_recovery_attempts == 0
 
 
 def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():

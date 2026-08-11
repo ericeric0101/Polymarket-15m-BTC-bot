@@ -13,6 +13,84 @@ from loguru import logger
 from py_clob_client_v2.exceptions import PolyApiException
 
 
+_QUOTE_PROVENANCE_TTL_SEC = 600.0
+_quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
+
+
+def _quote_provenance_key(quote: object) -> tuple[object, ...]:
+    """Build a key that survives Nautilus message-bus object copies."""
+    instrument_id = getattr(quote, "instrument_id", None)
+    ts_event = getattr(quote, "ts_event", None)
+    ts_init = getattr(quote, "ts_init", None)
+    if instrument_id is not None and ts_event is not None and ts_init is not None:
+        return (str(instrument_id), int(ts_event), int(ts_init))
+    # Simple test doubles do not always expose Nautilus timestamps.
+    return ("object_id", id(quote))
+
+
+def record_quote_provenance(
+    quote: object,
+    *,
+    source: str,
+    raw_ws_received_ts: float | None = None,
+) -> None:
+    """Attach adapter-side provenance without mutating Nautilus QuoteTick objects."""
+    now_ts = time.time()
+    if len(_quote_provenance_by_tick_key) > 4096:
+        cutoff = now_ts - _QUOTE_PROVENANCE_TTL_SEC
+        stale_keys = [
+            key
+            for key, metadata in _quote_provenance_by_tick_key.items()
+            if float(metadata.get("recorded_ts", 0.0)) < cutoff
+        ]
+        for key in stale_keys:
+            _quote_provenance_by_tick_key.pop(key, None)
+    _quote_provenance_by_tick_key[_quote_provenance_key(quote)] = {
+        "source": str(source),
+        "recorded_ts": now_ts,
+        "raw_ws_received_ts": (
+            float(raw_ws_received_ts) if raw_ws_received_ts is not None else None
+        ),
+    }
+
+
+def quote_provenance_for_tick(tick: object) -> dict[str, object]:
+    """Return best-effort provenance for the QuoteTick delivered to a strategy."""
+    return dict(_quote_provenance_by_tick_key.get(_quote_provenance_key(tick), {}))
+
+
+def record_quote_data_engine_queue_depth(quote: object, queue_depth: int) -> None:
+    """Attach DataEngine queue depth observed immediately before enqueue."""
+    metadata = _quote_provenance_by_tick_key.get(_quote_provenance_key(quote))
+    if metadata is not None:
+        metadata["data_engine_queue_depth"] = int(queue_depth)
+
+
+def coalesce_price_changes_by_asset(price_changes: object) -> list[list[object]]:
+    """Group a raw CLOB message so each asset publishes only its final quote."""
+    grouped: dict[str, list[object]] = {}
+    for change in price_changes:
+        grouped.setdefault(str(change.asset_id), []).append(change)
+    return list(grouped.values())
+
+
+def retain_latest_quote(pending_quotes: dict[str, object], quote: object) -> None:
+    """Keep only the newest undelivered QuoteTick for each instrument."""
+    pending_quotes[str(quote.instrument_id)] = quote
+
+
+def position_fetch_retry_delay_sec(error: Exception, attempt: int) -> float | None:
+    """Return bounded retry delay only for temporary Data API rate limits."""
+    if "HTTP 429:" not in str(error):
+        return None
+    return min(8.0, float(2 ** max(0, int(attempt))))
+
+
+def should_publish_order_book_deltas(*, has_delta_subscription: bool) -> bool:
+    """Avoid filling the DataEngine with depth updates no consumer requested."""
+    return bool(has_delta_subscription)
+
+
 def should_emit_quote_heartbeat(
     *,
     quote_unchanged: bool,
@@ -31,8 +109,22 @@ def should_emit_transport_heartbeat(*, is_connected: bool, has_quote: bool) -> b
     return is_connected and has_quote
 
 
+def build_transport_heartbeat_quote(data_mod, quote: object, ts_init: int):
+    """Clone a cached quote so heartbeat provenance cannot overwrite live data."""
+    return data_mod.QuoteTick(
+        instrument_id=quote.instrument_id,
+        bid_price=quote.bid_price,
+        ask_price=quote.ask_price,
+        bid_size=quote.bid_size,
+        ask_size=quote.ask_size,
+        ts_event=quote.ts_event,
+        ts_init=ts_init,
+    )
+
+
 def install_runtime_compatibility_overrides() -> None:
     _install_polymarket_data_overrides()
+    _install_live_data_engine_observability_override()
     _install_polymarket_execution_overrides()
     _install_polymarket_user_trade_overrides()
     _install_pyclob_http_overrides()
@@ -66,6 +158,7 @@ def _install_polymarket_data_overrides() -> None:
     original_init = cls.__init__
     original_connect = cls._connect
     original_disconnect = cls._disconnect
+    original_handle_raw_ws_message = cls._handle_raw_ws_message
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -86,6 +179,36 @@ def _install_polymarket_data_overrides() -> None:
             )
         if not hasattr(self, "_quote_transport_heartbeat_task"):
             self._quote_transport_heartbeat_task = None
+        if not hasattr(self, "_quote_delivery_pending"):
+            self._quote_delivery_pending = {}
+        if not hasattr(self, "_quote_delivery_task"):
+            self._quote_delivery_task = None
+        if not hasattr(self, "_quote_delivery_coalesce_sec"):
+            self._quote_delivery_coalesce_sec = max(
+                0.05,
+                float(os.getenv("POLYMARKET_QUOTE_COALESCE_SEC", "0.25")),
+            )
+
+    async def flush_latest_quotes(self) -> None:
+        """Deliver a bounded, latest-only QuoteTick stream to the strategy loop."""
+        try:
+            while True:
+                await asyncio.sleep(float(self._quote_delivery_coalesce_sec))
+                pending = self._quote_delivery_pending
+                self._quote_delivery_pending = {}
+                for quote in pending.values():
+                    self._handle_data(quote)
+                if not self._quote_delivery_pending:
+                    return
+        finally:
+            self._quote_delivery_task = None
+
+    def queue_latest_quote(self, quote) -> None:
+        """Replace intermediate quotes that have not yet reached the main loop."""
+        retain_latest_quote(self._quote_delivery_pending, quote)
+        task = getattr(self, "_quote_delivery_task", None)
+        if task is None or task.done():
+            self._quote_delivery_task = self.create_task(flush_latest_quotes(self))
 
     async def quote_transport_heartbeat(self) -> None:
         """Publish cached quotes while the protocol-level WebSocket remains connected.
@@ -103,7 +226,13 @@ def _install_polymarket_data_overrides() -> None:
                     is_connected=is_connected,
                     has_quote=quote is not None,
                 ):
-                    self._handle_data(quote)
+                    heartbeat = build_transport_heartbeat_quote(
+                        data_mod,
+                        quote,
+                        self._clock.timestamp_ns(),
+                    )
+                    record_quote_provenance(heartbeat, source="transport_heartbeat")
+                    self._handle_data(heartbeat)
 
     async def patched_connect(self) -> None:
         await original_connect(self)
@@ -116,7 +245,17 @@ def _install_polymarket_data_overrides() -> None:
         if task is not None:
             task.cancel()
             self._quote_transport_heartbeat_task = None
+        delivery_task = getattr(self, "_quote_delivery_task", None)
+        if delivery_task is not None:
+            delivery_task.cancel()
+            self._quote_delivery_task = None
+        self._quote_delivery_pending = {}
         await original_disconnect(self)
+
+    def patched_handle_raw_ws_message(self, raw: bytes) -> None:
+        """Capture ingress time before Nautilus decodes and routes a WS payload."""
+        self._btc15m_raw_ws_received_ts = time.time()
+        original_handle_raw_ws_message(self, raw)
 
     def patched_log_drop_quote_warning_throttled(self, instrument_id, reason: str) -> None:
         key = f"{instrument_id}:{reason}"
@@ -141,7 +280,8 @@ def _install_polymarket_data_overrides() -> None:
             f"Instrument tick size changed: id={instrument.id} price_increment={instrument.price_increment} ws_tick={ws_tick}",
         )
 
-    def patched_handle_quote(self, instrument, ws_message, price_change) -> None:
+    def patched_apply_quote_change(self, instrument, ws_message, price_change) -> bool:
+        """Apply an incremental CLOB update to the local book without publishing a quote."""
         now_ns = self._clock.timestamp_ns()
         order = data_mod.BookOrder(
             side=data_mod.OrderSide.BUY if price_change.side == data_mod.PolymarketOrderSide.BUY else data_mod.OrderSide.SELL,
@@ -165,14 +305,22 @@ def _install_polymarket_data_overrides() -> None:
                 instrument.id not in self.subscribed_quote_ticks()
                 and instrument.id not in self.subscribed_order_book_deltas()
             ):
-                return
+                return False
             self._create_local_book(instrument.id)
 
         local_book = self._local_books[instrument.id]
         local_book.apply(deltas)
-        self._handle_data(deltas)
+        if should_publish_order_book_deltas(
+            has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
+        ):
+            self._handle_data(deltas)
+        return True
 
+    def patched_publish_quote(self, instrument, ws_message) -> None:
+        """Publish the final top-of-book after all message updates are applied."""
         if instrument.id in self.subscribed_quote_ticks():
+            now_ns = self._clock.timestamp_ns()
+            local_book = self._local_books[instrument.id]
             bid_price = local_book.best_bid_price()
             ask_price = local_book.best_ask_price()
             bid_size = local_book.best_bid_size()
@@ -220,14 +368,47 @@ def _install_polymarket_data_overrides() -> None:
 
             self._last_quotes[instrument.id] = quote
             self._quote_heartbeat_emit_ns[instrument.id] = now_ns
-            self._handle_data(quote)
+            record_quote_provenance(
+                quote,
+                source="ws_price_change",
+                raw_ws_received_ts=getattr(self, "_btc15m_raw_ws_received_ts", None),
+            )
+            self._queue_latest_quote(quote)
+
+    def patched_handle_quote(self, instrument, ws_message, price_change) -> None:
+        if self._apply_quote_change(instrument, ws_message, price_change):
+            self._publish_quote(instrument, ws_message)
+
+    def patched_handle_quotes(self, ws_message) -> None:
+        """Coalesce quote fan-out while retaining every local-book delta in order."""
+        for changes in coalesce_price_changes_by_asset(ws_message.price_changes):
+            first_change = changes[0]
+            instrument_id = data_mod.get_polymarket_instrument_id(ws_message.market, first_change.asset_id)
+            instrument = self._cache.instrument(instrument_id)
+            if instrument is None:
+                self._log.error(f"Cannot find instrument for {instrument_id}")
+                continue
+            applied = False
+            for price_change in changes:
+                applied = self._apply_quote_change(instrument, ws_message, price_change) or applied
+            if applied:
+                self._publish_quote(instrument, ws_message)
 
     def patched_handle_book_snapshot(self, instrument, ws_message) -> None:
         now_ns = self._clock.timestamp_ns()
         deltas = ws_message.parse_to_snapshot(instrument=instrument, ts_init=now_ns)
         if deltas is None:
             return
-        self._handle_deltas(instrument, deltas)
+        if should_publish_order_book_deltas(
+            has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
+        ):
+            self._handle_deltas(instrument, deltas)
+        else:
+            # Retain a complete local book for quote generation while avoiding
+            # a DataEngine event for depth nobody subscribed to consume.
+            local_book = data_mod.OrderBook(instrument.id, book_type=data_mod.BookType.L2_MBP)
+            local_book.apply_deltas(deltas)
+            self._local_books[instrument.id] = local_book
         if instrument.id in self.subscribed_quote_ticks():
             quote = ws_message.parse_to_quote(
                 instrument=instrument,
@@ -242,16 +423,48 @@ def _install_polymarket_data_overrides() -> None:
                 return
             self._last_quotes[instrument.id] = quote
             self._quote_heartbeat_emit_ns[instrument.id] = now_ns
-            self._handle_data(quote)
+            record_quote_provenance(
+                quote,
+                source="ws_snapshot",
+                raw_ws_received_ts=getattr(self, "_btc15m_raw_ws_received_ts", None),
+            )
+            self._queue_latest_quote(quote)
 
     cls.__init__ = patched_init
     cls._connect = patched_connect
     cls._disconnect = patched_disconnect
+    cls._handle_raw_ws_message = patched_handle_raw_ws_message
     cls._log_drop_quote_warning_throttled = patched_log_drop_quote_warning_throttled
     cls._log_tick_size_warning_throttled = patched_log_tick_size_warning_throttled
+    cls._apply_quote_change = patched_apply_quote_change
+    cls._publish_quote = patched_publish_quote
+    cls._queue_latest_quote = queue_latest_quote
     cls._handle_quote = patched_handle_quote
+    cls._handle_quotes = patched_handle_quotes
     cls._handle_book_snapshot = patched_handle_book_snapshot
     cls._btc15m_runtime_compat_patched = True
+
+
+def _install_live_data_engine_observability_override() -> None:
+    """Record queue depth for QuoteTicks without changing DataEngine behavior."""
+    from nautilus_trader.live.data_engine import LiveDataEngine
+
+    if getattr(LiveDataEngine, "_btc15m_queue_telemetry_patched", False):
+        return
+
+    original_process = LiveDataEngine.process
+
+    def patched_process(self, data) -> None:
+        if type(data).__name__ == "QuoteTick":
+            try:
+                record_quote_data_engine_queue_depth(data, self.data_qsize())
+            except Exception:
+                # Queue observability must never interfere with market data.
+                pass
+        original_process(self, data)
+
+    LiveDataEngine.process = patched_process
+    LiveDataEngine._btc15m_queue_telemetry_patched = True
 
 
 def _install_polymarket_execution_overrides() -> None:
@@ -260,6 +473,28 @@ def _install_polymarket_execution_overrides() -> None:
     cls = exec_mod.PolymarketExecutionClient
     if getattr(cls, "_btc15m_runtime_compat_patched", False):
         return
+
+    original_fetch_user_positions = cls._fetch_user_positions
+
+    async def patched_fetch_user_positions(self, *, limit: int = 100, size_threshold: int = 0):
+        """Retry temporary Gamma/Data API rate limits during startup reconciliation."""
+        max_attempts = 5
+        for attempt in range(max_attempts):
+            try:
+                return await original_fetch_user_positions(
+                    self,
+                    limit=limit,
+                    size_threshold=size_threshold,
+                )
+            except RuntimeError as exc:
+                delay_sec = position_fetch_retry_delay_sec(exc, attempt)
+                if delay_sec is None or attempt == max_attempts - 1:
+                    raise
+                self._log.warning(
+                    "Polymarket position reconciliation rate limited; "
+                    f"retrying attempt={attempt + 2}/{max_attempts} in {delay_sec:.0f}s",
+                )
+                await asyncio.sleep(delay_sec)
 
     async def patched_cancel_order(self, command) -> None:
         await self._maintain_active_market(command.instrument_id)
@@ -417,6 +652,7 @@ def _install_polymarket_execution_overrides() -> None:
     cls._handle_ws_order_msg = patched_handle_ws_order_msg
     cls._handle_ws_trade_msg = patched_handle_ws_trade_msg
     cls._btc15m_runtime_compat_patched = True
+    cls._fetch_user_positions = patched_fetch_user_positions
 
 
 def _safe_decimal(value, fallback=None) -> Decimal:

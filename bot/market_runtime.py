@@ -12,6 +12,7 @@ from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.enums import ActiveSide
+from bot.adapter_overrides import quote_provenance_for_tick
 from bot.edge_observation import build_quote_age_telemetry
 from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_selection
 from bot.ops import log_strategy_run_stop, stop_event_threads
@@ -21,6 +22,21 @@ def quote_tick_event_timestamp(tick: Any, fallback_now: float) -> float:
     """Return QuoteTick event time in epoch seconds, with safe fallback."""
     try:
         raw = float(getattr(tick, "ts_event", 0) or 0)
+        if raw > 1e17:
+            raw /= 1e9
+        elif raw > 1e11:
+            raw /= 1e3
+        if raw > 0:
+            return raw
+    except Exception:
+        pass
+    return float(fallback_now)
+
+
+def quote_tick_adapter_timestamp(tick: Any, fallback_now: float) -> float:
+    """Return the local adapter creation time carried by a Nautilus QuoteTick."""
+    try:
+        raw = float(getattr(tick, "ts_init", 0) or 0)
         if raw > 1e17:
             raw /= 1e9
         elif raw > 1e11:
@@ -46,6 +62,83 @@ def quote_event_is_fresh(
         clock_skew_tolerance_sec=clock_skew_tolerance_sec,
     )
     return age.effective_age_sec is not None and age.effective_age_sec <= Decimal(str(max_age_sec))
+
+
+def quote_transport_is_fresh(
+    *,
+    received_ts: float,
+    adapter_emitted_ts: float,
+    max_age_sec: float,
+    clock_skew_tolerance_sec: Decimal | float,
+) -> bool:
+    """Return whether a native CLOB book was emitted recently enough to execute on.
+
+    Polymarket's message timestamp identifies the book's most recent market
+    update. It can legitimately predate a newly received current snapshot, so
+    it is telemetry rather than the execution-freshness clock.
+    """
+    return quote_event_is_fresh(
+        received_ts=received_ts,
+        event_ts=adapter_emitted_ts,
+        max_age_sec=max_age_sec,
+        clock_skew_tolerance_sec=clock_skew_tolerance_sec,
+    )
+
+
+def _record_quote_transport_telemetry(
+    strategy: Any,
+    *,
+    tick: Any,
+    received_ts: float,
+    event_ts: float,
+    adapter_emitted_ts: float,
+    source: str,
+    quote_is_fresh: bool,
+    raw_ws_received_ts: Optional[float],
+    data_engine_queue_depth: Optional[int],
+    raw_bid_present: bool,
+    raw_ask_present: bool,
+    bid_size: Optional[Decimal],
+    ask_size: Optional[Decimal],
+) -> None:
+    """Persist a throttled source/timestamp trace without affecting quote handling."""
+    if not hasattr(strategy, "_db_strategy_event"):
+        return
+    instrument_key = str(tick.instrument_id)
+    raw_age_sec = received_ts - event_ts
+    adapter_delay_sec = received_ts - adapter_emitted_ts
+    ws_to_adapter_delay_sec = (
+        adapter_emitted_ts - raw_ws_received_ts
+        if raw_ws_received_ts is not None
+        else None
+    )
+    state = getattr(strategy, "_quote_transport_telemetry_state", None)
+    if state is None:
+        state = {}
+        strategy._quote_transport_telemetry_state = state
+    last_ts = float(state.get(instrument_key, 0.0))
+    if received_ts - last_ts < 5.0:
+        return
+    state[instrument_key] = received_ts
+    strategy._db_strategy_event(
+        "QUOTE_TRANSPORT_TELEMETRY",
+        {
+            "quote_source": source,
+            "quote_event_ts": float(event_ts),
+            "raw_ws_received_ts": raw_ws_received_ts,
+            "adapter_emitted_ts": float(adapter_emitted_ts),
+            "quote_received_ts": float(received_ts),
+            "quote_age_raw_sec": float(raw_age_sec),
+            "ws_to_adapter_delay_sec": ws_to_adapter_delay_sec,
+            "data_engine_queue_depth": data_engine_queue_depth,
+            "adapter_to_strategy_delay_sec": float(adapter_delay_sec),
+            "quote_is_fresh": bool(quote_is_fresh),
+            "raw_bid_present": bool(raw_bid_present),
+            "raw_ask_present": bool(raw_ask_present),
+            "bid_size": float(bid_size) if bid_size is not None else None,
+            "ask_size": float(ask_size) if ask_size is not None else None,
+        },
+    )
 
 
 def align_price_to_tick(strategy: Any, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
@@ -320,8 +413,10 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             strategy._maybe_run_quote_watchdog(trigger="empty_quote")
             return
 
-        bid_decimal = tick.bid_price.as_decimal() if tick.bid_price is not None else None
-        ask_decimal = tick.ask_price.as_decimal() if tick.ask_price is not None else None
+        raw_bid_present = tick.bid_price is not None
+        raw_ask_present = tick.ask_price is not None
+        bid_decimal = tick.bid_price.as_decimal() if raw_bid_present else None
+        ask_decimal = tick.ask_price.as_decimal() if raw_ask_present else None
         bid_size_decimal: Optional[Decimal] = None
         ask_size_decimal: Optional[Decimal] = None
         try:
@@ -364,6 +459,9 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
 
         quote_received_ts = time.time()
         quote_event_ts = quote_tick_event_timestamp(tick, quote_received_ts)
+        provenance = quote_provenance_for_tick(tick)
+        quote_source = str(provenance.get("source") or "unknown")
+        adapter_emitted_ts = quote_tick_adapter_timestamp(tick, quote_received_ts)
         preferred_inst = strategy._instrument_for_side(strategy.active_side) or strategy._primary_instrument_for_market()
         is_preferred_quote = preferred_inst is None or tick.instrument_id == preferred_inst
         # Receipt time proves the subscribed transport remains alive. It is
@@ -371,11 +469,50 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         getattr(strategy, "last_quote_received_ts_by_inst", {})[str(tick.instrument_id)] = quote_received_ts
         if is_preferred_quote:
             strategy.last_valid_quote_ts = quote_received_ts
-        quote_is_fresh = quote_event_is_fresh(
+        clock_skew_tolerance_sec = getattr(
+            strategy,
+            "quote_event_clock_skew_tolerance_sec",
+            Decimal("0.25"),
+        )
+        is_native_book_update = quote_source in {"ws_price_change", "ws_snapshot"}
+        quote_is_fresh = (
+            quote_transport_is_fresh(
+                received_ts=quote_received_ts,
+                adapter_emitted_ts=adapter_emitted_ts,
+                max_age_sec=float(strategy.quote_stale_sec),
+                clock_skew_tolerance_sec=clock_skew_tolerance_sec,
+            )
+            if is_native_book_update
+            else quote_source != "transport_heartbeat"
+            and quote_event_is_fresh(
+                received_ts=quote_received_ts,
+                event_ts=quote_event_ts,
+                max_age_sec=float(strategy.quote_stale_sec),
+                clock_skew_tolerance_sec=clock_skew_tolerance_sec,
+            )
+        )
+        _record_quote_transport_telemetry(
+            strategy,
+            tick=tick,
             received_ts=quote_received_ts,
             event_ts=quote_event_ts,
-            max_age_sec=float(strategy.quote_stale_sec),
-            clock_skew_tolerance_sec=getattr(strategy, "quote_event_clock_skew_tolerance_sec", Decimal("0.25")),
+            adapter_emitted_ts=adapter_emitted_ts,
+            source=quote_source,
+            quote_is_fresh=quote_is_fresh,
+            raw_ws_received_ts=(
+                float(provenance["raw_ws_received_ts"])
+                if provenance.get("raw_ws_received_ts") is not None
+                else None
+            ),
+            data_engine_queue_depth=(
+                int(provenance["data_engine_queue_depth"])
+                if provenance.get("data_engine_queue_depth") is not None
+                else None
+            ),
+            raw_bid_present=raw_bid_present,
+            raw_ask_present=raw_ask_present,
+            bid_size=bid_size_decimal,
+            ask_size=ask_size_decimal,
         )
         if not quote_is_fresh:
             # A cached transport heartbeat or old exchange event is not valid
@@ -386,14 +523,18 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
 
         strategy.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
         getattr(strategy, "latest_quote_by_inst", {})[str(tick.instrument_id)] = (bid_decimal, ask_decimal)
-        getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = quote_event_ts
+        # Quote plans need the local time at which a current CLOB book was
+        # emitted, not the book's last internal market-update timestamp.
+        getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = adapter_emitted_ts
         pending_instruments = getattr(strategy, "quote_recovery_pending_instruments", set())
         if str(tick.instrument_id) in pending_instruments:
-            # A single valid quote proves the data connection recovered. The normal
-            # preferred-side freshness watchdog continues to protect execution.
-            pending_instruments.clear()
-            strategy.quote_recovery_started_ts = 0.0
-            strategy.quote_recovery_attempts = 0
+            # A binary market needs a fresh book for every subscribed outcome.
+            # Clearing the whole set after the first token hid a missing UP/DOWN
+            # subscription behind transport heartbeats and prevented recovery.
+            pending_instruments.discard(str(tick.instrument_id))
+            if not pending_instruments:
+                strategy.quote_recovery_started_ts = 0.0
+                strategy.quote_recovery_attempts = 0
         mid_price = (bid_decimal + ask_decimal) / 2
         strategy._append_real_mid_price(tick.instrument_id, mid_price)
         if hasattr(strategy, "_shadow_simulation_on_quote"):
