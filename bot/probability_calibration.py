@@ -37,6 +37,27 @@ def calibrate_probability(
     return clamp_probability(mid + weight * (raw - mid))
 
 
+def settlement_ev_per_share(
+    *,
+    calibrated_probability: Decimal,
+    entry_price: Decimal,
+    fee_per_share: Decimal = Decimal("0"),
+) -> Decimal:
+    """Estimate binary settlement EV for one purchased share.
+
+    This is deliberately a *settlement* metric, rather than the live
+    executable economics gate.  It assumes a filled BUY paying one USDC on a
+    correct settlement and zero otherwise, then subtracts the supplied quote
+    fee assumption.  Execution risk, fill probability, markout, exits, and
+    rebates are intentionally excluded so research can compare this value to
+    the separately recorded ``robust_net_usdc``.
+    """
+    probability = clamp_probability(calibrated_probability)
+    price = Decimal(str(entry_price))
+    fee = max(Decimal("0"), Decimal(str(fee_per_share)))
+    return probability - price - fee
+
+
 def fractional_kelly_stake_fraction(
     *,
     probability: Decimal,

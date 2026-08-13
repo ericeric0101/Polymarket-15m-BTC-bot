@@ -109,6 +109,7 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
+    apply_entry_vwap_risk_weight,
     apply_entry_quality_quote_placement,
     parse_quote_plan,
     should_emit_edge_observation,
@@ -133,6 +134,7 @@ from bot.quote_service import (
     log_no_quote_diagnostics,
     maybe_apply_continuation_entry,
     maybe_apply_trapped_inventory_recovery,
+    synchronize_desired_buy_economics_to_quantity,
     preserve_profitable_existing_sell_order,
     preserve_recent_loss_sell_order,
     reconcile_unwanted_quotes,
@@ -476,8 +478,7 @@ class IntegratedBTCStrategy(
                 f"taker_exit={'on' if self.taker_exit_enabled else 'off'} "
                 f"taker_max_spread={float(self.taker_exit_max_spread_pct):.3f} "
                 f"early_sell_only={self.maker_early_sell_only_sec}s "
-                f"dir_edge_gate={'on' if self.maker_directional_edge_gate_enabled else 'off'} "
-                f"dir_edge_min={float(self.maker_min_directional_edge_ps):.4f} "
+                "directional_edge_metric=telemetry_only "
                 f"regime_guard={'on' if self.regime_guard_enabled else 'off'}"
             )
 
@@ -1566,6 +1567,8 @@ class IntegratedBTCStrategy(
         fair: Any = None,
         entry_price: Any = None,
         robust_net_usdc: Any = None,
+        fee_per_share: Any = None,
+        planned_quantity: Any = None,
         time_left_sec: Optional[float] = None,
     ) -> None:
         """Record the existing BUY decision path without changing its outcome."""
@@ -1594,6 +1597,10 @@ class IntegratedBTCStrategy(
             fair=_as_float(fair),
             entry_price=_as_float(entry_price),
             robust_net_usdc=_as_float(robust_net_usdc),
+            # ``fair`` has already passed probability calibration upstream.
+            calibrated_probability=_as_float(fair),
+            fee_per_share=_as_float(fee_per_share),
+            planned_quantity=_as_float(planned_quantity),
         )
         payload = decision.to_payload()
         payload["decision_stage"] = "pre_submit"
@@ -1606,6 +1613,8 @@ class IntegratedBTCStrategy(
             payload["entry_price"],
             payload["fair"],
             payload["robust_net_usdc"],
+            payload["settlement_ev_per_share"],
+            payload["planned_quantity"],
         )
         if not hasattr(self, "_last_entry_decision_trace_signature_by_inst"):
             self._last_entry_decision_trace_signature_by_inst = {}
@@ -1942,6 +1951,56 @@ class IntegratedBTCStrategy(
                     if isinstance(quote_data, (tuple, list)) and len(quote_data) > 3
                     else None
                 )
+                # The entry-quality and high-price checks are earlier than
+                # ``build_desired_quote_entry``.  Give them the same effective
+                # passive-entry cost basis as the final economics gate, rather
+                # than the maker engine's raw forced-exit VWAP estimate.
+                if side == "buy" and isinstance(quote_data, (tuple, list)):
+                    raw_econ = quote_data[1] if len(quote_data) > 1 else None
+                    raw_exec_penalty = quote_data[4] if len(quote_data) > 4 else None
+                    raw_penalty_components = quote_data[10] if len(quote_data) > 10 else None
+                    if (
+                        raw_econ is not None
+                        and isinstance(candidate_robust_net, Decimal)
+                        and isinstance(raw_exec_penalty, Decimal)
+                    ):
+                        candidate_robust_net, _, _, _ = apply_entry_vwap_risk_weight(
+                            expected_net=Decimal(str(raw_econ.expected_net_usdc)),
+                            raw_robust_net=candidate_robust_net,
+                            raw_execution_penalty=raw_exec_penalty,
+                            execution_penalty_components=(
+                                raw_penalty_components
+                                if isinstance(raw_penalty_components, dict)
+                                else None
+                            ),
+                            entry_is_flat=(
+                                current_inst_inventory_qty <= Decimal("0")
+                                and other_held_inventory_qty <= Decimal("0")
+                            ),
+                            entry_signal_confirmed=(
+                                bool(self.active_side_locked)
+                                and self._latest_observation_supports_locked_side(
+                                    self.active_side,
+                                    self.side_decision_score,
+                                )
+                                and not bool(locked_side_runtime.entry_blocked)
+                            ),
+                            time_left_sec=time_left_sec_global,
+                            vwap_entry_risk_weight=getattr(
+                                self,
+                                "maker_execution_vwap_entry_risk_weight",
+                                Decimal("1"),
+                            ),
+                            vwap_full_risk_last_sec=float(getattr(
+                                self,
+                                "maker_execution_vwap_full_risk_last_sec",
+                                0.0,
+                            )),
+                            hold_to_redeem_enabled=bool(
+                                getattr(self, "hold_to_redeem_enabled", False)
+                            ),
+                            post_only_enabled=bool(getattr(self, "maker_use_post_only", False)),
+                        )
                 buy_entry_eval = evaluate_buy_entry_controls(
                     side=side,
                     bi_side_enabled=self.bi_side_enabled,
@@ -1997,6 +2056,11 @@ class IntegratedBTCStrategy(
                         getattr(self, "entry_quality_allow_size_down", False)
                     ),
                 )
+                # Defaults keep rejected candidates observable even when the
+                # quote context is incomplete and therefore has no quote plan.
+                quote_plan = None
+                planned_entry_price = None
+                planned_fee_ps = Decimal("0")
                 if side == "buy" and quote_ctx.quote is not None and quote_ctx.fair is not None:
                     try:
                         outcome_side = self._side_for_instrument_id(inst_id).value
@@ -2175,8 +2239,14 @@ class IntegratedBTCStrategy(
                         shadow_only=buy_entry_eval.shadow_only,
                         entry_mode=buy_entry_eval.entry_mode,
                         fair=quote_ctx.fair,
-                        entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
+                        entry_price=(
+                            planned_entry_price
+                            if planned_entry_price is not None
+                            else (quote_ctx.quote[0] if quote_ctx.quote is not None else None)
+                        ),
                         robust_net_usdc=candidate_robust_net,
+                        fee_per_share=planned_fee_ps,
+                        planned_quantity=(quote_plan.quantity if quote_plan is not None else None),
                         time_left_sec=time_left_sec_global,
                     )
                     self._db_buy_path_diagnostic(
@@ -2401,6 +2471,10 @@ class IntegratedBTCStrategy(
                         "maker_execution_vwap_full_risk_last_sec",
                         0.0,
                     )),
+                    hold_to_redeem_enabled=bool(
+                        getattr(self, "hold_to_redeem_enabled", False)
+                    ),
+                    post_only_enabled=bool(getattr(self, "maker_use_post_only", False)),
                 )
                 if buy_entry_eval.shadow_only:
                     desired_entry["fair_edge_bucket_shadow"] = buy_entry_eval.fair_edge_bucket
@@ -3013,6 +3087,25 @@ class IntegratedBTCStrategy(
                             int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
                         ),
                     )
+                    if side == "buy" and desired_entry.get("should_quote", False):
+                        requested_quantity = desired_entry.get("target_qty_override")
+                        if requested_quantity is None:
+                            base_quantity = self._compute_maker_order_qty(
+                                Decimal(str(desired_entry.get("price", "0") or "0")),
+                                int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
+                            )
+                            requested_quantity = (
+                                base_quantity
+                                * Decimal(str(desired_entry.get("size_multiplier", "1") or "1"))
+                            )
+                        else:
+                            requested_quantity = Decimal(str(requested_quantity)) * Decimal(
+                                str(desired_entry.get("size_multiplier", "1") or "1")
+                            )
+                        desired_entry = synchronize_desired_buy_economics_to_quantity(
+                            desired_entry=desired_entry,
+                            requested_quantity=requested_quantity,
+                        )
                     self._emit_buy_observe_diagnostic(
                         inst_id=inst_id,
                         desired_entry=desired_entry,
@@ -3034,6 +3127,8 @@ class IntegratedBTCStrategy(
                         fair=quote_ctx.fair,
                         entry_price=desired_entry.get("price"),
                         robust_net_usdc=desired_entry.get("robust_net", candidate_robust_net),
+                        fee_per_share=desired_entry.get("fee_ps"),
+                        planned_quantity=desired_entry.get("planned_quantity"),
                         time_left_sec=time_left_sec_global,
                     )
                 desired_quotes[order_key] = desired_entry

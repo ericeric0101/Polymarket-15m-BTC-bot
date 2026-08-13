@@ -25,6 +25,7 @@ from bot.market_data import (
     resolve_opening_strike_from_history,
     fetch_binance_open_price_sync,
     fetch_gamma_market_by_slug,
+    fetch_crypto_price_to_beat,
     extract_price_to_beat_from_market_payload,
 )
 from bot.price_streams import (
@@ -41,10 +42,8 @@ class SpotPricerMixin:
     """Mixin providing BTC spot price, Binance WS, and fair probability logic."""
 
     _AUTHORITATIVE_STRIKE_SOURCES = {
-        "polymarket_chainlink_open",
-        "polymarket_chainlink_twap_open",
-        "polymarket_chainlink_live_latch",
-        "polymarket_chainlink_twap_live_latch",
+        "polymarket_crypto_price_open",
+        "gamma_price_to_beat",
     }
 
     def _is_twap_spot_source(self, source: str) -> bool:
@@ -549,7 +548,7 @@ class SpotPricerMixin:
         if now_ts > float(start_ts) + float(self.market_strike_anchor_max_lag_sec):
             return None
         source = str(getattr(self, "latest_external_spot_source", "") or "")
-        if source != "polymarket_chainlink_ws" and not self._is_twap_spot_source(source):
+        if source != "polymarket_chainlink_ws":
             return None
         price = getattr(self, "latest_external_spot", None)
         if price is None or price <= 0:
@@ -558,7 +557,7 @@ class SpotPricerMixin:
         if src_ts <= 0 or abs(src_ts - float(start_ts)) > float(self.market_strike_anchor_max_lag_sec):
             return None
         self.market_strike_cache_by_slug[slug] = price
-        strike_source = "polymarket_chainlink_twap_live_latch" if self._is_twap_spot_source(source) else "polymarket_chainlink_live_latch"
+        strike_source = "polymarket_chainlink_raw_open"
         self.market_strike_source_by_slug[slug] = strike_source
         self.market_strike_provisional_by_slug.pop(slug, None)
         self.market_strike_provisional_source_by_slug.pop(slug, None)
@@ -572,7 +571,7 @@ class SpotPricerMixin:
             },
         )
         logger.info(
-            f"[STRIKE] Locked opening strike from Polymarket Chainlink live latch ({source}): "
+            f"[STRIKE] Locked opening strike from Polymarket Chainlink raw live latch: "
             f"${float(price):.2f} for slug={slug} "
             f"(sample_dt={src_ts - float(start_ts):+.2f}s)"
         )
@@ -726,48 +725,72 @@ class SpotPricerMixin:
             strike = self._extract_strike_from_question(question)
             return strike
 
-        # 3) Primary: Polymarket Chainlink reference history around market open
+        # 3) Primary: Polymarket's published crypto Price To Beat. This is
+        # available during an active market and is stronger than any local
+        # reconstruction from a rolling TWAP or raw stream observation.
+        end_ts = int(start_ts) + 900
+        now_ts = time.time()
+        if now_ts >= float(start_ts):
+            attempt_state = getattr(self, "market_strike_crypto_price_last_try_ts_by_slug", None)
+            if attempt_state is None:
+                attempt_state = {}
+                self.market_strike_crypto_price_last_try_ts_by_slug = attempt_state
+            last_try = float(attempt_state.get(slug, 0.0))
+            if now_ts - last_try >= float(self.market_strike_rest_retry_sec):
+                attempt_state[slug] = now_ts
+                published_ptb = await fetch_crypto_price_to_beat(
+                    start_ts=int(start_ts),
+                    end_ts=end_ts,
+                )
+                if published_ptb is not None:
+                    self.market_strike_cache_by_slug[slug] = published_ptb
+                    self.market_strike_source_by_slug[slug] = "polymarket_crypto_price_open"
+                    self.market_strike_provisional_by_slug.pop(slug, None)
+                    self.market_strike_provisional_source_by_slug.pop(slug, None)
+                    self._strike_pending_log_state_by_slug.pop(slug, None)
+                    self._record_strike_event(
+                        event_type="MARKET_STRIKE_LOCKED",
+                        slug=slug,
+                        strike=published_ptb,
+                        source="polymarket_crypto_price_open",
+                    )
+                    logger.info(
+                        f"[STRIKE] Locked published Polymarket Price To Beat: "
+                        f"${float(published_ptb):.2f} for slug={slug}"
+                    )
+                    return published_ptb
+
+        # 4) Local opening references remain provisional until the published
+        # Price To Beat is available. They are recorded for diagnostics only.
         anchor = self._resolve_opening_strike_from_polymarket_history(start_ts)
         if anchor is not None:
             anchor_ts, anchor_px = anchor
-            self.market_strike_cache_by_slug[slug] = anchor_px
-            hist_source = (
-                "polymarket_chainlink_twap_open"
-                if bool(getattr(self, "polymarket_chainlink_twap_enabled", True))
-                else "polymarket_chainlink_open"
-            )
-            self.market_strike_source_by_slug[slug] = hist_source
-            self.market_strike_provisional_by_slug.pop(slug, None)
-            self.market_strike_provisional_source_by_slug.pop(slug, None)
-            self._strike_pending_log_state_by_slug.pop(slug, None)
-            self._record_strike_event(
-                event_type="MARKET_STRIKE_LOCKED",
+            self._set_provisional_strike(
                 slug=slug,
                 strike=anchor_px,
-                source=hist_source,
-                extra={
-                    "sample_dt_sec": float(anchor_ts - float(start_ts)),
-                },
+                source="polymarket_chainlink_raw_open",
             )
             logger.info(
-                f"[STRIKE] Locked opening strike from Polymarket Chainlink history ({hist_source}): "
+                f"[STRIKE] Provisional Chainlink opening reference: "
                 f"${float(anchor_px):.2f} for slug={slug} "
-                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s)"
+                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s; awaiting published Price To Beat)"
             )
-            await self._maybe_validate_strike_with_gamma(slug, anchor_px)
-            return anchor_px
 
-        # 4) If market just started and we already have a fresh Polymarket tick, latch it.
+        # 5) Keep a live local latch provisional as well.
         live_latched = self._maybe_latch_opening_strike_from_live_reference(
             slug=slug,
             start_ts=int(start_ts),
         )
         if live_latched is not None:
-            self._strike_pending_log_state_by_slug.pop(slug, None)
-            await self._maybe_validate_strike_with_gamma(slug, live_latched)
-            return live_latched
+            self.market_strike_cache_by_slug.pop(slug, None)
+            self.market_strike_source_by_slug.pop(slug, None)
+            self._set_provisional_strike(
+                slug=slug,
+                strike=live_latched,
+                source="polymarket_chainlink_live_latch",
+            )
 
-        # 5) Fallback: parse from question text
+        # 6) Fallback: parse from question text
         info = getattr(instrument, "info", None) or {}
         if not isinstance(info, dict):
             info = {}
@@ -780,22 +803,28 @@ class SpotPricerMixin:
                 "(not authoritative; waiting for Polymarket Chainlink open lock)"
             )
 
-        # 6) Generic external spot history fallback
-        anchor = self._resolve_opening_strike_from_history(start_ts)
-        if anchor is not None:
-            anchor_ts, anchor_px = anchor
-            self._set_provisional_strike(slug=slug, strike=anchor_px, source="spot_history_open")
-            logger.info(
-                f"[STRIKE] Provisional strike from spot history fallback: "
-                f"${float(anchor_px):.2f} for slug={slug} "
-                f"(sample_dt={anchor_ts - float(start_ts):+.2f}s; not authoritative)"
-            )
+        # 7) Generic external spot history fallback, only when no stronger
+        # local Chainlink candidate has already been recorded.
+        if slug not in self.market_strike_provisional_by_slug:
+            anchor = self._resolve_opening_strike_from_history(start_ts)
+            if anchor is not None:
+                anchor_ts, anchor_px = anchor
+                self._set_provisional_strike(slug=slug, strike=anchor_px, source="spot_history_open")
+                logger.info(
+                    f"[STRIKE] Provisional strike from spot history fallback: "
+                    f"${float(anchor_px):.2f} for slug={slug} "
+                    f"(sample_dt={anchor_ts - float(start_ts):+.2f}s; not authoritative)"
+                )
 
-        # 7) Binance REST backfill as last resort
+        # 8) Binance REST backfill as last resort.
         import asyncio as _asyncio
         now_ts = time.time()
         last_try = float(self.market_strike_rest_last_try_ts_by_slug.get(slug, 0.0))
-        if now_ts >= float(start_ts) and (now_ts - last_try) >= float(self.market_strike_rest_retry_sec):
+        if (
+            slug not in self.market_strike_provisional_by_slug
+            and now_ts >= float(start_ts)
+            and (now_ts - last_try) >= float(self.market_strike_rest_retry_sec)
+        ):
             self.market_strike_rest_last_try_ts_by_slug[slug] = now_ts
             backfilled = await _asyncio.to_thread(self._fetch_binance_open_price_sync, start_ts)
             if backfilled is not None:

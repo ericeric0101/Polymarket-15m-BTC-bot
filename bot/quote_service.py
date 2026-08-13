@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, is_dataclass, replace
 from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Optional
 
@@ -158,6 +159,8 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "tail_protect_tp": bool(desired.get("tail_protect_tp", False)),
         "tail_protect_tp_price": desired.get("tail_protect_tp_price"),
         "target_qty_override": desired.get("target_qty_override"),
+        "planned_quantity": desired.get("planned_quantity"),
+        "economics_quantity_multiplier": desired.get("economics_quantity_multiplier"),
     }
 
 
@@ -832,17 +835,28 @@ def apply_entry_vwap_risk_weight(
     time_left_sec: float | None,
     vwap_entry_risk_weight: Decimal,
     vwap_full_risk_last_sec: float,
+    hold_to_redeem_enabled: bool = False,
+    post_only_enabled: bool = False,
 ) -> tuple[Decimal | None, Decimal | None, dict[str, Decimal], bool]:
-    """Weight forced-exit VWAP risk by the chance it applies to a new entry."""
+    """Apply entry execution cost policy without charging hypothetical exits.
+
+    The book VWAP component models immediately liquidating the entire position.
+    A confirmed, flat maker entry that is configured to hold to redemption does
+    not incur that cost at entry time. When the order is also post-only, spread
+    crossing, non-atomic forced-exit risk, and taker-leakage are likewise not
+    unavoidable entry costs. They remain raw telemetry and continue to apply
+    to inventory, non-post-only orders, and the final-risk window.
+    """
     components = dict(execution_penalty_components or {})
     if raw_robust_net is None or raw_execution_penalty is None:
         return raw_robust_net, raw_execution_penalty, components, False
 
     raw_vwap = max(Decimal("0"), components.get("vwap_usdc", Decimal("0")))
     weight = min(Decimal("1"), max(Decimal("0"), vwap_entry_risk_weight))
+    passive_hold_entry = hold_to_redeem_enabled and post_only_enabled
     eligible = (
-        raw_vwap > 0
-        and weight < Decimal("1")
+        (raw_vwap > 0 or passive_hold_entry)
+        and (weight < Decimal("1") or passive_hold_entry)
         and entry_is_flat
         and entry_signal_confirmed
         and time_left_sec is not None
@@ -857,19 +871,168 @@ def apply_entry_vwap_risk_weight(
         })
         return raw_robust_net, raw_execution_penalty, components, False
 
-    effective_vwap = raw_vwap * weight
-    effective_penalty = raw_execution_penalty - raw_vwap + effective_vwap
+    effective_weight = Decimal("0") if hold_to_redeem_enabled else weight
+    raw_slippage = max(Decimal("0"), components.get("slippage_usdc", Decimal("0")))
+    raw_non_atomic = max(Decimal("0"), components.get("non_atomic_usdc", Decimal("0")))
+    effective_vwap = raw_vwap * effective_weight
+    effective_slippage = Decimal("0") if passive_hold_entry else raw_slippage
+    effective_non_atomic = Decimal("0") if passive_hold_entry else raw_non_atomic
+
+    if passive_hold_entry:
+        # A passive, flat hold-to-redeem entry has no guaranteed liquidation.
+        # The expected-net adverse buffer and the outer robust-net threshold
+        # continue to provide its required entry margin.
+        effective_penalty = Decimal("0")
+    else:
+        effective_penalty = raw_execution_penalty - raw_vwap + effective_vwap
     # The raw robust net already contains execution penalty and taker leakage.
     taker_leakage = expected_net - raw_execution_penalty - raw_robust_net
-    effective_robust = expected_net - effective_penalty - taker_leakage
+    effective_taker_leakage = Decimal("0") if passive_hold_entry else taker_leakage
+    effective_robust = expected_net - effective_penalty - effective_taker_leakage
     components.update({
         "vwap_raw_usdc": raw_vwap,
         "vwap_effective_usdc": effective_vwap,
-        "vwap_risk_weight": weight,
+        "vwap_risk_weight": effective_weight,
+        "slippage_raw_usdc": raw_slippage,
+        "slippage_effective_usdc": effective_slippage,
+        "non_atomic_raw_usdc": raw_non_atomic,
+        "non_atomic_effective_usdc": effective_non_atomic,
+        "taker_leakage_raw_usdc": taker_leakage,
+        "taker_leakage_effective_usdc": effective_taker_leakage,
+        "vwap_entry_policy": (
+            Decimal("1") if hold_to_redeem_enabled else Decimal("0")
+        ),
+        "passive_hold_entry_cost_policy": Decimal("1") if passive_hold_entry else Decimal("0"),
         "total_raw_usdc": raw_execution_penalty,
         "total_effective_usdc": effective_penalty,
     })
     return effective_robust, effective_penalty, components, True
+
+
+def scale_buy_economics_to_order_size(
+    *,
+    econ: Any,
+    robust_net: Decimal | None,
+    exec_penalty: Decimal | None,
+    directional_edge_usdc: Decimal | None,
+    execution_penalty_components: dict[str, Decimal] | None,
+    size_multiplier: Decimal,
+) -> tuple[Any, Decimal | None, Decimal | None, Decimal | None, dict[str, Decimal]]:
+    """Scale BUY economics to the quantity that will actually be submitted.
+
+    Quote planning starts from the configured market target. Risk sizing is
+    applied later in the decision path, so leaving economics at the original
+    quantity made a 5-share high-price order pay the penalty of a 10-share
+    order. Monetary fields are linear in shares; market-state fields such as
+    ``recent_vol`` and boolean flags are intentionally preserved.
+    """
+    # This helper is also used for the final submit quantity.  Most callers
+    # size down, but an explicitly configured continuation/trend multiplier
+    # may be greater than one and must not leave economics at a smaller size.
+    multiplier = max(Decimal("0"), size_multiplier)
+    if multiplier == Decimal("1"):
+        return (
+            econ,
+            robust_net,
+            exec_penalty,
+            directional_edge_usdc,
+            dict(execution_penalty_components or {}),
+        )
+
+    def _scale(value: Decimal | None) -> Decimal | None:
+        return value * multiplier if isinstance(value, Decimal) else value
+
+    monetary_fields = (
+        "shares",
+        "fee_equivalent_usdc",
+        "expected_rebate_usdc",
+        "expected_spread_capture_usdc",
+        "expected_net_usdc",
+    )
+    changes = {
+        field: getattr(econ, field) * multiplier
+        for field in monetary_fields
+        if isinstance(getattr(econ, field, None), Decimal)
+    }
+    # Production supplies QuoteEconomics, while a few narrow regression tests
+    # intentionally use SimpleNamespace economics snapshots. Support both.
+    scaled_econ = replace(econ, **changes) if is_dataclass(econ) else copy(econ)
+    if not is_dataclass(econ):
+        for field, value in changes.items():
+            setattr(scaled_econ, field, value)
+    scaled_components: dict[str, Decimal] = {}
+    for key, value in (execution_penalty_components or {}).items():
+        # Every cost component is denominated in USDC except market-state and
+        # diagnostic fields. Keep those fields unchanged for observability.
+        if key.endswith("_usdc") or key == "total_usdc":
+            scaled_components[key] = value * multiplier
+        else:
+            scaled_components[key] = value
+    return (
+        scaled_econ,
+        _scale(robust_net),
+        _scale(exec_penalty),
+        _scale(directional_edge_usdc),
+        scaled_components,
+    )
+
+
+def synchronize_desired_buy_economics_to_quantity(
+    *,
+    desired_entry: dict[str, Any],
+    requested_quantity: Decimal | None,
+) -> dict[str, Any]:
+    """Make BUY economics describe the same shares the submit path requests.
+
+    Several risk controls can cap the final quantity after quote construction
+    (confirmation, weak-pfair, high-price, and Kelly).  Their order is
+    intentional, but the USDC-valued economics must not retain the larger
+    pre-cap quantity.  This function is called once after all sizing controls
+    and before the decision is logged/submitted.
+    """
+    if requested_quantity is None or requested_quantity <= 0:
+        return desired_entry
+    econ = desired_entry.get("econ")
+    current_quantity = getattr(econ, "shares", None)
+    if not isinstance(current_quantity, Decimal) or current_quantity <= 0:
+        return desired_entry
+    multiplier = requested_quantity / current_quantity
+    if multiplier == Decimal("1"):
+        desired_entry["planned_quantity"] = requested_quantity
+        return desired_entry
+    (
+        desired_entry["econ"],
+        desired_entry["robust_net"],
+        desired_entry["exec_penalty"],
+        desired_entry["directional_edge_usdc"],
+        desired_entry["execution_penalty_components"],
+    ) = scale_buy_economics_to_order_size(
+        econ=econ,
+        robust_net=(
+            desired_entry.get("robust_net")
+            if isinstance(desired_entry.get("robust_net"), Decimal)
+            else None
+        ),
+        exec_penalty=(
+            desired_entry.get("exec_penalty")
+            if isinstance(desired_entry.get("exec_penalty"), Decimal)
+            else None
+        ),
+        directional_edge_usdc=(
+            desired_entry.get("directional_edge_usdc")
+            if isinstance(desired_entry.get("directional_edge_usdc"), Decimal)
+            else None
+        ),
+        execution_penalty_components=(
+            desired_entry.get("execution_penalty_components")
+            if isinstance(desired_entry.get("execution_penalty_components"), dict)
+            else None
+        ),
+        size_multiplier=multiplier,
+    )
+    desired_entry["planned_quantity"] = requested_quantity
+    desired_entry["economics_quantity_multiplier"] = multiplier
+    return desired_entry
 
 
 def attach_desired_entry_runtime_metadata(
@@ -1238,17 +1401,13 @@ def apply_reload_edge_guard(
         or current_inst_inventory_qty + Decimal("0.000001") < maker_reload_inventory_threshold_shares
     ):
         return desired_entry
+    # Same principle as the removed initial directional-edge veto: this raw
+    # metric embeds a hypothetical forced exit and must not contradict the
+    # final robust-net decision for a permitted partial-fill reload.  Preserve
+    # it in telemetry so historical analyses remain possible.
     directional_edge_ps = desired_entry.get("directional_edge_ps")
     desired_entry["reload_min_directional_edge_ps"] = maker_reload_min_directional_edge_ps
-    if (
-        isinstance(directional_edge_ps, Decimal)
-        and directional_edge_ps < maker_reload_min_directional_edge_ps
-    ):
-        desired_entry["should_quote"] = False
-        desired_entry["diag_reason"] = (
-            f"reload_edge_gate directional_edge_ps={float(directional_edge_ps):.6f} "
-            f"< min={float(maker_reload_min_directional_edge_ps):.6f}"
-        )
+    desired_entry["reload_directional_edge_ps_telemetry"] = directional_edge_ps
     return desired_entry
 
 
@@ -1738,6 +1897,8 @@ def build_desired_quote_entry(
     entry_signal_confirmed: bool = False,
     execution_vwap_entry_risk_weight: Decimal = Decimal("1"),
     execution_vwap_full_risk_last_sec: float = 0.0,
+    hold_to_redeem_enabled: bool = False,
+    post_only_enabled: bool = False,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -1753,6 +1914,31 @@ def build_desired_quote_entry(
 
     vwap_risk_adjusted = False
     if side == "buy":
+        effective_size_multiplier = max(Decimal("0"), entry_size_multiplier)
+        if entry_mode == "trend":
+            effective_size_multiplier *= max(Decimal("0"), trend_buy_size_multiplier)
+        (
+            econ,
+            robust_net,
+            exec_penalty,
+            directional_edge_usdc,
+            execution_penalty_components,
+        ) = scale_buy_economics_to_order_size(
+            econ=econ,
+            robust_net=robust_net if isinstance(robust_net, Decimal) else None,
+            exec_penalty=exec_penalty if isinstance(exec_penalty, Decimal) else None,
+            directional_edge_usdc=(
+                directional_edge_usdc
+                if isinstance(directional_edge_usdc, Decimal)
+                else None
+            ),
+            execution_penalty_components=(
+                execution_penalty_components
+                if isinstance(execution_penalty_components, dict)
+                else None
+            ),
+            size_multiplier=effective_size_multiplier,
+        )
         robust_net, exec_penalty, execution_penalty_components, vwap_risk_adjusted = (
             apply_entry_vwap_risk_weight(
                 expected_net=econ.expected_net_usdc,
@@ -1768,6 +1954,8 @@ def build_desired_quote_entry(
                 time_left_sec=time_left_sec,
                 vwap_entry_risk_weight=execution_vwap_entry_risk_weight,
                 vwap_full_risk_last_sec=execution_vwap_full_risk_last_sec,
+                hold_to_redeem_enabled=hold_to_redeem_enabled,
+                post_only_enabled=post_only_enabled,
             )
         )
         # This must never override phase/risk controls. It only re-evaluates
@@ -1930,12 +2118,7 @@ def build_desired_quote_entry(
         "execution_vwap_risk_adjusted": vwap_risk_adjusted,
         "entry_mode": entry_mode if side == "buy" else "",
         "size_multiplier": (
-            max(Decimal("0"), entry_size_multiplier)
-            * (
-                max(Decimal("0"), trend_buy_size_multiplier)
-                if entry_mode == "trend"
-                else Decimal("1")
-            )
+            effective_size_multiplier
             if side == "buy"
             else Decimal("1")
         ),

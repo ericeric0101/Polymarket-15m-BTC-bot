@@ -53,6 +53,7 @@ from bot.quote_service import (
     apply_shadow_entry_veto,
     apply_high_entry_price_size_adjustment,
     apply_weak_pfair_size_adjustment,
+    apply_reload_edge_guard,
     build_desired_quote_entry,
     compute_loss_sell_policy,
     build_directional_snapshot,
@@ -745,6 +746,8 @@ class DummyRejectRecoveryStrategy:
         self.order_metric_count = 0
         self.current_market_slug = "btc-updown-15m-test"
         self.order_events = []
+        self.maker_kill_switch = False
+        self.kill_switch_reason = ""
 
     def _clear_pending_taker_exit_for_order(self, *_args, **_kwargs):
         return None
@@ -773,6 +776,10 @@ class DummyRejectRecoveryStrategy:
 
     def _db_order_event(self, **kwargs):
         self.order_events.append(kwargs)
+
+    def _activate_maker_kill_switch(self, reason):
+        self.maker_kill_switch = True
+        self.kill_switch_reason = reason
 
 
 class DummyUrgentExitStrategy(TakerExitMixin):
@@ -1366,6 +1373,27 @@ def test_balance_reject_marks_sell_recovery_and_caps_qty():
     assert strategy._force_quote_refresh_reason == "sell_recovery_balance_reject"
 
 
+def test_geoblock_rejection_stops_maker_quoting_without_retrying():
+    strategy = DummyRejectRecoveryStrategy()
+    event = SimpleNamespace(
+        client_order_id="BTC-15M-MAKER-BUY-1",
+        reason=(
+            "PolyApiException[status_code=403, error_message={'error': "
+            "'Trading restricted in your region, please refer to available regions - "
+            "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+        ),
+        instrument_id="cond-123-456.POLYMARKET",
+        order_side="BUY",
+        venue_order_id=None,
+    )
+
+    IntegratedBTCStrategy._handle_order_rejection_like_event(strategy, event, title="ORDER REJECTED")
+
+    assert strategy.maker_kill_switch is True
+    assert "trading restricted" in strategy.kill_switch_reason.lower()
+    assert strategy.order_events[-1]["event_type"] == "ORDER_REJECTED"
+
+
 def test_taker_buy_fill_updates_inventory_delta_with_net_shares():
     strategy = DummyStrategyForFill()
 
@@ -1573,11 +1601,29 @@ def test_new_signal_held_inventory_flip_requires_more_time_and_confirms():
 
 def test_strike_prefers_polymarket_chainlink_history_anchor():
     strategy = DummySpotPricerStrategy()
+    strategy.market_strike_crypto_price_last_try_ts_by_slug = {
+        "btc-updown-15m-test": time.time(),
+    }
 
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
-    assert strike == Decimal("66625.19")
-    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_chainlink_twap_open"
+    assert strike is None
+    assert strategy.market_strike_provisional_by_slug["btc-updown-15m-test"] == Decimal("66625.19")
+    assert "btc-updown-15m-test" not in strategy.market_strike_cache_by_slug
+
+
+def test_strike_uses_published_polymarket_price_to_beat(monkeypatch):
+    strategy = DummySpotPricerStrategy()
+
+    async def _published_ptb(**_kwargs):
+        return Decimal("66611.11")
+
+    monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _published_ptb)
+
+    strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+
+    assert strike == Decimal("66611.11")
+    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_crypto_price_open"
 
 
 def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
@@ -3352,6 +3398,50 @@ def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum(
 
     assert not strategy.submitted_orders
     assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
+
+
+def test_buy_is_not_submitted_above_the_evaluated_economics_quantity():
+    strategy = DummyTrendSubmitStrategy()
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.60"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.02"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+        directional_snapshot={
+            "size_multiplier": Decimal("1"),
+            "planned_quantity": Decimal("5"),
+        },
+    )
+
+    assert not strategy.submitted_orders
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_ECONOMICS_QTY_MISMATCH"
+    assert strategy.order_events[-1]["payload"]["planned_quantity"] == 5.0
+
+
+def test_partial_fill_reload_uses_robust_net_not_legacy_forced_exit_edge():
+    desired = apply_reload_edge_guard(
+        desired_entry={
+            "should_quote": True,
+            "diag_reason": "eligible",
+            "directional_edge_ps": Decimal("-0.12"),
+            "robust_net": Decimal("0.03"),
+        },
+        side="buy",
+        current_inst_inventory_qty=Decimal("5"),
+        maker_reload_inventory_threshold_shares=Decimal("5"),
+        maker_reload_min_directional_edge_ps=Decimal("0.03"),
+    )
+
+    assert desired["should_quote"] is True
+    assert desired["diag_reason"] == "eligible"
+    assert desired["reload_directional_edge_ps_telemetry"] == Decimal("-0.12")
 
 
 def test_partial_fill_buy_is_capped_to_remaining_market_inventory_capacity():

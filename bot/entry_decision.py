@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
+
+from bot.probability_calibration import settlement_ev_per_share
 
 
 def classify_entry_decision_layer(*, reason: str, event_type: str, shadow_only: bool) -> str:
@@ -44,6 +47,12 @@ class EntryDecision:
     entry_price: float | None
     fair_minus_entry: float | None
     robust_net_usdc: float | None
+    calibrated_probability: float | None
+    fee_per_share: float | None
+    planned_quantity: float | None
+    settlement_ev_per_share: float | None
+    settlement_ev_usdc: float | None
+    settlement_ev_observation_only: bool
 
     @classmethod
     def observe(
@@ -62,6 +71,9 @@ class EntryDecision:
         fair: float | None = None,
         entry_price: float | None = None,
         robust_net_usdc: float | None = None,
+        calibrated_probability: float | None = None,
+        fee_per_share: float | None = None,
+        planned_quantity: float | None = None,
     ) -> "EntryDecision":
         if shadow_only:
             state = "SHADOW"
@@ -70,6 +82,24 @@ class EntryDecision:
         else:
             state = "REJECT"
         final_reason = str(reason or ("eligible" if state == "ALLOW" else "unspecified"))
+        p_calibrated = calibrated_probability if calibrated_probability is not None else fair
+        settlement_ev_ps = None
+        settlement_ev_usdc = None
+        if p_calibrated is not None and entry_price is not None:
+            try:
+                settlement_ev_ps_decimal = settlement_ev_per_share(
+                    calibrated_probability=Decimal(str(p_calibrated)),
+                    entry_price=Decimal(str(entry_price)),
+                    fee_per_share=Decimal(str(fee_per_share or 0)),
+                )
+                settlement_ev_ps = float(settlement_ev_ps_decimal)
+                if planned_quantity is not None:
+                    settlement_ev_usdc = float(
+                        settlement_ev_ps_decimal * Decimal(str(planned_quantity))
+                    )
+            except (ArithmeticError, TypeError, ValueError):
+                # Observation telemetry must never alter the existing entry path.
+                pass
         return cls(
             slug=str(slug or ""),
             instrument_id=str(instrument_id or ""),
@@ -90,6 +120,12 @@ class EntryDecision:
             entry_price=entry_price,
             fair_minus_entry=(fair - entry_price if fair is not None and entry_price is not None else None),
             robust_net_usdc=robust_net_usdc,
+            calibrated_probability=p_calibrated,
+            fee_per_share=fee_per_share,
+            planned_quantity=planned_quantity,
+            settlement_ev_per_share=settlement_ev_ps,
+            settlement_ev_usdc=settlement_ev_usdc,
+            settlement_ev_observation_only=True,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -109,4 +145,10 @@ class EntryDecision:
             "entry_price": self.entry_price,
             "fair_minus_entry": self.fair_minus_entry,
             "robust_net_usdc": self.robust_net_usdc,
+            "calibrated_probability": self.calibrated_probability,
+            "fee_per_share": self.fee_per_share,
+            "planned_quantity": self.planned_quantity,
+            "settlement_ev_per_share": self.settlement_ev_per_share,
+            "settlement_ev_usdc": self.settlement_ev_usdc,
+            "settlement_ev_observation_only": self.settlement_ev_observation_only,
         }

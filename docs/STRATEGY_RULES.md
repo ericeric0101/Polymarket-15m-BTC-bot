@@ -55,7 +55,7 @@ out-of-sample result and an explicit bounded range.
 ## Size and Exposure
 
 - `MARKET_TARGET_SHARES` is the normal market target: 10 shares.
-- Above `HIGH_PRICE_THRESHOLD`, target is `HIGH_PRICE_TARGET_SHARES`: 5 shares.
+- Above `HIGH_PRICE_THRESHOLD`, target is `HIGH_PRICE_TARGET_SHARES` (currently 5.5 shares in the local deployment profile).
 - `MARKET_MAX_POSITION_SHARES` is a hard projected cap: 10 shares.
 - `MARKET_MAX_BUY_EVENTS` permits replacement attempts after partial fills, but
   it never permits the projected combined `UP` and `DOWN` exposure to exceed

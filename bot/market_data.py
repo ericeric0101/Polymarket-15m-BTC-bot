@@ -1,5 +1,6 @@
 import os
 from decimal import Decimal
+from datetime import datetime, timezone
 import math
 from typing import Any, Optional, Dict
 
@@ -104,6 +105,45 @@ def extract_price_to_beat_from_market_payload(market: dict[str, Any]) -> Optiona
         if ptb is not None:
             return ptb
     return None
+
+
+def _coerce_positive_decimal(value: Any) -> Optional[Decimal]:
+    try:
+        price = Decimal(str(value))
+    except Exception:
+        return None
+    return price if price > 0 else None
+
+
+async def fetch_crypto_price_to_beat(
+    *,
+    start_ts: int,
+    end_ts: int,
+    symbol: str = "BTC",
+    variant: str = "fifteen",
+) -> Optional[Decimal]:
+    """Fetch Polymarket's published crypto opening Price To Beat."""
+    if start_ts <= 0 or end_ts <= start_ts:
+        return None
+    params = {
+        "symbol": str(symbol or "BTC").upper(),
+        "eventStartTime": datetime.fromtimestamp(start_ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "variant": str(variant or "fifteen"),
+        "endDate": datetime.fromtimestamp(end_ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+        ) as client:
+            response = await client.get(
+                "https://polymarket.com/api/crypto/crypto-price",
+                params=params,
+            )
+            if response.status_code != 200:
+                return None
+            return _coerce_positive_decimal((response.json() or {}).get("openPrice"))
+    except Exception:
+        return None
 
 
 def resolve_opening_strike_from_history(

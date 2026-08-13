@@ -132,6 +132,37 @@ def submit_maker_quote(
             return
         min_buy_qty = exchange_min_qty if size_multiplier < Decimal("1") else max(strategy.maker_min_shares, exchange_min_qty)
         qty_dec = max(adjusted_qty, min_buy_qty)
+        planned_quantity = (directional_snapshot or {}).get("planned_quantity")
+        if planned_quantity is not None:
+            try:
+                planned_quantity_dec = Decimal(str(planned_quantity))
+            except Exception:
+                planned_quantity_dec = Decimal("0")
+            # Never submit more shares than the economics gate evaluated. A
+            # smaller venue/inventory cap is safe; a larger quantity must wait
+            # for the next quote cycle to be evaluated at that exposure.
+            if (
+                planned_quantity_dec > 0
+                and qty_dec > planned_quantity_dec + Decimal("0.000001")
+            ):
+                strategy._db_order_event(
+                    event_type="ORDER_SKIP_ECONOMICS_QTY_MISMATCH",
+                    side="BUY",
+                    price=float(limit_price),
+                    qty=float(qty_dec),
+                    status="SKIPPED",
+                    reason="submit_quantity_exceeds_economics_quantity",
+                    payload={
+                        "planned_quantity": float(planned_quantity_dec),
+                        "submit_quantity": float(qty_dec),
+                        "expected_net_usdc": float(expected_net_usdc),
+                    },
+                )
+                logger.warning(
+                    "Skip maker BUY quote: submit quantity exceeds evaluated economics "
+                    f"({float(qty_dec):.6f} > {float(planned_quantity_dec):.6f})"
+                )
+                return
     if qty_dec <= 0:
         return
     inst_key = strategy._instrument_key(instrument_id)
@@ -421,7 +452,9 @@ def submit_maker_quote(
         return
 
     strategy.submit_order(order)
-    strategy.consecutive_denied_orders = 0
+    # Submission is not an acceptance. Resetting this counter here made every
+    # asynchronous venue rejection appear as denial #1, preventing the failure
+    # circuit breaker from ever reaching its configured threshold.
     strategy.active_maker_orders[order_key] = build_active_maker_order_state(
         order=order,
         econ=econ,
@@ -522,6 +555,16 @@ def submit_maker_quote(
             "target_qty_override": (
                 float(directional_snapshot.get("target_qty_override"))
                 if directional_snapshot and directional_snapshot.get("target_qty_override") is not None
+                else None
+            ),
+            "planned_quantity": (
+                float(directional_snapshot.get("planned_quantity"))
+                if directional_snapshot and directional_snapshot.get("planned_quantity") is not None
+                else None
+            ),
+            "economics_quantity_multiplier": (
+                float(directional_snapshot.get("economics_quantity_multiplier"))
+                if directional_snapshot and directional_snapshot.get("economics_quantity_multiplier") is not None
                 else None
             ),
             "entry_mode": (

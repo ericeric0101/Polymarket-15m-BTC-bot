@@ -17,6 +17,21 @@ from bot.enums import ActiveSide
 from bot.post_trade import build_fill_order_event_payload
 
 
+def is_permanent_trading_restriction(reason: str) -> bool:
+    """Return whether the venue explicitly forbids trading from this client.
+
+    This is distinct from temporary orderbook, balance, allowance, or rate-limit
+    failures. Retrying a CLOB geo/compliance rejection cannot succeed until the
+    operator changes to a venue-approved deployment environment.
+    """
+    lowered = str(reason or "").lower()
+    return (
+        "trading restricted in your region" in lowered
+        or "geoblock" in lowered
+        or "geo-block" in lowered
+    )
+
+
 def handle_order_filled(strategy: Any, event: Any) -> None:
     """Handle when a live order is filled."""
     logger.info("=" * 80)
@@ -490,11 +505,24 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             "sell_recovery_candidate": bool(reject_result.rejected_side == "sell"),
         },
     )
+    lowered = reason.lower()
+    if is_permanent_trading_restriction(reason):
+        # A 403 geo/compliance rejection is not transient. Stop immediately so
+        # a rapid requote loop cannot keep submitting requests that Polymarket
+        # has already declared ineligible.
+        strategy._activate_maker_kill_switch("Polymarket CLOB trading restricted for this deployment region")
+        logger.error(
+            "Polymarket CLOB returned a permanent trading-restriction rejection. "
+            "Maker quoting has been stopped; resolve the deployment's regional "
+            "eligibility with Polymarket before restarting."
+        )
+        strategy.rebate_reporter.record_denied()
+        strategy._increment_order_metric("rejected")
+        return
     if "POST_ONLY_NOT_SUPPORTED" in reason:
         if strategy.maker_use_post_only:
             logger.warning("Exchange rejected post-only orders; disabling post-only and continuing maker mode.")
         strategy.maker_use_post_only = False
-    lowered = reason.lower()
     if ("orderbook" in lowered) and ("does not exist" in lowered):
         pause_sec = max(1, strategy.maker_error_pause_sec)
         now_ts = time.time()

@@ -169,18 +169,22 @@ def apply_quote_plan_guards(
     ):
         set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "early_sell_only")
 
-    if directional_edge_gate_enabled and "buy" in side_plan and phase_value == "ACTIVE":
-        buy_tuple = side_plan.get("buy")
-        buy_edge_ps = buy_tuple[5] if (buy_tuple and len(buy_tuple) > 5) else None
-        # Use side-specific edge threshold: DOWN side can have a higher bar
-        if min_directional_edge_ps_down is not None and active_side.upper() == "DOWN":
-            min_edge_gate = min_directional_edge_ps_down
-        elif regime_guard_active:
-            min_edge_gate = min_directional_edge_ps_conservative
-        else:
-            min_edge_gate = min_directional_edge_ps
-        if isinstance(buy_edge_ps, Decimal) and buy_edge_ps < min_edge_gate:
-            set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "edge_gate_buy")
+    # ``directional_edge_ps`` is retained as telemetry only.  Historically this
+    # guard included forced-exit VWAP, taker leakage, and non-atomic costs, then
+    # ran before the final passive-entry cost policy.  That let a hypothetical
+    # liquidation reject a flat post-only hold-to-redeem entry even when the
+    # final single economics gate had a positive robust net.  Direction belongs
+    # to the score gates; execution cost belongs exclusively to robust_net.
+    # Keep the parameters for backwards-compatible callers/profile loading, but
+    # deliberately do not use them as a second BUY veto.
+    _ = (
+        directional_edge_gate_enabled,
+        regime_guard_active,
+        min_directional_edge_ps,
+        min_directional_edge_ps_conservative,
+        active_side,
+        min_directional_edge_ps_down,
+    )
 
     buy_cooldown_remaining: Optional[float] = None
     if "buy" in side_plan and now_ts < buy_cooldown_until_ts:
