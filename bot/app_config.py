@@ -416,6 +416,9 @@ class ExitConfig:
     maker_urgent_exit_ttl_sec: int
     maker_urgent_exit_cooldown_sec: int
     maker_urgent_exit_min_confirmations: int
+    recovery_exit_ladder_enabled: bool
+    recovery_exit_passive_ttl_sec: int
+    recovery_exit_passive_min_time_left_sec: int
     exit_conviction_band_min_score_abs: Decimal
     exit_hold_band_min_score_abs: Decimal
     exit_hold_band_release_min_roi: Decimal
@@ -450,6 +453,10 @@ class ExitConfig:
             raise ValueError("TAKER_EXIT_DISABLE_IF_BID_BELOW must be in [0, 1]")
         if self.taker_exit_min_recovery_ratio < 0:
             raise ValueError("TAKER_EXIT_MIN_RECOVERY_RATIO must be >= 0")
+        if self.recovery_exit_passive_ttl_sec < 1:
+            raise ValueError("RECOVERY_EXIT_PASSIVE_TTL_SEC must be >= 1")
+        if self.recovery_exit_passive_min_time_left_sec < 0:
+            raise ValueError("RECOVERY_EXIT_PASSIVE_MIN_TIME_LEFT_SEC must be >= 0")
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1018,12 @@ class AppConfig:
                 maker_urgent_exit_ttl_sec=max(5, _env_int("MAKER_URGENT_EXIT_TTL_SEC", 15)),
                 maker_urgent_exit_cooldown_sec=max(1, _env_int("MAKER_URGENT_EXIT_COOLDOWN_SEC", 5)),
                 maker_urgent_exit_min_confirmations=max(1, _env_int("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS", 3)),
+                recovery_exit_ladder_enabled=_env_bool("RECOVERY_EXIT_LADDER_ENABLED", True),
+                recovery_exit_passive_ttl_sec=max(1, _env_int("RECOVERY_EXIT_PASSIVE_TTL_SEC", 15)),
+                recovery_exit_passive_min_time_left_sec=max(
+                    0,
+                    _env_int("RECOVERY_EXIT_PASSIVE_MIN_TIME_LEFT_SEC", 120),
+                ),
                 exit_conviction_band_min_score_abs=_env_decimal("EXIT_CONVICTION_BAND_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 exit_hold_band_min_score_abs=_env_decimal("EXIT_HOLD_BAND_MIN_SCORE_ABS_NEW", str(confident_score_abs_default)),
                 exit_hold_band_release_min_roi=_env_decimal("EXIT_HOLD_BAND_RELEASE_MIN_ROI", "0.15"),

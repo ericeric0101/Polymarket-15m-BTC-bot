@@ -242,28 +242,42 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
             return None
 
-    def reconcile_redeem_cycle(self, slug: str, redeem_value_usdc: float) -> Optional[Dict[str, float]]:
-        """Rebuild missing cycle PnL when redemption happens after a restart."""
+    def reconcile_redeem_cycle(
+        self,
+        slug: str,
+        redeem_value_usdc: float,
+        *,
+        tx_hash: str = "",
+        condition_id: str = "",
+    ) -> Optional[Dict[str, float | bool]]:
+        """Reconcile a market's journal PnL to its confirmed redemption cash flow.
+
+        Settlement is initially estimated from the local outcome snapshot.  A
+        successful redemption is the authoritative cash event, so it must
+        replace that estimate in-place.  Appending another MARKET_CYCLE_PNL
+        creates two totals for the same market and makes dashboard sums wrong.
+        """
         slug = str(slug or "")
         if not slug:
             return None
         try:
             with self._connect() as conn:
-                existing = conn.execute(
+                row = conn.execute(
                     """
-                    SELECT 1 FROM strategy_events
+                    SELECT id, payload_json FROM strategy_events
                     WHERE event_type='MARKET_CYCLE_PNL'
                       AND json_extract(payload_json, '$.slug')=?
+                    ORDER BY id DESC
                     LIMIT 1
                     """,
                     (slug,),
                 ).fetchone()
-                if existing:
-                    return None
-                row = conn.execute(
+                cash_row = conn.execute(
                     """
                     SELECT
-                      COALESCE(SUM(CASE WHEN side='BUY' THEN price * qty ELSE 0 END), 0.0) AS buy_cost,
+                      COALESCE(SUM(CASE WHEN side='BUY' THEN price * qty +
+                        COALESCE(CAST(json_extract(payload_json, '$.effective_fee_usdc') AS REAL), 0.0)
+                      ELSE 0 END), 0.0) AS buy_cost,
                       COALESCE(SUM(CASE WHEN side='SELL' THEN price * qty -
                         COALESCE(CAST(json_extract(payload_json, '$.effective_fee_usdc') AS REAL), 0.0)
                       ELSE 0 END), 0.0) AS sell_proceeds
@@ -273,17 +287,78 @@ class TradeJournalDB:
                     """,
                     (slug,),
                 ).fetchone()
-            buy_cost = float(row[0] or 0.0)
-            sell_proceeds = float(row[1] or 0.0)
-            if buy_cost <= 0 and sell_proceeds <= 0:
-                return None
-            redeem_value = max(0.0, float(redeem_value_usdc or 0.0))
-            return {
-                "buy_cost_usdc": buy_cost,
-                "sell_proceeds_usdc": sell_proceeds,
-                "redeem_value_usdc": redeem_value,
-                "cycle_combined_pnl_usdc": redeem_value + sell_proceeds - buy_cost,
-            }
+                buy_cost = float(cash_row[0] or 0.0)
+                sell_proceeds = float(cash_row[1] or 0.0)
+                if buy_cost <= 0 and sell_proceeds <= 0:
+                    return None
+
+                redeem_value = max(0.0, float(redeem_value_usdc or 0.0))
+                # Keep the two components additive and cash-based.  The
+                # resulting combined value is authoritative even when a
+                # restart lost the in-memory inventory-cost allocation.
+                fill_realized = sell_proceeds
+                settlement_pnl = redeem_value - buy_cost
+                cycle_combined = fill_realized + settlement_pnl
+                reconciled_at = _utc_now_iso()
+                reconciliation = {
+                    "buy_cost_usdc": buy_cost,
+                    "sell_proceeds_usdc": sell_proceeds,
+                    "redeem_value_usdc": redeem_value,
+                    "cycle_fill_realized_usdc": fill_realized,
+                    "cycle_settlement_pnl_usdc": settlement_pnl,
+                    "cycle_combined_pnl_usdc": cycle_combined,
+                    "cycle_pnl_reconciled_source": "onchain_redeem",
+                    "cycle_pnl_reconciled_at": reconciled_at,
+                    "redeem_tx_hash": str(tx_hash or ""),
+                    "redeem_condition_id": str(condition_id or ""),
+                }
+
+                settlement = conn.execute(
+                    """
+                    SELECT id, payload_json FROM strategy_events
+                    WHERE event_type='MARKET_SETTLEMENT'
+                      AND json_extract(payload_json, '$.slug')=?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (slug,),
+                ).fetchone()
+                if settlement is not None:
+                    settlement_payload = json.loads(settlement[1] or "{}")
+                    if not isinstance(settlement_payload, dict):
+                        settlement_payload = {}
+                    inventory_shares = float(settlement_payload.get("inventory_shares") or 0.0)
+                    inventory_cost = float(settlement_payload.get("inventory_cost_usdc") or 0.0)
+                    settlement_payload.update(
+                        {
+                            "redeem_value_usdc": redeem_value,
+                            "redeem_per_share": (
+                                redeem_value / inventory_shares if inventory_shares > 0 else 0.0
+                            ),
+                            "settlement_pnl_usdc": redeem_value - inventory_cost,
+                            "settlement_reconciled_source": "onchain_redeem",
+                            "settlement_reconciled_at": reconciled_at,
+                            "redeem_tx_hash": str(tx_hash or ""),
+                            "redeem_condition_id": str(condition_id or ""),
+                        }
+                    )
+                    conn.execute(
+                        "UPDATE strategy_events SET payload_json=? WHERE id=?",
+                        (_json_dumps(settlement_payload), int(settlement[0])),
+                    )
+
+                wrote_cycle_pnl = row is None
+                if row is not None:
+                    cycle_payload = json.loads(row[1] or "{}")
+                    if not isinstance(cycle_payload, dict):
+                        cycle_payload = {}
+                    cycle_payload.update(reconciliation)
+                    conn.execute(
+                        "UPDATE strategy_events SET payload_json=? WHERE id=?",
+                        (_json_dumps(cycle_payload), int(row[0])),
+                    )
+                conn.commit()
+            return {**reconciliation, "wrote_cycle_pnl": wrote_cycle_pnl}
         except Exception as e:
             logger.debug(f"TradeJournalDB reconcile_redeem_cycle failed: {e}")
             return None

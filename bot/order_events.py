@@ -81,7 +81,12 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
     fill_qty_dec = pending_fill_qty_dec
     raw_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
-    taker_exit_reason = strategy.taker_exit_reason_by_client_order_id.get(filled_id)
+    taker_exit_reason = getattr(strategy, "taker_exit_reason_by_client_order_id", {}).get(filled_id)
+    taker_exit_execution = getattr(
+        strategy,
+        "taker_exit_execution_by_client_order_id",
+        {},
+    ).get(filled_id, {})
     liquidity_side_raw = getattr(event, "liquidity_side", "")
     side_for_ledger = filled_side or strategy._normalize_side_text(getattr(event, "order_side", ""))
     fill_interpretation = interpret_fill_liquidity(
@@ -226,6 +231,23 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                 f"threshold={float(strategy.maker_high_cost_fill_threshold):.4f} "
                 f"cooldown={strategy.maker_high_cost_exit_cooldown_sec}s"
             )
+    if taker_exit_reason:
+        strategy._db_strategy_event(
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": str(strategy.current_market_slug or ""),
+                "instrument_id": str(filled_inst or ""),
+                "client_order_id": filled_id,
+                "exit_reason": taker_exit_reason,
+                "outcome": "filled",
+                "requested_tif": taker_exit_execution.get("requested_tif", "unknown"),
+                "requested_order_kind": taker_exit_execution.get("requested_order_kind", "unknown"),
+                "venue_order_type": taker_exit_execution.get("venue_order_type", "unknown"),
+                "fill_price": float(fill_price_dec),
+                "fill_qty": float(fill_qty_dec),
+                "effective_fee_usdc": float(effective_fee_usdc_dec),
+            },
+        )
     strategy._clear_pending_taker_exit_for_order(filled_id)
     protective_exit_reasons = {"stop_loss", "invalidation_recovery", "offside_near_close"}
     if taker_exit_reason == "stop_loss" and strategy.stop_loss_reentry_cooldown_sec > 0:
@@ -395,6 +417,12 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 def handle_order_canceled(strategy: Any, event: Any) -> None:
     """Handle cancel acknowledgements to clear pending-cancel state."""
     canceled_id = str(getattr(event, "client_order_id", "") or "")
+    taker_exit_reason = getattr(strategy, "taker_exit_reason_by_client_order_id", {}).get(canceled_id)
+    taker_exit_execution = getattr(
+        strategy,
+        "taker_exit_execution_by_client_order_id",
+        {},
+    ).get(canceled_id, {})
     strategy._clear_pending_taker_exit_for_order(canceled_id)
     cancel_result = reconcile_cancel_ack(
         canceled_id=canceled_id,
@@ -409,6 +437,21 @@ def handle_order_canceled(strategy: Any, event: Any) -> None:
     if strategy.terminal_dashboard and canceled_id:
         strategy.terminal_dashboard.record_order_canceled(client_order_id=canceled_id)
     strategy._update_terminal_dashboard_snapshot()
+    if taker_exit_reason:
+        strategy._db_strategy_event(
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": str(strategy.current_market_slug or ""),
+                "instrument_id": str(getattr(event, "instrument_id", "") or ""),
+                "client_order_id": canceled_id,
+                "exit_reason": taker_exit_reason,
+                "outcome": "cancelled",
+                "requested_tif": taker_exit_execution.get("requested_tif", "unknown"),
+                "requested_order_kind": taker_exit_execution.get("requested_order_kind", "unknown"),
+                "venue_order_type": taker_exit_execution.get("venue_order_type", "unknown"),
+                "cancel_reason": cancel_result.cancel_reason,
+            },
+        )
     strategy._db_order_event(
         event_type="ORDER_CANCELED",
         client_order_id=canceled_id,
@@ -458,6 +501,16 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
     logger.error("=" * 80)
 
     denied_id = str(event.client_order_id)
+    taker_exit_reason = getattr(
+        strategy,
+        "taker_exit_reason_by_client_order_id",
+        {},
+    ).get(denied_id)
+    taker_exit_execution = getattr(
+        strategy,
+        "taker_exit_execution_by_client_order_id",
+        {},
+    ).get(denied_id, {})
     strategy._clear_pending_taker_exit_for_order(denied_id)
     reject_result = reconcile_rejected_order(
         denied_id=denied_id,
@@ -489,6 +542,21 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
 
     strategy.consecutive_denied_orders += 1
     reason = reject_result.reason
+    if taker_exit_reason:
+        strategy._db_strategy_event(
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": str(strategy.current_market_slug or ""),
+                "instrument_id": str(getattr(event, "instrument_id", "") or ""),
+                "client_order_id": denied_id,
+                "exit_reason": taker_exit_reason,
+                "outcome": "rejected",
+                "requested_tif": taker_exit_execution.get("requested_tif", "unknown"),
+                "requested_order_kind": taker_exit_execution.get("requested_order_kind", "unknown"),
+                "venue_order_type": taker_exit_execution.get("venue_order_type", "unknown"),
+                "venue_reason": reason,
+            },
+        )
     venue_balance_shares = strategy._extract_venue_balance_shares_from_reject(reason)
     strategy._db_order_event(
         event_type="ORDER_REJECTED" if "REJECTED" in title else "ORDER_DENIED",

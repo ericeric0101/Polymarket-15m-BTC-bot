@@ -358,6 +358,11 @@ def initialize_strategy_settings(
     strategy.maker_urgent_exit_ttl_sec = config.exit.maker_urgent_exit_ttl_sec
     strategy.maker_urgent_exit_cooldown_sec = config.exit.maker_urgent_exit_cooldown_sec
     strategy.maker_urgent_exit_min_confirmations = config.exit.maker_urgent_exit_min_confirmations
+    strategy.recovery_exit_ladder_enabled = config.exit.recovery_exit_ladder_enabled
+    strategy.recovery_exit_passive_ttl_sec = config.exit.recovery_exit_passive_ttl_sec
+    strategy.recovery_exit_passive_min_time_left_sec = config.exit.recovery_exit_passive_min_time_left_sec
+    strategy.recovery_exit_stage_by_inst = {}
+    strategy.taker_exit_execution_by_client_order_id = {}
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
     strategy.directional_first_entry_min_score_abs_new = config.side.directional_first_entry_min_score_abs_new
     strategy.first_entry_max_time_left_sec = config.side.first_entry_max_time_left_sec

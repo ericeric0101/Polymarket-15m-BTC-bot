@@ -522,6 +522,16 @@ def submit_maker_quote(
                 if directional_snapshot and directional_snapshot.get("p_fair") is not None
                 else None
             ),
+            "model_fair_edge_ps": (
+                float(directional_snapshot.get("model_fair_edge_ps"))
+                if directional_snapshot and directional_snapshot.get("model_fair_edge_ps") is not None
+                else None
+            ),
+            "planned_entry_price": (
+                float(directional_snapshot.get("planned_entry_price"))
+                if directional_snapshot and directional_snapshot.get("planned_entry_price") is not None
+                else None
+            ),
             "fee_ps": (
                 float(directional_snapshot.get("fee_ps"))
                 if directional_snapshot and directional_snapshot.get("fee_ps") is not None

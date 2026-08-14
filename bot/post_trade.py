@@ -70,6 +70,16 @@ def build_fill_order_event_payload(
             if filled_directional_snapshot.get("p_fair") is not None
             else None
         ),
+        "model_fair_edge_ps_submit": (
+            float(filled_directional_snapshot.get("model_fair_edge_ps"))
+            if filled_directional_snapshot.get("model_fair_edge_ps") is not None
+            else None
+        ),
+        "planned_entry_price_submit": (
+            float(filled_directional_snapshot.get("planned_entry_price"))
+            if filled_directional_snapshot.get("planned_entry_price") is not None
+            else None
+        ),
         "fee_ps_submit": (
             float(filled_directional_snapshot.get("fee_ps"))
             if filled_directional_snapshot.get("fee_ps") is not None

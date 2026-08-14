@@ -8,6 +8,7 @@ Complete BTC 15-Min Trading Bot - FIXED VERSION
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -29,6 +30,36 @@ import subprocess
 # Add project to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
+
+
+def _loaded_source_fingerprint(repo_root: Path) -> str:
+    """Fingerprint strategy modules when this Python process imports them.
+
+    Node rollovers create a new strategy instance but do not reload Python
+    modules.  Recording this import-time fingerprint distinguishes a genuine
+    process restart from a later working-tree edit.
+    """
+    paths = (
+        "run_bot.py",
+        "bot/quote_service.py",
+        "bot/order_submission.py",
+        "bot/taker_exit.py",
+        "bot/recovery_exit_ladder.py",
+        "bot/db_runtime.py",
+        "monitoring/trade_journal_db.py",
+    )
+    digest = hashlib.sha256()
+    for relative_path in paths:
+        path = repo_root / relative_path
+        digest.update(relative_path.encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()[:16]
+
+
+RUNTIME_SOURCE_FINGERPRINT = _loaded_source_fingerprint(project_root)
 
 # Now import Nautilus
 from nautilus_trader.adapters.polymarket import POLYMARKET
@@ -245,6 +276,7 @@ class IntegratedBTCStrategy(
         self.dashboard_state = dashboard_state
         self.telegram_notifier = telegram_notifier
         self.alert_watcher = alert_watcher
+        self.runtime_source_fingerprint = RUNTIME_SOURCE_FINGERPRINT
         self._last_dashboard_sync_ts = 0.0
         self._last_dashboard_pause_log_ts = 0.0
         initialize_strategy_settings(
@@ -3234,6 +3266,7 @@ class IntegratedBTCStrategy(
                 "bi_side_enabled": self.bi_side_enabled,
                 "active_side": self.active_side.value,
                 "git_revision": self.runtime_git_revision,
+                "source_fingerprint": self.runtime_source_fingerprint,
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),

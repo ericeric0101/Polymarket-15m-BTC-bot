@@ -940,12 +940,8 @@ class TradeJournalDashboardSource:
             redeem_amount = None
             redeem = redeems.get(slug)
             settlement_redeem_amount = _optional_float(settlement.get("redeem_value_usdc"))
-            if redeem is not None and (slug not in settlements or (settlement_redeem_amount or 0.0) > 0):
-                redeem_amount = _optional_float(
-                    redeem.get("redeem_value_usdc")
-                    or redeem.get("redeem_size_usdc")
-                    or redeem.get("amount")
-                )
+            if redeem is not None and "redeem_cash_usdc" in redeem:
+                redeem_amount = _optional_float(redeem.get("redeem_cash_usdc"))
             expected_redeem_amount = None
             if slug in settlements:
                 expected_redeem_amount = float(settlement_redeem_amount or 0.0)

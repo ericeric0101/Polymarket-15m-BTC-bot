@@ -159,7 +159,10 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
                 continue
 
             amount = _activity_amount(activity)
-            payload["redeem_size_usdc"] = amount
+            # Data API activity is the first per-condition source that tells
+            # us the actual collateral payout.  Keep it distinct from the
+            # position-token quantity logged when the transaction was sent.
+            payload["redeem_cash_usdc"] = amount
             payload["redeem_activity_size"] = float(activity.get("size") or 0.0)
             payload["redeem_activity_usdc_size"] = amount
             payload["redeem_activity_timestamp"] = activity.get("timestamp")
@@ -188,7 +191,7 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
         conn.close()
 
     for _, _, slug, amount in updates[:20]:
-        print(f"reconciled slug={slug} redeem_size_usdc={amount:.6f}")
+        print(f"reconciled slug={slug} redeem_cash_usdc={amount:.6f}")
     print(
         f"activity_rows={len(activity_rows)} redeem_events_scanned={len(rows)} "
         f"updated={len(updates)} db={db_path} dry_run={dry_run}"

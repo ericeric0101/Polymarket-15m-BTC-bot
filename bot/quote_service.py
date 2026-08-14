@@ -134,10 +134,25 @@ def extract_instrument_tick(instrument: Any, default_tick: str = "0.01") -> Deci
 
 
 def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
+    p_fair = desired.get("p_fair")
+    entry_price = desired.get("price")
+    try:
+        model_fair_edge_ps = (
+            Decimal(str(p_fair)) - Decimal(str(entry_price))
+            if p_fair is not None and entry_price is not None
+            else None
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        model_fair_edge_ps = None
     return {
         "directional_edge_ps": desired.get("directional_edge_ps"),
         "directional_edge_usdc": desired.get("directional_edge_usdc"),
-        "p_fair": desired.get("p_fair"),
+        "p_fair": p_fair,
+        # This is the model-consistency value enforced by ENTRY_FAIR_EDGE_MIN_PS.
+        # directional_edge_ps is a separate, diagnostic calculation and can
+        # include a hypothetical exit path.
+        "model_fair_edge_ps": model_fair_edge_ps,
+        "planned_entry_price": entry_price,
         "fee_ps": desired.get("fee_ps"),
         "other_cost_ps": desired.get("other_cost_ps"),
         "exec_penalty_usdc": desired.get("exec_penalty"),

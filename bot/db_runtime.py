@@ -92,19 +92,35 @@ class StrategyDBRuntimeMixin:
         if not self.trade_db:
             return
         slug = str(redeem_payload.get("slug") or redeem_payload.get("market_slug") or "")
-        redeem_value = redeem_payload.get("redeem_size_usdc")
+        # Only a confirmed collateral amount can correct PnL.  The auto
+        # redeem command initially knows the position-token quantity, which is
+        # not equivalent to the payout for a losing outcome.
+        redeem_value = redeem_payload.get("redeem_cash_usdc")
         if not slug or redeem_value is None:
             return
-        reconciled = self.trade_db.reconcile_redeem_cycle(slug, float(redeem_value))
+        reconciled = self.trade_db.reconcile_redeem_cycle(
+            slug,
+            float(redeem_value),
+            tx_hash=str(redeem_payload.get("tx_hash") or ""),
+            condition_id=str(redeem_payload.get("condition_id") or ""),
+        )
         if reconciled is None:
+            return
+        # The journal method updates the existing lifecycle PnL in-place.  A
+        # restart can leave no lifecycle row at all; only that case needs one.
+        if not bool(reconciled.get("wrote_cycle_pnl", False)):
+            self._db_strategy_event(
+                "MARKET_PNL_RECONCILED",
+                {"slug": slug, **reconciled},
+            )
             return
         self._db_strategy_event(
             "MARKET_CYCLE_PNL",
             {
                 "slug": slug,
                 "active_side": "RECONCILED",
-                "cycle_fill_realized_usdc": reconciled["sell_proceeds_usdc"] - reconciled["buy_cost_usdc"],
-                "cycle_settlement_pnl_usdc": reconciled["redeem_value_usdc"],
+                "cycle_fill_realized_usdc": reconciled["cycle_fill_realized_usdc"],
+                "cycle_settlement_pnl_usdc": reconciled["cycle_settlement_pnl_usdc"],
                 "cycle_combined_pnl_usdc": reconciled["cycle_combined_pnl_usdc"],
                 "source": "redeem_reconciliation",
                 **reconciled,
@@ -118,7 +134,12 @@ class StrategyDBRuntimeMixin:
             payload_out["slug"] = self.current_market_slug
         if self.current_market_slug and "market_slug" not in payload_out:
             payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
+        payload_slug = str(payload_out.get("slug") or payload_out.get("market_slug") or "")
+        if (
+            self.instrument_id
+            and "instrument_id" not in payload_out
+            and (not payload_slug or payload_slug == str(self.current_market_slug or ""))
+        ):
             payload_out["instrument_id"] = str(self.instrument_id)
         self.trade_db.log_strategy_event(
             run_id=self.run_id,

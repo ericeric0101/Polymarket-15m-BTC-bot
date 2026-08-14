@@ -14,9 +14,11 @@ from typing import Any, Dict, Optional, Protocol
 from loguru import logger
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
-from nautilus_trader.model.objects import Quantity
+from nautilus_trader.model.objects import Price, Quantity
 
 from bot.enums import ActiveSide
+from bot.exit_audit import build_invalidation_exit_audit
+from bot.recovery_exit_ladder import select_recovery_exit_action
 from bot.models import (
     ExitDecisionType,
     MarketSnapshot,
@@ -214,6 +216,66 @@ class TakerExitMixin:
                     or twap_confirms_adverse
                 )
             )
+            sellable_for_audit = self._get_effective_sellable_qty(instrument_id=inst_id)
+            qty_for_audit = min(qty, sellable_for_audit)
+            min_recovery_ratio_for_audit = Decimal(
+                str(getattr(self, "taker_exit_min_recovery_ratio", Decimal("0"))),
+            )
+            recovery_ratio_for_audit = (
+                (best_bid * qty_for_audit) / (avg_entry * qty_for_audit)
+                if qty_for_audit > 0 and avg_entry > 0
+                else None
+            )
+            if confirmed_locked_side_invalidated:
+                if hold_sec < float(getattr(self, "taker_exit_min_hold_sec", 0)):
+                    audit_block_reason = "min_hold_not_elapsed"
+                elif time_left_sec is None or int(getattr(self, "taker_exit_max_time_left_sec", 0)) <= 0:
+                    audit_block_reason = "recovery_time_window_unavailable"
+                elif time_left_sec > float(getattr(self, "taker_exit_max_time_left_sec", 0)):
+                    audit_block_reason = "outside_recovery_time_window"
+                elif best_bid < Decimal(str(getattr(self, "taker_exit_disable_if_bid_below", Decimal("0")))):
+                    audit_block_reason = "bid_below_disable_threshold"
+                elif best_bid < Decimal(str(getattr(self, "taker_exit_min_bid", Decimal("0")))):
+                    audit_block_reason = "bid_below_minimum"
+                elif bool(getattr(self, "taker_exit_require_twap_confirmation", True)) and not twap_confirms_adverse:
+                    audit_block_reason = "twap_not_confirming_adverse"
+                elif qty_for_audit + Decimal("0.000001") < self.maker_exchange_min_shares:
+                    audit_block_reason = "insufficient_sellable_inventory"
+                elif (
+                    recovery_ratio_for_audit is not None
+                    and recovery_ratio_for_audit < min_recovery_ratio_for_audit
+                ):
+                    audit_block_reason = "recovery_ratio_below_min"
+                else:
+                    audit_block_reason = None
+                self._record_exit_audit_throttled(
+                    inst_key=inst_key,
+                    reason_tag=f"invalidation:{audit_block_reason or 'eligible'}",
+                    now_ts=now_ts,
+                    payload=build_invalidation_exit_audit(
+                        slug=str(self.current_market_slug or ""),
+                        instrument_id=inst_key,
+                        time_left_sec=time_left_sec,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        qty=qty,
+                        sellable_qty=sellable_for_audit,
+                        avg_entry=avg_entry,
+                        hold_sec=hold_sec,
+                        locked_side_invalidated=True,
+                        twap_confirms_adverse=twap_confirms_adverse,
+                        twap_fresh=twap_fresh,
+                        recovery_candidate=invalidation_recovery_candidate,
+                        recovery_ratio=recovery_ratio_for_audit,
+                        min_recovery_ratio=min_recovery_ratio_for_audit,
+                        min_hold_sec=float(getattr(self, "taker_exit_min_hold_sec", 0)),
+                        max_time_left_sec=float(getattr(self, "taker_exit_max_time_left_sec", 0)),
+                        min_bid=Decimal(str(getattr(self, "taker_exit_min_bid", Decimal("0")))),
+                        disable_if_bid_below=Decimal(str(getattr(self, "taker_exit_disable_if_bid_below", Decimal("0")))),
+                        pending_exit=inst_key in self.pending_taker_exit_by_inst,
+                        block_reason=audit_block_reason,
+                    ),
+                )
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)
             # After a high-cost BUY fill, avoid active exits below cost during cooldown.
@@ -355,13 +417,14 @@ class TakerExitMixin:
                         now_ts=now_ts,
                     )
                     continue
-                ok = self._submit_taker_exit_order(
+                ok = self._submit_invalidation_recovery_ladder(
                     instrument_id=inst_id,
                     quantity=qty_to_exit,
-                    reason="invalidation_recovery",
                     est_net_if_exit=net_if_exit,
                     best_bid=best_bid,
+                    best_ask=best_ask,
                     fee_rate=fee_rate,
+                    time_left_sec=time_left_sec,
                     decision_payload={
                         "slug": self.current_market_slug or "",
                         "decision_type": "INVALIDATION_RECOVERY_TAKER_EXIT",
@@ -653,6 +716,7 @@ class TakerExitMixin:
         best_bid: Decimal,
         fee_rate: Decimal,
         decision_payload: Optional[Dict[str, Any]] = None,
+        execution_mode: str = "market_fok",
     ) -> bool:
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
@@ -671,18 +735,42 @@ class TakerExitMixin:
 
         qty = Quantity(float(qty_dec), precision=precision)
         coid = ClientOrderId(f"BTC-15M-TAKER-EXIT-{int(time.time() * 1000)}")
-        order = self.order_factory.market(
-            instrument_id=inst,
-            order_side=OrderSide.SELL,
-            quantity=qty,
-            client_order_id=coid,
-            quote_quantity=False,
-            time_in_force=TimeInForce.IOC,
-        )
+        if execution_mode == "limit_fak":
+            price_precision = int(getattr(instrument, "price_precision", 2))
+            order = self.order_factory.limit(
+                instrument_id=inst,
+                order_side=OrderSide.SELL,
+                quantity=qty,
+                price=Price(float(best_bid), precision=price_precision),
+                client_order_id=coid,
+                time_in_force=TimeInForce.IOC,
+            )
+            requested_order_kind = "limit"
+            venue_order_type = "FAK"
+        else:
+            order = self.order_factory.market(
+                instrument_id=inst,
+                order_side=OrderSide.SELL,
+                quantity=qty,
+                client_order_id=coid,
+                quote_quantity=False,
+                time_in_force=TimeInForce.IOC,
+            )
+            requested_order_kind = "market"
+            venue_order_type = "FOK"
         self.submit_order(order)
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
         self.taker_exit_reason_by_client_order_id[str(coid)] = reason
+        execution_by_id = getattr(self, "taker_exit_execution_by_client_order_id", None)
+        if execution_by_id is None:
+            execution_by_id = {}
+            self.taker_exit_execution_by_client_order_id = execution_by_id
+        execution_by_id[str(coid)] = {
+            "requested_tif": "IOC",
+            "requested_order_kind": requested_order_kind,
+            "venue_order_type": venue_order_type,
+        }
         if getattr(self, "terminal_dashboard", None):
             token_side = getattr(self._side_for_instrument_id(inst), "value", "NONE")
             self.terminal_dashboard.record_order_submitted(
@@ -694,10 +782,10 @@ class TakerExitMixin:
                 is_taker=True,
             )
         logger.warning(
-            "TAKER EXIT submit: "
+            "RECOVERY EXIT submit: "
             f"reason={reason} inst={inst_key} qty={float(qty_dec):.6f} "
             f"best_bid={float(best_bid):.4f} est_net={float(est_net_if_exit):+.4f} "
-            f"fee_rate={float(fee_rate):.4f}"
+            f"fee_rate={float(fee_rate):.4f} execution={requested_order_kind}/{venue_order_type}"
         )
         self._db_order_event(
             event_type="ORDER_TAKER_EXIT_SUBMIT",
@@ -715,7 +803,198 @@ class TakerExitMixin:
                 "fee_rate": float(fee_rate),
                 "fee_rate_decimal": float(fee_rate),
                 "best_bid": float(best_bid),
+                "requested_tif": "IOC",
+                "requested_order_kind": requested_order_kind,
+                "venue_order_type": venue_order_type,
                 **(decision_payload or {}),
+            },
+        )
+        self._db_strategy_event(
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": str(self.current_market_slug or ""),
+                "instrument_id": inst_key,
+                "client_order_id": str(coid),
+                "exit_reason": reason,
+                "outcome": "submitted",
+                "requested_tif": "IOC",
+                "requested_order_kind": requested_order_kind,
+                "venue_order_type": venue_order_type,
+                "best_bid": float(best_bid),
+                "qty": float(qty_dec),
+            },
+        )
+        return True
+
+    def _submit_invalidation_recovery_ladder(
+        self,
+        *,
+        instrument_id: Any,
+        quantity: Decimal,
+        est_net_if_exit: Decimal,
+        best_bid: Decimal,
+        best_ask: Decimal,
+        fee_rate: Decimal,
+        time_left_sec: Optional[float],
+        decision_payload: Dict[str, Any],
+    ) -> bool:
+        """Submit a passive recovery offer before a bounded partial-fill exit."""
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return False
+        inst_key = self._instrument_key(inst)
+        stages = getattr(self, "recovery_exit_stage_by_inst", None)
+        if stages is None:
+            stages = {}
+            self.recovery_exit_stage_by_inst = stages
+        sell_key = self._order_key_for("sell", inst)
+        existing = self.active_maker_orders.get(sell_key)
+        existing_is_passive = bool(existing and existing.get("is_recovery_exit_passive"))
+        existing_age = (
+            max(0.0, time.time() - float(existing.get("created_ts", 0.0)))
+            if existing_is_passive
+            else 0.0
+        )
+        action = select_recovery_exit_action(
+            enabled=bool(getattr(self, "recovery_exit_ladder_enabled", True)),
+            stage=stages.get(inst_key),
+            time_left_sec=time_left_sec,
+            passive_min_time_left_sec=float(
+                getattr(self, "recovery_exit_passive_min_time_left_sec", 120),
+            ),
+            passive_order_active=existing_is_passive,
+            passive_age_sec=existing_age,
+            passive_ttl_sec=float(getattr(self, "recovery_exit_passive_ttl_sec", 15)),
+        )
+        if action == "wait_passive":
+            return True
+        if action == "cancel_passive":
+            stages[inst_key] = "awaiting_passive_cancel"
+            self._cancel_maker_order_side("sell", reason="recovery_exit_passive_ttl", instrument_id=inst)
+            self._db_strategy_event(
+                "EXIT_AUDIT_OUTCOME",
+                {
+                    "slug": str(self.current_market_slug or ""),
+                    "instrument_id": inst_key,
+                    "outcome": "passive_ttl_expired",
+                    "exit_reason": "invalidation_recovery",
+                    "passive_age_sec": existing_age,
+                },
+            )
+            return True
+        if action == "passive_limit":
+            return self._submit_passive_recovery_exit(
+                instrument_id=inst,
+                quantity=quantity,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                fee_rate=fee_rate,
+                decision_payload=decision_payload,
+            )
+        stages[inst_key] = "aggressive"
+        return self._submit_taker_exit_order(
+            instrument_id=inst,
+            quantity=quantity,
+            reason="invalidation_recovery",
+            est_net_if_exit=est_net_if_exit,
+            best_bid=best_bid,
+            fee_rate=fee_rate,
+            decision_payload={**decision_payload, "recovery_ladder_stage": "limit_fak"},
+            execution_mode="limit_fak" if action == "limit_fak" else "market_fok",
+        )
+
+    def _submit_passive_recovery_exit(
+        self,
+        *,
+        instrument_id: Any,
+        quantity: Decimal,
+        best_bid: Decimal,
+        best_ask: Decimal,
+        fee_rate: Decimal,
+        decision_payload: Dict[str, Any],
+    ) -> bool:
+        if best_ask <= best_bid:
+            return False
+        instrument = self.cache.instrument(instrument_id)
+        if instrument is None:
+            return False
+        precision = int(getattr(instrument, "size_precision", 6))
+        min_lot = Decimal(str(10 ** (-precision)))
+        qty_dec = max(min_lot, quantity).quantize(min_lot, rounding=ROUND_FLOOR)
+        if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
+            return False
+        price_precision = int(getattr(instrument, "price_precision", 2))
+        coid = ClientOrderId(f"BTC-15M-RECOVERY-PASSIVE-{int(time.time() * 1000)}")
+        order = self.order_factory.limit(
+            instrument_id=instrument_id,
+            order_side=OrderSide.SELL,
+            quantity=Quantity(float(qty_dec), precision=precision),
+            price=Price(float(best_ask), precision=price_precision),
+            client_order_id=coid,
+            time_in_force=TimeInForce.GTC,
+        )
+        self._cancel_maker_order_side("buy", reason="recovery_exit_passive", instrument_id=instrument_id)
+        self.submit_order(order)
+        inst_key = self._instrument_key(instrument_id)
+        self.taker_exit_reason_by_client_order_id[str(coid)] = "invalidation_recovery"
+        execution_by_id = getattr(self, "taker_exit_execution_by_client_order_id", None)
+        if execution_by_id is None:
+            execution_by_id = {}
+            self.taker_exit_execution_by_client_order_id = execution_by_id
+        execution_by_id[str(coid)] = {
+            "requested_tif": "GTC",
+            "requested_order_kind": "limit",
+            "venue_order_type": "GTC",
+        }
+        self.recovery_exit_stage_by_inst[inst_key] = "passive"
+        self.active_maker_orders[self._order_key_for("sell", instrument_id)] = {
+            "order": order,
+            "econ": None,
+            "directional_snapshot": {},
+            "price": best_ask,
+            "side": "sell",
+            "instrument_id": instrument_id,
+            "token_id": None,
+            "quantity": qty_dec,
+            "created_ts": time.time(),
+            "target_version": 0,
+            "is_recovery_exit_passive": True,
+        }
+        self._db_order_event(
+            event_type="ORDER_RECOVERY_EXIT_PASSIVE_SUBMIT",
+            client_order_id=str(coid),
+            side="SELL",
+            price=float(best_ask),
+            qty=float(qty_dec),
+            status="SUBMITTED",
+            reason="invalidation_recovery",
+            payload={
+                "reason": "invalidation_recovery",
+                "instrument_id": inst_key,
+                "best_bid": float(best_bid),
+                "best_ask": float(best_ask),
+                "fee_rate": float(fee_rate),
+                "requested_tif": "GTC",
+                "requested_order_kind": "limit",
+                "venue_order_type": "GTC",
+                "recovery_ladder_stage": "passive_limit",
+                **decision_payload,
+            },
+        )
+        self._db_strategy_event(
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": str(self.current_market_slug or ""),
+                "instrument_id": inst_key,
+                "client_order_id": str(coid),
+                "exit_reason": "invalidation_recovery",
+                "outcome": "passive_submitted",
+                "requested_tif": "GTC",
+                "requested_order_kind": "limit",
+                "venue_order_type": "GTC",
+                "best_bid": float(best_bid),
+                "limit_price": float(best_ask),
+                "qty": float(qty_dec),
             },
         )
         return True
@@ -725,6 +1004,7 @@ class TakerExitMixin:
         if not target:
             return
         self.taker_exit_reason_by_client_order_id.pop(target, None)
+        getattr(self, "taker_exit_execution_by_client_order_id", {}).pop(target, None)
         for inst_key, coid in list(self.pending_taker_exit_by_inst.items()):
             if coid == target:
                 self.pending_taker_exit_by_inst.pop(inst_key, None)
@@ -751,6 +1031,20 @@ class TakerExitMixin:
             return
         self._taker_exit_skip_log_ts_by_key[key] = now_ts
         self._db_strategy_event("EXIT_POLICY_DECISION", payload)
+
+    def _record_exit_audit_throttled(
+        self,
+        inst_key: str,
+        reason_tag: str,
+        now_ts: float,
+        payload: Dict[str, Any],
+    ) -> None:
+        key = f"{inst_key}:{reason_tag}:exit_audit"
+        last_ts = float(self._taker_exit_skip_log_ts_by_key.get(key, 0.0))
+        if now_ts - last_ts < float(self.taker_exit_skip_log_interval_sec):
+            return
+        self._taker_exit_skip_log_ts_by_key[key] = now_ts
+        self._db_strategy_event("EXIT_AUDIT", payload)
 
     # ------------------------------------------------------------------
     # Maker-Style Urgent Exit

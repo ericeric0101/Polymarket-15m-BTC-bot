@@ -281,7 +281,11 @@ def run_auto_redeem_script(
                     "status": int(parts.get("status", "0")),
                 }
                 if condition_id in condition_size_by_id:
-                    result["redeem_size_usdc"] = condition_size_by_id[condition_id]
+                    # This is the size of the winning/losing position token,
+                    # not collateral received.  A losing token can redeem
+                    # successfully for zero USDC, so it must never be used as
+                    # a PnL cash-flow value.
+                    result["redeem_position_size_shares"] = condition_size_by_id[condition_id]
                 if slug:
                     result["slug"] = slug
                     result["market_slug"] = slug
