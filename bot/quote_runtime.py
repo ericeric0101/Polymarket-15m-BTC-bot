@@ -15,6 +15,7 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     should_requote_existing_order,
 )
+from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
 
 class QuoteRuntimeMixin:
@@ -288,6 +289,13 @@ class QuoteRuntimeMixin:
             submitted_attempts += 1
             side = str(desired["side"])
             inst_id = desired["instrument_id"]
+            inst_key = self._instrument_key(inst_id)
+            recovery_stage = getattr(self, "recovery_exit_stage_by_inst", {}).get(inst_key)
+            if side == "sell" and recovery_exit_owns_sell_reservation(recovery_stage):
+                # A confirmed-invalidation recovery owns this instrument's
+                # SELL reservation. Do not let the ordinary TP lifecycle
+                # cancel, requote, or recreate a 0.97 maker order here.
+                continue
             limit_price = Decimal(str(desired["price"]))
             econ = desired["econ"]
             dynamic_fee_rate = desired.get("dynamic_fee_rate")

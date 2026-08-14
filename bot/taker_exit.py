@@ -850,6 +850,34 @@ class TakerExitMixin:
         sell_key = self._order_key_for("sell", inst)
         existing = self.active_maker_orders.get(sell_key)
         existing_is_passive = bool(existing and existing.get("is_recovery_exit_passive"))
+        # A normal TP/maker sell reserves the same outcome tokens that the
+        # recovery order needs.  Do not overwrite its local state and submit a
+        # second SELL: the venue will reject it for insufficient free balance.
+        # Wait for the cancel acknowledgement (or a matched terminal event)
+        # before the recovery ladder takes ownership of the sell reservation.
+        if existing and not existing_is_passive:
+            prior_stage = stages.get(inst_key)
+            stages[inst_key] = "awaiting_existing_sell_cancel"
+            if not bool(existing.get("pending_cancel")):
+                self._cancel_maker_order_side(
+                    "sell",
+                    reason="recovery_exit_replace_existing_sell",
+                    instrument_id=inst,
+                )
+            if prior_stage != "awaiting_existing_sell_cancel":
+                self._db_strategy_event(
+                    "EXIT_AUDIT_OUTCOME",
+                    {
+                        "slug": str(self.current_market_slug or ""),
+                        "instrument_id": inst_key,
+                        "exit_reason": "invalidation_recovery",
+                        "outcome": "awaiting_existing_sell_cancel",
+                        "existing_client_order_id": str(
+                            getattr(existing.get("order"), "client_order_id", "") or ""
+                        ),
+                    },
+                )
+            return True
         existing_age = (
             max(0.0, time.time() - float(existing.get("created_ts", 0.0)))
             if existing_is_passive

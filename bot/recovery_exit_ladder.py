@@ -13,6 +13,22 @@ RecoveryExitAction = Literal[
 ]
 
 
+def recovery_exit_owns_sell_reservation(stage: str | None) -> bool:
+    """Return whether the recovery ladder exclusively owns a SELL lifecycle.
+
+    While a confirmed-invalidation exit is replacing a normal take-profit
+    order, the regular quote loop must not recreate or requote that TP order.
+    Either action reserves the same tokens and prevents the recovery ladder
+    from submitting its replacement.
+    """
+    return stage in {
+        "awaiting_existing_sell_cancel",
+        "passive",
+        "awaiting_passive_cancel",
+        "aggressive",
+    }
+
+
 def select_recovery_exit_action(
     *,
     enabled: bool,

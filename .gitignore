@@ -21,6 +21,7 @@ logs/
 *.db
 *.sqlite
 paper_trades.json
+env_investigation.md
 
 # OS / editor artifacts
 .DS_Store

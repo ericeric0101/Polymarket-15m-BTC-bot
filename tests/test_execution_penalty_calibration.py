@@ -34,3 +34,9 @@ def test_empirical_markout_caps_full_book_vwap_stress_for_maker_entry():
     assert components["empirical_markout_usdc"] == Decimal("0.12")
     assert components["vwap_usdc"] == Decimal("0")
     assert components["total_usdc"] == Decimal("0.12")
+    # The convergence telemetry exposes the old forced-exit proxy alongside
+    # the empirical model without changing the production total.
+    assert components["legacy_proxy_vwap_usdc"].quantize(Decimal("0.0001")) == Decimal("0.4000")
+    assert components["legacy_proxy_penalty_usdc"].quantize(Decimal("0.0001")) == Decimal("0.4000")
+    assert components["single_empirical_penalty_usdc"] == Decimal("0.12")
+    assert components["single_empirical_available"] == Decimal("1")

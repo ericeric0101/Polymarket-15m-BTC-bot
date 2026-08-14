@@ -16,6 +16,7 @@ from bot.quote_service import (
     retreat_crossing_buy_quote,
     violates_final_crossing_guard,
 )
+from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
 
 def submit_maker_quote(
@@ -33,6 +34,21 @@ def submit_maker_quote(
     fair_edge_bucket_shadow: Optional[str] = None,
 ) -> None:
     instrument_id = strategy._normalize_instrument_id(instrument_id)
+    inst_key = strategy._instrument_key(instrument_id)
+    recovery_stage = getattr(strategy, "recovery_exit_stage_by_inst", {}).get(inst_key)
+    if side == "sell" and recovery_exit_owns_sell_reservation(recovery_stage):
+        strategy._db_order_event(
+            event_type="ORDER_SKIP_RECOVERY_EXIT_OWNERSHIP",
+            side="SELL",
+            price=float(limit_price),
+            status="SKIPPED",
+            reason="recovery_exit_owns_sell_reservation",
+            payload={
+                "instrument_id": str(instrument_id),
+                "recovery_exit_stage": recovery_stage,
+            },
+        )
+        return
     instrument = strategy.cache.instrument(instrument_id) if instrument_id else None
     limit_price = strategy._align_price_to_tick(limit_price, side, instrument)
     expected_net_usdc = Decimal(str(getattr(econ, "expected_net_usdc", "0")))
@@ -165,7 +181,6 @@ def submit_maker_quote(
                 return
     if qty_dec <= 0:
         return
-    inst_key = strategy._instrument_key(instrument_id)
     if side == "buy":
         reentry_pause_until = float(strategy.stop_loss_reentry_pause_until_by_inst.get(inst_key, 0.0))
         if time.time() < reentry_pause_until:

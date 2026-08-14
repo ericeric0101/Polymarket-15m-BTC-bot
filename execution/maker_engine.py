@@ -428,6 +428,20 @@ class MakerEngine:
                 exhaustion_ratio = remaining_qty / quote_shares
                 book_vwap_penalty += notional * exhaustion_ratio * spread * self.config.maker_execution_vwap_mult
 
+        # Preserve the legacy proxy as telemetry.  The convergence program
+        # compares it with a single observed-markout model before changing any
+        # economics gate; neither comparison value changes current behavior.
+        vol = max(Decimal("0"), recent_vol or Decimal("0"))
+        legacy_non_atomic_penalty = (
+            notional * vol * self.config.maker_execution_non_atomic_vol_mult
+        )
+        legacy_raw_total = slippage_penalty + book_vwap_penalty + legacy_non_atomic_penalty
+        legacy_floor_penalty = max(
+            Decimal("0"),
+            self.config.maker_execution_penalty_floor_usdc - legacy_raw_total,
+        )
+        legacy_total = max(self.config.maker_execution_penalty_floor_usdc, legacy_raw_total)
+
         # Order-book VWAP is a stress estimate for an immediate full liquidation.
         # A real maker-fill adverse markout is a direct measurement of the
         # expected short-horizon loss after a passive entry. It replaces both
@@ -442,7 +456,6 @@ class MakerEngine:
             vwap_penalty = Decimal("0")
             use_empirical_markout = True
 
-        vol = max(Decimal("0"), recent_vol or Decimal("0"))
         non_atomic_penalty = (
             Decimal("0")
             if use_empirical_markout
@@ -466,6 +479,17 @@ class MakerEngine:
             "empirical_markout_replaces_non_atomic": (
                 Decimal("1") if use_empirical_markout else Decimal("0")
             ),
+            # Observation-only comparison for execution-cost convergence.
+            # ``single_empirical_penalty_usdc`` deliberately excludes spread,
+            # depth, VWAP, volatility and fixed-floor proxies: those effects
+            # are represented by the observed post-fill adverse markout.
+            "legacy_proxy_slippage_usdc": slippage_penalty,
+            "legacy_proxy_vwap_usdc": book_vwap_penalty,
+            "legacy_proxy_non_atomic_usdc": legacy_non_atomic_penalty,
+            "legacy_proxy_floor_usdc": legacy_floor_penalty,
+            "legacy_proxy_penalty_usdc": legacy_total,
+            "single_empirical_penalty_usdc": empirical_markout_penalty or Decimal("0"),
+            "single_empirical_available": Decimal("1") if use_empirical_markout else Decimal("0"),
             "non_atomic_usdc": non_atomic_penalty,
             "floor_usdc": floor_penalty,
             "total_usdc": max(self.config.maker_execution_penalty_floor_usdc, raw_total),
@@ -633,6 +657,22 @@ class MakerEngine:
             bid_taker_leakage_usdc / bid_econ.shares
             if bid_econ.shares > 0
             else Decimal("0")
+        )
+        bid_exec_components["legacy_proxy_robust_net_usdc"] = (
+            bid_econ.expected_net_usdc
+            - bid_exec_components["legacy_proxy_penalty_usdc"]
+            - bid_taker_leakage_usdc
+        )
+        bid_exec_components["single_empirical_robust_net_usdc"] = (
+            bid_econ.expected_net_usdc
+            - bid_exec_components["single_empirical_penalty_usdc"]
+            - bid_taker_leakage_usdc
+        )
+        ask_exec_components["legacy_proxy_robust_net_usdc"] = (
+            ask_econ.expected_net_usdc - ask_exec_components["legacy_proxy_penalty_usdc"]
+        )
+        ask_exec_components["single_empirical_robust_net_usdc"] = (
+            ask_econ.expected_net_usdc - ask_exec_components["single_empirical_penalty_usdc"]
         )
         ask_fee_ps = (
             ask_econ.fee_equivalent_usdc / ask_econ.shares
