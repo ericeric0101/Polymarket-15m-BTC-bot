@@ -163,12 +163,6 @@ def _apply_canonical_aliases(environ: MutableMapping[str, str], external_keys: s
             raise ValueError("EXTERNAL_CONFLICT_ACTION must be 'skip' or 'size_down'")
         environ["EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT"] = "1" if action == "skip" else "0"
 
-    if "EXECUTION_COST_MODE" in environ and "MAKER_EXECUTION_EMPIRICAL_MARKOUT_ENABLE" not in external_keys:
-        mode = environ["EXECUTION_COST_MODE"].strip().lower()
-        if mode not in {"empirical_markout", "book_proxy"}:
-            raise ValueError("EXECUTION_COST_MODE must be 'empirical_markout' or 'book_proxy'")
-        environ["MAKER_EXECUTION_EMPIRICAL_MARKOUT_ENABLE"] = "1" if mode == "empirical_markout" else "0"
-
     if "HIGH_PRICE_TARGET_SHARES" in environ and "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER" not in external_keys:
         target = float(environ["MARKET_TARGET_SHARES"])
         high_price_target = float(environ["HIGH_PRICE_TARGET_SHARES"])

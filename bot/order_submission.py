@@ -358,6 +358,37 @@ def submit_maker_quote(
         return
 
     quote = strategy._get_quote_for_instrument(instrument_id)
+    if (
+        tail_protect_tp
+        and side == "sell"
+        and not strategy._is_dry_run_mode()
+        and quote is not None
+        and limit_price <= quote[0]
+    ):
+        # The TP has already become marketable. A post-only maker order is
+        # required to reject it, but waiting at the ask can throw away a
+        # locked-in profit. Route this explicit TP exception through the
+        # bounded FAK exit path at the current bid instead.
+        submit_exit = getattr(strategy, "_submit_taker_exit_order", None)
+        if callable(submit_exit):
+            best_bid, best_ask = quote
+            fee_rate = Decimal(str(dynamic_fee_rate or "0"))
+            submit_exit(
+                instrument_id=instrument_id,
+                quantity=qty_dec,
+                reason="tail_protect_tp_crossing",
+                est_net_if_exit=expected_net_usdc,
+                best_bid=best_bid,
+                fee_rate=fee_rate,
+                decision_payload={
+                    "tail_protect_tp": True,
+                    "tail_protect_tp_price": float(limit_price),
+                    "best_ask": float(best_ask),
+                    "execution_path": "bounded_limit_fak",
+                },
+                execution_mode="limit_fak",
+            )
+            return
     if violates_final_crossing_guard(
         side=side,
         limit_price=limit_price,

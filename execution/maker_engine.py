@@ -8,7 +8,6 @@ from decimal import Decimal
 from execution.rebate_model import (
     QuoteEconomics,
     estimate_quote_economics,
-    estimate_taker_fee_usdc,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,6 @@ class MakerEngineConfig:
         maker_min_shares: Decimal,
         maker_fixed_shares: Decimal,
         maker_max_order_usdc: Decimal,
-        maker_adverse_selection_buffer: Decimal,
         maker_min_expected_net_usdc: Decimal,
         maker_quote_sides: str,
         maker_inventory_skew_max: Decimal,
@@ -40,13 +38,6 @@ class MakerEngineConfig:
         maker_vol_extreme_spread_mult: Decimal,
         maker_pennying_enabled: bool,
         maker_pennying_min_edge: Decimal,
-        maker_execution_penalty_enable: bool,
-        maker_execution_penalty_floor_usdc: Decimal,
-        maker_execution_slippage_spread_mult: Decimal,
-        maker_execution_non_atomic_vol_mult: Decimal,
-        maker_execution_depth_impact_mult: Decimal,
-        maker_execution_vwap_mult: Decimal,
-        maker_buy_taker_leakage_prob: Decimal,
         maker_execution_empirical_adverse_markout_per_share: Optional[Decimal] = None,
     ):
         self.maker_half_spread = maker_half_spread
@@ -54,7 +45,6 @@ class MakerEngineConfig:
         self.maker_min_shares = maker_min_shares
         self.maker_fixed_shares = maker_fixed_shares
         self.maker_max_order_usdc = maker_max_order_usdc
-        self.maker_adverse_selection_buffer = maker_adverse_selection_buffer
         self.maker_min_expected_net_usdc = maker_min_expected_net_usdc
         self.maker_quote_sides = maker_quote_sides
         self.maker_inventory_skew_max = maker_inventory_skew_max
@@ -68,13 +58,6 @@ class MakerEngineConfig:
         self.maker_vol_extreme_spread_mult = maker_vol_extreme_spread_mult
         self.maker_pennying_enabled = maker_pennying_enabled
         self.maker_pennying_min_edge = maker_pennying_min_edge
-        self.maker_execution_penalty_enable = maker_execution_penalty_enable
-        self.maker_execution_penalty_floor_usdc = maker_execution_penalty_floor_usdc
-        self.maker_execution_slippage_spread_mult = maker_execution_slippage_spread_mult
-        self.maker_execution_non_atomic_vol_mult = maker_execution_non_atomic_vol_mult
-        self.maker_execution_depth_impact_mult = maker_execution_depth_impact_mult
-        self.maker_execution_vwap_mult = maker_execution_vwap_mult
-        self.maker_buy_taker_leakage_prob = maker_buy_taker_leakage_prob
         self.maker_execution_empirical_adverse_markout_per_share = (
             max(Decimal("0"), maker_execution_empirical_adverse_markout_per_share)
             if maker_execution_empirical_adverse_markout_per_share is not None
@@ -360,140 +343,28 @@ class MakerEngine:
         ask_levels: Optional[List[Tuple[Decimal, Decimal]]],
         recent_vol: Optional[Decimal],
     ) -> dict[str, Decimal]:
+        """Return the sole entry-cost model for a passive maker BUY.
+
+        A 10-second adverse markout is observed after actual maker fills. It
+        subsumes the old hypothetical VWAP liquidation, depth impact, spread,
+        non-atomic volatility, fixed floor, and taker-leakage proxies. A SELL
+        is an inventory-management action and has no entry-cost gate here.
         """
-        Minimal execution-risk proxy (depth-aware when available):
-        - Slippage proxy from current top-of-book spread and touch depth.
-        - Non-atomic risk proxy from recent volatility.
-        - Floor penalty to avoid overfitting to optimistic micro snapshots.
-        """
-        if not self.config.maker_execution_penalty_enable:
-            return {
-                "slippage_usdc": Decimal("0"),
-                "vwap_usdc": Decimal("0"),
-                "non_atomic_usdc": Decimal("0"),
-                "floor_usdc": Decimal("0"),
-                "total_usdc": Decimal("0"),
-                "recent_vol": max(Decimal("0"), recent_vol or Decimal("0")),
-            }
-
-        spread = max(Decimal("0"), inst_ask - inst_bid)
-        book_levels = bid_levels if side == "buy" else ask_levels
-
-        def _vwap(levels: List[Tuple[Decimal, Decimal]], qty: Decimal) -> Tuple[Optional[Decimal], Decimal]:
-            if not levels or qty <= 0:
-                return None, Decimal("0")
-            remaining = qty
-            consumed_notional = Decimal("0")
-            consumed_qty = Decimal("0")
-            for px, level_qty in levels:
-                if remaining <= 0:
-                    break
-                if px <= 0 or level_qty <= 0:
-                    continue
-                take_qty = min(remaining, level_qty)
-                consumed_notional += px * take_qty
-                consumed_qty += take_qty
-                remaining -= take_qty
-            if consumed_qty <= 0:
-                return None, qty
-            return consumed_notional / consumed_qty, remaining
-        # Depth-aware slippage proxy:
-        # If depth is available, penalize more aggressively when quote size approaches/exceeds top depth.
-        # If depth is unavailable, fallback to spread-only proxy.
-        touch_depth = bid_depth if side == "buy" else ask_depth
-        notional = max(Decimal("0"), quote_shares * quote_price)
-        if touch_depth is not None and touch_depth > 0:
-            impact_ratio = max(Decimal("0"), quote_shares / touch_depth)
-            impact_mult = Decimal("1") + (impact_ratio * self.config.maker_execution_depth_impact_mult)
-            slippage_penalty = notional * spread * self.config.maker_execution_slippage_spread_mult * impact_mult
-        else:
-            slippage_penalty = effective_quote_size * spread * self.config.maker_execution_slippage_spread_mult
-
-        # Multi-level VWAP add-on (if book levels are available).
-        book_vwap_penalty = Decimal("0")
-        if book_levels:
-            vwap_price, remaining_qty = _vwap(book_levels, quote_shares)
-            if vwap_price is not None and quote_shares > 0:
-                touch_px = inst_bid if side == "buy" else inst_ask
-                if touch_px > 0:
-                    if side == "buy":
-                        # Buy-side risk = forced exit by selling into bids.
-                        impact_pct = max(Decimal("0"), (touch_px - vwap_price) / touch_px)
-                    else:
-                        # Sell-side risk = forced cover by buying from asks.
-                        impact_pct = max(Decimal("0"), (vwap_price - touch_px) / touch_px)
-                    book_vwap_penalty += notional * impact_pct * self.config.maker_execution_vwap_mult
-            # If requested size exceeds observed levels, penalize exhaustion explicitly.
-            if remaining_qty > 0 and quote_shares > 0:
-                exhaustion_ratio = remaining_qty / quote_shares
-                book_vwap_penalty += notional * exhaustion_ratio * spread * self.config.maker_execution_vwap_mult
-
-        # Preserve the legacy proxy as telemetry.  The convergence program
-        # compares it with a single observed-markout model before changing any
-        # economics gate; neither comparison value changes current behavior.
-        vol = max(Decimal("0"), recent_vol or Decimal("0"))
-        legacy_non_atomic_penalty = (
-            notional * vol * self.config.maker_execution_non_atomic_vol_mult
-        )
-        legacy_raw_total = slippage_penalty + book_vwap_penalty + legacy_non_atomic_penalty
-        legacy_floor_penalty = max(
-            Decimal("0"),
-            self.config.maker_execution_penalty_floor_usdc - legacy_raw_total,
-        )
-        legacy_total = max(self.config.maker_execution_penalty_floor_usdc, legacy_raw_total)
-
-        # Order-book VWAP is a stress estimate for an immediate full liquidation.
-        # A real maker-fill adverse markout is a direct measurement of the
-        # expected short-horizon loss after a passive entry. It replaces both
-        # that forced-exit stress and the overlapping non-atomic proxy.
-        vwap_penalty = book_vwap_penalty
         empirical_markout_penalty: Optional[Decimal] = None
-        use_empirical_markout = False
-        if self.config.maker_execution_empirical_adverse_markout_per_share is not None:
+        if side == "buy" and self.config.maker_execution_empirical_adverse_markout_per_share is not None:
             empirical_markout_penalty = (
                 quote_shares * self.config.maker_execution_empirical_adverse_markout_per_share
             )
-            vwap_penalty = Decimal("0")
-            use_empirical_markout = True
-
-        non_atomic_penalty = (
-            Decimal("0")
-            if use_empirical_markout
-            else notional * vol * self.config.maker_execution_non_atomic_vol_mult
-        )
-        raw_total = (
-            slippage_penalty
-            + vwap_penalty
-            + non_atomic_penalty
-            + (empirical_markout_penalty or Decimal("0"))
-        )
-        floor_penalty = max(Decimal("0"), self.config.maker_execution_penalty_floor_usdc - raw_total)
+        cost_available = side != "buy" or empirical_markout_penalty is not None
+        total = empirical_markout_penalty or Decimal("0")
         return {
-            "slippage_usdc": slippage_penalty,
-            "vwap_usdc": vwap_penalty,
-            "book_vwap_usdc": book_vwap_penalty,
-            "empirical_markout_usdc": empirical_markout_penalty or Decimal("0"),
+            "empirical_markout_usdc": total,
             "empirical_markout_applied": (
                 Decimal("1") if empirical_markout_penalty is not None else Decimal("0")
             ),
-            "empirical_markout_replaces_non_atomic": (
-                Decimal("1") if use_empirical_markout else Decimal("0")
-            ),
-            # Observation-only comparison for execution-cost convergence.
-            # ``single_empirical_penalty_usdc`` deliberately excludes spread,
-            # depth, VWAP, volatility and fixed-floor proxies: those effects
-            # are represented by the observed post-fill adverse markout.
-            "legacy_proxy_slippage_usdc": slippage_penalty,
-            "legacy_proxy_vwap_usdc": book_vwap_penalty,
-            "legacy_proxy_non_atomic_usdc": legacy_non_atomic_penalty,
-            "legacy_proxy_floor_usdc": legacy_floor_penalty,
-            "legacy_proxy_penalty_usdc": legacy_total,
-            "single_empirical_penalty_usdc": empirical_markout_penalty or Decimal("0"),
-            "single_empirical_available": Decimal("1") if use_empirical_markout else Decimal("0"),
-            "non_atomic_usdc": non_atomic_penalty,
-            "floor_usdc": floor_penalty,
-            "total_usdc": max(self.config.maker_execution_penalty_floor_usdc, raw_total),
-            "recent_vol": vol,
+            "cost_model_available": Decimal("1") if cost_available else Decimal("0"),
+            "total_usdc": total,
+            "recent_vol": max(Decimal("0"), recent_vol or Decimal("0")),
         }
 
     def generate_quote_plan(
@@ -576,14 +447,14 @@ class MakerEngine:
             quote_size_usdc=bid_quote_size,
             probability=quote_bid,
             half_spread=(skewed_fair - quote_bid),
-            adverse_selection_buffer=self.config.maker_adverse_selection_buffer,
+            adverse_selection_buffer=Decimal("0"),
             fee_rate_override=fee_rate,
         )
         ask_econ = estimate_quote_economics(
             quote_size_usdc=ask_quote_size,
             probability=quote_ask,
             half_spread=(quote_ask - skewed_fair),
-            adverse_selection_buffer=self.config.maker_adverse_selection_buffer,
+            adverse_selection_buffer=Decimal("0"),
             fee_rate_override=fee_rate,
         )
 
@@ -647,33 +518,6 @@ class MakerEngine:
             if bid_econ.shares > 0
             else Decimal("0")
         )
-        bid_taker_leakage_usdc = Decimal("0")
-        if bid_econ.shares > 0 and self.config.maker_buy_taker_leakage_prob > 0:
-            bid_taker_leakage_usdc = estimate_taker_fee_usdc(
-                shares=bid_econ.shares,
-                probability=quote_bid,
-            ) * self.config.maker_buy_taker_leakage_prob
-        bid_taker_leakage_ps = (
-            bid_taker_leakage_usdc / bid_econ.shares
-            if bid_econ.shares > 0
-            else Decimal("0")
-        )
-        bid_exec_components["legacy_proxy_robust_net_usdc"] = (
-            bid_econ.expected_net_usdc
-            - bid_exec_components["legacy_proxy_penalty_usdc"]
-            - bid_taker_leakage_usdc
-        )
-        bid_exec_components["single_empirical_robust_net_usdc"] = (
-            bid_econ.expected_net_usdc
-            - bid_exec_components["single_empirical_penalty_usdc"]
-            - bid_taker_leakage_usdc
-        )
-        ask_exec_components["legacy_proxy_robust_net_usdc"] = (
-            ask_econ.expected_net_usdc - ask_exec_components["legacy_proxy_penalty_usdc"]
-        )
-        ask_exec_components["single_empirical_robust_net_usdc"] = (
-            ask_econ.expected_net_usdc - ask_exec_components["single_empirical_penalty_usdc"]
-        )
         ask_fee_ps = (
             ask_econ.fee_equivalent_usdc / ask_econ.shares
             if ask_econ.shares > 0
@@ -689,38 +533,30 @@ class MakerEngine:
             if ask_econ.shares > 0
             else Decimal("0")
         )
-        bid_adverse_ps = (
-            self.config.maker_adverse_selection_buffer / bid_econ.shares
-            if bid_econ.shares > 0
-            else Decimal("0")
-        )
-        ask_adverse_ps = (
-            self.config.maker_adverse_selection_buffer / ask_econ.shares
-            if ask_econ.shares > 0
-            else Decimal("0")
-        )
-
         # Directional edge:
         # BUY  -> value minus paid price and execution/friction costs
         # SELL -> received price minus fair value and execution/friction costs
-        bid_directional_edge_ps = fair_price - quote_bid - bid_fee_ps - bid_taker_leakage_ps - bid_exec_penalty_ps - bid_adverse_ps
-        ask_directional_edge_ps = quote_ask - fair_price - ask_fee_ps - ask_exec_penalty_ps - ask_adverse_ps
+        bid_directional_edge_ps = fair_price - quote_bid - bid_fee_ps - bid_exec_penalty_ps
+        ask_directional_edge_ps = quote_ask - fair_price - ask_fee_ps - ask_exec_penalty_ps
         bid_directional_edge_usdc = bid_directional_edge_ps * bid_econ.shares
         ask_directional_edge_usdc = ask_directional_edge_ps * ask_econ.shares
 
         if allowed_buy:
-            robust_bid_net = bid_econ.expected_net_usdc - bid_exec_penalty - bid_taker_leakage_usdc
+            robust_bid_net = bid_econ.expected_net_usdc - bid_exec_penalty
             side_plan["buy"] = (
                 quote_bid,
                 bid_econ,
-                robust_bid_net >= self.config.maker_min_expected_net_usdc,
+                (
+                    bid_exec_components["cost_model_available"] > 0
+                    and robust_bid_net >= self.config.maker_min_expected_net_usdc
+                ),
                 robust_bid_net,
                 bid_exec_penalty,
                 bid_directional_edge_ps,
                 bid_directional_edge_usdc,
                 fair_price,
-                bid_fee_ps + bid_taker_leakage_ps,
-                bid_exec_penalty_ps + bid_adverse_ps,
+                bid_fee_ps,
+                bid_exec_penalty_ps,
                 bid_exec_components,
             )
         else:
@@ -728,13 +564,13 @@ class MakerEngine:
                 quote_bid,
                 bid_econ,
                 False,
-                bid_econ.expected_net_usdc - bid_exec_penalty - bid_taker_leakage_usdc,
+                bid_econ.expected_net_usdc - bid_exec_penalty,
                 bid_exec_penalty,
                 bid_directional_edge_ps,
                 bid_directional_edge_usdc,
                 fair_price,
-                bid_fee_ps + bid_taker_leakage_ps,
-                bid_exec_penalty_ps + bid_adverse_ps,
+                bid_fee_ps,
+                bid_exec_penalty_ps,
                 bid_exec_components,
             )
             
@@ -750,7 +586,7 @@ class MakerEngine:
                 ask_directional_edge_usdc,
                 fair_price,
                 ask_fee_ps,
-                ask_exec_penalty_ps + ask_adverse_ps,
+                ask_exec_penalty_ps,
                 ask_exec_components,
             )
         else:
@@ -764,7 +600,7 @@ class MakerEngine:
                 ask_directional_edge_usdc,
                 fair_price,
                 ask_fee_ps,
-                ask_exec_penalty_ps + ask_adverse_ps,
+                ask_exec_penalty_ps,
                 ask_exec_components,
             )
 

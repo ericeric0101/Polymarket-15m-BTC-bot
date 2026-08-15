@@ -119,7 +119,6 @@ class MakerConfig:
     reload_inventory_threshold_shares: Decimal
     reload_min_expected_net_multiplier: Decimal
     reload_min_directional_edge_ps: Decimal
-    adverse_selection_buffer: Decimal
     use_post_only: bool
     post_only_strict: bool
     max_inventory_shares: Decimal
@@ -140,19 +139,8 @@ class MakerConfig:
     requote_max_per_sec: float
     requote_hysteresis_ticks: Decimal
     buy_planned_quote_max_age_sec: float
-    execution_penalty_enable: bool
-    execution_penalty_floor_usdc: Decimal
-    execution_slippage_spread_mult: Decimal
-    execution_non_atomic_vol_mult: Decimal
-    execution_depth_impact_mult: Decimal
-    execution_vwap_mult: Decimal
-    execution_vwap_entry_risk_weight: Decimal
-    execution_vwap_full_risk_last_sec: float
-    execution_empirical_markout_enabled: bool
     execution_empirical_markout_lookback_hours: float
     execution_empirical_markout_min_samples: int
-    execution_empirical_markout_horizon_sec: int
-    buy_taker_leakage_prob: Decimal
     orderbook_fetch_interval_sec: int
     orderbook_levels_limit: int
     vol_warmup_quotes: int
@@ -572,11 +560,6 @@ class AppConfig:
         econ_fee_rate_decimal = _env_decimal("MAKER_ECON_FEE_RATE_DECIMAL", "0")
         if econ_fee_rate_decimal < 0:
             econ_fee_rate_decimal = Decimal("0")
-        buy_taker_leakage_prob = max(
-            Decimal("0"),
-            min(Decimal("1"), _env_decimal("MAKER_BUY_TAKER_LEAKAGE_PROB", "0.15")),
-        )
-
         bi_side_flip_confirmations = max(1, _env_int("BI_SIDE_FLIP_CONFIRMATIONS", 2))
         bi_side_flip_confirmations_held = max(
             bi_side_flip_confirmations,
@@ -727,7 +710,6 @@ class AppConfig:
                     "MAKER_RELOAD_MIN_DIRECTIONAL_EDGE_PS",
                     str(maker_min_directional_edge_ps_conservative),
                 ),
-                adverse_selection_buffer=_env_decimal("MAKER_ADVERSE_SELECTION_BUFFER", "0.0005"),
                 use_post_only=_env_bool("MAKER_POST_ONLY", False),
                 post_only_strict=_env_bool_inverted("MAKER_POST_ONLY_STRICT", True),
                 max_inventory_shares=_env_decimal("MAKER_MAX_INVENTORY_SHARES", "25"),
@@ -754,23 +736,6 @@ class AppConfig:
                     0.5,
                     _env_float("MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC", 10.0),
                 ),
-                execution_penalty_enable=_env_bool_inverted("MAKER_EXECUTION_PENALTY_ENABLE", True),
-                execution_penalty_floor_usdc=_env_decimal("MAKER_EXECUTION_PENALTY_FLOOR_USDC", "0.001"),
-                execution_slippage_spread_mult=_env_decimal("MAKER_EXECUTION_SLIPPAGE_SPREAD_MULT", "0.15"),
-                execution_non_atomic_vol_mult=_env_decimal("MAKER_EXECUTION_NON_ATOMIC_VOL_MULT", "0.2"),
-                execution_depth_impact_mult=_env_decimal("MAKER_EXECUTION_DEPTH_IMPACT_MULT", "1.0"),
-                execution_vwap_mult=_env_decimal("MAKER_EXECUTION_VWAP_MULT", "0.5"),
-                execution_vwap_entry_risk_weight=min(
-                    Decimal("1"),
-                    max(Decimal("0"), _env_decimal("MAKER_EXECUTION_VWAP_ENTRY_RISK_WEIGHT", "0.25")),
-                ),
-                execution_vwap_full_risk_last_sec=max(
-                    0.0,
-                    _env_float("MAKER_EXECUTION_VWAP_FULL_RISK_LAST_SEC", 180.0),
-                ),
-                execution_empirical_markout_enabled=_env_bool(
-                    "MAKER_EXECUTION_EMPIRICAL_MARKOUT_ENABLE", True
-                ),
                 execution_empirical_markout_lookback_hours=max(
                     1.0,
                     _env_float("MAKER_EXECUTION_EMPIRICAL_MARKOUT_LOOKBACK_HOURS", 168.0),
@@ -779,11 +744,6 @@ class AppConfig:
                     1,
                     _env_int("MAKER_EXECUTION_EMPIRICAL_MARKOUT_MIN_SAMPLES", 5),
                 ),
-                execution_empirical_markout_horizon_sec=max(
-                    1,
-                    _env_int("MAKER_EXECUTION_EMPIRICAL_MARKOUT_HORIZON_SEC", 10),
-                ),
-                buy_taker_leakage_prob=buy_taker_leakage_prob,
                 orderbook_fetch_interval_sec=max(1, _env_int("ORDERBOOK_FETCH_INTERVAL_SEC", 5)),
                 orderbook_levels_limit=max(1, _env_int("ORDERBOOK_LEVELS_LIMIT", 10)),
                 vol_warmup_quotes=_env_int("MAKER_VOL_WARMUP_QUOTES", 30),

@@ -216,6 +216,26 @@ class TakerExitMixin:
                     or twap_confirms_adverse
                 )
             )
+            min_recovery_ratio_for_release = Decimal(
+                str(getattr(self, "taker_exit_min_recovery_ratio", Decimal("0"))),
+            )
+            recovery_ratio_for_release = (
+                best_bid / avg_entry if avg_entry > 0 else Decimal("0")
+            )
+            awaiting_recovery_sell_release = False
+            if (
+                invalidation_recovery_candidate
+                and recovery_ratio_for_release >= min_recovery_ratio_for_release
+            ):
+                # A normal TP SELL reserves the same tokens as recovery.  The
+                # previous order of operations checked sellable inventory
+                # first, so a valid recovery at a high bid could be rejected
+                # before it ever cancelled that TP. Release the reservation
+                # first, then re-evaluate sellable inventory after its cancel
+                # acknowledgement.
+                awaiting_recovery_sell_release = self._prepare_invalidation_recovery_sell_release(
+                    instrument_id=inst_id,
+                )
             sellable_for_audit = self._get_effective_sellable_qty(instrument_id=inst_id)
             qty_for_audit = min(qty, sellable_for_audit)
             min_recovery_ratio_for_audit = Decimal(
@@ -239,6 +259,8 @@ class TakerExitMixin:
                     audit_block_reason = "bid_below_minimum"
                 elif bool(getattr(self, "taker_exit_require_twap_confirmation", True)) and not twap_confirms_adverse:
                     audit_block_reason = "twap_not_confirming_adverse"
+                elif awaiting_recovery_sell_release:
+                    audit_block_reason = "awaiting_existing_sell_cancel"
                 elif qty_for_audit + Decimal("0.000001") < self.maker_exchange_min_shares:
                     audit_block_reason = "insufficient_sellable_inventory"
                 elif (
@@ -276,6 +298,8 @@ class TakerExitMixin:
                         block_reason=audit_block_reason,
                     ),
                 )
+            if awaiting_recovery_sell_release:
+                continue
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)
             # After a high-cost BUY fill, avoid active exits below cost during cooldown.
@@ -847,37 +871,11 @@ class TakerExitMixin:
         if stages is None:
             stages = {}
             self.recovery_exit_stage_by_inst = stages
+        if self._prepare_invalidation_recovery_sell_release(instrument_id=inst):
+            return True
         sell_key = self._order_key_for("sell", inst)
         existing = self.active_maker_orders.get(sell_key)
         existing_is_passive = bool(existing and existing.get("is_recovery_exit_passive"))
-        # A normal TP/maker sell reserves the same outcome tokens that the
-        # recovery order needs.  Do not overwrite its local state and submit a
-        # second SELL: the venue will reject it for insufficient free balance.
-        # Wait for the cancel acknowledgement (or a matched terminal event)
-        # before the recovery ladder takes ownership of the sell reservation.
-        if existing and not existing_is_passive:
-            prior_stage = stages.get(inst_key)
-            stages[inst_key] = "awaiting_existing_sell_cancel"
-            if not bool(existing.get("pending_cancel")):
-                self._cancel_maker_order_side(
-                    "sell",
-                    reason="recovery_exit_replace_existing_sell",
-                    instrument_id=inst,
-                )
-            if prior_stage != "awaiting_existing_sell_cancel":
-                self._db_strategy_event(
-                    "EXIT_AUDIT_OUTCOME",
-                    {
-                        "slug": str(self.current_market_slug or ""),
-                        "instrument_id": inst_key,
-                        "exit_reason": "invalidation_recovery",
-                        "outcome": "awaiting_existing_sell_cancel",
-                        "existing_client_order_id": str(
-                            getattr(existing.get("order"), "client_order_id", "") or ""
-                        ),
-                    },
-                )
-            return True
         existing_age = (
             max(0.0, time.time() - float(existing.get("created_ts", 0.0)))
             if existing_is_passive
@@ -930,6 +928,49 @@ class TakerExitMixin:
             decision_payload={**decision_payload, "recovery_ladder_stage": "limit_fak"},
             execution_mode="limit_fak" if action == "limit_fak" else "market_fok",
         )
+
+    def _prepare_invalidation_recovery_sell_release(self, *, instrument_id: Any) -> bool:
+        """Cancel a normal SELL that prevents a recovery exit from using tokens.
+
+        Returns ``True`` while cancellation is outstanding. The caller must
+        wait for the venue acknowledgement before checking sellable inventory
+        or submitting the recovery replacement.
+        """
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return False
+        inst_key = self._instrument_key(inst)
+        stages = getattr(self, "recovery_exit_stage_by_inst", None)
+        if stages is None:
+            stages = {}
+            self.recovery_exit_stage_by_inst = stages
+        sell_key = self._order_key_for("sell", inst)
+        existing = self.active_maker_orders.get(sell_key)
+        if not existing or bool(existing.get("is_recovery_exit_passive")):
+            return False
+
+        prior_stage = stages.get(inst_key)
+        stages[inst_key] = "awaiting_existing_sell_cancel"
+        if not bool(existing.get("pending_cancel")):
+            self._cancel_maker_order_side(
+                "sell",
+                reason="recovery_exit_replace_existing_sell",
+                instrument_id=inst,
+            )
+        if prior_stage != "awaiting_existing_sell_cancel":
+            self._db_strategy_event(
+                "EXIT_AUDIT_OUTCOME",
+                {
+                    "slug": str(self.current_market_slug or ""),
+                    "instrument_id": inst_key,
+                    "exit_reason": "invalidation_recovery",
+                    "outcome": "awaiting_existing_sell_cancel",
+                    "existing_client_order_id": str(
+                        getattr(existing.get("order"), "client_order_id", "") or ""
+                    ),
+                },
+            )
+        return True
 
     def _submit_passive_recovery_exit(
         self,

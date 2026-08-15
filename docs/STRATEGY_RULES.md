@@ -44,6 +44,12 @@ The negative `fair - entry` bands are recorded in shadow telemetry only. A
 future live policy requires a separately documented, cost-inclusive,
 out-of-sample result and an explicit bounded range.
 
+The empirical execution cost is the observed 10-second adverse markout of
+real maker BUY fills, scaled to the submitted quantity. If the journal has
+fewer than `EXECUTION_COST_MIN_SAMPLES` observations in
+`EXECUTION_COST_LOOKBACK_HOURS`, new BUY entries are blocked; the bot does not
+fall back to VWAP, depth, spread, volatility, or taker-leakage proxies.
+
 ## Score and Time Rules
 
 - First filled entry of a market: `max(FIRST_ENTRY_SCORE_MIN, ENTRY_SCORE_MIN)`.

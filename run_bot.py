@@ -140,7 +140,6 @@ from bot.quoting import (
     apply_quote_plan_guards,
 )
 from bot.quote_service import (
-    apply_entry_vwap_risk_weight,
     apply_entry_quality_quote_placement,
     parse_quote_plan,
     should_emit_edge_observation,
@@ -178,7 +177,11 @@ from bot.smart_money import (
     extract_condition_id_from_instrument_id,
     extract_token_id_from_instrument_id,
 )
-from bot.shadow_signal import build_entry_regime_observation_payload, build_live_signal_compare_payload
+from bot.shadow_signal import (
+    attach_forecast_snapshot_telemetry,
+    build_entry_regime_observation_payload,
+    build_live_signal_compare_payload,
+)
 from bot.probability_calibration import calibrate_probability
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
@@ -1127,7 +1130,7 @@ class IntegratedBTCStrategy(
             sigma = diag_sigma
         end_ts = getattr(self, "current_market_end_timestamp", None)
         time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
-        return build_live_signal_compare_payload(
+        payload = build_live_signal_compare_payload(
             slug=slug,
             spot=spot,
             strike=strike,
@@ -1148,6 +1151,16 @@ class IntegratedBTCStrategy(
             bid_up=up_quote[0] if up_quote is not None else None,
             bid_down=down_quote[0] if down_quote is not None else None,
             cfg=self.shadow_signal_config,
+        )
+        reference_source_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+        reference_source_age_sec = (
+            max(0.0, now_ts - reference_source_ts) if reference_source_ts > 0 else None
+        )
+        return attach_forecast_snapshot_telemetry(
+            payload,
+            diagnostics=pricer_diag,
+            reference_source=str(getattr(self, "latest_external_spot_source", "") or ""),
+            reference_source_age_sec=reference_source_age_sec,
         )
 
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
@@ -1983,56 +1996,6 @@ class IntegratedBTCStrategy(
                     if isinstance(quote_data, (tuple, list)) and len(quote_data) > 3
                     else None
                 )
-                # The entry-quality and high-price checks are earlier than
-                # ``build_desired_quote_entry``.  Give them the same effective
-                # passive-entry cost basis as the final economics gate, rather
-                # than the maker engine's raw forced-exit VWAP estimate.
-                if side == "buy" and isinstance(quote_data, (tuple, list)):
-                    raw_econ = quote_data[1] if len(quote_data) > 1 else None
-                    raw_exec_penalty = quote_data[4] if len(quote_data) > 4 else None
-                    raw_penalty_components = quote_data[10] if len(quote_data) > 10 else None
-                    if (
-                        raw_econ is not None
-                        and isinstance(candidate_robust_net, Decimal)
-                        and isinstance(raw_exec_penalty, Decimal)
-                    ):
-                        candidate_robust_net, _, _, _ = apply_entry_vwap_risk_weight(
-                            expected_net=Decimal(str(raw_econ.expected_net_usdc)),
-                            raw_robust_net=candidate_robust_net,
-                            raw_execution_penalty=raw_exec_penalty,
-                            execution_penalty_components=(
-                                raw_penalty_components
-                                if isinstance(raw_penalty_components, dict)
-                                else None
-                            ),
-                            entry_is_flat=(
-                                current_inst_inventory_qty <= Decimal("0")
-                                and other_held_inventory_qty <= Decimal("0")
-                            ),
-                            entry_signal_confirmed=(
-                                bool(self.active_side_locked)
-                                and self._latest_observation_supports_locked_side(
-                                    self.active_side,
-                                    self.side_decision_score,
-                                )
-                                and not bool(locked_side_runtime.entry_blocked)
-                            ),
-                            time_left_sec=time_left_sec_global,
-                            vwap_entry_risk_weight=getattr(
-                                self,
-                                "maker_execution_vwap_entry_risk_weight",
-                                Decimal("1"),
-                            ),
-                            vwap_full_risk_last_sec=float(getattr(
-                                self,
-                                "maker_execution_vwap_full_risk_last_sec",
-                                0.0,
-                            )),
-                            hold_to_redeem_enabled=bool(
-                                getattr(self, "hold_to_redeem_enabled", False)
-                            ),
-                            post_only_enabled=bool(getattr(self, "maker_use_post_only", False)),
-                        )
                 buy_entry_eval = evaluate_buy_entry_controls(
                     side=side,
                     bi_side_enabled=self.bi_side_enabled,
@@ -2493,20 +2456,6 @@ class IntegratedBTCStrategy(
                         )
                         and not bool(locked_side_runtime.entry_blocked)
                     ),
-                    execution_vwap_entry_risk_weight=getattr(
-                        self,
-                        "maker_execution_vwap_entry_risk_weight",
-                        Decimal("1"),
-                    ),
-                    execution_vwap_full_risk_last_sec=float(getattr(
-                        self,
-                        "maker_execution_vwap_full_risk_last_sec",
-                        0.0,
-                    )),
-                    hold_to_redeem_enabled=bool(
-                        getattr(self, "hold_to_redeem_enabled", False)
-                    ),
-                    post_only_enabled=bool(getattr(self, "maker_use_post_only", False)),
                 )
                 if buy_entry_eval.shadow_only:
                     desired_entry["fair_edge_bucket_shadow"] = buy_entry_eval.fair_edge_bucket

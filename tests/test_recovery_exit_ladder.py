@@ -198,3 +198,47 @@ def test_recovery_ladder_cancels_existing_sell_before_submitting_replacement() -
             },
         ),
     ]
+
+
+def test_recovery_sell_release_is_requested_before_sellable_qty_is_available() -> None:
+    instrument_id = "up-token"
+    existing_order = SimpleNamespace(client_order_id="BTC-15M-MAKER-SELL-existing")
+
+    class Strategy(TakerExitMixin):
+        current_market_slug = "btc-updown-15m-test"
+
+        def __init__(self) -> None:
+            self.recovery_exit_stage_by_inst = {}
+            self.active_maker_orders = {
+                "sell:up-token": {
+                    "order": existing_order,
+                    "side": "sell",
+                    "instrument_id": instrument_id,
+                    "pending_cancel": False,
+                },
+            }
+            self.cancel_calls = []
+            self.events = []
+
+        def _normalize_instrument_id(self, value):
+            return value
+
+        def _instrument_key(self, value):
+            return str(value)
+
+        def _order_key_for(self, side, value):
+            return f"{side}:{value}"
+
+        def _cancel_maker_order_side(self, side, reason="", instrument_id=None):
+            self.cancel_calls.append((side, reason, instrument_id))
+            self.active_maker_orders[f"{side}:{instrument_id}"]["pending_cancel"] = True
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    strategy = Strategy()
+    assert strategy._prepare_invalidation_recovery_sell_release(instrument_id=instrument_id) is True
+    assert strategy.cancel_calls == [
+        ("sell", "recovery_exit_replace_existing_sell", instrument_id),
+    ]
+    assert strategy.recovery_exit_stage_by_inst[instrument_id] == "awaiting_existing_sell_cancel"

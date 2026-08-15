@@ -70,6 +70,7 @@ from bot.recovery import StrategyRecoveryMixin
 from bot.order_submission import submit_maker_quote
 from bot.shadow_signal import (
     ShadowSignalConfig,
+    attach_forecast_snapshot_telemetry,
     build_entry_regime_observation_payload,
     build_live_signal_compare_payload,
     select_shadow_candidate,
@@ -649,6 +650,8 @@ class DummyTrendSubmitStrategy:
         self.submitted_orders = []
         self.order_events = []
         self.consecutive_denied_orders = 0
+        self.recovery_exit_stage_by_inst = {}
+        self.tail_exit_calls = []
 
     @property
     def cache(self):
@@ -677,6 +680,12 @@ class DummyTrendSubmitStrategy:
             return self.inventory_delta_shares + qty_dec
         return self.inventory_delta_shares - qty_dec
 
+    def _get_effective_sellable_qty(self, instrument_id=None):
+        return self.inventory_delta_shares
+
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id=None):
+        return self.inventory_delta_shares
+
     def _is_dry_run_mode(self):
         return False
 
@@ -691,6 +700,10 @@ class DummyTrendSubmitStrategy:
 
     def _db_order_event(self, **kwargs):
         self.order_events.append(kwargs)
+
+    def _submit_taker_exit_order(self, **kwargs):
+        self.tail_exit_calls.append(kwargs)
+        return True
 
 
 class DummyMakerInstrumentStrategy:
@@ -3252,6 +3265,32 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty_without_economics_exemp
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "trend"
 
 
+def test_crossing_tail_protect_tp_uses_bounded_taker_exit_not_post_only_maker_order():
+    strategy = DummyTrendSubmitStrategy()
+    strategy.inventory_delta_shares = Decimal("5.5")
+    strategy._get_quote_for_instrument = lambda _instrument_id: (Decimal("0.99"), Decimal("1.00"))
+    econ = SimpleNamespace(expected_net_usdc=Decimal("0.38"))
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="sell",
+        limit_price=Decimal("0.97"),
+        econ=econ,
+        dynamic_fee_rate=Decimal("0.01"),
+        directional_snapshot={"tail_protect_tp": True, "tail_protect_tp_price": Decimal("0.97")},
+        target_qty_override=Decimal("5.5"),
+    )
+
+    assert strategy.submitted_orders == []
+    assert len(strategy.tail_exit_calls) == 1
+    exit_call = strategy.tail_exit_calls[0]
+    assert exit_call["reason"] == "tail_protect_tp_crossing"
+    assert exit_call["execution_mode"] == "limit_fak"
+    assert exit_call["best_bid"] == Decimal("0.99")
+    assert exit_call["quantity"] == Decimal("5.5")
+
+
 def test_entry_quality_adjustment_soft_sizes_high_price_chase_risk():
     adjustment = evaluate_entry_quality_adjustment(
         candidate_entry_price=Decimal("0.85"),
@@ -4190,6 +4229,38 @@ def test_live_shadow_payload_does_not_emit_opposite_candidate_side():
 
     assert payload["shadow_bias_side"] == "UP"
     assert payload["shadow_candidate_side"] is None
+
+
+def test_forecast_snapshot_telemetry_preserves_shadow_payload_and_serializes_decimals():
+    original = {"slug": "btc-updown-15m-test", "shadow_score": 0.2}
+    payload = attach_forecast_snapshot_telemetry(
+        original,
+        diagnostics={
+            "sigma_default": Decimal("0.60"),
+            "sigma_raw_realized": Decimal("0.42"),
+            "sigma_input_source": "realized_external_spot",
+            "sigma_after_scale": Decimal("0.42"),
+            "sigma_after_bounds": Decimal("0.42"),
+            "sigma_time_decay_enabled": True,
+            "sigma_time_decay_factor": Decimal("0.50"),
+            "sigma_after_time_decay": Decimal("0.21"),
+            "sigma": Decimal("0.21"),
+            "implied_sigma": Decimal("0.35"),
+            "implied_sigma_floor": Decimal("0.21"),
+            "implied_sigma_floor_applied": True,
+            "standard_up_probability": Decimal("0.61"),
+            "twap_average_up_probability": Decimal("0.58"),
+            "settlement_model": "twap_average_approx",
+        },
+        reference_source="polymarket_chainlink_twap_60s_ws",
+        reference_source_age_sec=0.25,
+    )
+
+    assert original == {"slug": "btc-updown-15m-test", "shadow_score": 0.2}
+    assert payload["forecast_schema_version"] == 1
+    assert payload["forecast_sigma_final"] == 0.21
+    assert payload["forecast_twap_average_up_probability"] == 0.58
+    assert payload["forecast_reference_source"] == "polymarket_chainlink_twap_60s_ws"
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():

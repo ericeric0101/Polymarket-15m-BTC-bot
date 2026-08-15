@@ -839,91 +839,6 @@ def _trend_price_premium_ok(
     return best_bid <= fair + max_premium
 
 
-def apply_entry_vwap_risk_weight(
-    *,
-    expected_net: Decimal,
-    raw_robust_net: Decimal | None,
-    raw_execution_penalty: Decimal | None,
-    execution_penalty_components: dict[str, Decimal] | None,
-    entry_is_flat: bool,
-    entry_signal_confirmed: bool,
-    time_left_sec: float | None,
-    vwap_entry_risk_weight: Decimal,
-    vwap_full_risk_last_sec: float,
-    hold_to_redeem_enabled: bool = False,
-    post_only_enabled: bool = False,
-) -> tuple[Decimal | None, Decimal | None, dict[str, Decimal], bool]:
-    """Apply entry execution cost policy without charging hypothetical exits.
-
-    The book VWAP component models immediately liquidating the entire position.
-    A confirmed, flat maker entry that is configured to hold to redemption does
-    not incur that cost at entry time. When the order is also post-only, spread
-    crossing, non-atomic forced-exit risk, and taker-leakage are likewise not
-    unavoidable entry costs. They remain raw telemetry and continue to apply
-    to inventory, non-post-only orders, and the final-risk window.
-    """
-    components = dict(execution_penalty_components or {})
-    if raw_robust_net is None or raw_execution_penalty is None:
-        return raw_robust_net, raw_execution_penalty, components, False
-
-    raw_vwap = max(Decimal("0"), components.get("vwap_usdc", Decimal("0")))
-    weight = min(Decimal("1"), max(Decimal("0"), vwap_entry_risk_weight))
-    passive_hold_entry = hold_to_redeem_enabled and post_only_enabled
-    eligible = (
-        (raw_vwap > 0 or passive_hold_entry)
-        and (weight < Decimal("1") or passive_hold_entry)
-        and entry_is_flat
-        and entry_signal_confirmed
-        and time_left_sec is not None
-        and time_left_sec > max(0.0, vwap_full_risk_last_sec)
-    )
-    if not eligible:
-        components.update({
-            "vwap_raw_usdc": raw_vwap,
-            "vwap_risk_weight": Decimal("1"),
-            "total_raw_usdc": raw_execution_penalty,
-            "total_effective_usdc": raw_execution_penalty,
-        })
-        return raw_robust_net, raw_execution_penalty, components, False
-
-    effective_weight = Decimal("0") if hold_to_redeem_enabled else weight
-    raw_slippage = max(Decimal("0"), components.get("slippage_usdc", Decimal("0")))
-    raw_non_atomic = max(Decimal("0"), components.get("non_atomic_usdc", Decimal("0")))
-    effective_vwap = raw_vwap * effective_weight
-    effective_slippage = Decimal("0") if passive_hold_entry else raw_slippage
-    effective_non_atomic = Decimal("0") if passive_hold_entry else raw_non_atomic
-
-    if passive_hold_entry:
-        # A passive, flat hold-to-redeem entry has no guaranteed liquidation.
-        # The expected-net adverse buffer and the outer robust-net threshold
-        # continue to provide its required entry margin.
-        effective_penalty = Decimal("0")
-    else:
-        effective_penalty = raw_execution_penalty - raw_vwap + effective_vwap
-    # The raw robust net already contains execution penalty and taker leakage.
-    taker_leakage = expected_net - raw_execution_penalty - raw_robust_net
-    effective_taker_leakage = Decimal("0") if passive_hold_entry else taker_leakage
-    effective_robust = expected_net - effective_penalty - effective_taker_leakage
-    components.update({
-        "vwap_raw_usdc": raw_vwap,
-        "vwap_effective_usdc": effective_vwap,
-        "vwap_risk_weight": effective_weight,
-        "slippage_raw_usdc": raw_slippage,
-        "slippage_effective_usdc": effective_slippage,
-        "non_atomic_raw_usdc": raw_non_atomic,
-        "non_atomic_effective_usdc": effective_non_atomic,
-        "taker_leakage_raw_usdc": taker_leakage,
-        "taker_leakage_effective_usdc": effective_taker_leakage,
-        "vwap_entry_policy": (
-            Decimal("1") if hold_to_redeem_enabled else Decimal("0")
-        ),
-        "passive_hold_entry_cost_policy": Decimal("1") if passive_hold_entry else Decimal("0"),
-        "total_raw_usdc": raw_execution_penalty,
-        "total_effective_usdc": effective_penalty,
-    })
-    return effective_robust, effective_penalty, components, True
-
-
 def scale_buy_economics_to_order_size(
     *,
     econ: Any,
@@ -1910,10 +1825,6 @@ def build_desired_quote_entry(
     decision_pressure: float | None = None,
     entry_is_flat: bool = False,
     entry_signal_confirmed: bool = False,
-    execution_vwap_entry_risk_weight: Decimal = Decimal("1"),
-    execution_vwap_full_risk_last_sec: float = 0.0,
-    hold_to_redeem_enabled: bool = False,
-    post_only_enabled: bool = False,
 ) -> dict[str, Any]:
     limit_price = quote_data[0]
     econ = quote_data[1]
@@ -1926,8 +1837,11 @@ def build_desired_quote_entry(
     fee_ps = quote_data[8] if len(quote_data) > 8 else None
     other_cost_ps = quote_data[9] if len(quote_data) > 9 else None
     execution_penalty_components = quote_data[10] if len(quote_data) > 10 else None
+    execution_cost_model_available = bool(
+        isinstance(execution_penalty_components, dict)
+        and execution_penalty_components.get("cost_model_available", Decimal("1")) > 0
+    )
 
-    vwap_risk_adjusted = False
     if side == "buy":
         effective_size_multiplier = max(Decimal("0"), entry_size_multiplier)
         if entry_mode == "trend":
@@ -1954,25 +1868,6 @@ def build_desired_quote_entry(
             ),
             size_multiplier=effective_size_multiplier,
         )
-        robust_net, exec_penalty, execution_penalty_components, vwap_risk_adjusted = (
-            apply_entry_vwap_risk_weight(
-                expected_net=econ.expected_net_usdc,
-                raw_robust_net=robust_net if isinstance(robust_net, Decimal) else None,
-                raw_execution_penalty=exec_penalty if isinstance(exec_penalty, Decimal) else None,
-                execution_penalty_components=(
-                    execution_penalty_components
-                    if isinstance(execution_penalty_components, dict)
-                    else None
-                ),
-                entry_is_flat=entry_is_flat,
-                entry_signal_confirmed=entry_signal_confirmed,
-                time_left_sec=time_left_sec,
-                vwap_entry_risk_weight=execution_vwap_entry_risk_weight,
-                vwap_full_risk_last_sec=execution_vwap_full_risk_last_sec,
-                hold_to_redeem_enabled=hold_to_redeem_enabled,
-                post_only_enabled=post_only_enabled,
-            )
-        )
         # This must never override phase/risk controls. It only re-evaluates
         # an econ-gated new BUY using its expected, rather than worst-case,
         # forced-exit VWAP cost.
@@ -1981,6 +1876,7 @@ def build_desired_quote_entry(
             and not reduce_only_reason
             and not forced_sell_only
             and not side_disable_reason_by_side.get(side)
+            and execution_cost_model_available
             and isinstance(robust_net, Decimal)
             and robust_net >= min_expected_net_usdc
         ):
@@ -1991,7 +1887,9 @@ def build_desired_quote_entry(
         robust_net_val = robust_net if isinstance(robust_net, Decimal) else None
         robust_net_display = float(robust_net) if isinstance(robust_net, Decimal) else float("nan")
         exec_penalty_display = float(exec_penalty) if isinstance(exec_penalty, Decimal) else 0.0
-        if robust_net_val is not None and robust_net_val < min_expected_net_usdc:
+        if side == "buy" and not execution_cost_model_available:
+            diag_reason = "econ_gate execution_cost_calibration_unavailable"
+        elif robust_net_val is not None and robust_net_val < min_expected_net_usdc:
             diag_reason = (
                 f"econ_gate robust_net={float(robust_net_val):.6f} "
                 f"(expected_net={float(econ.expected_net_usdc):.6f}, "
@@ -2130,7 +2028,7 @@ def build_desired_quote_entry(
         "fee_ps": fee_ps,
         "other_cost_ps": other_cost_ps,
         "execution_penalty_components": execution_penalty_components,
-        "execution_vwap_risk_adjusted": vwap_risk_adjusted,
+        "execution_cost_model_available": execution_cost_model_available,
         "entry_mode": entry_mode if side == "buy" else "",
         "size_multiplier": (
             effective_size_multiplier

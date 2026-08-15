@@ -15,13 +15,11 @@ class StrategyDBRuntimeMixin:
         if not config:
             return
         config.maker_execution_empirical_adverse_markout_per_share = None
-        if not getattr(self, "maker_execution_empirical_markout_enabled", False):
-            return
         if not self.trade_db:
             return
 
         lookback_hours = float(self.maker_execution_empirical_markout_lookback_hours)
-        horizon_sec = int(self.maker_execution_empirical_markout_horizon_sec)
+        horizon_sec = 10
         min_samples = int(self.maker_execution_empirical_markout_min_samples)
         calibration = self.trade_db.load_maker_buy_markout_calibration(
             lookback_hours=lookback_hours,
@@ -30,7 +28,7 @@ class StrategyDBRuntimeMixin:
         )
         if not calibration:
             logger.info(
-                "Execution penalty calibration unavailable; retaining book VWAP stress: "
+                "Execution-cost calibration unavailable; new BUY entries remain blocked: "
                 f"horizon={horizon_sec}s lookback={lookback_hours:.0f}h min_samples={min_samples}"
             )
             return
@@ -310,7 +308,9 @@ class StrategyDBRuntimeMixin:
             "directional_edge_ps": float(desired_entry.get("directional_edge_ps")) if desired_entry.get("directional_edge_ps") is not None else None,
             "execution_penalty_usdc": float(desired_entry.get("exec_penalty")) if desired_entry.get("exec_penalty") is not None else None,
             "execution_penalty_components": desired_entry.get("execution_penalty_components"),
-            "execution_vwap_risk_adjusted": bool(desired_entry.get("execution_vwap_risk_adjusted", False)),
+            "execution_cost_model_available": bool(
+                desired_entry.get("execution_cost_model_available", False)
+            ),
             "external_entry_confirmation": desired_entry.get("external_entry_confirmation"),
             "market_buy_count": int(market_buy_count),
             "inventory_qty": float(current_inst_inventory_qty),

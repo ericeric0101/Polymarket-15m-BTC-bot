@@ -158,7 +158,6 @@ def initialize_strategy_settings(
     strategy.maker_reload_inventory_threshold_shares = config.maker.reload_inventory_threshold_shares
     strategy.maker_reload_min_expected_net_multiplier = config.maker.reload_min_expected_net_multiplier
     strategy.maker_reload_min_directional_edge_ps = config.maker.reload_min_directional_edge_ps
-    strategy.maker_adverse_selection_buffer = config.maker.adverse_selection_buffer
     strategy.maker_use_post_only = config.maker.use_post_only
     strategy.maker_post_only_strict = config.maker.post_only_strict
     strategy.maker_max_inventory_shares = config.maker.max_inventory_shares
@@ -177,19 +176,8 @@ def initialize_strategy_settings(
     strategy.maker_pennying_min_edge = config.maker.pennying_min_edge
     strategy.maker_requote_max_per_sec = config.maker.requote_max_per_sec
     strategy.maker_requote_hysteresis_ticks = config.maker.requote_hysteresis_ticks
-    strategy.maker_execution_penalty_enable = config.maker.execution_penalty_enable
-    strategy.maker_execution_penalty_floor_usdc = config.maker.execution_penalty_floor_usdc
-    strategy.maker_execution_slippage_spread_mult = config.maker.execution_slippage_spread_mult
-    strategy.maker_execution_non_atomic_vol_mult = config.maker.execution_non_atomic_vol_mult
-    strategy.maker_execution_depth_impact_mult = config.maker.execution_depth_impact_mult
-    strategy.maker_execution_vwap_mult = config.maker.execution_vwap_mult
-    strategy.maker_execution_vwap_entry_risk_weight = config.maker.execution_vwap_entry_risk_weight
-    strategy.maker_execution_vwap_full_risk_last_sec = config.maker.execution_vwap_full_risk_last_sec
-    strategy.maker_execution_empirical_markout_enabled = config.maker.execution_empirical_markout_enabled
     strategy.maker_execution_empirical_markout_lookback_hours = config.maker.execution_empirical_markout_lookback_hours
     strategy.maker_execution_empirical_markout_min_samples = config.maker.execution_empirical_markout_min_samples
-    strategy.maker_execution_empirical_markout_horizon_sec = config.maker.execution_empirical_markout_horizon_sec
-    strategy.maker_buy_taker_leakage_prob = config.maker.buy_taker_leakage_prob
     strategy.orderbook_fetch_interval_sec = config.maker.orderbook_fetch_interval_sec
     strategy.orderbook_levels_limit = config.maker.orderbook_levels_limit
     strategy.requote_bucket_tokens = strategy.maker_requote_max_per_sec
@@ -540,7 +528,6 @@ def initialize_strategy_settings(
         maker_min_shares=strategy.maker_min_shares,
         maker_fixed_shares=strategy.maker_fixed_shares,
         maker_max_order_usdc=strategy.maker_max_order_usdc,
-        maker_adverse_selection_buffer=strategy.maker_adverse_selection_buffer,
         maker_min_expected_net_usdc=strategy.maker_min_expected_net_usdc,
         maker_quote_sides=strategy.maker_quote_sides,
         maker_inventory_skew_max=strategy.maker_inventory_skew_max,
@@ -554,13 +541,6 @@ def initialize_strategy_settings(
         maker_vol_extreme_spread_mult=strategy.maker_vol_extreme_spread_mult,
         maker_pennying_enabled=strategy.maker_pennying_enabled,
         maker_pennying_min_edge=strategy.maker_pennying_min_edge,
-        maker_execution_penalty_enable=strategy.maker_execution_penalty_enable,
-        maker_execution_penalty_floor_usdc=strategy.maker_execution_penalty_floor_usdc,
-        maker_execution_slippage_spread_mult=strategy.maker_execution_slippage_spread_mult,
-        maker_execution_non_atomic_vol_mult=strategy.maker_execution_non_atomic_vol_mult,
-        maker_execution_depth_impact_mult=strategy.maker_execution_depth_impact_mult,
-        maker_execution_vwap_mult=strategy.maker_execution_vwap_mult,
-        maker_buy_taker_leakage_prob=strategy.maker_buy_taker_leakage_prob,
         maker_execution_empirical_adverse_markout_per_share=None,
     )
     strategy.maker_engine = MakerEngine(maker_config)

@@ -390,3 +390,51 @@ def build_live_signal_compare_payload(
         "shadow_min_score_abs": cfg.shadow_score_min_abs,
         "shadow_min_edge": float(cfg.min_edge),
     }
+
+
+def attach_forecast_snapshot_telemetry(
+    payload: Dict[str, Any],
+    *,
+    diagnostics: Dict[str, Any],
+    reference_source: str,
+    reference_source_age_sec: Optional[float],
+) -> Dict[str, Any]:
+    """Attach the quote-pricer forecast state without changing shadow signals."""
+    out = dict(payload)
+
+    def _number(key: str) -> Optional[float]:
+        value = diagnostics.get(key)
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    out.update(
+        {
+            "forecast_schema_version": 1,
+            "forecast_reference_source": str(reference_source or ""),
+            "forecast_reference_source_age_sec": (
+                float(reference_source_age_sec) if reference_source_age_sec is not None else None
+            ),
+            "forecast_sigma_default": _number("sigma_default"),
+            "forecast_sigma_raw_realized": _number("sigma_raw_realized"),
+            "forecast_sigma_input_source": str(diagnostics.get("sigma_input_source") or ""),
+            "forecast_sigma_after_scale": _number("sigma_after_scale"),
+            "forecast_sigma_after_bounds": _number("sigma_after_bounds"),
+            "forecast_sigma_time_decay_enabled": bool(diagnostics.get("sigma_time_decay_enabled", False)),
+            "forecast_sigma_time_decay_factor": _number("sigma_time_decay_factor"),
+            "forecast_sigma_after_time_decay": _number("sigma_after_time_decay"),
+            "forecast_sigma_final": _number("sigma"),
+            "forecast_implied_sigma": _number("implied_sigma"),
+            "forecast_implied_sigma_floor": _number("implied_sigma_floor"),
+            "forecast_implied_sigma_floor_applied": bool(
+                diagnostics.get("implied_sigma_floor_applied", False)
+            ),
+            "forecast_standard_up_probability": _number("standard_up_probability"),
+            "forecast_twap_average_up_probability": _number("twap_average_up_probability"),
+            "forecast_settlement_model": str(diagnostics.get("settlement_model") or ""),
+        }
+    )
+    return out
