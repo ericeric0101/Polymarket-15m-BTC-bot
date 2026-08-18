@@ -2810,7 +2810,11 @@ def test_continuation_entry_gets_longer_entry_protection():
 
 
 def test_app_config_reads_extended_env(monkeypatch):
-    monkeypatch.setenv("MAKER_REQUOTE_MIN_AGE_SEC", "9")
+    monkeypatch.setenv("ORDER_POST_ONLY", "1")
+    monkeypatch.setenv("ORDER_TTL_SEC", "19")
+    monkeypatch.setenv("ORDER_REQUOTE_MIN_AGE_SEC", "9")
+    monkeypatch.setenv("ORDER_REQUOTE_HYSTERESIS_TICKS", "2")
+    monkeypatch.setenv("MARKET_MAX_POSITION_SHARES", "10")
     monkeypatch.setenv("MAKER_DIGITAL_SIGMA_DEFAULT", "0.77")
     monkeypatch.setenv("AUTO_REDEEM_ENABLED", "1")
     monkeypatch.setenv("TRADE_DB_PATH", "./logs/custom.db")
@@ -2828,7 +2832,12 @@ def test_app_config_reads_extended_env(monkeypatch):
 
     cfg = AppConfig.from_env(enable_terminal_dashboard=False)
 
+    assert cfg.maker.use_post_only is True
+    assert cfg.maker.order_ttl_sec == 19
     assert cfg.maker.requote_min_age_sec == 9.0
+    assert cfg.maker.requote_hysteresis_ticks == Decimal("2")
+    assert cfg.maker.max_inventory_shares == Decimal("10")
+    assert cfg.maker.max_locked_side_position == Decimal("10")
     assert cfg.maker.digital_sigma_default == Decimal("0.77")
     assert cfg.operations.auto_redeem_enabled is True
     assert cfg.operations.trade_db_path == "./logs/custom.db"

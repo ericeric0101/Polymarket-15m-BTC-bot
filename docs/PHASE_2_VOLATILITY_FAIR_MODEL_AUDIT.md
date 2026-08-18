@@ -127,8 +127,30 @@ replay before the next step.
    shows a stable calibration improvement. Preserve the floor/cap as internal
    safety invariants until sufficient evidence supports a replacement.
 
-The phase is ready for P2.1 now. It is not ready to change sigma values or
-relax entry gates.
+## P2.1-P2.3 Implementation Status (2026-08-18)
+
+P2.1 telemetry and P2.2's shared forecast builder are complete.  Quote pricing
+and side decision now use the same `ForecastState` construction: the same raw
+realized sigma, bounds, time-decay, implied-sigma guardrail, reference source,
+and native-TWAP average-settlement probability.  No entry, exit, sizing, or
+cost threshold was changed while making this convergence.
+
+`scripts/twap_fair_calibration_report.py` now reads the P2.1 forecast fields
+from `LIVE_SIGNAL_COMPARE`, chooses one earliest complete forecast per settled
+market, separates source/model cohorts, and prints a chronological 30% holdout
+instead of treating repeated quote ticks as independent samples.
+
+The first report over the available 120-hour history produced 207 joinable
+settled markets.  The native-TWAP cohort (200 markets) had model Brier score
+`0.44247`, versus `0.24659` for the contemporaneous market midpoint.  This is
+not evidence to tune sigma by hand: all sampled forecasts were at 10-15 minutes
+to close and the extreme probability bins are strongly miscalibrated.  It is
+evidence that P2.4 must be data-driven and evaluated per forecast timing and
+source, not by adding another volatility multiplier.
+
+`MAKER_DIGITAL_IMPLIED_SIGMA_WEIGHT` was removed because it had no behavioral
+consumer.  The remaining sigma values stay unchanged until a later
+out-of-sample calibration identifies a single replacement policy.
 
 ---
 
@@ -158,17 +180,43 @@ readers; it does not eliminate those readers yet.
 | --- | --- | --- | --- |
 | `MAKER_QUOTE_REFRESH_SEC`, `MAX_REQUOTE_PER_SEC` | `AppConfig` -> `settings` -> `quote_runtime` | Evaluation cadence versus rate cap; complementary, not duplicates. | `QuoteSchedulePolicy`; retain both semantic inputs. |
 | `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC` | `quote_runtime._should_skip_buy_submit_for_quote_drift` | Submit-time snapshot validity, separate from transport freshness. | Keep under `SubmitFreshnessPolicy`. |
-| `MAKER_POST_ONLY`, `ORDER_POST_ONLY` | `runtime_env` canonical alias -> `AppConfig` -> `quote_service.build_limit_order` | Same boolean through canonical/legacy names. | Keep only `ORDER_POST_ONLY` as operator input; remove legacy profile key when the reader migration is made. |
+| `MAKER_POST_ONLY`, `ORDER_POST_ONLY` | `AppConfig` -> `quote_service.build_limit_order` | Same boolean through canonical/legacy names. | **Resolved 2026-08-18:** runtime reads only `ORDER_POST_ONLY`; legacy name is migration-only. |
 | `MAKER_POST_ONLY_STRICT` | `quote_service.build_limit_order` | Controls failure behavior if Nautilus cannot construct post-only. | Move to adapter/venue capability policy; not a strategy knob. |
-| `MAKER_ORDER_TTL_SEC`, `ORDER_TTL_SEC` | canonical alias -> `order_runtime._is_order_ttl_expired`, `quote_runtime` | Same normal maker-order TTL. | Keep only `ORDER_TTL_SEC` externally; legacy reader remains internal until migration. |
+| `MAKER_ORDER_TTL_SEC`, `ORDER_TTL_SEC` | `AppConfig` -> `order_runtime._is_order_ttl_expired`, `quote_runtime` | Same normal maker-order TTL. | **Resolved 2026-08-18:** runtime reads only `ORDER_TTL_SEC`; legacy name is migration-only. |
 | `MAKER_POST_FILL_BUY_COOLDOWN_SEC` | `fill_ledger` / `quote_runtime` | Prevents immediate buy re-entry after a fill. | `PostFillPolicy`; independent of order TTL. |
 | `MAKER_EARLY_SELL_ONLY_SEC`, `MAKER_REDUCE_ONLY_NO_NEW_SELL_LAST_SEC` | `quote_runtime`, `quoting` | Both constrain tail behavior but have different phase semantics. | Replace later with one named market-phase policy, after replay equivalence. |
 | `MAKER_GATE_BLOCK_GRACE_SEC` | `quote_service.reconcile_unwanted_quotes` | Delay before canceling an existing quote after a gate blocks it. | `CancelPolicy.gate_block_grace`; not duplicate with cancel cooldown. |
-| `MAKER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_MIN_AGE_SEC` | canonical alias -> `quote_service.should_requote_existing_order` | Same BUY/default requote age. | Keep only canonical operator input. |
+| `MAKER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_MIN_AGE_SEC` | `AppConfig` -> `quote_service.should_requote_existing_order` | Same BUY/default requote age. | **Resolved 2026-08-18:** runtime reads only canonical operator input. |
 | `MAKER_REQUOTE_MIN_AGE_SEC_SELL` | `quote_service.should_requote_existing_order` | SELL-specific override. | Retain only if replay proves BUY/SELL need distinct ages; otherwise inherit default. |
-| `REQUOTE_HYSTERESIS_TICKS`, `ORDER_REQUOTE_HYSTERESIS_TICKS` | canonical alias -> `quote_service.compute_requote_target_version` | Same price-move threshold. | Keep only canonical operator input. |
+| `REQUOTE_HYSTERESIS_TICKS`, `ORDER_REQUOTE_HYSTERESIS_TICKS` | `AppConfig` -> `quote_service.compute_requote_target_version` | Same price-move threshold. | **Resolved 2026-08-18:** runtime reads only canonical operator input. |
 | `MAKER_CANCEL_COOLDOWN_SEC`, `MAKER_CANCEL_ACK_TIMEOUT_SEC`, `MAKER_CANCEL_MAX_RETRIES`, `MAKER_CANCEL_ACK_DEDUPE_WINDOW_SEC` | `order_runtime`, `execution_events` | Four stages of one cancel state machine: duplicate suppression, wait, retry, event de-dupe. | Introduce internal `CancelPolicy`; do not merge numeric meanings. |
 | `MAKER_ERROR_PAUSE_SEC`, `MAKER_MAX_CONSECUTIVE_DENIED` | `order_runtime`, order-event rejection handling | Failure backoff and escalation threshold. | `SubmissionFailurePolicy`; separate from cancel retries. |
+
+## Phase 3.1: Confirmed Alias Removal (2026-08-18)
+
+This first lifecycle change removes only names proven to be duplicate operator
+inputs. It does not change TTL, requote cadence, cancellation, watchdog, or
+inventory semantics.
+
+`AppConfig` now reads these canonical keys directly:
+
+- `ORDER_POST_ONLY`
+- `ORDER_TTL_SEC`
+- `ORDER_REQUOTE_MIN_AGE_SEC`
+- `ORDER_REQUOTE_HYSTERESIS_TICKS`
+- `MARKET_MAX_POSITION_SHARES`
+
+The latter is the sole external cap and supplies both existing internal
+inventory-cap consumers. `runtime_env` no longer projects it into
+`MAKER_MAX_INVENTORY_SHARES` or `MAX_LOCKED_SIDE_POSITION`; it no longer
+aliases the four `ORDER_*` keys either. The legacy names remain accepted only
+by `scripts/migrate_env_to_profile.py`, which converts old files to canonical
+operator keys rather than preserving them in a profile.
+
+The versioned `btc15_twap_v3.env` already contained none of these six legacy
+keys, so this removes six runtime readers rather than profile lines. Its
+physical key count will only fall when a later phase removes a setting that is
+actually present and whose behavior has independently been validated.
 
 ## Inventory: Quote Transport and Watchdog (11)
 
@@ -197,7 +245,7 @@ readers; it does not eliminate those readers yet.
 
 | Keys | Read / consumer path | Relationship | Candidate consolidation |
 | --- | --- | --- | --- |
-| `MARKET_MAX_POSITION_SHARES`, `MAKER_MAX_INVENTORY_SHARES`, `MAX_LOCKED_SIDE_POSITION` | `runtime_env` aliases -> `quote_service` inventory gates | One intended market cap is projected into two legacy caps. | Genuine duplicate: keep `MARKET_MAX_POSITION_SHARES`; remove two independent profile values only after cap-equivalence tests. |
+| `MARKET_MAX_POSITION_SHARES`, `MAKER_MAX_INVENTORY_SHARES`, `MAX_LOCKED_SIDE_POSITION` | `AppConfig` -> `quote_service` inventory gates | One intended market cap supplied two legacy consumers. | **Resolved 2026-08-18:** one canonical external cap supplies both internal consumers. |
 | `INVENTORY_FULL_BEHAVIOR` | `quote_service.build_desired_quote_entry` | Defines STOP_BUY versus spread widening at cap. | Inventory-policy enum; retain. |
 | `MAKER_INVENTORY_SKEW_MAX` | `MakerEngine.apply_inventory_skew` | Price skew, not a hard cap. | Move to quote pricing group; do not merge with position cap. |
 | `MAKER_STALE_INVENTORY_SEC`, `MAKER_STALE_INVENTORY_MULTIPLIER` | inventory-aware quoting | Stale internal inventory protection. | One `InventoryFreshnessPolicy`; distinct threshold and multiplier. |
@@ -233,14 +281,14 @@ edit.
 The following are actual duplication candidates, not merely similarly named
 settings:
 
-1. Canonical-to-legacy aliases: `ORDER_POST_ONLY`/`MAKER_POST_ONLY`,
+1. **Resolved 2026-08-18:** canonical-to-legacy aliases: `ORDER_POST_ONLY`/`MAKER_POST_ONLY`,
    `ORDER_TTL_SEC`/`MAKER_ORDER_TTL_SEC`,
    `ORDER_REQUOTE_MIN_AGE_SEC`/`MAKER_REQUOTE_MIN_AGE_SEC`,
    `ORDER_REQUOTE_HYSTERESIS_TICKS`/`REQUOTE_HYSTERESIS_TICKS`,
    `MARKET_TARGET_SHARES`/`MAKER_FIXED_SHARES`, and
    historical `MARKET_MAX_BUY_EVENTS`/`MARKET_MAX_BUY_EVENTS_PER_MARKET` aliases
    (replaced by the one-successful-BUY invariant).
-2. One canonical position cap currently writes both
+2. **Resolved 2026-08-18:** one canonical position cap previously wrote both
    `MAKER_MAX_INVENTORY_SHARES` and `MAX_LOCKED_SIDE_POSITION`.
 
 The following must **not** be prematurely merged: order TTL versus recovery or
@@ -248,15 +296,11 @@ urgent-exit TTL; stale quote versus planned-quote age; cancel cooldown versus
 cancel acknowledgement timeout; and normal inventory cap versus sellable
 venue-balance buffer. They are separate states with different failure modes.
 
-## Safe Phase-3 Implementation Order
+## Remaining Phase-3 Work
 
-1. Add a read-only lifecycle trace that associates every cancel/requote with
-   its active policy values and target version. No behavior change.
-2. Establish replay and dry-run parity for normal maker order lifecycle.
-3. Move aliases to one internal `QuoteLifecyclePolicy`, preserving values and
-   tests. This is a refactor only.
-4. Remove only one alias pair per commit after same-window replay, dry-run,
-   and the invariant `market exposure <= 10 shares` remain unchanged.
-
-No third-family numeric value should be changed while P2.1/P2.2 and the P5
-small-live recovery-exit validation are still collecting evidence.
+Phase 3.1 removed the six confirmed duplicate readers without changing any
+numeric lifecycle policy. The remaining settings are not aliases: they govern
+distinct cancellation, watchdog, venue-balance, recovery, and tail-order
+states. Their consolidation must therefore wait for a separate behavior-
+equivalence change, rather than deleting values merely because their names are
+similar.

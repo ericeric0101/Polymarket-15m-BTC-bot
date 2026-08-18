@@ -35,6 +35,7 @@ from bot.price_streams import (
     extract_binance_aggtrade_tick,
     extract_polymarket_chainlink_tick,
 )
+from bot.forecast_state import ForecastState, build_forecast_state
 from execution.maker_engine import MakerEngine
 
 
@@ -846,6 +847,52 @@ class SpotPricerMixin:
     # Fair probability
     # ------------------------------------------------------------------
 
+    def _build_forecast_state(
+        self,
+        *,
+        spot: Decimal,
+        strike: Decimal,
+        time_left_sec: float,
+        market_mid: Decimal,
+        outcome: str,
+        reference_source: str,
+        now_ts: Optional[float] = None,
+    ) -> ForecastState:
+        """Build the one forecast representation used by price and side logic."""
+        now = float(now_ts if now_ts is not None else time.time())
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        twap_window_sec = int(getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60)
+        observed_twap_average: Optional[Decimal] = None
+        observed_twap_seconds = 0.0
+        if self._is_twap_spot_source(reference_source):
+            observed_twap_average, observed_twap_seconds = self._final_twap_observation(
+                now_ts=now,
+                end_ts=float(end_ts) if end_ts is not None else now + time_left_sec,
+                window_sec=twap_window_sec,
+            )
+        state = build_forecast_state(
+            spot=spot,
+            strike=strike,
+            time_left_sec=time_left_sec,
+            reference_source=reference_source,
+            market_mid=market_mid,
+            outcome=outcome,
+            sigma_default=self.maker_digital_sigma_default,
+            sigma_raw_realized=self._estimate_external_spot_sigma_annualized(),
+            sigma_scale=self.maker_digital_vol_scale,
+            sigma_floor=self.maker_digital_sigma_floor,
+            sigma_ceiling=self.maker_digital_sigma_ceiling,
+            time_decay_enabled=bool(self.maker_digital_sigma_time_decay_enabled),
+            time_decay_ref_sec=float(self.maker_digital_sigma_time_decay_ref_sec),
+            time_decay_min=float(self.maker_digital_sigma_time_decay_min),
+            implied_sigma_enabled=bool(getattr(self, "maker_implied_sigma_enabled", False)),
+            twap_window_sec=twap_window_sec,
+            observed_twap_average=observed_twap_average,
+            observed_twap_seconds=observed_twap_seconds,
+        )
+        self.last_forecast_state = state
+        return state
+
     async def _compute_fair_probability(self, market_mid: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
         """
         Build fair probability from external BTC spot.
@@ -862,8 +909,7 @@ class SpotPricerMixin:
             self._record_external_spot_observation(external)
 
             strike = None
-            sigma_default = self.maker_digital_sigma_default
-            sigma = sigma_default
+            sigma = self.maker_digital_sigma_default
             time_left_sec = 0.0
             outcome = ""
 
@@ -871,85 +917,8 @@ class SpotPricerMixin:
                 strike = await self._get_market_strike_for_instrument(instrument_id)
                 end_ts = getattr(self, "current_market_end_timestamp", None)
                 time_left_sec = float(end_ts - time.time()) if end_ts is not None else 0.0
-                est_sigma = self._estimate_external_spot_sigma_annualized()
-                sigma_input_source = "default"
-                if est_sigma and est_sigma > 0:
-                    sigma = est_sigma
-                    sigma_input_source = "realized_external_spot"
-                sigma_before_scale = sigma
-                sigma = sigma * self.maker_digital_vol_scale
-                sigma_after_scale = sigma
-                sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
-                sigma_after_bounds = sigma
-
-                # Dynamic sigma: time decay — reduce sigma as expiry approaches
-                time_decay_factor = None
-                if self.maker_digital_sigma_time_decay_enabled and time_left_sec > 0:
-                    ref = self.maker_digital_sigma_time_decay_ref_sec
-                    decay = max(self.maker_digital_sigma_time_decay_min, min(1.0, time_left_sec / ref))
-                    time_decay_factor = Decimal(str(round(decay, 4)))
-                    sigma = sigma * time_decay_factor
-                    sigma = max(self.maker_digital_sigma_floor, sigma)
-                sigma_after_time_decay = sigma
-
                 instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
                 outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
-
-                # Implied sigma: derive σ from market mid price (DIAGNOSTIC ONLY)
-                # Computed and logged to compare with realized sigma, but NOT
-                # blended into fair price — that would create circular calibration
-                # (market price → implied σ → fair ≈ market price → no edge).
-                implied_sigma_used = None
-                sigma_before_implied_floor = sigma
-                implied_sigma_floor = None
-                implied_sigma_floor_applied = False
-                if (
-                    getattr(self, "maker_implied_sigma_enabled", False)
-                    and strike is not None
-                    and time_left_sec > 30
-                    and float(market_mid) > 0.05
-                    and float(market_mid) < 0.95
-                ):
-                    imp_sigma = MakerEngine.implied_sigma_from_market_mid(
-                        market_mid=float(market_mid),
-                        spot=float(external),
-                        strike=float(strike),
-                        time_left_sec=time_left_sec,
-                        outcome=outcome or "up",
-                    )
-                    if imp_sigma is not None and imp_sigma > 0:
-                        implied_sigma_used = imp_sigma
-                        # Guardrail only: prevent realized sigma from being
-                        # absurdly lower than what the market implies (floor at 60% of implied)
-                        sigma_floor_from_implied = imp_sigma * Decimal("0.6")
-                        implied_sigma_floor = sigma_floor_from_implied
-                        if sigma < sigma_floor_from_implied:
-                            sigma = max(sigma, sigma_floor_from_implied)
-                            sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
-                            implied_sigma_floor_applied = sigma > sigma_before_implied_floor
-
-                self.last_digital_pricer_diagnostics = {
-                    "sigma_default": sigma_default,
-                    "sigma_raw_realized": est_sigma,
-                    "sigma_input_source": sigma_input_source,
-                    "sigma_before_scale": sigma_before_scale,
-                    "sigma_after_scale": sigma_after_scale,
-                    "sigma_after_bounds": sigma_after_bounds,
-                    "sigma_time_decay_enabled": bool(self.maker_digital_sigma_time_decay_enabled),
-                    "sigma_time_decay_factor": time_decay_factor,
-                    "sigma_after_time_decay": sigma_after_time_decay,
-                    "sigma": sigma,
-                    "implied_sigma": implied_sigma_used,
-                    "sigma_before_implied_floor": sigma_before_implied_floor,
-                    "implied_sigma_floor": implied_sigma_floor,
-                    "implied_sigma_floor_applied": implied_sigma_floor_applied,
-                    "strike": strike,
-                    "time_left_sec": time_left_sec,
-                    "outcome": outcome,
-                    "market_mid": market_mid,
-                    "spot": external,
-                    "reference_source": str(self.latest_external_spot_source or ""),
-                }
 
                 if strike is None:
                     if time.time() - self._last_strike_fallback_log_ts >= self.strike_fallback_log_interval_sec:
@@ -957,33 +926,26 @@ class SpotPricerMixin:
                         self._last_strike_fallback_log_ts = time.time()
                 else:
                     now_ts = time.time()
-                    twap_window_sec = int(
-                        getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60
-                    )
-                    observed_twap_avg, observed_twap_sec = self._final_twap_observation(
+                    forecast = self._build_forecast_state(
+                        spot=external,
+                        strike=strike,
+                        time_left_sec=time_left_sec,
+                        market_mid=market_mid,
+                        outcome=outcome,
+                        reference_source=str(self.latest_external_spot_source or ""),
                         now_ts=now_ts,
-                        end_ts=float(end_ts) if end_ts is not None else now_ts + time_left_sec,
-                        window_sec=twap_window_sec,
+                    )
+                    sigma = forecast.sigma_final
+                    self.last_digital_pricer_diagnostics = forecast.diagnostics(
+                        market_mid=market_mid,
+                        outcome=outcome,
                     )
                     if now_ts - self._last_digital_pricer_log_ts >= 60:
-                        up_prob = MakerEngine.twap_settlement_up_probability(
-                            spot=float(external),
-                            strike=float(strike),
-                            sigma_annual=float(sigma),
-                            time_left_sec=time_left_sec,
-                            twap_window_sec=twap_window_sec,
-                            observed_window_avg=float(observed_twap_avg) if observed_twap_avg is not None else None,
-                            observed_window_sec=observed_twap_sec,
-                        ) if self._is_twap_spot_source(self.latest_external_spot_source or "") else MakerEngine.digital_up_probability(
-                            spot=float(external),
-                            strike=float(strike),
-                            sigma_annual=float(sigma),
-                            time_left_sec=time_left_sec,
-                        )
+                        up_prob = forecast.selected_up_probability
                         fair_for_token = up_prob
                         if outcome == "down":
                             fair_for_token = Decimal("1.0") - up_prob
-                        imp_str = f" implied_σ={float(implied_sigma_used):.4f}" if implied_sigma_used else ""
+                        imp_str = f" implied_σ={float(forecast.implied_sigma):.4f}" if forecast.implied_sigma else ""
                         fair_color = "green" if fair_for_token >= Decimal("0.60") else "yellow" if fair_for_token >= Decimal("0.40") else "red"
                         side_color = "green" if self.active_side.value == "UP" else "red" if self.active_side.value == "DOWN" else "yellow"
                         source_color = "cyan" if self._is_twap_spot_source(self.latest_external_spot_source or "") else "yellow"
@@ -1022,63 +984,10 @@ class SpotPricerMixin:
                 sigma=float(sigma),
                 time_left_sec=time_left_sec,
                 outcome=outcome,
-                pricer_mode=self.maker_fair_pricer_mode
+                pricer_mode=self.maker_fair_pricer_mode,
             )
-            # ``calculate_fair_price`` owns the drift/digital fallback.  For
-            # a locked TWAP market replace only its digital probability with
-            # an average-settlement approximation, preserving token outcome.
-            if (
-                self.maker_fair_pricer_mode == "digital"
-                and strike is not None
-                and self._is_twap_spot_source(self.latest_external_spot_source or "")
-            ):
-                up_prob = MakerEngine.twap_settlement_up_probability(
-                    spot=float(external),
-                    strike=float(strike),
-                    sigma_annual=float(sigma),
-                    time_left_sec=time_left_sec,
-                    twap_window_sec=int(getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60),
-                    observed_window_avg=(
-                        float(observed_twap_avg) if "observed_twap_avg" in locals() and observed_twap_avg is not None else None
-                    ),
-                    observed_window_sec=(observed_twap_sec if "observed_twap_sec" in locals() else 0.0),
-                )
-                fair = up_prob if outcome != "down" else Decimal("1") - up_prob
-                self.last_digital_pricer_diagnostics["settlement_model"] = "twap_average_approx"
-
-            # P2.1 telemetry: retain both comparable probability models. This
-            # runs after the live fair is decided and never feeds a decision.
             if self.maker_fair_pricer_mode == "digital" and strike is not None:
-                standard_up_probability = MakerEngine.digital_up_probability(
-                    spot=float(external),
-                    strike=float(strike),
-                    sigma_annual=float(sigma),
-                    time_left_sec=time_left_sec,
-                )
-                self.last_digital_pricer_diagnostics["standard_up_probability"] = standard_up_probability
-                if self._is_twap_spot_source(self.latest_external_spot_source or ""):
-                    observed_twap_avg, observed_twap_sec = self._final_twap_observation(
-                        now_ts=time.time(),
-                        end_ts=float(end_ts) if end_ts is not None else time.time() + time_left_sec,
-                        window_sec=int(getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60),
-                    )
-                    self.last_digital_pricer_diagnostics["twap_average_up_probability"] = (
-                        MakerEngine.twap_settlement_up_probability(
-                            spot=float(external),
-                            strike=float(strike),
-                            sigma_annual=float(sigma),
-                            time_left_sec=time_left_sec,
-                            twap_window_sec=int(
-                                getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60
-                            ),
-                            observed_window_avg=(
-                                float(observed_twap_avg) if observed_twap_avg is not None else None
-                            ),
-                            observed_window_sec=observed_twap_sec,
-                        )
-                    )
-                else:
-                    self.last_digital_pricer_diagnostics["settlement_model"] = "instantaneous_digital"
+                fair = self.last_forecast_state.probability_for_outcome(outcome)
 
             self.last_external_spot = external
         else:

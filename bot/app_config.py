@@ -176,7 +176,6 @@ class MakerConfig:
     digital_sigma_time_decay_ref_sec: float
     digital_sigma_time_decay_min: float
     implied_sigma_enabled: bool
-    implied_sigma_weight: Decimal
     continuation_entry_enabled: bool
     continuation_entry_size_multiplier: Decimal
     trend_buy_enabled: bool
@@ -551,6 +550,7 @@ class AppConfig:
         maker_min_shares = _env_decimal("MAKER_MIN_SHARES", "5")
         maker_exchange_min_shares = _env_decimal("MAKER_EXCHANGE_MIN_SHARES", "5")
         maker_fixed_shares = _env_decimal("MAKER_FIXED_SHARES", "0")
+        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "25")
         maker_reload_inventory_threshold_shares = _env_decimal(
             "MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES",
             str(maker_fixed_shares if maker_fixed_shares > 0 else maker_min_shares),
@@ -712,13 +712,10 @@ class AppConfig:
                     "MAKER_RELOAD_MIN_DIRECTIONAL_EDGE_PS",
                     str(maker_min_directional_edge_ps_conservative),
                 ),
-                use_post_only=_env_bool("MAKER_POST_ONLY", False),
+                use_post_only=_env_bool("ORDER_POST_ONLY", False),
                 post_only_strict=_env_bool_inverted("MAKER_POST_ONLY_STRICT", True),
-                max_inventory_shares=_env_decimal("MAKER_MAX_INVENTORY_SHARES", "25"),
-                max_locked_side_position=_env_decimal(
-                    "MAX_LOCKED_SIDE_POSITION",
-                    _env_str("MAKER_MAX_INVENTORY_SHARES", "25"),
-                ),
+                max_inventory_shares=market_max_position_shares,
+                max_locked_side_position=market_max_position_shares,
                 inventory_full_behavior=_env_str("INVENTORY_FULL_BEHAVIOR", "STOP_BUY").strip().upper(),
                 inventory_skew_max=_env_decimal("MAKER_INVENTORY_SKEW_MAX", "0.03"),
                 stale_inventory_sec=_env_int("MAKER_STALE_INVENTORY_SEC", 30),
@@ -733,7 +730,7 @@ class AppConfig:
                 pennying_enabled=_env_bool_inverted("MAKER_PENNYING_ENABLED", True),
                 pennying_min_edge=_env_decimal("MAKER_PENNYING_MIN_EDGE", "0.005"),
                 requote_max_per_sec=_env_float("MAX_REQUOTE_PER_SEC", 1.0),
-                requote_hysteresis_ticks=_env_decimal("REQUOTE_HYSTERESIS_TICKS", "1"),
+                requote_hysteresis_ticks=_env_decimal("ORDER_REQUOTE_HYSTERESIS_TICKS", "1"),
                 buy_planned_quote_max_age_sec=max(
                     0.5,
                     _env_float("MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC", 10.0),
@@ -753,7 +750,7 @@ class AppConfig:
                 vol_rolling_window=_env_int("MAKER_VOL_ROLLING_WINDOW", 30),
                 vol_ewma_alpha=_env_float("MAKER_VOL_EWMA_ALPHA", 0.35),
                 max_consecutive_denied=max(1, _env_int("MAKER_MAX_CONSECUTIVE_DENIED", 5)),
-                order_ttl_sec=_env_int("MAKER_ORDER_TTL_SEC", 20),
+                order_ttl_sec=_env_int("ORDER_TTL_SEC", 20),
                 balance_pause_sec=_env_int("MAKER_BALANCE_PAUSE_SEC", 60),
                 error_pause_sec=_env_int("MAKER_ERROR_PAUSE_SEC", 30),
                 min_minutes_to_close=_env_float("MAKER_MIN_MINUTES_TO_CLOSE", 3.0),
@@ -793,7 +790,6 @@ class AppConfig:
                 digital_sigma_time_decay_ref_sec=_env_float("MAKER_DIGITAL_SIGMA_TIME_DECAY_REF_SEC", 600.0),
                 digital_sigma_time_decay_min=_env_float("MAKER_DIGITAL_SIGMA_TIME_DECAY_MIN", 0.30),
                 implied_sigma_enabled=_env_bool("MAKER_DIGITAL_IMPLIED_SIGMA_ENABLED", True),
-                implied_sigma_weight=_env_decimal("MAKER_DIGITAL_IMPLIED_SIGMA_WEIGHT", "0.50"),
                 continuation_entry_enabled=_env_bool_inverted("CONTINUATION_ENTRY_ENABLED", True),
                 continuation_entry_size_multiplier=_env_decimal("CONTINUATION_ENTRY_SIZE_MULTIPLIER", "1.0"),
                 trend_buy_enabled=_env_bool("TREND_BUY_ENABLED", False),
@@ -826,7 +822,7 @@ class AppConfig:
                 cancel_max_retries=_env_int("MAKER_CANCEL_MAX_RETRIES", 3),
                 cancel_cooldown_sec=_env_int("MAKER_CANCEL_COOLDOWN_SEC", 2),
                 cancel_ack_timeout_sec=_env_int("MAKER_CANCEL_ACK_TIMEOUT_SEC", 8),
-                requote_min_age_sec=max(0.0, _env_float("MAKER_REQUOTE_MIN_AGE_SEC", 6.0)),
+                requote_min_age_sec=max(0.0, _env_float("ORDER_REQUOTE_MIN_AGE_SEC", 6.0)),
                 requote_min_age_sec_sell=max(0.0, _env_float("MAKER_REQUOTE_MIN_AGE_SEC_SELL", 0.0)),
                 early_sell_only_sec=max(0, _env_int("MAKER_EARLY_SELL_ONLY_SEC", 120)),
                 post_fill_buy_cooldown_sec=max(0.0, _env_float("MAKER_POST_FILL_BUY_COOLDOWN_SEC", 15.0)),

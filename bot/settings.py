@@ -372,7 +372,6 @@ def initialize_strategy_settings(
     strategy.absolute_max_loss_usdc = config.exit.absolute_max_loss_usdc
     strategy.absolute_max_loss_min_hold_sec = config.exit.absolute_max_loss_min_hold_sec
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
-    strategy.maker_implied_sigma_weight = config.maker.implied_sigma_weight
     strategy.exit_policy = ExitPolicy(
         ExitPolicyConfig(
             aggressive_stage_sec=config.exit.exit_policy_aggressive_stage_sec,

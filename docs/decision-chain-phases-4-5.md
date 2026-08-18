@@ -23,10 +23,9 @@ risk tier when either weak `p_fair` or high entry price applies:
 
 | Setting | Value |
 | --- | ---: |
-| `MAKER_FIXED_SHARES` | 10 |
+| `MARKET_TARGET_SHARES` | 10 |
 | `MAKER_MIN_SHARES` / venue minimum | 5 |
-| `MAKER_MAX_INVENTORY_SHARES` | 10 |
-| `MAX_LOCKED_SIDE_POSITION` | 10 |
+| `MARKET_MAX_POSITION_SHARES` | 10 |
 | Weak/high-price multiplier | 0.5 |
 
 Risk reductions now compose as caps rather than multiplying. If both weak

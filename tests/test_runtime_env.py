@@ -66,7 +66,11 @@ def test_migration_keeps_secrets_local_and_maps_operator_names(tmp_path):
         "MAKER_FIXED_SHARES=10\n"
         "MAKER_MIN_MINUTES_TO_CLOSE=1\n"
         "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW=0.20\n"
+        "MAKER_POST_ONLY=1\n"
         "MAKER_ORDER_TTL_SEC=25\n"
+        "MAKER_REQUOTE_MIN_AGE_SEC=7\n"
+        "REQUOTE_HYSTERESIS_TICKS=2\n"
+        "MAKER_MAX_INVENTORY_SHARES=10\n"
         "MAKER_HALF_SPREAD=0.012\n",
         encoding="utf-8",
     )
@@ -77,9 +81,44 @@ def test_migration_keeps_secrets_local_and_maps_operator_names(tmp_path):
     assert core["MARKET_TARGET_SHARES"] == "10"
     assert core["ENTRY_MIN_TIME_LEFT_SEC"] == "60.0"
     assert core["ENTRY_SCORE_MIN"] == "0.20"
+    assert core["ORDER_POST_ONLY"] == "1"
     assert core["ORDER_TTL_SEC"] == "25"
+    assert core["ORDER_REQUOTE_MIN_AGE_SEC"] == "7"
+    assert core["ORDER_REQUOTE_HYSTERESIS_TICKS"] == "2"
+    assert core["MARKET_MAX_POSITION_SHARES"] == "10"
     assert "POLYMARKET_PK" not in profile
     assert profile["MAKER_HALF_SPREAD"] == "0.012"
+
+
+def test_runtime_env_does_not_recreate_removed_lifecycle_aliases(tmp_path):
+    profile_dir = tmp_path / "config" / "profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "btc15_twap_v3.env").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "ORDER_POST_ONLY=1\n"
+        "ORDER_TTL_SEC=21\n"
+        "ORDER_REQUOTE_MIN_AGE_SEC=8\n"
+        "ORDER_REQUOTE_HYSTERESIS_TICKS=3\n"
+        "MARKET_MAX_POSITION_SHARES=10\n",
+        encoding="utf-8",
+    )
+    environ: dict[str, str] = {}
+
+    load_runtime_env(repo_root=tmp_path, environ=environ)
+
+    assert environ["ORDER_POST_ONLY"] == "1"
+    assert environ["ORDER_TTL_SEC"] == "21"
+    assert environ["ORDER_REQUOTE_MIN_AGE_SEC"] == "8"
+    assert environ["ORDER_REQUOTE_HYSTERESIS_TICKS"] == "3"
+    assert environ["MARKET_MAX_POSITION_SHARES"] == "10"
+    assert not {
+        "MAKER_POST_ONLY",
+        "MAKER_ORDER_TTL_SEC",
+        "MAKER_REQUOTE_MIN_AGE_SEC",
+        "REQUOTE_HYSTERESIS_TICKS",
+        "MAKER_MAX_INVENTORY_SHARES",
+        "MAX_LOCKED_SIDE_POSITION",
+    } & environ.keys()
 
 
 def test_versioned_profile_has_no_sensitive_keys():

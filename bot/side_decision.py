@@ -477,17 +477,56 @@ class SideDecisionMixin:
         time_left_sec = max(0.0, float(end_ts - now_ts)) if end_ts is not None else 0.0
         inputs["time_left_sec"] = time_left_sec
 
-        # --- Sigma ---
-        sigma = self.maker_digital_sigma_default
-        est_sigma = self._estimate_external_spot_sigma_annualized()
-        if est_sigma and est_sigma > 0:
-            sigma = est_sigma
-        sigma = sigma * self.maker_digital_vol_scale
-        sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
-
         # --- Get market mid-price ---
         market_mid = self._get_up_token_mid_for_side_decision()
         inputs["market_mid"] = float(market_mid) if market_mid is not None else None
+
+        # Quote pricing and side selection use one forecast builder.  The
+        # previous side path independently skipped the quote path's time
+        # decay, implied-volatility guardrail, and native-TWAP settlement
+        # probability.
+        forecast = None
+        sigma = self.maker_digital_sigma_default
+        fair_up = None
+        fair_down = None
+        if self.maker_fair_pricer_mode == "digital" and market_mid is not None:
+            build_forecast = getattr(self, "_build_forecast_state", None)
+            if callable(build_forecast):
+                reference_source = str(inputs.get("reference_spot_source") or "")
+                forecast = build_forecast(
+                    spot=spot,
+                    strike=strike_dec,
+                    time_left_sec=time_left_sec,
+                    market_mid=market_mid,
+                    outcome="up",
+                    reference_source=reference_source,
+                    now_ts=now_ts,
+                )
+                sigma = forecast.sigma_final
+                fair_up = forecast.selected_up_probability
+                fair_down = Decimal("1") - fair_up
+                inputs.update(
+                    {
+                        "forecast_sigma_final": float(forecast.sigma_final),
+                        "forecast_settlement_model": forecast.settlement_model,
+                        "forecast_reference_source": forecast.reference_source,
+                    }
+                )
+            else:
+                # Compatibility fallback for isolated mixin tests and legacy
+                # hosts. IntegratedBTCStrategy always takes the shared path.
+                est_sigma = self._estimate_external_spot_sigma_annualized()
+                if est_sigma and est_sigma > 0:
+                    sigma = est_sigma
+                sigma = sigma * self.maker_digital_vol_scale
+                sigma = max(self.maker_digital_sigma_floor, min(self.maker_digital_sigma_ceiling, sigma))
+                fair_up = MakerEngine.digital_up_probability(
+                    spot=float(spot),
+                    strike=float(strike_dec),
+                    sigma_annual=float(sigma),
+                    time_left_sec=time_left_sec,
+                )
+                fair_down = Decimal("1.0") - fair_up
 
         # Feed mid into signal engine
         _sig_eng: Optional[SignalEngine] = getattr(self, '_signal_engine', None)
@@ -508,17 +547,7 @@ class SideDecisionMixin:
         )
         inputs.update(signals.to_dict())
 
-        # --- Fair values from digital pricer (for flip requirements / logging) ---
-        fair_up = None
-        fair_down = None
-        if self.maker_fair_pricer_mode == "digital":
-            fair_up = MakerEngine.digital_up_probability(
-                spot=float(spot),
-                strike=float(strike_dec),
-                sigma_annual=float(sigma),
-                time_left_sec=time_left_sec,
-            )
-            fair_down = Decimal("1.0") - fair_up
+        # --- Fair values from the shared digital forecast ---
         inputs["fair_up"] = float(fair_up) if fair_up is not None else None
         inputs["fair_down"] = float(fair_down) if fair_down is not None else None
 

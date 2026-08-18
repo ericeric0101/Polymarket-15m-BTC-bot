@@ -42,6 +42,9 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
     paths = (
         "run_bot.py",
         "bot/quote_service.py",
+        "bot/spot_pricer.py",
+        "bot/side_decision.py",
+        "bot/forecast_state.py",
         "bot/order_submission.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",

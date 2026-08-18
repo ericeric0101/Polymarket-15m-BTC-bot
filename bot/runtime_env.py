@@ -102,8 +102,8 @@ SENSITIVE_ENV_KEYS = frozenset(
     }
 )
 
-# Canonical names in .env map to legacy names until later phases can remove the
-# legacy AppConfig fields. The mapping is intentionally one-way.
+# Canonical names in .env map to legacy readers that have not yet been
+# converged. The mapping is intentionally one-way.
 CANONICAL_TO_LEGACY = {
     "ENTRY_SCORE_MIN": "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW",
     "FIRST_ENTRY_SCORE_MIN": "DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW",
@@ -116,10 +116,6 @@ CANONICAL_TO_LEGACY = {
     "EXECUTION_COST_MIN_SAMPLES": "MAKER_EXECUTION_EMPIRICAL_MARKOUT_MIN_SAMPLES",
     "MARKET_TARGET_SHARES": "MAKER_FIXED_SHARES",
     "HIGH_PRICE_THRESHOLD": "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD",
-    "ORDER_POST_ONLY": "MAKER_POST_ONLY",
-    "ORDER_TTL_SEC": "MAKER_ORDER_TTL_SEC",
-    "ORDER_REQUOTE_MIN_AGE_SEC": "MAKER_REQUOTE_MIN_AGE_SEC",
-    "ORDER_REQUOTE_HYSTERESIS_TICKS": "REQUOTE_HYSTERESIS_TICKS",
     "RECOVERY_EXIT_ENABLED": "TAKER_EXIT_ENABLED",
     "RECOVERY_EXIT_REQUIRE_TWAP_CONFIRMATION": "TAKER_EXIT_REQUIRE_TWAP_CONFIRMATION",
     "RECOVERY_EXIT_MAX_TIME_LEFT_SEC": "TAKER_EXIT_MAX_TIME_LEFT_SEC",
@@ -168,14 +164,6 @@ def _apply_canonical_aliases(environ: MutableMapping[str, str], external_keys: s
             raise ValueError("HIGH_PRICE_TARGET_SHARES must be > 0 and <= MARKET_TARGET_SHARES")
         environ["MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_ENABLED"] = "1"
         environ["MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER"] = str(high_price_target / target)
-
-    if "MARKET_MAX_POSITION_SHARES" in environ:
-        value = environ["MARKET_MAX_POSITION_SHARES"]
-        if "MAKER_MAX_INVENTORY_SHARES" not in external_keys:
-            environ["MAKER_MAX_INVENTORY_SHARES"] = value
-        if "MAX_LOCKED_SIDE_POSITION" not in external_keys:
-            environ["MAX_LOCKED_SIDE_POSITION"] = value
-
 
 def load_runtime_env(
     *,

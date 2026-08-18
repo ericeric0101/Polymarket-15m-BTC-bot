@@ -23,15 +23,31 @@ from bot.runtime_env import (
     SENSITIVE_ENV_KEYS,
 )
 
-LEGACY_TO_CANONICAL = {legacy: canonical for canonical, legacy in CANONICAL_TO_LEGACY.items() if canonical != legacy}
+# Runtime no longer reads these Phase-3 aliases, but migrations must continue
+# to convert old local files into the supported canonical operator surface.
+LEGACY_TO_CANONICAL = {
+    legacy: canonical
+    for canonical, legacy in CANONICAL_TO_LEGACY.items()
+    if canonical != legacy
+}
+LEGACY_TO_CANONICAL.update(
+    {
+        "MAKER_POST_ONLY": "ORDER_POST_ONLY",
+        "MAKER_ORDER_TTL_SEC": "ORDER_TTL_SEC",
+        "MAKER_REQUOTE_MIN_AGE_SEC": "ORDER_REQUOTE_MIN_AGE_SEC",
+        "REQUOTE_HYSTERESIS_TICKS": "ORDER_REQUOTE_HYSTERESIS_TICKS",
+        "MAKER_MAX_INVENTORY_SHARES": "MARKET_MAX_POSITION_SHARES",
+        "MAX_LOCKED_SIDE_POSITION": "MARKET_MAX_POSITION_SHARES",
+    }
+)
 
 
 def _canonical_value(values: dict[str, str | None], key: str) -> str | None:
     if key in values:
         return values[key]
-    legacy = CANONICAL_TO_LEGACY.get(key)
-    if legacy is not None:
-        return values.get(legacy)
+    for legacy, canonical in LEGACY_TO_CANONICAL.items():
+        if canonical == key and legacy in values:
+            return values[legacy]
     if key == "ENTRY_MIN_TIME_LEFT_SEC":
         minutes = values.get("MAKER_MIN_MINUTES_TO_CLOSE")
         return str(float(minutes) * 60.0) if minutes is not None else None
@@ -44,8 +60,6 @@ def _canonical_value(values: dict[str, str | None], key: str) -> str | None:
         multiplier = values.get("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER")
         if target is not None and multiplier is not None:
             return str(float(target) * float(multiplier))
-    if key == "MARKET_MAX_POSITION_SHARES":
-        return values.get("MAKER_MAX_INVENTORY_SHARES")
     return None
 
 
@@ -62,7 +76,7 @@ def migrate(*, source: Path, profile: Path) -> tuple[dict[str, str | None], dict
         and key not in CORE_ENV_KEYS
         and key not in SENSITIVE_ENV_KEYS
         and key not in LEGACY_TO_CANONICAL
-        and key not in {"MAKER_MIN_MINUTES_TO_CLOSE", "MAKER_MAX_INVENTORY_SHARES", "MAX_LOCKED_SIDE_POSITION"}
+        and key not in {"MAKER_MIN_MINUTES_TO_CLOSE"}
     }
     core_values: dict[str, str | None] = {"STRATEGY_PROFILE": profile.stem}
     for key in sorted(CORE_ENV_KEYS - {"STRATEGY_PROFILE"}):
