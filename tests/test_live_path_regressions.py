@@ -4976,13 +4976,17 @@ def test_quote_recovery_waits_for_both_binary_outcomes_before_clearing_pending_s
             raise AssertionError("fresh quote must not trigger the watchdog")
 
     strategy = Strategy()
+    tick_ts_ns = int(time.time() * 1_000_000_000)
     fresh_tick = SimpleNamespace(
         instrument_id="down-token",
         bid_price=Price("0.40"),
         ask_price=Price("0.41"),
         bid_size=Price("10"),
         ask_size=Price("10"),
-        ts_event=int(time.time() * 1_000_000_000),
+        ts_event=tick_ts_ns,
+        # Real Nautilus QuoteTicks always carry ts_init. Supplying it here
+        # avoids object-id provenance cache collisions between test fixtures.
+        ts_init=tick_ts_ns,
     )
 
     handle_quote_tick(strategy, fresh_tick)
