@@ -22,7 +22,6 @@ What remains is mostly cleanup, operational hardening, and non-blocking side-sys
 These files still carry explicit `fee_rate_bps` or `/fee-rate` logic:
 
 - [execution/fee_rate_client.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/execution/fee_rate_client.py:1)
-- [execution/sim_adapter.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/execution/sim_adapter.py:44)
 - [bot/settings.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot/settings.py:144)
 - [bot/fill_ledger.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot/fill_ledger.py:251)
 - [bot/db_runtime.py](/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/bot/db_runtime.py:68)

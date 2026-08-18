@@ -6,7 +6,7 @@ from scripts.inspect_env_contract import OPERATOR_KEYS, _code_keys, _keys
 
 
 def test_operator_template_has_no_duplicate_or_empty_keys():
-    assert len(OPERATOR_KEYS) == 55
+    assert len(OPERATOR_KEYS) == 54
     assert all(key and key.upper() == key for key in OPERATOR_KEYS)
     template = Path(__file__).parents[1] / "config" / "operator.env.example"
     assert _keys(template) == OPERATOR_KEYS
@@ -34,3 +34,11 @@ def test_first_entry_threshold_is_never_looser_than_general_entry_threshold(monk
 
     assert config.side.directional_entry_min_score_abs_new == Decimal("0.20")
     assert config.side.directional_first_entry_min_score_abs_new == Decimal("0.22")
+
+
+def test_market_entry_budget_is_hard_limited_to_one_successful_buy(monkeypatch):
+    monkeypatch.setenv("MARKET_MAX_BUY_EVENTS_PER_MARKET", "2")
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.exit.market_max_buy_events_per_market == 1

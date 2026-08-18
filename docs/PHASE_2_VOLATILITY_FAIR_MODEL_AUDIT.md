@@ -201,7 +201,7 @@ readers; it does not eliminate those readers yet.
 | `INVENTORY_FULL_BEHAVIOR` | `quote_service.build_desired_quote_entry` | Defines STOP_BUY versus spread widening at cap. | Inventory-policy enum; retain. |
 | `MAKER_INVENTORY_SKEW_MAX` | `MakerEngine.apply_inventory_skew` | Price skew, not a hard cap. | Move to quote pricing group; do not merge with position cap. |
 | `MAKER_STALE_INVENTORY_SEC`, `MAKER_STALE_INVENTORY_MULTIPLIER` | inventory-aware quoting | Stale internal inventory protection. | One `InventoryFreshnessPolicy`; distinct threshold and multiplier. |
-| `MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES` | reload-entry guard | Threshold for a second buy after partial fill. | Must be reviewed with `MARKET_MAX_BUY_EVENTS`; Phase 7 sizing. |
+| `MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES` | legacy reload-entry guard | Previously governed a second buy after a partial fill. | New entries are limited to one successful BUY per market; retire this reader during Phase 7 sizing. |
 | `SELLABLE_FALLBACK_AFTER_BUY_SEC`, `SELLABLE_AFTER_BUY_BUFFER_SHARES` | `pricing_runtime._get_effective_sellable_qty` | Temporary conservative fallback before venue token balance is visible. | `VenueBalanceSyncPolicy`; retain separately. |
 | `SELL_DELAY_AFTER_BUY_SEC`, `SELL_BALANCE_RETRY_PAUSE_SEC`, `SELL_RECOVERY_QTY_BUFFER_SHARES` | `order_submission`, `order_events` | Wait/retry/quantity buffer for venue balance synchronization. | Same `VenueBalanceSyncPolicy`; do not collapse until P4/P5 exit evidence is complete. |
 | `CONDITIONAL_BALANCE_CHECK_INTERVAL_SEC`, `CONDITIONAL_BALANCE_SAFETY_BUFFER_PCT`, `MAKER_BALANCE_CHECK_INTERVAL_SEC`, `MAKER_BALANCE_PAUSE_SEC` | wallet/conditional-token polling and insufficient-balance pause | Different balance sources plus backoff. | Split into `CollateralBalancePolicy` and `ConditionalTokenBalancePolicy`; no numeric merge. |
@@ -218,7 +218,7 @@ edit.
 | `HIGH_PRICE_TARGET_SHARES` | `runtime_env` derives legacy size multiplier | Derived from normal target and high-price target. | Keep external absolute target; never expose both target and multiplier. |
 | `MAKER_MIN_SHARES`, `MAKER_EXCHANGE_MIN_SHARES` | order quantity and sellability guards | Desired minimum versus venue minimum. | Keep venue minimum internal; operator sets target only. |
 | `MAKER_QUOTE_SIZE_USDC`, `MAKER_MAX_ORDER_USDC` | `MakerEngine._compute_maker_order_qty` | Legacy notional sizing and cap; bypassed when fixed shares is active. | Remove from active profile after Phase-7 fixed-share equivalence test. |
-| `MARKET_MAX_BUY_EVENTS`, `MARKET_MAX_BUY_EVENTS_PER_MARKET` | canonical alias -> fill ledger/risk guard | Same buy-event budget through canonical/legacy names. | Keep canonical name externally. |
+| one-successful-BUY invariant | fill ledger/risk guard | A market may establish only one directional position. | Hard-coded risk policy; no operator override. |
 
 ## Inventory: Shadow Lifecycle and Recovery Exit Execution (10)
 
@@ -238,7 +238,8 @@ settings:
    `ORDER_REQUOTE_MIN_AGE_SEC`/`MAKER_REQUOTE_MIN_AGE_SEC`,
    `ORDER_REQUOTE_HYSTERESIS_TICKS`/`REQUOTE_HYSTERESIS_TICKS`,
    `MARKET_TARGET_SHARES`/`MAKER_FIXED_SHARES`, and
-   `MARKET_MAX_BUY_EVENTS`/`MARKET_MAX_BUY_EVENTS_PER_MARKET`.
+   historical `MARKET_MAX_BUY_EVENTS`/`MARKET_MAX_BUY_EVENTS_PER_MARKET` aliases
+   (replaced by the one-successful-BUY invariant).
 2. One canonical position cap currently writes both
    `MAKER_MAX_INVENTORY_SHARES` and `MAX_LOCKED_SIDE_POSITION`.
 

@@ -63,9 +63,9 @@ fall back to VWAP, depth, spread, volatility, or taker-leakage proxies.
 - `MARKET_TARGET_SHARES` is the normal market target: 10 shares.
 - Above `HIGH_PRICE_THRESHOLD`, target is `HIGH_PRICE_TARGET_SHARES` (currently 5.5 shares in the local deployment profile).
 - `MARKET_MAX_POSITION_SHARES` is a hard projected cap: 10 shares.
-- `MARKET_MAX_BUY_EVENTS` permits replacement attempts after partial fills, but
-  it never permits the projected combined `UP` and `DOWN` exposure to exceed
-  the market cap.
+- Each market has one successful BUY entry slot. Once any UP or DOWN BUY fills,
+  all later BUYs in that market are blocked, including after a side flip or
+  restart. Partial fills of that same order remain valid inventory.
 - A remaining quantity below the venue minimum is skipped; it is not rounded
   up beyond the cap.
 

@@ -441,6 +441,8 @@ class ExitConfig:
             raise ValueError("TAKER_EXIT_DISABLE_IF_BID_BELOW must be in [0, 1]")
         if self.taker_exit_min_recovery_ratio < 0:
             raise ValueError("TAKER_EXIT_MIN_RECOVERY_RATIO must be >= 0")
+        if self.market_max_buy_events_per_market != 1:
+            raise ValueError("Each market must permit exactly one successful BUY entry")
         if self.recovery_exit_passive_ttl_sec < 1:
             raise ValueError("RECOVERY_EXIT_PASSIVE_TTL_SEC must be >= 1")
         if self.recovery_exit_passive_min_time_left_sec < 0:
@@ -949,7 +951,10 @@ class AppConfig:
                 taker_exit_require_inventory=_env_bool("TAKER_EXIT_REQUIRE_INVENTORY", True),
                 taker_exit_disable_if_bid_below=_env_decimal("TAKER_EXIT_DISABLE_IF_BID_BELOW", "0"),
                 market_stop_loss_max_per_market=max(0, _env_int("MARKET_STOP_LOSS_MAX_PER_MARKET", 2)),
-                market_max_buy_events_per_market=max(0, _env_int("MARKET_MAX_BUY_EVENTS_PER_MARKET", 2)),
+                # One binary market can establish one directional position.
+                # This prevents a filled UP from being followed by a new DOWN
+                # entry after a signal flip.
+                market_max_buy_events_per_market=1,
                 taker_exit_max_hold_near_close_sec=max(0, _env_int("TAKER_EXIT_MAX_HOLD_NEAR_CLOSE_SEC", 90)),
                 taker_exit_reject_cooldown_sec=max(0, _env_int("TAKER_EXIT_REJECT_COOLDOWN_SEC", 20)),
                 taker_exit_skip_log_interval_sec=max(1, _env_int("TAKER_EXIT_SKIP_LOG_INTERVAL_SEC", 20)),

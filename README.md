@@ -123,7 +123,7 @@ DASHBOARD_THEME=light ./.venv/bin/python dashboard.py
 ./.venv/bin/python -m pytest -q
 ```
 
-`trade_journal.db` is the canonical local record for strategy, order, fill,
+`logs/trade_journal.db` is the canonical local record for strategy, order, fill,
 and settlement analysis. It does not replace independent wallet or chain
 verification before moving funds.
 

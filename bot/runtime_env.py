@@ -20,7 +20,7 @@ DEFAULT_PROFILE = "btc15_twap_v3"
 
 # Supported day-to-day deployment surface. Advanced values belong in the
 # versioned profile so a strategy change is reviewed as code, not hidden in a
-# machine-local file. Keep this list to 55 keys.
+# machine-local file. Keep this list deliberately small.
 CORE_ENV_KEYS = frozenset(
     {
         "STRATEGY_PROFILE",
@@ -60,7 +60,6 @@ CORE_ENV_KEYS = frozenset(
         "HIGH_PRICE_THRESHOLD",
         "HIGH_PRICE_TARGET_SHARES",
         "MARKET_MAX_POSITION_SHARES",
-        "MARKET_MAX_BUY_EVENTS",
         "ORDER_POST_ONLY",
         "ORDER_TTL_SEC",
         "ORDER_REQUOTE_MIN_AGE_SEC",
@@ -82,7 +81,7 @@ CORE_ENV_KEYS = frozenset(
 )
 
 # Secrets and host-specific credentials must never be migrated into a tracked
-# profile even if they are not part of the 55-key operator surface.
+# profile even if they are not part of the operator surface.
 SENSITIVE_ENV_KEYS = frozenset(
     {
         "POLYMARKET_WALLET_ADDRESS",
@@ -117,7 +116,6 @@ CANONICAL_TO_LEGACY = {
     "EXECUTION_COST_MIN_SAMPLES": "MAKER_EXECUTION_EMPIRICAL_MARKOUT_MIN_SAMPLES",
     "MARKET_TARGET_SHARES": "MAKER_FIXED_SHARES",
     "HIGH_PRICE_THRESHOLD": "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD",
-    "MARKET_MAX_BUY_EVENTS": "MARKET_MAX_BUY_EVENTS_PER_MARKET",
     "ORDER_POST_ONLY": "MAKER_POST_ONLY",
     "ORDER_TTL_SEC": "MAKER_ORDER_TTL_SEC",
     "ORDER_REQUOTE_MIN_AGE_SEC": "MAKER_REQUOTE_MIN_AGE_SEC",

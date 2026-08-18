@@ -10,8 +10,6 @@ These modules are on the current BTC 15-minute live trading path and should be t
 - `bot/`
 - `execution/`
 - `monitoring/`
-- `data_sources/binance/`
-- `data_sources/coinbase/`
 
 These areas are the first priority for testing and refactors.
 
@@ -19,10 +17,8 @@ These areas are the first priority for testing and refactors.
 
 These modules are present in the repo but are not the primary live trading path today:
 
-- `core/ingestion/`
-- `core/nautilus_core/`
-- `core/strategy_brain/`
-- `feedback/learning_engine.py`
+- `core/strategy_brain/signal_processors/base_processor.py`
+  Note: `core/ingestion/` and `core/nautilus_core/` have been removed. `core/strategy_brain/signal_processors/base_processor.py` is retained solely due to an indirect dependency: `monitoring/grafana_exporter.py` imports `execution/execution_engine.py`, which imports `SignalDirection` from `core.strategy_brain.signal_processors.base_processor`.
 - `execution/risk_engine.py`
   Note: the module header already states it is not used by the maker strategy path.
 
