@@ -537,6 +537,8 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                 strategy.quote_recovery_attempts = 0
         mid_price = (bid_decimal + ask_decimal) / 2
         strategy._append_real_mid_price(tick.instrument_id, mid_price)
+        if hasattr(strategy, "_lead_lag_observation_on_quote"):
+            strategy._lead_lag_observation_on_quote(quote_received_ts)
         if hasattr(strategy, "_shadow_simulation_on_quote"):
             strategy._shadow_simulation_on_quote(
                 tick.instrument_id,

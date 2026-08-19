@@ -45,6 +45,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/spot_pricer.py",
         "bot/side_decision.py",
         "bot/forecast_state.py",
+        "bot/lead_lag_observation.py",
         "bot/order_submission.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",
@@ -113,6 +114,7 @@ from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
 from bot.recovery import StrategyRecoveryMixin
 from bot.shadow_simulation import ShadowSimulationMixin
+from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
     evaluate_market_phase,
@@ -249,6 +251,7 @@ class IntegratedBTCStrategy(
     QuoteRuntimeMixin,
     StrategyRecoveryMixin,
     ShadowSimulationMixin,
+    LeadLagObservationMixin,
     StrategyLifecycleMixin,
     Strategy,
 ):

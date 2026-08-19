@@ -1,3 +1,4 @@
+import math
 from decimal import Decimal
 
 from bot.probability_calibration import (
@@ -6,6 +7,12 @@ from bot.probability_calibration import (
 )
 from bot.quote_service import apply_fractional_kelly_sizing, evaluate_buy_entry_controls
 from execution.maker_engine import MakerEngine
+from scripts.calibration_shadow_report import (
+    ForecastRow,
+    brier_score,
+    fit_brier_weight,
+    probability_shadow_settlement,
+)
 
 
 def test_calibration_shrinks_down_probability_more_than_up_probability():
@@ -47,6 +54,19 @@ def test_fractional_kelly_is_zero_without_positive_probability_edge():
     assert fractional_kelly_stake_fraction(
         probability=Decimal("0.60"), entry_price=Decimal("0.61"), fraction=Decimal("0.25")
     ) == 0
+
+
+def test_calibration_shadow_fits_train_weight_and_keeps_holdout_observational():
+    rows = [
+        ForecastRow("a", 0.90, 0.50, 1, "UP", 0.60, 0.40),
+        ForecastRow("b", 0.10, 0.50, 0, "DOWN", 0.40, 0.60),
+    ]
+    learned = fit_brier_weight(rows)
+    assert learned == 1.0
+    assert math.isclose(brier_score(rows, learned) or 0.0, 0.01)
+    candidates, settlement_pnl = probability_shadow_settlement(rows, learned)
+    assert candidates == 2
+    assert math.isclose(settlement_pnl, 0.8)
 
 
 def test_first_entry_time_window_blocks_only_a_new_market_entry():

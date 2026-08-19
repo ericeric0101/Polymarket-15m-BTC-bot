@@ -737,5 +737,7 @@ def initialize_strategy_settings(
     strategy.shadow_simulation_aged_quote_max_age_sec = config.operations.shadow_simulation_aged_quote_max_age_sec
     strategy._shadow_simulations_by_slug = {}
     strategy._fair_edge_bucket_shadow_by_id = {}
+    strategy._lead_lag_pending = {}
+    strategy._lead_lag_last_snapshot_ts_by_slug = {}
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

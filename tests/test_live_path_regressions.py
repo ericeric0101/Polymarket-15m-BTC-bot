@@ -27,6 +27,7 @@ from bot.enums import ActiveSide, MarketPhase
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle_runtime import StrategyLifecycleMixin
+from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import (
     handle_quote_tick,
@@ -4294,6 +4295,45 @@ def test_forecast_snapshot_telemetry_preserves_shadow_payload_and_serializes_dec
     assert payload["forecast_strike_source"] == "polymarket_crypto_price_open"
     assert payload["forecast_strike_authoritative"] is True
     assert payload["forecast_strike_lock_state"] == "authoritative"
+
+
+def test_external_lead_lag_observation_records_each_horizon_once():
+    class Harness(LeadLagObservationMixin):
+        def __init__(self):
+            self.trade_db = object()
+            self.current_market_slug = "btc-updown-15m-test"
+            self.current_market_end_timestamp = 1_000.0
+            self.current_up_instrument_id = "up-token"
+            self.latest_quote_by_inst = {"up-token": (Decimal("0.49"), Decimal("0.51"))}
+            self._binance_ws_price = Decimal("100.0")
+            self._binance_ws_price_ts = 100.0
+            self._polymarket_chainlink_twap_price = Decimal("99.0")
+            self._polymarket_chainlink_twap_price_ts = 100.0
+            self.latest_external_spot = Decimal("99.0")
+            self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
+            self.latest_external_spot_source_ts = 100.0
+            self.events = []
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    strategy = Harness()
+    strategy._lead_lag_observation_on_quote(100.0)
+    strategy.latest_quote_by_inst["up-token"] = (Decimal("0.54"), Decimal("0.56"))
+    strategy._binance_ws_price = Decimal("101.0")
+    strategy._polymarket_chainlink_twap_price = Decimal("99.5")
+    for timestamp in (105.0, 115.0, 130.0, 160.0):
+        strategy._lead_lag_observation_on_quote(timestamp)
+
+    snapshots = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_SNAPSHOT"]
+    outcomes = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_OUTCOME"]
+    first_id = snapshots[0]["observation_id"]
+    first_outcomes = [payload for payload in outcomes if payload["observation_id"] == first_id]
+    assert len(snapshots) == 4
+    assert [payload["horizon_target_sec"] for payload in first_outcomes] == [5, 15, 30, 60]
+    assert all(payload["elapsed_sec"] >= payload["horizon_target_sec"] for payload in first_outcomes)
+    assert all(math.isclose(payload["up_mid_change_ps"], 0.05) for payload in first_outcomes)
+    assert all(math.isclose(payload["binance_return_bps"], 100.0) for payload in first_outcomes)
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():
