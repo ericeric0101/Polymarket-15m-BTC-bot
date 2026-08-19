@@ -14,6 +14,7 @@ from bot.quote_service import (
     log_no_quote_diagnostics,
     reconcile_unwanted_quotes,
     should_requote_existing_order,
+    should_preserve_static_tail_protect_tp_order,
 )
 from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
@@ -190,6 +191,12 @@ class QuoteRuntimeMixin:
         self._cleanup_stale_pending_cancels(now_ts)
 
         for order_key, state in list(self.active_maker_orders.items()):
+            # A tail-protect TP has a fixed price and is GTC. Reposting it on
+            # the ordinary maker TTL only loses queue priority without changing
+            # the intended execution. Recovery exit explicitly cancels it when
+            # it needs the sell reservation.
+            if should_preserve_static_tail_protect_tp_order(state):
+                continue
             created_ts = float(state.get("created_ts", 0.0))
             if state.get("is_urgent_exit"):
                 ttl = float(state.get("urgent_exit_ttl", self.maker_order_ttl_sec))

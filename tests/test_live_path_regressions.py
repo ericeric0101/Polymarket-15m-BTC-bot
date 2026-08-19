@@ -64,6 +64,7 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     resolve_quote_intent_state,
     retreat_crossing_buy_quote,
+    should_preserve_static_tail_protect_tp_order,
     should_requote_existing_order,
 )
 from bot.recovery import StrategyRecoveryMixin
@@ -4036,6 +4037,23 @@ def test_should_requote_existing_order_when_loss_exit_recovers():
         maker_requote_min_age_sec_sell=30.0,
         desired_loss_sell_reason="",
     )
+
+
+def test_static_tail_protect_tp_is_preserved_but_recovery_sell_is_not():
+    static_tp = {
+        "side": "sell",
+        "loss_sell_reason": "",
+        "directional_snapshot": {"tail_protect_tp": True},
+    }
+    recovery_sell = {
+        "side": "sell",
+        "loss_sell_reason": "confirmed_invalidation",
+        "directional_snapshot": {"tail_protect_tp": True},
+    }
+
+    assert should_preserve_static_tail_protect_tp_order(static_tp)
+    assert not should_preserve_static_tail_protect_tp_order(recovery_sell)
+    assert not should_preserve_static_tail_protect_tp_order({"side": "buy"})
 
 
 

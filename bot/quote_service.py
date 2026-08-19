@@ -2095,3 +2095,13 @@ def should_requote_existing_order(
     if effective_min_age > 0 and created_ts > 0 and (now_ts - created_ts) < effective_min_age:
         return False
     return True
+
+
+def should_preserve_static_tail_protect_tp_order(current: dict[str, Any] | None) -> bool:
+    """Keep a fixed take-profit order open until it fills or an exit owns it."""
+    if not current or str(current.get("side", "") or "").lower() != "sell":
+        return False
+    if str(current.get("loss_sell_reason", "") or ""):
+        return False
+    snapshot = current.get("directional_snapshot") or {}
+    return bool(snapshot.get("tail_protect_tp", False))
