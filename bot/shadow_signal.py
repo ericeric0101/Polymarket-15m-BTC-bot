@@ -398,6 +398,9 @@ def attach_forecast_snapshot_telemetry(
     diagnostics: Dict[str, Any],
     reference_source: str,
     reference_source_age_sec: Optional[float],
+    strike_source: str = "",
+    strike_authoritative: bool = False,
+    strike_lock_state: str = "unknown",
 ) -> Dict[str, Any]:
     """Attach the quote-pricer forecast state without changing shadow signals."""
     out = dict(payload)
@@ -413,7 +416,7 @@ def attach_forecast_snapshot_telemetry(
 
     out.update(
         {
-            "forecast_schema_version": 1,
+            "forecast_schema_version": 2,
             "forecast_reference_source": str(reference_source or ""),
             "forecast_reference_source_age_sec": (
                 float(reference_source_age_sec) if reference_source_age_sec is not None else None
@@ -435,6 +438,9 @@ def attach_forecast_snapshot_telemetry(
             "forecast_standard_up_probability": _number("standard_up_probability"),
             "forecast_twap_average_up_probability": _number("twap_average_up_probability"),
             "forecast_settlement_model": str(diagnostics.get("settlement_model") or ""),
+            "forecast_strike_source": str(strike_source or ""),
+            "forecast_strike_authoritative": bool(strike_authoritative),
+            "forecast_strike_lock_state": str(strike_lock_state or "unknown"),
         }
     )
     return out

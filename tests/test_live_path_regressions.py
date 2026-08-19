@@ -4281,13 +4281,19 @@ def test_forecast_snapshot_telemetry_preserves_shadow_payload_and_serializes_dec
         },
         reference_source="polymarket_chainlink_twap_60s_ws",
         reference_source_age_sec=0.25,
+        strike_source="polymarket_crypto_price_open",
+        strike_authoritative=True,
+        strike_lock_state="authoritative",
     )
 
     assert original == {"slug": "btc-updown-15m-test", "shadow_score": 0.2}
-    assert payload["forecast_schema_version"] == 1
+    assert payload["forecast_schema_version"] == 2
     assert payload["forecast_sigma_final"] == 0.21
     assert payload["forecast_twap_average_up_probability"] == 0.58
     assert payload["forecast_reference_source"] == "polymarket_chainlink_twap_60s_ws"
+    assert payload["forecast_strike_source"] == "polymarket_crypto_price_open"
+    assert payload["forecast_strike_authoritative"] is True
+    assert payload["forecast_strike_lock_state"] == "authoritative"
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():

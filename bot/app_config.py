@@ -887,8 +887,11 @@ class AppConfig:
                 entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0"),
                 first_entry_max_time_left_sec=max(0, _env_int("FIRST_ENTRY_MAX_TIME_LEFT_SEC", 600)),
                 probability_calibration_enabled=_env_bool_inverted("PROBABILITY_CALIBRATION_ENABLED", True),
-                probability_calibration_up_model_weight=_env_decimal("PROBABILITY_CALIBRATION_UP_MODEL_WEIGHT", "0.65"),
-                probability_calibration_down_model_weight=_env_decimal("PROBABILITY_CALIBRATION_DOWN_MODEL_WEIGHT", "0.35"),
+                # Until chronological out-of-sample calibration establishes a
+                # positive model contribution, executable fair defaults to
+                # the tradable market midpoint rather than raw digital fair.
+                probability_calibration_up_model_weight=_env_decimal("PROBABILITY_CALIBRATION_UP_MODEL_WEIGHT", "0"),
+                probability_calibration_down_model_weight=_env_decimal("PROBABILITY_CALIBRATION_DOWN_MODEL_WEIGHT", "0"),
                 down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "1"),
                 down_high_price_min_score_abs=_env_decimal("DOWN_HIGH_PRICE_MIN_SCORE_ABS", "0.25"),
                 down_high_price_min_robust_net_usdc=_env_decimal("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC", "0.15"),

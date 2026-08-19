@@ -29,7 +29,7 @@ def _time_bucket(time_left_sec: float) -> str:
     return "10-15m"
 
 
-def _print_summary(label: str, rows: list[tuple[float, float | None, int, str, str, float, float]]) -> None:
+def _print_summary(label: str, rows: list[tuple]) -> None:
     print(f"\n{label}: settled_markets={len(rows)}")
     if not rows:
         return
@@ -44,7 +44,7 @@ def _print_summary(label: str, rows: list[tuple[float, float | None, int, str, s
         f"brier_market={'-' if market_brier is None else f'{market_brier:.5f}'}"
     )
     print("source/model                 markets  brier    avg_model  actual_up  avg_sigma")
-    groups: dict[tuple[str, str], list[tuple[float, float | None, int, str, str, float, float]]] = defaultdict(list)
+    groups: dict[tuple[str, str], list[tuple]] = defaultdict(list)
     for row in rows:
         groups[(row[3], row[4])].append(row)
     for (source, model_name), group in sorted(groups.items(), key=lambda item: -len(item[1])):
@@ -69,7 +69,7 @@ def _print_summary(label: str, rows: list[tuple[float, float | None, int, str, s
             f" {model:>13.3f} {actual - model:>+18.3f}"
         )
     print("time_bucket  markets  brier    avg_abs_model_market_delta")
-    time_groups: dict[str, list[tuple[float, float | None, int, str, str, float, float]]] = defaultdict(list)
+    time_groups: dict[str, list[tuple]] = defaultdict(list)
     for row in rows:
         time_groups[_time_bucket(row[6])].append(row)
     for bucket in ("10-15m", "5-10m", "0-5m"):
@@ -80,6 +80,19 @@ def _print_summary(label: str, rows: list[tuple[float, float | None, int, str, s
         delta = _mean(abs(row[0] - row[1]) for row in group if row[1] is not None)
         delta_text = "-" if delta is None else f"{delta:.5f}"
         print(f"{bucket:11} {len(group):>7} {brier:>7.5f} {delta_text:>26}")
+
+    print("strike_source/state          markets  brier    avg_model  actual_up")
+    strike_groups: dict[tuple[str, str], list[tuple]] = defaultdict(list)
+    for row in rows:
+        strike_groups[(row[7], row[9])].append(row)
+    for (strike_source, strike_state), group in sorted(strike_groups.items(), key=lambda item: -len(item[1])):
+        avg_model = _mean(row[0] for row in group)
+        actual = _mean(float(row[2]) for row in group)
+        brier = _mean((row[0] - row[2]) ** 2 for row in group)
+        print(
+            f"{strike_source[:16]:16} {strike_state[:12]:12} {len(group):>7}"
+            f" {brier:>7.5f} {avg_model:>10.4f} {actual:>10.4f}"
+        )
 
 
 def main() -> int:
@@ -96,6 +109,7 @@ def main() -> int:
     sql = """
     WITH forecasts AS (
       SELECT
+        id,
         json_extract(payload_json, '$.slug') AS slug,
         json_extract(payload_json, '$.forecast_reference_source') AS source,
         json_extract(payload_json, '$.forecast_settlement_model') AS settlement_model,
@@ -105,7 +119,10 @@ def main() -> int:
         CAST(json_extract(payload_json, '$.time_left_sec') AS REAL) AS time_left_sec,
         CAST(json_extract(payload_json, '$.bid_up') AS REAL) AS bid_up,
         CAST(json_extract(payload_json, '$.ask_up') AS REAL) AS ask_up,
-        ROW_NUMBER() OVER (PARTITION BY json_extract(payload_json, '$.slug') ORDER BY id ASC) AS rn
+        NULLIF(json_extract(payload_json, '$.forecast_strike_source'), '') AS forecast_strike_source,
+        json_extract(payload_json, '$.forecast_strike_authoritative') AS forecast_strike_authoritative,
+        NULLIF(json_extract(payload_json, '$.forecast_strike_lock_state'), '') AS forecast_strike_lock_state,
+        ROW_NUMBER() OVER (PARTITION BY json_extract(payload_json, '$.slug') ORDER BY id ASC) AS market_rn
       FROM strategy_events
       WHERE event_type='LIVE_SIGNAL_COMPARE'
         AND julianday(ts) >= julianday('now', ?)
@@ -120,19 +137,29 @@ def main() -> int:
       CASE WHEN settlement_model='twap_average_approx' THEN twap_up ELSE standard_up END,
       CASE WHEN bid_up > 0 AND ask_up > 0 THEN (bid_up + ask_up) / 2.0 ELSE NULL END,
       CASE outcome WHEN 'UP' THEN 1 ELSE 0 END,
-      coalesce(source, 'unknown'), settlement_model, sigma, time_left_sec, settlement_ts
+      coalesce(source, 'unknown'), settlement_model, sigma, time_left_sec,
+      coalesce(forecast_strike_source, 'unknown'),
+      coalesce(forecast_strike_authoritative, 0),
+      coalesce(forecast_strike_lock_state, 'unknown'), settlement_ts
     FROM forecasts JOIN settlements USING (slug)
-    WHERE rn=1 AND outcome IN ('UP', 'DOWN') AND standard_up IS NOT NULL
+    WHERE market_rn=1 AND outcome IN ('UP', 'DOWN') AND standard_up IS NOT NULL
     ORDER BY settlement_ts ASC
     """
     with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-        raw_rows = conn.execute(sql, (f"-{args.hours:g} hours", f"-{args.hours:g} hours")).fetchall()
+        raw_rows = conn.execute(
+            sql,
+            (f"-{args.hours:g} hours", f"-{args.hours:g} hours"),
+        ).fetchall()
     rows = [
         (
             float(model), float(market) if market is not None else None, int(outcome),
             str(source), str(model_name), float(sigma or 0), float(time_left or 0),
+            str(strike_source or "unknown"), bool(strike_authoritative), str(strike_lock_state or "unknown"),
         )
-        for model, market, outcome, source, model_name, sigma, time_left, _settlement_ts in raw_rows
+        for (
+            model, market, outcome, source, model_name, sigma, time_left,
+            strike_source, strike_authoritative, strike_lock_state, _settlement_ts,
+        ) in raw_rows
         if model is not None
     ]
     split_at = max(1, int(len(rows) * (1 - args.holdout_fraction)))

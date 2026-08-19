@@ -152,6 +152,23 @@ source, not by adding another volatility multiplier.
 consumer.  The remaining sigma values stay unchanged until a later
 out-of-sample calibration identifies a single replacement policy.
 
+## P2.4 Safety Baseline and Strike Provenance (2026-08-19)
+
+The raw digital probability has not demonstrated an out-of-sample calibration
+advantage over the contemporaneous Polymarket midpoint.  Therefore the
+existing `calibrate_probability()` blend remains the single quote-fair path,
+but both model weights now default to `0`.  Until a chronological holdout
+proves otherwise, executable fair is the token's market midpoint; raw digital
+fair remains recorded for research and does not drive quote placement.
+
+`LIVE_SIGNAL_COMPARE` schema version 2 records the strike source, whether it
+is authoritative, and its lock state.  The calibration report groups future
+settled observations by those fields.  Historical schema-v1 rows are shown as
+`unknown`, rather than being retroactively assumed authoritative.  Do not add
+a provisional-strike entry block until this telemetry demonstrates that an
+authoritative/provisional difference exists in a sufficiently large,
+chronological holdout.
+
 ---
 
 # Phase 3: Execution-Lifecycle Audit

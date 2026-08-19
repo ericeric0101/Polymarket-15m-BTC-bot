@@ -1159,11 +1159,29 @@ class IntegratedBTCStrategy(
         reference_source_age_sec = (
             max(0.0, now_ts - reference_source_ts) if reference_source_ts > 0 else None
         )
+        strike_source = str(
+            self.market_strike_source_by_slug.get(slug)
+            or self.market_strike_provisional_source_by_slug.get(slug)
+            or ""
+        )
+        strike_authoritative = bool(
+            strike is not None and self._is_authoritative_strike_source(strike_source)
+        )
+        strike_lock_state = (
+            "authoritative"
+            if strike_authoritative
+            else "provisional"
+            if strike_source
+            else "unavailable"
+        )
         return attach_forecast_snapshot_telemetry(
             payload,
             diagnostics=pricer_diag,
             reference_source=str(getattr(self, "latest_external_spot_source", "") or ""),
             reference_source_age_sec=reference_source_age_sec,
+            strike_source=strike_source,
+            strike_authoritative=strike_authoritative,
+            strike_lock_state=strike_lock_state,
         )
 
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
@@ -1719,8 +1737,8 @@ class IntegratedBTCStrategy(
                 market_mid=market_mid,
                 side=outcome_side,
                 enabled=bool(getattr(self, "probability_calibration_enabled", True)),
-                up_model_weight=Decimal(str(getattr(self, "probability_calibration_up_model_weight", Decimal("0.65")))),
-                down_model_weight=Decimal(str(getattr(self, "probability_calibration_down_model_weight", Decimal("0.35")))),
+                up_model_weight=Decimal(str(getattr(self, "probability_calibration_up_model_weight", Decimal("0")))),
+                down_model_weight=Decimal(str(getattr(self, "probability_calibration_down_model_weight", Decimal("0")))),
             )
             quote_ctx.fair = fair
             quote_ctx.diag_context.update({
