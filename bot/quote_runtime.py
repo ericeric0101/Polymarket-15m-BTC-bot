@@ -11,10 +11,10 @@ from bot.quote_service import (
     build_directional_snapshot,
     compute_requote_target_version,
     extract_instrument_tick,
+    lifecycle_ttl_for_order,
     log_no_quote_diagnostics,
     reconcile_unwanted_quotes,
     should_requote_existing_order,
-    should_preserve_static_tail_protect_tp_order,
 )
 from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
@@ -191,19 +191,16 @@ class QuoteRuntimeMixin:
         self._cleanup_stale_pending_cancels(now_ts)
 
         for order_key, state in list(self.active_maker_orders.items()):
-            # A tail-protect TP has a fixed price and is GTC. Reposting it on
-            # the ordinary maker TTL only loses queue priority without changing
-            # the intended execution. Recovery exit explicitly cancels it when
-            # it needs the sell reservation.
-            if should_preserve_static_tail_protect_tp_order(state):
-                continue
             created_ts = float(state.get("created_ts", 0.0))
-            if state.get("is_urgent_exit"):
-                ttl = float(state.get("urgent_exit_ttl", self.maker_order_ttl_sec))
-            else:
-                ttl = self.maker_order_ttl_sec
-                if str(state.get("side", "") or "") == "sell" and state.get("loss_sell_reason"):
-                    ttl = max(ttl, float(getattr(self, "maker_loss_sell_reprice_min_interval_sec", ttl)))
+            ttl = lifecycle_ttl_for_order(
+                state,
+                normal_ttl_sec=float(self.maker_order_ttl_sec),
+                loss_sell_reprice_min_interval_sec=float(
+                    getattr(self, "maker_loss_sell_reprice_min_interval_sec", self.maker_order_ttl_sec)
+                ),
+            )
+            if ttl is None:
+                continue
             if created_ts <= 0 or (now_ts - created_ts) >= ttl:
                 side = str(state.get("side", "") or "")
                 is_urgent = " (urgent_exit)" if state.get("is_urgent_exit") else ""

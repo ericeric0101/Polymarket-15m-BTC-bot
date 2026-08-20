@@ -2074,3 +2074,24 @@ def should_preserve_static_tail_protect_tp_order(current: dict[str, Any] | None)
         return False
     snapshot = current.get("directional_snapshot") or {}
     return bool(snapshot.get("tail_protect_tp", False))
+
+
+def lifecycle_ttl_for_order(
+    current: dict[str, Any] | None,
+    *,
+    normal_ttl_sec: float,
+    loss_sell_reprice_min_interval_sec: float,
+) -> float | None:
+    """Return a TTL only for exit-owned orders that need periodic escalation.
+
+    A normal maker entry is refreshed by target-version/hysteresis and removed
+    when its gate stops allowing it. Cycling an unchanged entry on a timer only
+    loses queue priority, so it intentionally has no lifecycle TTL.
+    """
+    if not current or should_preserve_static_tail_protect_tp_order(current):
+        return None
+    if current.get("is_urgent_exit"):
+        return float(current.get("urgent_exit_ttl", normal_ttl_sec))
+    if str(current.get("side", "") or "") == "sell" and current.get("loss_sell_reason"):
+        return max(normal_ttl_sec, loss_sell_reprice_min_interval_sec)
+    return None

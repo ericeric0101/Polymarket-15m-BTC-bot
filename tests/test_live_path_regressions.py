@@ -65,6 +65,7 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     resolve_quote_intent_state,
     retreat_crossing_buy_quote,
+    lifecycle_ttl_for_order,
     should_preserve_static_tail_protect_tp_order,
     should_requote_existing_order,
 )
@@ -4048,6 +4049,29 @@ def test_static_tail_protect_tp_is_preserved_but_recovery_sell_is_not():
     assert should_preserve_static_tail_protect_tp_order(static_tp)
     assert not should_preserve_static_tail_protect_tp_order(recovery_sell)
     assert not should_preserve_static_tail_protect_tp_order({"side": "buy"})
+
+
+def test_lifecycle_ttl_only_applies_to_exit_owned_orders():
+    assert lifecycle_ttl_for_order(
+        {"side": "buy"},
+        normal_ttl_sec=20.0,
+        loss_sell_reprice_min_interval_sec=45.0,
+    ) is None
+    assert lifecycle_ttl_for_order(
+        {"side": "sell", "directional_snapshot": {"tail_protect_tp": True}},
+        normal_ttl_sec=20.0,
+        loss_sell_reprice_min_interval_sec=45.0,
+    ) is None
+    assert lifecycle_ttl_for_order(
+        {"side": "sell", "loss_sell_reason": "confirmed_invalidation"},
+        normal_ttl_sec=20.0,
+        loss_sell_reprice_min_interval_sec=45.0,
+    ) == 45.0
+    assert lifecycle_ttl_for_order(
+        {"side": "sell", "is_urgent_exit": True, "urgent_exit_ttl": 12.0},
+        normal_ttl_sec=20.0,
+        loss_sell_reprice_min_interval_sec=45.0,
+    ) == 12.0
 
 
 
