@@ -61,7 +61,6 @@ class _DryOrderHost(_ShadowHost, OrderRuntimeMixin):
         self.maker_min_shares = Decimal("5")
         self.maker_exchange_min_shares = Decimal("5")
         self.continuation_entry_size_multiplier = Decimal("1")
-        self.trend_buy_size_multiplier = Decimal("1")
         self.stop_loss_reentry_pause_until_by_inst = {}
         self.inventory_delta_shares = Decimal("0")
         self.maker_max_inventory_shares = Decimal("10")

@@ -2042,15 +2042,9 @@ class IntegratedBTCStrategy(
                     current_slug=current_slug,
                     inst_id=inst_id,
                     market_buy_count=market_buy_count,
-                    # Trend-buy params
-                    trend_buy_enabled=self.trend_buy_enabled,
-                    trend_buy_min_score=self.trend_buy_min_score,
-                    active_instrument_id=self._instrument_for_side(self.active_side),
                     time_left_sec=time_left_sec_global,
-                    trend_buy_min_time_left_sec=self.trend_buy_min_time_left_sec,
                     best_bid=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
                     fair=quote_ctx.fair,
-                    trend_buy_max_price_premium_ps=self.trend_buy_max_price_premium_ps,
                     candidate_entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
                     spot_minus_strike_avg=(
                         self._spot_minus_strike_avg(int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0))
@@ -2452,9 +2446,7 @@ class IntegratedBTCStrategy(
                     hold_sec=hold_sec,
                     loss_sell_min_hold_sec=self.maker_loss_sell_min_hold_sec,
                     time_left_sec=time_left_sec_global,
-                    # Trend-buy params
                     entry_mode=buy_entry_eval.entry_mode,
-                    trend_buy_size_multiplier=self.trend_buy_size_multiplier,
                     entry_size_multiplier=(
                         buy_entry_eval.size_multiplier
                         * Decimal(str(getattr(self, "loss_recovery_size_multiplier", 1)))

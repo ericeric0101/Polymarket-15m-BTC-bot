@@ -640,7 +640,6 @@ class DummyTrendSubmitStrategy:
         self.maker_min_shares = Decimal("5.4")
         self.maker_exchange_min_shares = Decimal("5.0")
         self.continuation_entry_size_multiplier = Decimal("1.0")
-        self.trend_buy_size_multiplier = Decimal("1.5")
         self.stop_loss_reentry_pause_until_by_inst = {}
         self.inventory_delta_shares = Decimal("0")
         self.maker_max_inventory_shares = Decimal("20")
@@ -3215,7 +3214,7 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
     ]
 
 
-def test_trend_buy_size_multiplier_flows_into_submit_qty_without_economics_exemption():
+def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up",
         side="buy",
@@ -3255,8 +3254,6 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty_without_economics_exemp
         high_cost_exit_cooldown_until=0.0,
         maker_sell_cost_protect_enabled=False,
         maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
-        entry_mode="trend",
-        trend_buy_size_multiplier=Decimal("1.5"),
     )
     snapshot = build_directional_snapshot(desired_entry)
     strategy = DummyTrendSubmitStrategy()
@@ -3272,8 +3269,8 @@ def test_trend_buy_size_multiplier_flows_into_submit_qty_without_economics_exemp
 
     assert strategy.submitted_orders, "expected submit_order to be called"
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
-    assert submitted_qty == Decimal("8.100000")
-    assert strategy.order_events[-1]["payload"]["entry_mode"] == "trend"
+    assert submitted_qty == Decimal("5.400000")
+    assert strategy.order_events[-1]["payload"]["entry_mode"] == "value"
 
 
 def test_crossing_tail_protect_tp_uses_bounded_taker_exit_not_post_only_maker_order():
@@ -3392,7 +3389,7 @@ def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchang
         "should_quote": True,
         "price": Decimal("0.71"),
         "size_multiplier": Decimal("1"),
-        "diag_reason": "trend_buy_entry",
+        "diag_reason": "eligible",
     }
 
     adjusted = apply_high_entry_price_size_adjustment(
@@ -3620,7 +3617,7 @@ def test_weak_and_high_price_risk_caps_produce_half_size_not_quarter_size():
     assert desired["high_entry_price_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
 
 
-def test_trend_mode_cannot_recover_a_negative_robust_net_with_discounted_cost():
+def test_negative_robust_net_cannot_be_recovered_by_entry_mode():
     desired = build_desired_quote_entry(
         order_key="buy:inst-up",
         side="buy",
@@ -3660,8 +3657,6 @@ def test_trend_mode_cannot_recover_a_negative_robust_net_with_discounted_cost():
         high_cost_exit_cooldown_until=0.0,
         maker_sell_cost_protect_enabled=False,
         maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
-        entry_mode="trend",
-        trend_buy_size_multiplier=Decimal("1"),
     )
 
     assert desired["should_quote"] is False
@@ -3669,7 +3664,7 @@ def test_trend_mode_cannot_recover_a_negative_robust_net_with_discounted_cost():
     assert desired["diag_reason"].startswith("econ_gate")
 
 
-def test_reduce_only_overrides_trend_buy_quote():
+def test_reduce_only_overrides_buy_quote():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up",
         side="buy",
@@ -3709,8 +3704,6 @@ def test_reduce_only_overrides_trend_buy_quote():
         high_cost_exit_cooldown_until=0.0,
         maker_sell_cost_protect_enabled=False,
         maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
-        entry_mode="trend",
-        trend_buy_size_multiplier=Decimal("1.0"),
     )
 
     assert desired_entry["should_quote"] is False
@@ -4442,14 +4435,9 @@ def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
         current_slug="btc-updown-15m-test",
         inst_id="inst-down",
         market_buy_count=0,
-        trend_buy_enabled=True,
-        trend_buy_min_score=Decimal("0.16"),
-        active_instrument_id="inst-down",
         time_left_sec=600.0,
-        trend_buy_min_time_left_sec=360.0,
         best_bid=Decimal("0.55"),
         fair=Decimal("0.62"),
-        trend_buy_max_price_premium_ps=Decimal("0.018"),
     )
 
     assert out.skip is True

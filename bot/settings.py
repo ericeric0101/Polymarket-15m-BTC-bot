@@ -253,11 +253,6 @@ def initialize_strategy_settings(
     strategy.down_high_price_spot_strike_avg_max = config.side.down_high_price_spot_strike_avg_max
     strategy.continuation_entry_enabled = config.maker.continuation_entry_enabled
     strategy.continuation_entry_size_multiplier = config.maker.continuation_entry_size_multiplier
-    strategy.trend_buy_enabled = config.maker.trend_buy_enabled
-    strategy.trend_buy_min_score = config.maker.trend_buy_min_score
-    strategy.trend_buy_min_time_left_sec = config.maker.trend_buy_min_time_left_sec
-    strategy.trend_buy_max_price_premium_ps = config.maker.trend_buy_max_price_premium_ps
-    strategy.trend_buy_size_multiplier = config.maker.trend_buy_size_multiplier
     strategy.trapped_inventory_recovery_enabled = config.maker.trapped_inventory_recovery_enabled
     strategy.trapped_inventory_recovery_min_qty = config.maker.trapped_inventory_recovery_min_qty
     strategy.trapped_inventory_recovery_max_robust_net_deficit_usdc = (

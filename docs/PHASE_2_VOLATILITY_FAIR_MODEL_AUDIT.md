@@ -170,6 +170,66 @@ a provisional-strike entry block until this telemetry demonstrates that an
 authoritative/provisional difference exists in a sufficiently large,
 chronological holdout.
 
+## P6.1 Operational Profile Defaults (2026-08-20)
+
+The versioned profile no longer repeats operational values already supplied by
+the code defaults: auto-redeem interval/gap/timeout/rollover/slug, lifecycle
+settling and next-market polling, compatibility patch mode, and HTTP retry
+timings.  Their readers remain intentionally supported for explicit shell or
+local overrides, but the reviewed profile no longer treats default operational
+timing as strategy tuning.  This is behavior-preserving: every removed value
+matches its existing default.
+
+## P3.1 Lifecycle Default Reduction (2026-08-20)
+
+The profile no longer repeats the default cancel retry/cooldown/ack timing,
+post-fill BUY cooldown, or requote rate limit.  These values are still
+supported as explicit local or shell overrides, but are not strategy tuning.
+`MAKER_REQUOTE_MIN_AGE_SEC_SELL`, watchdog controls, venue-balance timing, and
+recovery-exit TTL remain because they govern distinct state transitions rather
+than duplicate the ordinary BUY lifecycle.
+
+## P6.2 Operational Alert Defaults (2026-08-20)
+
+The profile no longer carries four alert-only values. `AlertWatcher` now owns
+the fixed operational policy: three consecutive losses, a $7 large-loss alert,
+a $20 low-balance alert, and a 300-second heartbeat threshold. This removes
+environment readers from a monitoring-only path; it cannot affect strategy
+decisions, replay, order submission, or exits.
+
+## P4.1 Entry-Mode Convergence (2026-08-20)
+
+The `TREND_BUY_*` mode and its size multiplier were removed.  It was a second
+entry classification layered on top of the same locked-side score and common
+economics gate; in the deployed profile its multiplier was `1.0`, so removing
+it preserves submitted quantity while eliminating an unverified path for a
+future size exception.  New entry decisions now use only the canonical score,
+first-entry score, timing, model-consistency, economics, and explicit
+high-price size rules.
+
+## P1.2 Empirical Markout Checkpoint (2026-08-20)
+
+The most recent 168-hour window contains 104 real maker-BUY observations at
+the 10-second markout horizon (103 distinct fills). The mean adverse markout
+is `0.053317` per share and the mean signed markout is `-0.040192` per share.
+The largest adverse observation is `0.675000` per share, but it is not the
+sole source of the mean: the entry-price buckets are `0.061429` below $0.40,
+`0.042500` from $0.40--0.60, `0.055926` from $0.60--0.80, and `0.030625` at or
+above $0.80. The current empirical-markout path therefore remains the only
+entry-cost input. The retired VWAP, depth-impact, slippage, and non-atomic
+proxies must not be restored as fallback penalties.
+
+## P5.1 Exit-Policy Regression Boundary (2026-08-20)
+
+The recovery ladder already has executable regression coverage for passive
+submission, passive TTL handoff, price-bounded FAK escalation, sell-reservation
+ownership, cancellation, and terminal audit outcomes. Current 168-hour audit
+data contains four filled and three rejected `invalidation_recovery` exits,
+plus three passive submissions and four existing-SELL handoffs. This supports
+the ladder's audit and lifecycle contract, but is not enough to retune recovery
+eligibility thresholds. Ordinary TP, urgent exit, recovery exit, and
+offside-near-close remain distinct policies and are not profile duplicates.
+
 ---
 
 # Phase 3: Execution-Lifecycle Audit

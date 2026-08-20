@@ -178,11 +178,6 @@ class MakerConfig:
     implied_sigma_enabled: bool
     continuation_entry_enabled: bool
     continuation_entry_size_multiplier: Decimal
-    trend_buy_enabled: bool
-    trend_buy_min_score: Decimal
-    trend_buy_min_time_left_sec: float
-    trend_buy_max_price_premium_ps: Decimal
-    trend_buy_size_multiplier: Decimal
     trapped_inventory_recovery_enabled: bool
     trapped_inventory_recovery_min_qty: Decimal
     trapped_inventory_recovery_max_robust_net_deficit_usdc: Decimal
@@ -783,11 +778,6 @@ class AppConfig:
                 implied_sigma_enabled=_env_bool("MAKER_DIGITAL_IMPLIED_SIGMA_ENABLED", True),
                 continuation_entry_enabled=_env_bool_inverted("CONTINUATION_ENTRY_ENABLED", True),
                 continuation_entry_size_multiplier=_env_decimal("CONTINUATION_ENTRY_SIZE_MULTIPLIER", "1.0"),
-                trend_buy_enabled=_env_bool("TREND_BUY_ENABLED", False),
-                trend_buy_min_score=_env_decimal("TREND_BUY_MIN_SCORE", "0.20"),
-                trend_buy_min_time_left_sec=_env_float("TREND_BUY_MIN_TIME_LEFT_SEC", 300.0),
-                trend_buy_max_price_premium_ps=_env_decimal("TREND_BUY_MAX_PRICE_PREMIUM_PS", "0.02"),
-                trend_buy_size_multiplier=_env_decimal("TREND_BUY_SIZE_MULTIPLIER", "1.0"),
                 trapped_inventory_recovery_enabled=_env_bool_inverted("TRAPPED_INVENTORY_RECOVERY_ENABLED", True),
                 trapped_inventory_recovery_min_qty=_env_decimal("TRAPPED_INVENTORY_RECOVERY_MIN_QTY", "1.0"),
                 trapped_inventory_recovery_max_robust_net_deficit_usdc=_env_decimal(

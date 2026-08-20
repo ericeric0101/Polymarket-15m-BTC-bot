@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set, Tuple
 
 from dashboard_state import DashboardState, TradeRecord
 from telegram_notifier import TelegramNotifier
+
+
+ALERT_CONSECUTIVE_LOSSES = 3
+ALERT_LARGE_LOSS_USD = 7.0
+ALERT_LOW_BALANCE_USD = 20.0
+ALERT_HEARTBEAT_STALE_SEC = 300
 
 
 def _utc_now() -> datetime:
@@ -29,10 +34,10 @@ def _trade_pnl(trade: TradeRecord) -> Optional[float]:
 
 class AlertWatcher:
     def __init__(self) -> None:
-        self.consecutive_losses = int(os.getenv("ALERT_CONSECUTIVE_LOSSES", "3"))
-        self.large_loss_usd = float(os.getenv("ALERT_LARGE_LOSS_USD", "1.50"))
-        self.low_balance_usd = float(os.getenv("ALERT_LOW_BALANCE_USD", "20.00"))
-        self.heartbeat_stale_sec = int(os.getenv("ALERT_HEARTBEAT_STALE_SEC", "300"))
+        self.consecutive_losses = ALERT_CONSECUTIVE_LOSSES
+        self.large_loss_usd = ALERT_LARGE_LOSS_USD
+        self.low_balance_usd = ALERT_LOW_BALANCE_USD
+        self.heartbeat_stale_sec = ALERT_HEARTBEAT_STALE_SEC
         self.last_sent: Dict[str, datetime] = {}
         self._alerted_loss_trades: Set[Tuple[int, str]] = set()
         self._seen_errors: Set[Tuple[str, str]] = set()

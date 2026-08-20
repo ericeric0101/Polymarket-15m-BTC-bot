@@ -91,7 +91,7 @@ class QuoteInstrumentContext:
 class BuyEntryEvaluation:
     skip: bool
     min_expected_net_usdc: Decimal
-    entry_mode: str = "value"  # "value" or "trend"
+    entry_mode: str = "value"
     size_multiplier: Decimal = Decimal("1")
     event_type: str = ""
     reason: str = ""
@@ -528,15 +528,9 @@ def evaluate_buy_entry_controls(
     current_slug: str,
     inst_id: Any,
     market_buy_count: int = 0,
-    # --- Trend-buy params ---
-    trend_buy_enabled: bool = False,
-    trend_buy_min_score: Decimal = Decimal("0.20"),
-    active_instrument_id: Any = None,
     time_left_sec: float | None = None,
-    trend_buy_min_time_left_sec: float = 300.0,
     best_bid: Decimal | None = None,
     fair: Decimal | None = None,
-    trend_buy_max_price_premium_ps: Decimal = Decimal("0.02"),
     candidate_entry_price: Decimal | None = None,
     spot_minus_strike_avg: Decimal | None = None,
     entry_spot_strike_avg_min_abs: Decimal = Decimal("0"),
@@ -767,8 +761,6 @@ def evaluate_buy_entry_controls(
                 "engine": "entry_context",
             },
         )
-    # --- Trend-buy mode detection ---
-    _active_side_txt = active_side_txt
     if (
         current_inst_inventory_qty >= max_locked_side_position
         and str(inventory_full_behavior or "STOP_BUY").upper() == "WIDEN_SPREAD"
@@ -776,25 +768,6 @@ def evaluate_buy_entry_controls(
         min_expected_net_usdc = (
             maker_min_expected_net_usdc * max(Decimal("1"), maker_reload_min_expected_net_multiplier)
         )
-    if (
-        trend_buy_enabled
-        and active_side_locked
-        and _active_side_txt not in ("NONE", "")
-        and abs(side_score) >= trend_buy_min_score
-        and current_inst_inventory_qty <= 0
-        and active_instrument_id is not None
-        and str(inst_id) == str(active_instrument_id)
-        and (time_left_sec is None or time_left_sec >= trend_buy_min_time_left_sec)
-        and _trend_price_premium_ok(
-            best_bid=best_bid,
-            fair=fair,
-            max_premium=trend_buy_max_price_premium_ps,
-        )
-    ):
-        entry_mode = "trend"
-        # Trend is a directional classification only. It cannot relax the
-        # common economics threshold used by every new BUY.
-
     if (
         maker_reload_min_expected_net_multiplier > Decimal("1")
         and current_inst_inventory_qty + Decimal("0.000001")
@@ -1815,9 +1788,7 @@ def build_desired_quote_entry(
     # loss-selling is always allowed regardless of thesis to prevent
     # holding a dead position into settlement.
     true_last_resort_sec: float = 15.0,
-    # --- Trend-buy params (orchestration passes down) ---
     entry_mode: str = "value",
-    trend_buy_size_multiplier: Decimal = Decimal("1"),
     entry_size_multiplier: Decimal = Decimal("1"),
     entry_quality: dict[str, Any] | None = None,
     decision_phase: str = "",
@@ -1844,8 +1815,6 @@ def build_desired_quote_entry(
 
     if side == "buy":
         effective_size_multiplier = max(Decimal("0"), entry_size_multiplier)
-        if entry_mode == "trend":
-            effective_size_multiplier *= max(Decimal("0"), trend_buy_size_multiplier)
         (
             econ,
             robust_net,

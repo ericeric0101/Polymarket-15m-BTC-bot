@@ -98,11 +98,7 @@ def submit_maker_quote(
                     (
                         strategy.continuation_entry_size_multiplier
                         if entry_mode == "continuation"
-                        else (
-                            getattr(strategy, "trend_buy_size_multiplier", Decimal("1"))
-                            if entry_mode == "trend"
-                            else Decimal("1")
-                        )
+                        else Decimal("1")
                     ),
                 )
             )
