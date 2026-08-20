@@ -2064,9 +2064,6 @@ class IntegratedBTCStrategy(
                     maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
                     max_locked_side_position=self.max_locked_side_position,
                     inventory_full_behavior=self.inventory_full_behavior,
-                    allow_fair_edge_shadow=bool(
-                        getattr(self, "fair_edge_bucket_shadow_enabled", False)
-                    ),
                     twap_reference_degraded=bool(
                         getattr(self, "twap_degraded_block_new_entries", True)
                         and getattr(self, "_twap_reference_degraded", False)
@@ -2078,18 +2075,7 @@ class IntegratedBTCStrategy(
                     best_bid=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
                     fair=quote_ctx.fair,
                     candidate_entry_price=quote_ctx.quote[0] if quote_ctx.quote is not None else None,
-                    spot_minus_strike_avg=(
-                        self._spot_minus_strike_avg(int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0))
-                        if int(getattr(self, "entry_spot_strike_lookback_sec", 0) or 0) > 0
-                        else None
-                    ),
-                    entry_spot_strike_avg_min_abs=getattr(self, "entry_spot_strike_avg_min_abs", Decimal("0")),
-                    entry_fair_edge_min_ps=getattr(self, "entry_fair_edge_min_ps", Decimal("0")),
                     robust_net_usdc=candidate_robust_net,
-                    down_high_price_threshold=getattr(self, "down_high_price_threshold", Decimal("1")),
-                    down_high_price_min_score_abs=getattr(self, "down_high_price_min_score_abs", Decimal("0")),
-                    down_high_price_min_robust_net_usdc=getattr(self, "down_high_price_min_robust_net_usdc", Decimal("0")),
-                    down_high_price_spot_strike_avg_max=getattr(self, "down_high_price_spot_strike_avg_max", Decimal("0")),
                     shadow_payload=live_shadow_payload,
                     entry_quality_allow_size_down=bool(
                         getattr(self, "entry_quality_allow_size_down", False)

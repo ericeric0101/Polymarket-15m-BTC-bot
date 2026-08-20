@@ -296,6 +296,27 @@ keys, so this removes six runtime readers rather than profile lines. Its
 physical key count will only fall when a later phase removes a setting that is
 actually present and whose behavior has independently been validated.
 
+## Phase 4.1: Canonical Entry Gates (2026-08-21)
+
+The live BUY path now has one directional decision chain: hard data safety,
+locked-side invalidation, first-entry time/score, normal score, high-price
+size adjustment, and the single robust-net economics check. The following
+seven profile keys and their readers were removed because they applied a
+second, overlapping model-context veto after that chain:
+
+- `ENTRY_SPOT_STRIKE_LOOKBACK_SEC`
+- `ENTRY_SPOT_STRIKE_AVG_MIN_ABS`
+- `ENTRY_FAIR_EDGE_MIN_PS`
+- `DOWN_HIGH_PRICE_THRESHOLD`
+- `DOWN_HIGH_PRICE_MIN_SCORE_ABS`
+- `DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC`
+- `DOWN_HIGH_PRICE_SPOT_STRIKE_AVG_MAX`
+
+This does not relax `ENTRY_SCORE_MIN`, `FIRST_ENTRY_SCORE_MIN`, the first-entry
+window, `MARKET_MAX_POSITION_SHARES`, the high-price half-size rule, or
+`ENTRY_MIN_ROBUST_NET_USDC`. Negative fair-edge research remains telemetry and
+is not a second live entry gate.
+
 ## Inventory: Quote Transport and Watchdog (11)
 
 | Keys | Read / consumer path | Relationship | Candidate consolidation |

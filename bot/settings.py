@@ -246,13 +246,6 @@ def initialize_strategy_settings(
     strategy.bi_side_flip_max_score_down_held_new = config.side.flip_max_score_down_held_new
     strategy.directional_entry_min_score_abs_new = config.side.directional_entry_min_score_abs_new
     strategy.directional_entry_min_score_abs = strategy.directional_entry_min_score_abs_new
-    strategy.entry_spot_strike_lookback_sec = config.side.entry_spot_strike_lookback_sec
-    strategy.entry_spot_strike_avg_min_abs = config.side.entry_spot_strike_avg_min_abs
-    strategy.entry_fair_edge_min_ps = config.side.entry_fair_edge_min_ps
-    strategy.down_high_price_threshold = config.side.down_high_price_threshold
-    strategy.down_high_price_min_score_abs = config.side.down_high_price_min_score_abs
-    strategy.down_high_price_min_robust_net_usdc = config.side.down_high_price_min_robust_net_usdc
-    strategy.down_high_price_spot_strike_avg_max = config.side.down_high_price_spot_strike_avg_max
     strategy.continuation_entry_enabled = config.maker.continuation_entry_enabled
     strategy.continuation_entry_size_multiplier = config.maker.continuation_entry_size_multiplier
     strategy.trapped_inventory_recovery_enabled = config.maker.trapped_inventory_recovery_enabled

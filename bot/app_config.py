@@ -282,14 +282,7 @@ class SideDecisionConfig:
     flip_max_score_down_held_new: Decimal
     directional_entry_min_score_abs_new: Decimal
     directional_first_entry_min_score_abs_new: Decimal
-    entry_spot_strike_lookback_sec: int
-    entry_spot_strike_avg_min_abs: Decimal
-    entry_fair_edge_min_ps: Decimal
     first_entry_max_time_left_sec: int
-    down_high_price_threshold: Decimal
-    down_high_price_min_score_abs: Decimal
-    down_high_price_min_robust_net_usdc: Decimal
-    down_high_price_spot_strike_avg_max: Decimal
     side_thesis_weak_score_abs: Decimal
     side_thesis_weak_requires_opposite_side_new: bool
     side_thesis_weak_opposite_score_abs_new: Decimal
@@ -313,18 +306,8 @@ class SideDecisionConfig:
             raise ValueError("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
         if self.directional_first_entry_min_score_abs_new < 0:
             raise ValueError("DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
-        if self.entry_spot_strike_lookback_sec < 0:
-            raise ValueError("ENTRY_SPOT_STRIKE_LOOKBACK_SEC must be >= 0")
-        if self.entry_fair_edge_min_ps < 0:
-            raise ValueError("ENTRY_FAIR_EDGE_MIN_PS must be >= 0")
         if self.first_entry_max_time_left_sec < 0:
             raise ValueError("FIRST_ENTRY_MAX_TIME_LEFT_SEC must be >= 0")
-        if self.down_high_price_threshold < 0:
-            raise ValueError("DOWN_HIGH_PRICE_THRESHOLD must be >= 0")
-        if self.down_high_price_min_score_abs < 0:
-            raise ValueError("DOWN_HIGH_PRICE_MIN_SCORE_ABS must be >= 0")
-        if self.down_high_price_min_robust_net_usdc < 0:
-            raise ValueError("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC must be >= 0")
         if self.side_thesis_weak_opposite_score_abs_new < 0:
             raise ValueError("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW must be >= 0")
 
@@ -863,14 +846,7 @@ class AppConfig:
                         str(entry_score_abs_default),
                     ),
                 ),
-                entry_spot_strike_lookback_sec=max(0, _env_int("ENTRY_SPOT_STRIKE_LOOKBACK_SEC", 0)),
-                entry_spot_strike_avg_min_abs=_env_decimal("ENTRY_SPOT_STRIKE_AVG_MIN_ABS", "0"),
-                entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0"),
                 first_entry_max_time_left_sec=max(0, _env_int("FIRST_ENTRY_MAX_TIME_LEFT_SEC", 600)),
-                down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "1"),
-                down_high_price_min_score_abs=_env_decimal("DOWN_HIGH_PRICE_MIN_SCORE_ABS", "0.25"),
-                down_high_price_min_robust_net_usdc=_env_decimal("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC", "0.15"),
-                down_high_price_spot_strike_avg_max=_env_decimal("DOWN_HIGH_PRICE_SPOT_STRIKE_AVG_MAX", "-10"),
                 side_thesis_weak_score_abs=_env_decimal("SIDE_THESIS_WEAK_SCORE_ABS_NEW", str(entry_score_abs_default)),
                 side_thesis_weak_requires_opposite_side_new=_env_bool_inverted("SIDE_THESIS_WEAK_REQUIRES_OPPOSITE_SIDE_NEW", True),
                 side_thesis_weak_opposite_score_abs_new=_env_decimal("SIDE_THESIS_WEAK_OPPOSITE_SCORE_ABS_NEW", str(held_flip_default)),
