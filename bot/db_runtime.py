@@ -21,11 +21,13 @@ class StrategyDBRuntimeMixin:
         lookback_hours = float(self.maker_execution_empirical_markout_lookback_hours)
         horizon_sec = 10
         min_samples = int(self.maker_execution_empirical_markout_min_samples)
-        calibration = self.trade_db.load_maker_buy_markout_calibration(
+        calibrations = self.trade_db.load_maker_buy_markout_calibrations(
             lookback_hours=lookback_hours,
             horizon_sec=horizon_sec,
             min_samples=min_samples,
         )
+        calibration = calibrations.get("global")
+        self.maker_buy_markout_calibrations = calibrations
         if not calibration:
             logger.info(
                 "Execution-cost calibration unavailable; new BUY entries remain blocked: "
@@ -38,19 +40,26 @@ class StrategyDBRuntimeMixin:
             return
         config.maker_execution_empirical_adverse_markout_per_share = adverse_markout_ps
         payload = {
-            "source": "maker_buy_adverse_markout",
+            "source": str(calibration["source"]),
             "sample_count": int(calibration["sample_count"]),
             "horizon_sec": horizon_sec,
             "lookback_hours": lookback_hours,
             "adverse_markout_per_share": float(adverse_markout_ps),
+            "raw_mean_adverse_markout_per_share": float(
+                calibration["raw_mean_adverse_markout_per_share"]
+            ),
+            "winsor_cap_per_share": float(calibration["winsor_cap_per_share"]),
+            "method": str(calibration["method"]),
+            "regime_calibrations": calibrations,
             "risk_cap_at_fixed_shares_usdc": float(
                 adverse_markout_ps * Decimal(str(getattr(self, "maker_fixed_shares", 0)))
             ),
         }
         logger.info(
             "Execution penalty calibrated from maker BUY fills: "
-            f"samples={payload['sample_count']} horizon={horizon_sec}s "
-            f"adverse_markout=${float(adverse_markout_ps):.6f}/share"
+            f"samples={payload['sample_count']} horizon={horizon_sec}s method={payload['method']} "
+            f"adverse_markout=${float(adverse_markout_ps):.6f}/share "
+            f"raw_mean=${payload['raw_mean_adverse_markout_per_share']:.6f}/share"
         )
         self._db_strategy_event("EXECUTION_PENALTY_CALIBRATED", payload)
 

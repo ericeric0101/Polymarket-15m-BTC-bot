@@ -31,14 +31,18 @@ def test_strong_directional_regime_keeps_markout_but_uses_settled_probability():
         spot=Decimal("10020"),
         strike=Decimal("10000"),
         calibrations={"10_30": {"win_probability": 0.78, "sample_count": 100}},
+        markout_calibrations={
+            "global": {"adverse_markout_per_share": 0.02, "sample_count": 100, "source": "global_fallback"},
+        },
         min_expected_net_usdc=Decimal("0.001"),
     )
 
     assert details["applied"] is True
     assert updated[2] is True
-    assert updated[4] == Decimal("0.53")  # Markout is still fully deducted.
-    assert updated[3] == Decimal("0.37")  # 10 * (0.78 - 0.69) - 0.53
+    assert updated[4] == Decimal("0.20")  # Global fallback remains fully deducted.
+    assert updated[3] == Decimal("0.70")  # 10 * (0.78 - 0.69) - 0.20
     assert updated[10]["regime_resolution_probability"] == Decimal("0.78")
+    assert details["markout_source"] == "global_fallback"
 
 
 def test_strong_directional_regime_refuses_unmeasured_time_window():
@@ -52,6 +56,7 @@ def test_strong_directional_regime_refuses_unmeasured_time_window():
         spot=Decimal("10020"),
         strike=Decimal("10000"),
         calibrations={"10_30": {"win_probability": 0.78, "sample_count": 100}},
+        markout_calibrations=None,
         min_expected_net_usdc=Decimal("0.001"),
     )
 

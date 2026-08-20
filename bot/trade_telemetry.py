@@ -20,6 +20,7 @@ class FillObservation:
     model_probability: Decimal | None = None
     edge_ps: Decimal | None = None
     liquidity_class: str | None = None
+    entry_context: dict[str, Any] = field(default_factory=dict)
     completed_horizons: set[int] = field(default_factory=set)
 
 
@@ -44,7 +45,7 @@ class TradeTelemetry:
                     mid - obs.fill_price if obs.side.lower() == "buy" else obs.fill_price - mid
                 )
                 obs.completed_horizons.add(horizon)
-                completed.append({
+                payload = {
                     "fill_id": fill_id,
                     "instrument_key": instrument_key,
                     "side": obs.side,
@@ -56,7 +57,12 @@ class TradeTelemetry:
                     "model_probability": float(obs.model_probability) if obs.model_probability is not None else None,
                     "edge_ps": float(obs.edge_ps) if obs.edge_ps is not None else None,
                     "liquidity_class": obs.liquidity_class,
-                })
+                }
+                # Freeze the decision context captured at fill time.  Markout
+                # is a post-fill measurement, so recomputing these values from
+                # a later quote would create look-ahead bias in calibration.
+                payload.update(obs.entry_context)
+                completed.append(payload)
             if len(obs.completed_horizons) == len(MARKOUT_HORIZONS_SEC):
                 self.pending.pop(fill_id, None)
         return completed

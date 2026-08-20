@@ -17,6 +17,62 @@ from bot.enums import ActiveSide
 from bot.post_trade import build_fill_order_event_payload
 
 
+def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float) -> Dict[str, Any]:
+    """Capture immutable decision inputs for later markout calibration."""
+    slug = str(getattr(strategy, "current_market_slug", "") or "")
+    try:
+        outcome_side = str(strategy._side_for_instrument_id(filled_inst).value)
+    except Exception:
+        outcome_side = "NONE"
+    try:
+        spot = Decimal(str(getattr(strategy, "latest_external_spot", None)))
+    except Exception:
+        spot = None
+    strike = None
+    try:
+        strike = getattr(strategy, "market_strike_cache_by_slug", {}).get(slug)
+        strike = Decimal(str(strike)) if strike is not None else None
+    except Exception:
+        strike = None
+    signed_distance = None
+    if spot is not None and strike is not None and strike > 0 and outcome_side in {"UP", "DOWN"}:
+        signed_distance = spot - strike
+        if outcome_side == "DOWN":
+            signed_distance = -signed_distance
+    bucket = None
+    if signed_distance is not None:
+        if Decimal("10") <= signed_distance < Decimal("30"):
+            bucket = "10_30"
+        elif Decimal("30") <= signed_distance < Decimal("60"):
+            bucket = "30_60"
+    end_ts = getattr(strategy, "current_market_end_timestamp", None)
+    time_left_sec = None
+    if end_ts is not None:
+        try:
+            time_left_sec = max(0.0, float(end_ts) - now_ts)
+        except (TypeError, ValueError):
+            pass
+    recent_vol = None
+    try:
+        recent_vol = strategy._compute_recent_volatility(filled_inst)
+    except Exception:
+        pass
+    return {
+        "markout_context_schema_version": 1,
+        "slug": slug or None,
+        "entry_outcome_side": outcome_side,
+        "entry_spot": float(spot) if spot is not None else None,
+        "entry_strike": float(strike) if strike is not None else None,
+        "entry_signed_spot_distance": float(signed_distance) if signed_distance is not None else None,
+        "entry_regime_bucket": bucket,
+        "entry_time_left_sec": time_left_sec,
+        "entry_side_score": float(getattr(strategy, "side_decision_score", 0) or 0),
+        "entry_recent_vol": float(recent_vol) if recent_vol is not None else None,
+        "entry_reference_source": str(getattr(strategy, "latest_external_spot_source", "") or ""),
+        "entry_twap_degraded": bool(getattr(strategy, "_twap_reference_degraded", False)),
+    }
+
+
 def is_permanent_trading_restriction(reason: str) -> bool:
     """Return whether the venue explicitly forbids trading from this client.
 
@@ -148,13 +204,14 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     telemetry = getattr(strategy, "trade_telemetry", None)
     if telemetry is not None and fill_side_norm and fill_qty_dec > 0:
         try:
+            fill_ts = time.time()
             telemetry.record_fill(
                 fill_id=filled_id,
                 instrument_key=str(strategy._instrument_key(filled_inst)),
                 side=fill_side_norm,
                 fill_price=fill_price_dec,
                 qty=fill_qty_dec,
-                filled_ts=time.time(),
+                filled_ts=fill_ts,
                 reference_mid=(
                     (strategy.latest_market_bid + strategy.latest_market_ask) / Decimal("2")
                     if strategy.latest_market_bid is not None and strategy.latest_market_ask is not None
@@ -169,6 +226,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                     if filled_directional_snapshot.get("directional_edge_ps") is not None else None
                 ),
                 liquidity_class=liquidity_class,
+                entry_context=_build_markout_entry_context(strategy, filled_inst, fill_ts),
             )
         except Exception as telemetry_error:
             logger.debug(f"Trade telemetry fill record skipped: {telemetry_error}")

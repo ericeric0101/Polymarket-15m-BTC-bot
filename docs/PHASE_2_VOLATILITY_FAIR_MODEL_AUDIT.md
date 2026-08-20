@@ -389,9 +389,9 @@ The entry-cost implementation had two distinct defects which made ordinary
 midpoint quoting appear uneconomic in every market regime:
 
 1. The 10-second adverse markout was a single arithmetic mean over the whole
-   `EXECUTION_COST_LOOKBACK_HOURS` window. The current 168-hour calibration is
-   104 maker BUY observations at `$0.053317/share`; it is retained as a risk
-   cost, but it is not a current-book estimate and must not be treated as one.
+   `EXECUTION_COST_LOOKBACK_HOURS` window. It is now a P90-winsorized mean:
+   adverse selection remains a risk cost, but a small number of violent
+   reversals cannot dictate every future maker quote.
 2. `recent_vol` had been calculated from a global sequence interleaving UP and
    DOWN contract mids. Because the outcomes are complementary, that created
    artificial returns. Volatility is now calculated per instrument only.
@@ -411,8 +411,12 @@ one-observation-per-market calibrations from the same 168-hour history:
 - each distance bin has at least 30 independent settled markets.
 
 Each bin receives its own measured probability. In a calibrated regime, the
-economics comparison is `shares * (p - entry_price) -
-fees - full_empirical_markout`; quote price, entry gates, sizing, and all exit
-logic remain unchanged. Telemetry records whether this path was applied. If
-the sample requirement or any regime condition is not met, midpoint
-spread-capture economics remains the only live path.
+economics comparison is `shares * (p - entry_price) - fees - empirical_markout`;
+quote price, entry gates, sizing, and all exit logic remain unchanged.
+
+Every new `FILL_MARKOUT` now freezes its entry score, signed spot distance,
+remaining time, per-instrument volatility, reference source, and TWAP degraded
+state. A distance-specific markout may replace the global fallback only after
+30 fills matching the same score and 300–600 second time window. Until then,
+the P90-winsorized global markout is used. This avoids both an unbounded global
+mean and unsupported regime-specific cost guesses.

@@ -4,6 +4,7 @@ SQLite trade journal for run_bot live/simulation diagnostics and analytics.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -28,6 +29,34 @@ def _json_default(value: Any) -> Any:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=_json_default)
+
+
+def _summarize_adverse_markouts(
+    values: list[float],
+    *,
+    min_samples: int,
+    horizon_sec: int,
+    lookback_hours: float,
+) -> Optional[Dict[str, float | int | str]]:
+    """Build a robust calibration from non-negative per-share observations."""
+    values = sorted(max(0.0, float(value)) for value in values)
+    sample_count = len(values)
+    if sample_count < int(min_samples):
+        return None
+    cap_index = max(0, math.ceil(sample_count * 0.90) - 1)
+    p90_cap = values[cap_index]
+    adverse = sum(min(value, p90_cap) for value in values) / sample_count
+    if adverse <= 0:
+        return None
+    return {
+        "sample_count": sample_count,
+        "adverse_markout_per_share": adverse,
+        "raw_mean_adverse_markout_per_share": sum(values) / sample_count,
+        "winsor_cap_per_share": p90_cap,
+        "method": "winsorized_p90_mean",
+        "horizon_sec": float(horizon_sec),
+        "lookback_hours": float(lookback_hours),
+    }
 
 
 class TradeJournalDB:
@@ -204,21 +233,68 @@ class TradeJournalDB:
         lookback_hours: float,
         horizon_sec: int,
         min_samples: int,
-    ) -> Optional[Dict[str, float | int]]:
-        """Return observed adverse BUY markout per share for entry-risk calibration."""
+        entry_regime_bucket: Optional[str] = None,
+    ) -> Optional[Dict[str, float | int | str]]:
+        """Return a robust adverse BUY markout estimate for one entry regime.
+
+        A single arithmetic mean lets a few violent reversals dominate every
+        future maker quote.  We cap observations at their own P90 before
+        averaging: adverse selection remains a real cost, while one 67.5-cent
+        event cannot dictate the cost of an otherwise ordinary regime.
+        """
         try:
             with self._connect() as conn:
-                row = conn.execute(
+                where_bucket = ""
+                params: list[Any] = [int(horizon_sec), f"-{float(lookback_hours):g} hours"]
+                if entry_regime_bucket:
+                    where_bucket = " AND json_extract(payload_json, '$.entry_regime_bucket')=?"
+                    params.append(str(entry_regime_bucket))
+                rows = conn.execute(
+                    """
+                    SELECT CASE
+                      WHEN CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL) < 0
+                      THEN -CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL)
+                      ELSE 0
+                    END AS adverse_markout_per_share
+                    FROM order_events
+                    WHERE event_type='FILL_MARKOUT'
+                      AND side='BUY'
+                      AND json_extract(payload_json, '$.liquidity_class')='maker'
+                      AND CAST(json_extract(payload_json, '$.horizon_sec') AS INTEGER)=?
+                      AND julianday(ts) >= julianday('now', ?)
+                    """ + where_bucket,
+                    params,
+                ).fetchall()
+            return _summarize_adverse_markouts(
+                [float(row[0] or 0.0) for row in rows],
+                min_samples=min_samples,
+                horizon_sec=horizon_sec,
+                lookback_hours=lookback_hours,
+            )
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
+            return None
+
+    def load_maker_buy_markout_calibrations(
+        self,
+        *,
+        lookback_hours: float,
+        horizon_sec: int,
+        min_samples: int,
+    ) -> Dict[str, Dict[str, float | int | str]]:
+        """Return global fallback plus independently measured entry regimes."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
                     """
                     SELECT
-                      COUNT(*) AS sample_count,
-                      AVG(
-                        CASE
-                          WHEN CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL) < 0
-                          THEN -CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL)
-                          ELSE 0
-                        END
-                      ) AS adverse_markout_per_share
+                      CASE WHEN CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL) < 0
+                        THEN -CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL)
+                        ELSE 0
+                      END AS adverse_markout_per_share,
+                      json_extract(payload_json, '$.entry_regime_bucket') AS entry_regime_bucket,
+                      CAST(json_extract(payload_json, '$.entry_side_score') AS REAL) AS entry_side_score,
+                      CAST(json_extract(payload_json, '$.entry_time_left_sec') AS REAL) AS entry_time_left_sec
                     FROM order_events
                     WHERE event_type='FILL_MARKOUT'
                       AND side='BUY'
@@ -227,20 +303,41 @@ class TradeJournalDB:
                       AND julianday(ts) >= julianday('now', ?)
                     """,
                     (int(horizon_sec), f"-{float(lookback_hours):g} hours"),
-                ).fetchone()
-            sample_count = int(row[0] or 0) if row else 0
-            adverse = float(row[1] or 0.0) if row else 0.0
-            if sample_count < int(min_samples) or adverse <= 0:
-                return None
-            return {
-                "sample_count": sample_count,
-                "adverse_markout_per_share": adverse,
-                "horizon_sec": float(horizon_sec),
-                "lookback_hours": float(lookback_hours),
-            }
+                ).fetchall()
         except Exception as e:
-            logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
-            return None
+            logger.debug(f"TradeJournalDB load markout calibrations failed: {e}")
+            return {}
+        global_values = [float(row[0] or 0.0) for row in rows]
+        global_calibration = _summarize_adverse_markouts(
+            global_values,
+            min_samples=min_samples,
+            horizon_sec=horizon_sec,
+            lookback_hours=lookback_hours,
+        )
+        if not global_calibration:
+            return {}
+        calibrations: Dict[str, Dict[str, float | int | str]] = {
+            "global": {**global_calibration, "source": "global_fallback"},
+        }
+        for bucket in ("10_30", "30_60"):
+            calibration = _summarize_adverse_markouts(
+                [
+                    float(row[0] or 0.0)
+                    for row in rows
+                    if str(row[1] or "") == bucket
+                    and abs(float(row[2] or 0.0)) >= 0.35
+                    and 300.0 <= float(row[3] or -1.0) < 600.0
+                ],
+                lookback_hours=lookback_hours,
+                horizon_sec=horizon_sec,
+                min_samples=min_samples,
+            )
+            if calibration:
+                calibrations[bucket] = {
+                    **calibration,
+                    "source": f"entry_regime_bucket:{bucket}",
+                }
+        return calibrations
 
     def load_strong_directional_regime_calibrations(
         self,

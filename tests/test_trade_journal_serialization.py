@@ -49,5 +49,26 @@ def test_journal_calibrates_maker_buy_adverse_markout_from_observed_fills(tmp_pa
 
     assert calibration is not None
     assert calibration["sample_count"] == 6
-    # Mean(max(0, -markout)) = (0.02 + 0 + 0.04 + 0.06 + 0 + 0.03) / 6.
+    # With six values the nearest-rank P90 cap is the maximum, so the
+    # winsorized estimate equals the raw mean.
     assert calibration["adverse_markout_per_share"] == pytest.approx(0.025)
+    assert calibration["method"] == "winsorized_p90_mean"
+
+
+def test_journal_uses_regime_markout_only_after_that_regime_has_samples(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    for markout in ("-0.01", "-0.02", "0.01"):
+        db.log_order_event(
+            "run", "FILL_MARKOUT", side="BUY",
+            payload={
+                "liquidity_class": "maker", "horizon_sec": 10,
+                "signed_markout_ps": Decimal(markout), "entry_regime_bucket": "10_30",
+                "entry_side_score": 0.40, "entry_time_left_sec": 480,
+            },
+        )
+    calibrations = db.load_maker_buy_markout_calibrations(
+        lookback_hours=24, horizon_sec=10, min_samples=3,
+    )
+    assert calibrations["global"]["sample_count"] == 3
+    assert calibrations["10_30"]["sample_count"] == 3
+    assert "30_60" not in calibrations

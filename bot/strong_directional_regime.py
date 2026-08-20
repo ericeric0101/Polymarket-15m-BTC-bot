@@ -35,6 +35,7 @@ def apply_strong_directional_regime_economics(
     spot: Optional[Decimal],
     strike: Optional[Decimal],
     calibrations: Optional[dict[str, dict[str, Any]]],
+    markout_calibrations: Optional[dict[str, dict[str, Any]]],
     min_expected_net_usdc: Decimal,
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Replace only BUY economics when a fully measured regime is eligible.
@@ -92,6 +93,15 @@ def apply_strong_directional_regime_economics(
         return quote_data, details
 
     probability = max(Decimal("0.01"), min(Decimal("0.99"), calibrated_win_probability))
+    markout_calibration = (markout_calibrations or {}).get(bucket)
+    if not isinstance(markout_calibration, dict):
+        markout_calibration = (markout_calibrations or {}).get("global")
+    if isinstance(markout_calibration, dict):
+        try:
+            markout_ps = Decimal(str(markout_calibration["adverse_markout_per_share"]))
+            exec_penalty = econ.shares * max(Decimal("0"), markout_ps)
+        except Exception:
+            markout_calibration = None
     resolution_ev = econ.shares * (probability - price) - econ.fee_equivalent_usdc
     robust_net = resolution_ev - exec_penalty
     penalty_ps = exec_penalty / econ.shares if econ.shares > 0 else Decimal("0")
@@ -108,6 +118,7 @@ def apply_strong_directional_regime_economics(
             "regime_resolution_probability": probability,
             "regime_resolution_ev_usdc": resolution_ev,
             "regime_economics_applied": Decimal("1"),
+            "empirical_markout_usdc": exec_penalty,
         }
     )
     updated = (
@@ -133,6 +144,9 @@ def apply_strong_directional_regime_economics(
             "resolution_probability": probability,
             "resolution_ev_usdc": resolution_ev,
             "robust_net_usdc": robust_net,
+            "markout_source": str(markout_calibration.get("source")) if markout_calibration else "engine_global",
+            "markout_sample_count": int(markout_calibration.get("sample_count") or 0) if markout_calibration else 0,
+            "markout_per_share": exec_penalty / econ.shares if econ.shares > 0 else Decimal("0"),
         }
     )
     return updated, details

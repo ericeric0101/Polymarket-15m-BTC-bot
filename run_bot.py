@@ -47,6 +47,10 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/side_decision.py",
         "bot/forecast_state.py",
         "bot/strong_directional_regime.py",
+        "bot/db_runtime.py",
+        "bot/order_events.py",
+        "bot/trade_telemetry.py",
+        "monitoring/trade_journal_db.py",
         "bot/lead_lag_observation.py",
         "bot/order_submission.py",
         "bot/taker_exit.py",
@@ -2038,6 +2042,7 @@ class IntegratedBTCStrategy(
                         spot=current_price,
                         strike=price_to_beat,
                         calibrations=getattr(self, "strong_directional_regime_calibration", None),
+                        markout_calibrations=getattr(self, "maker_buy_markout_calibrations", None),
                         min_expected_net_usdc=self.maker_min_expected_net_usdc,
                     )
                     candidate_robust_net = quote_data[3]
