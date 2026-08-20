@@ -291,9 +291,6 @@ class SideDecisionConfig:
     entry_spot_strike_avg_min_abs: Decimal
     entry_fair_edge_min_ps: Decimal
     first_entry_max_time_left_sec: int
-    probability_calibration_enabled: bool
-    probability_calibration_up_model_weight: Decimal
-    probability_calibration_down_model_weight: Decimal
     down_high_price_threshold: Decimal
     down_high_price_min_score_abs: Decimal
     down_high_price_min_robust_net_usdc: Decimal
@@ -327,12 +324,6 @@ class SideDecisionConfig:
             raise ValueError("ENTRY_FAIR_EDGE_MIN_PS must be >= 0")
         if self.first_entry_max_time_left_sec < 0:
             raise ValueError("FIRST_ENTRY_MAX_TIME_LEFT_SEC must be >= 0")
-        for weight in (
-            self.probability_calibration_up_model_weight,
-            self.probability_calibration_down_model_weight,
-        ):
-            if weight < 0 or weight > 1:
-                raise ValueError("Probability calibration model weights must be in [0, 1]")
         if self.down_high_price_threshold < 0:
             raise ValueError("DOWN_HIGH_PRICE_THRESHOLD must be >= 0")
         if self.down_high_price_min_score_abs < 0:
@@ -886,12 +877,6 @@ class AppConfig:
                 entry_spot_strike_avg_min_abs=_env_decimal("ENTRY_SPOT_STRIKE_AVG_MIN_ABS", "0"),
                 entry_fair_edge_min_ps=_env_decimal("ENTRY_FAIR_EDGE_MIN_PS", "0"),
                 first_entry_max_time_left_sec=max(0, _env_int("FIRST_ENTRY_MAX_TIME_LEFT_SEC", 600)),
-                probability_calibration_enabled=_env_bool_inverted("PROBABILITY_CALIBRATION_ENABLED", True),
-                # Until chronological out-of-sample calibration establishes a
-                # positive model contribution, executable fair defaults to
-                # the tradable market midpoint rather than raw digital fair.
-                probability_calibration_up_model_weight=_env_decimal("PROBABILITY_CALIBRATION_UP_MODEL_WEIGHT", "0"),
-                probability_calibration_down_model_weight=_env_decimal("PROBABILITY_CALIBRATION_DOWN_MODEL_WEIGHT", "0"),
                 down_high_price_threshold=_env_decimal("DOWN_HIGH_PRICE_THRESHOLD", "1"),
                 down_high_price_min_score_abs=_env_decimal("DOWN_HIGH_PRICE_MIN_SCORE_ABS", "0.25"),
                 down_high_price_min_robust_net_usdc=_env_decimal("DOWN_HIGH_PRICE_MIN_ROBUST_NET_USDC", "0.15"),

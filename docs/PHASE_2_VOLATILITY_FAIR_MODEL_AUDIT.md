@@ -155,11 +155,12 @@ out-of-sample calibration identifies a single replacement policy.
 ## P2.4 Safety Baseline and Strike Provenance (2026-08-19)
 
 The raw digital probability has not demonstrated an out-of-sample calibration
-advantage over the contemporaneous Polymarket midpoint.  Therefore the
-existing `calibrate_probability()` blend remains the single quote-fair path,
-but both model weights now default to `0`.  Until a chronological holdout
-proves otherwise, executable fair is the token's market midpoint; raw digital
-fair remains recorded for research and does not drive quote placement.
+advantage over the contemporaneous Polymarket midpoint.  Therefore executable
+fair is explicitly the token's market midpoint.  The former configurable
+UP/DOWN calibration weights and enable switch were removed from deployment
+configuration: a zero-valued blend was behaviorally equivalent but still
+allowed an unverified environment override.  Raw digital fair remains
+recorded for research and does not drive quote placement.
 
 `LIVE_SIGNAL_COMPARE` schema version 2 records the strike source, whether it
 is authoritative, and its lock state.  The calibration report groups future

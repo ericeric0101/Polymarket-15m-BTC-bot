@@ -354,9 +354,6 @@ def initialize_strategy_settings(
     strategy.side_thesis_weak_score_abs = config.side.side_thesis_weak_score_abs
     strategy.directional_first_entry_min_score_abs_new = config.side.directional_first_entry_min_score_abs_new
     strategy.first_entry_max_time_left_sec = config.side.first_entry_max_time_left_sec
-    strategy.probability_calibration_enabled = config.side.probability_calibration_enabled
-    strategy.probability_calibration_up_model_weight = config.side.probability_calibration_up_model_weight
-    strategy.probability_calibration_down_model_weight = config.side.probability_calibration_down_model_weight
     strategy.side_thesis_weak_requires_opposite_side_new = config.side.side_thesis_weak_requires_opposite_side_new
     strategy.side_thesis_weak_opposite_score_abs_new = config.side.side_thesis_weak_opposite_score_abs_new
     strategy.side_thesis_weak_confirmations_new = config.side.side_thesis_weak_confirmations_new

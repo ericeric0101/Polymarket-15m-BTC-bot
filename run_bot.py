@@ -187,7 +187,6 @@ from bot.shadow_signal import (
     build_entry_regime_observation_payload,
     build_live_signal_compare_payload,
 )
-from bot.probability_calibration import calibrate_probability
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.market_discovery import (
@@ -1732,23 +1731,18 @@ class IntegratedBTCStrategy(
             if quote_ctx.quote is None or quote_ctx.fair is None:
                 continue
             inst_bid, inst_ask = quote_ctx.quote
+            # Executable fair is the tradable market consensus until a
+            # chronological OOS calibration demonstrates an improvement.
+            # Keep the digital result only as research telemetry.
             raw_fair = quote_ctx.fair
-            outcome_side = self._side_for_instrument_id(inst_id).value
             market_mid = (inst_bid + inst_ask) / Decimal("2")
-            fair = calibrate_probability(
-                raw_probability=raw_fair,
-                market_mid=market_mid,
-                side=outcome_side,
-                enabled=bool(getattr(self, "probability_calibration_enabled", True)),
-                up_model_weight=Decimal(str(getattr(self, "probability_calibration_up_model_weight", Decimal("0")))),
-                down_model_weight=Decimal(str(getattr(self, "probability_calibration_down_model_weight", Decimal("0")))),
-            )
+            fair = market_mid
             quote_ctx.fair = fair
             quote_ctx.diag_context.update({
                 "raw_fair": raw_fair,
                 "calibrated_fair": fair,
                 "market_mid": market_mid,
-                "probability_calibration_enabled": bool(getattr(self, "probability_calibration_enabled", True)),
+                "probability_calibration_mode": "market_mid_canonical",
             })
             self.rebate_reporter.record_api_health(self.fee_rate_client.get_health_snapshot())
             if quote_ctx.dynamic_fee_rate is not None:

@@ -38,18 +38,6 @@ def test_calibration_shrinks_down_probability_more_than_up_probability():
     assert down == Decimal("0.67000")
 
 
-def test_calibration_uses_market_mid_when_model_weights_are_unverified():
-    for side in ("UP", "DOWN"):
-        assert calibrate_probability(
-            raw_probability=Decimal("0.99"),
-            market_mid=Decimal("0.61"),
-            side=side,
-            enabled=True,
-            up_model_weight=Decimal("0"),
-            down_model_weight=Decimal("0"),
-        ) == Decimal("0.61000")
-
-
 def test_fractional_kelly_is_zero_without_positive_probability_edge():
     assert fractional_kelly_stake_fraction(
         probability=Decimal("0.60"), entry_price=Decimal("0.61"), fraction=Decimal("0.25")
