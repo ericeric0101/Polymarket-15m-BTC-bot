@@ -242,6 +242,97 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
             return None
 
+    def load_strong_directional_regime_calibrations(
+        self,
+        *,
+        lookback_hours: float,
+        min_score_abs: float,
+        min_samples: int,
+    ) -> Dict[str, Dict[str, float | int]]:
+        """Return settled hit-rates for independently measured distance bins.
+
+        This intentionally uses the first qualifying observation per market.
+        Repeated quote-cycle telemetry must not turn one market into many
+        statistically dependent training examples.  Only bins with enough
+        independent settled markets are returned.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    WITH candidates AS (
+                      SELECT
+                        e.id,
+                        e.ts,
+                        json_extract(e.payload_json, '$.slug') AS slug,
+                        CASE json_extract(e.payload_json, '$.main_candidate_side')
+                          WHEN 'BUY_UP' THEN 'UP'
+                          WHEN 'BUY_DOWN' THEN 'DOWN'
+                        END AS outcome,
+                        ABS(CAST(json_extract(e.payload_json, '$.main_score') AS REAL)) AS score_abs,
+                        CASE json_extract(e.payload_json, '$.main_candidate_side')
+                          WHEN 'BUY_UP' THEN CAST(json_extract(e.payload_json, '$.spot_minus_strike') AS REAL)
+                          WHEN 'BUY_DOWN' THEN -CAST(json_extract(e.payload_json, '$.spot_minus_strike') AS REAL)
+                        END AS signed_spot_distance,
+                        CAST(json_extract(e.payload_json, '$.time_left_sec') AS REAL) AS time_left_sec,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY json_extract(e.payload_json, '$.slug')
+                          ORDER BY e.ts ASC, e.id ASC
+                        ) AS rn
+                      FROM strategy_events e
+                      WHERE e.event_type='LIVE_SIGNAL_COMPARE'
+                        AND ABS(CAST(json_extract(e.payload_json, '$.main_score') AS REAL)) >= ?
+                        AND CAST(json_extract(e.payload_json, '$.main_side_locked') AS INTEGER)=1
+                        AND julianday(e.ts) >= julianday('now', ?)
+                    ), settlements AS (
+                      SELECT
+                        json_extract(payload_json, '$.slug') AS slug,
+                        UPPER(json_extract(payload_json, '$.outcome')) AS outcome,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY json_extract(payload_json, '$.slug')
+                          ORDER BY ts DESC, id DESC
+                        ) AS rn
+                      FROM strategy_events
+                      WHERE event_type='MARKET_SETTLEMENT'
+                    )
+                    SELECT
+                      CASE
+                        WHEN c.signed_spot_distance >= 10 AND c.signed_spot_distance < 30 THEN '10_30'
+                        WHEN c.signed_spot_distance >= 30 AND c.signed_spot_distance < 60 THEN '30_60'
+                      END AS distance_bucket,
+                      COUNT(*) AS sample_count,
+                      SUM(CASE WHEN c.outcome=s.outcome THEN 1 ELSE 0 END) AS wins
+                    FROM candidates c
+                    JOIN settlements s ON s.slug=c.slug AND s.rn=1
+                    WHERE c.rn=1
+                      AND c.outcome IN ('UP', 'DOWN')
+                      AND s.outcome IN ('UP', 'DOWN')
+                      AND c.time_left_sec >= 300 AND c.time_left_sec < 600
+                      AND c.signed_spot_distance >= 10 AND c.signed_spot_distance < 60
+                    GROUP BY distance_bucket
+                    """,
+                    (float(min_score_abs), f"-{float(lookback_hours):g} hours"),
+                ).fetchall()
+            calibrated: Dict[str, Dict[str, float | int]] = {}
+            for row in rows:
+                bucket = str(row[0] or "")
+                sample_count = int(row[1] or 0)
+                wins = int(row[2] or 0)
+                if bucket not in {"10_30", "30_60"} or sample_count < int(min_samples):
+                    continue
+                calibrated[bucket] = {
+                    "sample_count": sample_count,
+                    "wins": wins,
+                    "losses": sample_count - wins,
+                    "win_probability": float(wins / sample_count),
+                    "min_score_abs": float(min_score_abs),
+                    "lookback_hours": float(lookback_hours),
+                }
+            return calibrated
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load strong directional regime calibrations failed: {e}")
+            return {}
+
     def reconcile_redeem_cycle(
         self,
         slug: str,

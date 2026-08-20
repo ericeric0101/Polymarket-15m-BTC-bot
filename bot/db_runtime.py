@@ -54,6 +54,28 @@ class StrategyDBRuntimeMixin:
         )
         self._db_strategy_event("EXECUTION_PENALTY_CALIBRATED", payload)
 
+        # The only live exception to midpoint spread-capture economics is a
+        # separately measured, high-score regime. Each distance bucket needs
+        # 30 independent settled markets; no profile knob can silently relax
+        # that sample requirement.
+        self.strong_directional_regime_calibration = None
+        regimes = self.trade_db.load_strong_directional_regime_calibrations(
+            lookback_hours=lookback_hours,
+            min_score_abs=0.35,
+            min_samples=30,
+        )
+        if not regimes:
+            logger.info("Strong directional regime calibrations unavailable; midpoint economics remains canonical.")
+            return
+        self.strong_directional_regime_calibration = regimes
+        self._db_strategy_event("STRONG_DIRECTIONAL_REGIME_CALIBRATED", {"buckets": regimes})
+        for bucket, regime in regimes.items():
+            logger.info(
+                "Strong directional regime calibrated from settled markets: "
+                f"bucket={bucket} samples={regime['sample_count']} wins={regime['wins']} "
+                f"p={regime['win_probability']:.4f}"
+            )
+
     def _restore_market_risk_guards_from_trade_db_on_startup(self) -> None:
         if not self.trade_db or not self.current_market_slug:
             return

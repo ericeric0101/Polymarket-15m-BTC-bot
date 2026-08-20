@@ -178,6 +178,7 @@ def initialize_strategy_settings(
     strategy.maker_requote_hysteresis_ticks = config.maker.requote_hysteresis_ticks
     strategy.maker_execution_empirical_markout_lookback_hours = config.maker.execution_empirical_markout_lookback_hours
     strategy.maker_execution_empirical_markout_min_samples = config.maker.execution_empirical_markout_min_samples
+    strategy.strong_directional_regime_calibration = None
     strategy.orderbook_fetch_interval_sec = config.maker.orderbook_fetch_interval_sec
     strategy.orderbook_levels_limit = config.maker.orderbook_levels_limit
     strategy.requote_bucket_tokens = strategy.maker_requote_max_per_sec

@@ -594,17 +594,23 @@ class PricingRuntimeMixin:
         token_qty = max(token_qty, min_qty)
         return token_qty
 
-    def _compute_recent_volatility(self) -> Optional[Decimal]:
+    def _compute_recent_volatility(self, instrument_id: Any = None) -> Optional[Decimal]:
         """
-        Compute volatility from REAL quote history only.
+        Compute volatility from one outcome token's REAL quote history only.
+
+        UP and DOWN tokens are complementary contracts.  Combining their
+        alternating mids makes normal updates look like large returns and
+        creates a false ``EXTREME`` volatility regime.  The global history is
+        retained only as a compatibility fallback when no instrument is known.
         Uses clipped returns + max(rolling_std, ewma_std).
         """
         min_quotes = max(2, self.maker_vol_warmup_quotes)
-        if len(self.real_price_history) < min_quotes:
+        history = self._momentum_history_for_instrument(instrument_id)
+        if len(history) < min_quotes:
             return None
 
         window = max(5, self.maker_vol_rolling_window)
-        recent = self.real_price_history[-(window + 1):]
+        recent = history[-(window + 1):]
         clip = float(abs(self.maker_vol_return_clip))
         returns: List[float] = []
         for i in range(1, len(recent)):
@@ -623,7 +629,7 @@ class PricingRuntimeMixin:
         var = sum((r - mean_r) ** 2 for r in roll) / len(roll)
         rolling_std = math.sqrt(max(0.0, var))
 
-        alpha = max(0.01, min(0.99, self.maker_vol_ewma_alpha))
+        alpha = max(0.01, min(0.99, float(self.maker_vol_ewma_alpha)))
         ewma_var = roll[0] ** 2
         for r in roll[1:]:
             ewma_var = alpha * (r ** 2) + (1.0 - alpha) * ewma_var

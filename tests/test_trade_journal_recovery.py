@@ -34,6 +34,47 @@ def test_market_guard_counts_survive_restart_and_ignore_partial_fill_rows(tmp_pa
     }
 
 
+def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    for index, (candidate, outcome) in enumerate((("UP", "UP"), ("DOWN", "UP"), ("UP", "UP"))):
+        slug = f"btc-updown-{index}"
+        db.log_strategy_event(
+            "run", "LIVE_SIGNAL_COMPARE",
+            {
+                "slug": slug,
+                "main_candidate_side": f"BUY_{candidate}",
+                "main_score": 0.40,
+                "main_side_locked": True,
+                "spot_minus_strike": 20 if candidate == "UP" else -20,
+                "time_left_sec": 480,
+            },
+        )
+        # A later flip must not create another sample for this market.
+        db.log_strategy_event(
+            "run", "LIVE_SIGNAL_COMPARE",
+            {
+                "slug": slug,
+                "main_candidate_side": f"BUY_{outcome}",
+                "main_score": 0.50,
+                "main_side_locked": True,
+                "spot_minus_strike": 20 if outcome == "UP" else -20,
+                "time_left_sec": 480,
+            },
+        )
+        db.log_strategy_event("run", "MARKET_SETTLEMENT", {"slug": slug, "outcome": outcome})
+
+    calibrations = db.load_strong_directional_regime_calibrations(
+        lookback_hours=168,
+        min_score_abs=0.35,
+        min_samples=3,
+    )
+
+    calibration = calibrations["10_30"]
+    assert calibration["sample_count"] == 3
+    assert calibration["wins"] == 2
+    assert calibration["win_probability"] == 2 / 3
+
+
 def test_reconcile_redeem_cycle_rebuilds_missing_pnl_with_buy_fees(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     slug = "btc-updown-15m-test"

@@ -42,9 +42,11 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
     paths = (
         "run_bot.py",
         "bot/quote_service.py",
+        "bot/pricing_runtime.py",
         "bot/spot_pricer.py",
         "bot/side_decision.py",
         "bot/forecast_state.py",
+        "bot/strong_directional_regime.py",
         "bot/lead_lag_observation.py",
         "bot/order_submission.py",
         "bot/taker_exit.py",
@@ -187,6 +189,7 @@ from bot.shadow_signal import (
     build_entry_regime_observation_payload,
     build_live_signal_compare_payload,
 )
+from bot.strong_directional_regime import apply_strong_directional_regime_economics
 from bot.settings import initialize_strategy_settings
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.market_discovery import (
@@ -1757,7 +1760,9 @@ class IntegratedBTCStrategy(
                 inventory_last_update_ts=self.inventory_last_update_ts,
                 current_time_ts=now_ts,
                 tick_size=quote_ctx.tick,
-                recent_vol=recent_vol,
+                # Never calculate a token's volatility from an interleaved
+                # UP/DOWN series.  The two outcome tokens are complementary.
+                recent_vol=self._compute_recent_volatility(inst_id),
                 balance_forced_sell_only=forced_sell_only,
                 bid_depth=quote_ctx.bid_depth,
                 ask_depth=quote_ctx.ask_depth,
@@ -2014,6 +2019,28 @@ class IntegratedBTCStrategy(
                     if isinstance(quote_data, (tuple, list)) and len(quote_data) > 3
                     else None
                 )
+                regime_economics = {"applied": False, "reason": "not_buy"}
+                # Midpoint remains the canonical quoted fair.  Only the
+                # already-measured strong directional regime may replace the
+                # *economics* estimate, and only for a flat first entry.
+                if side == "buy" and market_buy_count == 0 and current_inst_inventory_qty <= 0:
+                    try:
+                        outcome_side = self._side_for_instrument_id(inst_id).value
+                    except Exception:
+                        outcome_side = self.active_side.value
+                    quote_data, regime_economics = apply_strong_directional_regime_economics(
+                        tuple(quote_data),
+                        active_side=self.active_side.value,
+                        outcome_side=outcome_side,
+                        side_locked=bool(self.active_side_locked),
+                        side_score=Decimal(str(self.side_decision_score)),
+                        time_left_sec=time_left_sec_global,
+                        spot=current_price,
+                        strike=price_to_beat,
+                        calibrations=getattr(self, "strong_directional_regime_calibration", None),
+                        min_expected_net_usdc=self.maker_min_expected_net_usdc,
+                    )
+                    candidate_robust_net = quote_data[3]
                 buy_entry_eval = evaluate_buy_entry_controls(
                     side=side,
                     bi_side_enabled=self.bi_side_enabled,
@@ -2190,6 +2217,10 @@ class IntegratedBTCStrategy(
                         "execution_penalty_components": {
                             key: float(value)
                             for key, value in quote_plan.execution_penalty_components.items()
+                        },
+                        "strong_directional_regime": {
+                            key: float(value) if isinstance(value, Decimal) else value
+                            for key, value in regime_economics.items()
                         },
                         "decision": "SKIP" if buy_entry_eval.skip else "ELIGIBLE",
                         "decision_reason": buy_entry_eval.reason or "shadow_only",

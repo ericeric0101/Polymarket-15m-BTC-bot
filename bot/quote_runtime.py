@@ -216,10 +216,12 @@ class QuoteRuntimeMixin:
             )
             return None
 
-        recent_vol = self._compute_recent_volatility()
+        # This is diagnostic-only cycle state.  Quote economics receive the
+        # correct per-instrument value in ``_evaluate_quote_targets``.
+        recent_vol = self._compute_recent_volatility(self.instrument_id)
         if recent_vol is None:
             logger.debug(
-                f"Volatility gate warmup: real_quotes={len(self.real_price_history)}/{self.maker_vol_warmup_quotes}"
+                f"Volatility gate warmup: real_quotes={len(self._momentum_history_for_instrument(self.instrument_id))}/{self.maker_vol_warmup_quotes}"
             )
 
         target_instruments = self._maker_quote_instruments()

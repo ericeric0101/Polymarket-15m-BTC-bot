@@ -382,3 +382,37 @@ distinct cancellation, watchdog, venue-balance, recovery, and tail-order
 states. Their consolidation must therefore wait for a separate behavior-
 equivalence change, rather than deleting values merely because their names are
 similar.
+
+## Regime-Aware Markout Correction (2026-08-20)
+
+The entry-cost implementation had two distinct defects which made ordinary
+midpoint quoting appear uneconomic in every market regime:
+
+1. The 10-second adverse markout was a single arithmetic mean over the whole
+   `EXECUTION_COST_LOOKBACK_HOURS` window. The current 168-hour calibration is
+   104 maker BUY observations at `$0.053317/share`; it is retained as a risk
+   cost, but it is not a current-book estimate and must not be treated as one.
+2. `recent_vol` had been calculated from a global sequence interleaving UP and
+   DOWN contract mids. Because the outcomes are complementary, that created
+   artificial returns. Volatility is now calculated per instrument only.
+
+The canonical live fair remains market midpoint. Consequently ordinary passive
+spread capture is normally about `$0.05` for ten shares, and neither a `$0.15`
+nor a `$0.20` arbitrary markout cap could pass the economics gate. The remedy
+is **not** a weekend multiplier or a lower score threshold.
+
+For separately measured regimes only, the bot now loads settled,
+one-observation-per-market calibrations from the same 168-hour history:
+
+- locked side matches the traded outcome;
+- `abs(side_score) >= 0.35`;
+- 300–600 seconds remain;
+- signed spot-to-strike distance is either `$10–$30` or `$30–$60`;
+- each distance bin has at least 30 independent settled markets.
+
+Each bin receives its own measured probability. In a calibrated regime, the
+economics comparison is `shares * (p - entry_price) -
+fees - full_empirical_markout`; quote price, entry gates, sizing, and all exit
+logic remain unchanged. Telemetry records whether this path was applied. If
+the sample requirement or any regime condition is not met, midpoint
+spread-capture economics remains the only live path.
