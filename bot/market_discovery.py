@@ -27,7 +27,7 @@ def build_btc_15m_slug_candidates(lookback: int = 1, lookahead: int = 4) -> List
 async def discover_existing_btc_15m_slugs(candidates: List[str]) -> List[str]:
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
     existing: List[str] = []
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+    timeout = 8.0
     async with httpx.AsyncClient(timeout=timeout) as client:
         for slug in candidates:
             try:
@@ -125,7 +125,7 @@ def _valid_token_id(value: Any) -> bool:
 
 async def hydrate_gamma_market_details(market: Dict[str, Any]) -> Dict[str, Any]:
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+    timeout = 8.0
     market_id = market.get("id") or market.get("marketId") or market.get("conditionId") or market.get("condition_id")
     if not market_id:
         return market

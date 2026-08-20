@@ -133,7 +133,7 @@ async def fetch_crypto_price_to_beat(
     }
     try:
         async with httpx.AsyncClient(
-            timeout=float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+            timeout=8.0
         ) as client:
             response = await client.get(
                 "https://polymarket.com/api/crypto/crypto-price",
@@ -243,7 +243,7 @@ async def fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     Async implementation for use in strategical decision paths.
     """
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+    timeout = 8.0
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:

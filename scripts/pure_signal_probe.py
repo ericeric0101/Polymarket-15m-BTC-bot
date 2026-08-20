@@ -87,7 +87,7 @@ async def _hydrate_gamma_market_details(market: Dict[str, Any]) -> Dict[str, Any
     import httpx
 
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+    timeout = 8.0
     market_id = market.get("id") or market.get("marketId") or market.get("conditionId") or market.get("condition_id")
     if not market_id:
         return market
@@ -165,7 +165,7 @@ async def _discover_existing_btc_15m_slugs(candidates: List[str]) -> List[str]:
     import httpx
 
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
-    timeout = float(os.getenv("GAMMA_DISCOVERY_TIMEOUT_SEC", "8"))
+    timeout = 8.0
     existing: List[str] = []
     async with httpx.AsyncClient(timeout=timeout) as client:
         for slug in candidates:

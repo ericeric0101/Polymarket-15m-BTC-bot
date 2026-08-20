@@ -197,6 +197,15 @@ a $20 low-balance alert, and a 300-second heartbeat threshold. This removes
 environment readers from a monitoring-only path; it cannot affect strategy
 decisions, replay, order submission, or exits.
 
+## P6.3 Fixed Operational Transport Defaults (2026-08-21)
+
+The profile no longer exposes compatibility patch application, operational log
+cadence, fee-debug toggles, or Gamma discovery timeout as strategy settings.
+Their deployed values are fixed internal operational defaults: patches on,
+30-second strategy and no-quote logs, 60-second fee/strike logs, and an
+8-second Gamma timeout. This removes eight profile keys and their environment
+readers without changing quoting, order submission, replay, or exit behavior.
+
 ## P4.1 Entry-Mode Convergence (2026-08-20)
 
 The `TREND_BUY_*` mode and its size multiplier were removed.  It was a second

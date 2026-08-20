@@ -568,15 +568,17 @@ class AppConfig:
                 startup_verbose=startup_verbose,
                 terminal_dashboard_enabled=terminal_dashboard_enabled,
                 terminal_dashboard_refresh_sec=terminal_dashboard_refresh_sec,
-                strategy_status_interval_sec=max(15, _env_int("STRATEGY_STATUS_INTERVAL_SEC", 60)),
-                no_quote_diag_interval_sec=max(15, _env_int("NO_QUOTE_DIAG_INTERVAL_SEC", 60)),
-                fee_log_interval_sec=max(5, _env_int("FEE_LOG_INTERVAL_SEC", 60)),
-                strike_fallback_log_interval_sec=max(10, _env_int("STRIKE_FALLBACK_LOG_INTERVAL_SEC", 60)),
+                # Operational log cadence is not strategy tuning. Keep the
+                # established deployment values without profile readers.
+                strategy_status_interval_sec=30,
+                no_quote_diag_interval_sec=30,
+                fee_log_interval_sec=60,
+                strike_fallback_log_interval_sec=60,
                 rebate_report_dir=_env_str("REBATE_REPORT_DIR", "./logs/rebate"),
             ),
             compatibility=CompatibilityConfig(
                 patch_mode=_env_str("NAUTILUS_COMPAT_PATCH_MODE", "runtime").strip().lower(),
-                auto_apply_patches=_env_bool_inverted("AUTO_APPLY_NAUTILUS_PATCH", True),
+                auto_apply_patches=True,
             ),
             maker=MakerConfig(
                 maker_mode=_env_bool_inverted("MAKER_MODE", True),
