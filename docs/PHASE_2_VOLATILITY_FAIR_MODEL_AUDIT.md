@@ -206,6 +206,12 @@ Their deployed values are fixed internal operational defaults: patches on,
 8-second Gamma timeout. This removes eight profile keys and their environment
 readers without changing quoting, order submission, replay, or exit behavior.
 
+P6.4 then removed four node/lifecycle values that were also fixed deployment
+policy: one-hour scheduled rollover, three-second rollover cooldown, five
+consecutive rollover failures, and three missed next-market searches. They
+remain explicit constants in the launcher/lifecycle runtime, so the profile no
+longer presents them as trading controls.
+
 ## P4.1 Entry-Mode Convergence (2026-08-20)
 
 The `TREND_BUY_*` mode and its size multiplier were removed.  It was a second

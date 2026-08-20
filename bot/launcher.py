@@ -293,9 +293,11 @@ def run_integrated_bot(
             logger.warning(f"Could not set Redis simulation mode: {e}")
 
     auto_rollover_enabled = os.getenv("AUTO_NODE_ROLLOVER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
-    auto_rollover_sec = max(300, int(os.getenv("AUTO_NODE_ROLLOVER_SEC", "1800")))
-    auto_rollover_cooldown_sec = max(1, int(os.getenv("AUTO_NODE_ROLLOVER_COOLDOWN_SEC", "3")))
-    auto_rollover_max_failures = max(1, int(os.getenv("AUTO_NODE_ROLLOVER_MAX_FAILURES", "5")))
+    # Node rollover is operational recovery, not strategy tuning. Preserve the
+    # established hourly policy without carrying three profile readers.
+    auto_rollover_sec = 3600
+    auto_rollover_cooldown_sec = 3
+    auto_rollover_max_failures = 5
     auto_restart_on_unexpected_exit = os.getenv("AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT", "0").strip().lower() in ("1", "true", "yes", "on")
     logger.info(
         "Startup config: "

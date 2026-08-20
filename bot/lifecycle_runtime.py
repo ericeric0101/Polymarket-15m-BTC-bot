@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 from decimal import Decimal
 from typing import Any, Dict, Protocol
@@ -350,7 +349,7 @@ class StrategyLifecycleMixin:
                 continue
 
             if action.should_search_next:
-                max_waiting_misses = int(os.getenv("MARKET_WAITING_MAX_MISSES", "3"))
+                max_waiting_misses = 3
 
                 def _request_rollover() -> None:
                     self._waiting_miss_count = 0
