@@ -137,10 +137,6 @@ def apply_quote_plan_guards(
     inventory_delta_shares: Decimal,
     early_sell_only_sec: float,
     time_left_sec_global: Optional[float],
-    directional_edge_gate_enabled: bool,
-    regime_guard_active: bool,
-    min_directional_edge_ps: Decimal,
-    min_directional_edge_ps_conservative: Decimal,
     now_ts: float,
     buy_cooldown_until_ts: float,
     momentum_buy_filter_pct: Decimal,
@@ -155,7 +151,6 @@ def apply_quote_plan_guards(
     reduce_only_no_new_sell_last_sec: int,
     forced_sell_only: bool,
     active_side: str = "",
-    min_directional_edge_ps_down: Optional[Decimal] = None,
 ) -> QuotePlanGuardOutcome:
     side_disable_reason_by_side: dict[str, str] = initial_side_disable_reasons(quote_sides_mode)
 
@@ -169,22 +164,11 @@ def apply_quote_plan_guards(
     ):
         set_side_should_quote(side_plan, side_disable_reason_by_side, "buy", False, "early_sell_only")
 
-    # ``directional_edge_ps`` is retained as telemetry only.  Historically this
-    # guard included forced-exit VWAP, taker leakage, and non-atomic costs, then
-    # ran before the final passive-entry cost policy.  That let a hypothetical
-    # liquidation reject a flat post-only hold-to-redeem entry even when the
-    # final single economics gate had a positive robust net.  Direction belongs
-    # to the score gates; execution cost belongs exclusively to robust_net.
-    # Keep the parameters for backwards-compatible callers/profile loading, but
-    # deliberately do not use them as a second BUY veto.
-    _ = (
-        directional_edge_gate_enabled,
-        regime_guard_active,
-        min_directional_edge_ps,
-        min_directional_edge_ps_conservative,
-        active_side,
-        min_directional_edge_ps_down,
-    )
+    # Direction is governed by the score gates; execution cost is governed by
+    # the final robust-net gate. A former directional-edge veto was removed
+    # because it embedded hypothetical forced-exit cost and contradicted that
+    # single economics policy.
+    _ = active_side
 
     buy_cooldown_remaining: Optional[float] = None
     if "buy" in side_plan and now_ts < buy_cooldown_until_ts:

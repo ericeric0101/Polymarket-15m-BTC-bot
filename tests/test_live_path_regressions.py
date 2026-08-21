@@ -54,7 +54,6 @@ from bot.quote_service import (
     apply_shadow_entry_veto,
     apply_high_entry_price_size_adjustment,
     apply_weak_pfair_size_adjustment,
-    apply_reload_edge_guard,
     build_desired_quote_entry,
     compute_loss_sell_policy,
     build_directional_snapshot,
@@ -268,6 +267,10 @@ class DummyStrategyForFill(FillLedgerMixin):
         self.strategy_events = []
         self.order_events = []
         self.order_metric_count = 0
+        self.cancel_calls = []
+
+    def _cancel_maker_order_side(self, *, side, instrument_id=None, reason=""):
+        self.cancel_calls.append((side, instrument_id, reason))
         self.inventory_metric_count = 0
 
     @property
@@ -308,9 +311,6 @@ class DummyStrategyForFill(FillLedgerMixin):
 
     def _start_maker_worker(self, *args, **kwargs):
         return None
-
-    def _increment_order_metric(self, *_args, **_kwargs):
-        self.order_metric_count += 1
 
     def _update_inventory_metric(self):
         self.inventory_metric_count += 1
@@ -571,9 +571,6 @@ def test_position_manager_marks_near_strike_entry_as_chop_even_with_positive_edg
     def _update_terminal_dashboard_snapshot(self):
         return None
 
-    def _increment_order_metric(self, *_args, **_kwargs):
-        self.order_metric_count += 1
-
     def _update_inventory_metric(self):
         self.inventory_metric_count += 1
 
@@ -785,9 +782,6 @@ class DummyRejectRecoveryStrategy:
     def _get_conditional_balance_for_token(self, token_id=None, force_refresh=False):
         self.last_conditional_refresh = (token_id, force_refresh)
         return Decimal("0")
-
-    def _increment_order_metric(self, *_args, **_kwargs):
-        self.order_metric_count += 1
 
     def _db_order_event(self, **kwargs):
         self.order_events.append(kwargs)
@@ -1061,6 +1055,8 @@ class DummySpotPricerStrategy(SpotPricerMixin):
     def __init__(self) -> None:
         self.market_strike_cache_by_slug = {}
         self.market_strike_source_by_slug = {}
+        self.market_strike_status_by_slug = {}
+        self.market_strike_provenance_by_slug = {}
         self.market_strike_provisional_by_slug = {}
         self.market_strike_provisional_source_by_slug = {}
         self._strike_pending_log_state_by_slug = {}
@@ -1069,11 +1065,7 @@ class DummySpotPricerStrategy(SpotPricerMixin):
         self.market_strike_anchor_near_sec = 30
         self.market_strike_rest_retry_sec = 60
         self.market_strike_rest_last_try_ts_by_slug = {}
-        self.market_strike_last_gamma_validate_ts_by_slug = {}
-        self.market_strike_last_gamma_warn_ts_by_slug = {}
-        self.market_strike_gamma_validate_interval_sec = 180
-        self.market_strike_gamma_warn_abs_usd = Decimal("5")
-        self.market_strike_gamma_mismatch_warn_interval_sec = 180
+        self.market_strike_last_provenance_signature_by_slug = {}
         self.polymarket_chainlink_history = [(1000.1, Decimal("66625.19"))]
         self.polymarket_chainlink_history_max = 1200
         self.polymarket_chainlink_twap_enabled = True
@@ -1092,9 +1084,6 @@ class DummySpotPricerStrategy(SpotPricerMixin):
 
     def _extract_market_slug_from_instrument(self, _instrument):
         return "btc-updown-15m-test"
-
-    async def _maybe_validate_strike_with_gamma(self, slug, local_strike):
-        return None
 
     def _extract_strike_from_question(self, question_text):
         return None
@@ -1168,6 +1157,9 @@ def test_partial_fills_only_increment_market_buy_count_once():
     assert strategy.market_buy_counted_order_ids_by_slug["btc-updown-15m-test:0"] == {"BUY-1"}
     count_events = [evt for evt, _ in strategy.strategy_events if evt == "MARKET_BUY_COUNT_UPDATED"]
     assert count_events == ["MARKET_BUY_COUNT_UPDATED"]
+    assert strategy.cancel_calls == [
+        ("buy", "inst-1", "first_buy_fill_no_reentry"),
+    ]
 
 
 def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
@@ -1627,18 +1619,74 @@ def test_strike_prefers_polymarket_chainlink_history_anchor():
     assert "btc-updown-15m-test" not in strategy.market_strike_cache_by_slug
 
 
-def test_strike_uses_published_polymarket_price_to_beat(monkeypatch):
+def test_strike_uses_verified_market_scoped_price_to_beat(monkeypatch):
     strategy = DummySpotPricerStrategy()
 
-    async def _published_ptb(**_kwargs):
+    async def _crypto_open_price(**_kwargs):
         return Decimal("66611.11")
 
-    monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _published_ptb)
+    async def _gamma_market(_slug):
+        return {
+            "_gamma_event_slug": "btc-updown-15m-test",
+            "eventMetadata": {"priceToBeat": "66611.11"},
+        }
+
+    monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
+    monkeypatch.setattr("bot.spot_pricer.fetch_gamma_market_by_slug", _gamma_market)
 
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
     assert strike == Decimal("66611.11")
-    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_crypto_price_open"
+    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "gamma_price_to_beat"
+    assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "verified"
+    assert any(event == "MARKET_STRIKE_PROVENANCE" for event, _payload in strategy.strategy_events)
+
+
+def test_crypto_candidate_mismatch_does_not_override_verified_gamma_strike(monkeypatch):
+    strategy = DummySpotPricerStrategy()
+
+    async def _crypto_open_price(**_kwargs):
+        return Decimal("66611.11")
+
+    async def _gamma_market(_slug):
+        return {
+            "_gamma_event_slug": "btc-updown-15m-test",
+            "eventMetadata": {"priceToBeat": "66650.00"},
+        }
+
+    monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
+    monkeypatch.setattr("bot.spot_pricer.fetch_gamma_market_by_slug", _gamma_market)
+
+    strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+
+    assert strike == Decimal("66650.00")
+    assert strategy.market_strike_cache_by_slug["btc-updown-15m-test"] == Decimal("66650.00")
+    assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "verified"
+    assert strategy._market_strike_is_entry_eligible("btc-updown-15m-test")
+    provenance = next(payload for event, payload in strategy.strategy_events if event == "MARKET_STRIKE_PROVENANCE")
+    assert provenance["diff_abs_usd"] == 38.89
+
+
+def test_gamma_response_for_a_different_slug_is_not_entry_eligible(monkeypatch):
+    strategy = DummySpotPricerStrategy()
+
+    async def _crypto_open_price(**_kwargs):
+        return Decimal("66611.11")
+
+    async def _gamma_market(_slug):
+        return {
+            "_gamma_event_slug": "btc-updown-15m-other",
+            "eventMetadata": {"priceToBeat": "66650.00"},
+        }
+
+    monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
+    monkeypatch.setattr("bot.spot_pricer.fetch_gamma_market_by_slug", _gamma_market)
+
+    strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+
+    assert strike is None
+    assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "pending_gamma_price_to_beat"
+    assert not strategy._market_strike_is_entry_eligible("btc-updown-15m-test")
 
 
 def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
@@ -1675,10 +1723,6 @@ def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
         inventory_delta_shares=Decimal("0"),
         early_sell_only_sec=0.0,
         time_left_sec_global=600.0,
-        directional_edge_gate_enabled=False,
-        regime_guard_active=False,
-        min_directional_edge_ps=Decimal("0.01"),
-        min_directional_edge_ps_conservative=Decimal("0.02"),
         now_ts=100.0,
         buy_cooldown_until_ts=0.0,
         momentum_buy_filter_pct=Decimal("0.04"),
@@ -1693,7 +1737,6 @@ def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():
         reduce_only_no_new_sell_last_sec=45,
         forced_sell_only=False,
         active_side=ActiveSide.UP.value,
-        min_directional_edge_ps_down=None,
     )
 
     assert outcome.momentum_buy_blocked is False
@@ -1722,10 +1765,6 @@ def test_quote_plan_guards_still_blocks_buy_momentum_without_active_side():
         inventory_delta_shares=Decimal("0"),
         early_sell_only_sec=0.0,
         time_left_sec_global=600.0,
-        directional_edge_gate_enabled=False,
-        regime_guard_active=False,
-        min_directional_edge_ps=Decimal("0.01"),
-        min_directional_edge_ps_conservative=Decimal("0.02"),
         now_ts=100.0,
         buy_cooldown_until_ts=0.0,
         momentum_buy_filter_pct=Decimal("0.04"),
@@ -1740,7 +1779,6 @@ def test_quote_plan_guards_still_blocks_buy_momentum_without_active_side():
         reduce_only_no_new_sell_last_sec=45,
         forced_sell_only=False,
         active_side=ActiveSide.NONE.value,
-        min_directional_edge_ps_down=None,
     )
 
     assert outcome.momentum_buy_blocked is True
@@ -1770,10 +1808,6 @@ def test_quote_plan_guards_never_blocks_inventory_exit_sell_on_momentum():
         inventory_delta_shares=Decimal("5.4"),
         early_sell_only_sec=0.0,
         time_left_sec_global=600.0,
-        directional_edge_gate_enabled=False,
-        regime_guard_active=False,
-        min_directional_edge_ps=Decimal("0.01"),
-        min_directional_edge_ps_conservative=Decimal("0.02"),
         now_ts=100.0,
         buy_cooldown_until_ts=0.0,
         momentum_buy_filter_pct=Decimal("0.04"),
@@ -1788,7 +1822,6 @@ def test_quote_plan_guards_never_blocks_inventory_exit_sell_on_momentum():
         reduce_only_no_new_sell_last_sec=45,
         forced_sell_only=False,
         active_side=ActiveSide.UP.value,
-        min_directional_edge_ps_down=None,
     )
 
     assert outcome.momentum_sell_blocked is False
@@ -3473,25 +3506,6 @@ def test_buy_is_not_submitted_above_the_evaluated_economics_quantity():
     assert strategy.order_events[-1]["payload"]["planned_quantity"] == 5.0
 
 
-def test_partial_fill_reload_uses_robust_net_not_legacy_forced_exit_edge():
-    desired = apply_reload_edge_guard(
-        desired_entry={
-            "should_quote": True,
-            "diag_reason": "eligible",
-            "directional_edge_ps": Decimal("-0.12"),
-            "robust_net": Decimal("0.03"),
-        },
-        side="buy",
-        current_inst_inventory_qty=Decimal("5"),
-        maker_reload_inventory_threshold_shares=Decimal("5"),
-        maker_reload_min_directional_edge_ps=Decimal("0.03"),
-    )
-
-    assert desired["should_quote"] is True
-    assert desired["diag_reason"] == "eligible"
-    assert desired["reload_directional_edge_ps_telemetry"] == Decimal("-0.12")
-
-
 def test_partial_fill_buy_is_capped_to_remaining_market_inventory_capacity():
     strategy = DummyTrendSubmitStrategy()
     strategy.maker_max_inventory_shares = Decimal("10")
@@ -4471,9 +4485,7 @@ def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
         directional_entry_min_score_abs_new=Decimal("0.18"),
         directional_first_entry_min_score_abs_new=Decimal("0.25"),
         maker_min_expected_net_usdc=Decimal("0.001"),
-        maker_reload_min_expected_net_multiplier=Decimal("1.5"),
         current_inst_inventory_qty=Decimal("0"),
-        maker_reload_inventory_threshold_shares=Decimal("5"),
         current_slug="btc-updown-15m-test",
         inst_id="inst-down",
         market_buy_count=0,

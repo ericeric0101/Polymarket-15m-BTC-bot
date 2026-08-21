@@ -522,9 +522,7 @@ def evaluate_buy_entry_controls(
     first_entry_max_time_left_sec: int = 0,
     locked_side_score_abs: Decimal = Decimal("0"),
     maker_min_expected_net_usdc: Decimal,
-    maker_reload_min_expected_net_multiplier: Decimal,
     current_inst_inventory_qty: Decimal,
-    maker_reload_inventory_threshold_shares: Decimal,
     current_slug: str,
     inst_id: Any,
     market_buy_count: int = 0,
@@ -542,6 +540,9 @@ def evaluate_buy_entry_controls(
     max_locked_side_position: Decimal = Decimal("999999"),
     inventory_full_behavior: str = "STOP_BUY",
     twap_reference_degraded: bool = False,
+    market_strike_entry_eligible: bool = True,
+    market_strike_status: str = "verified",
+    market_strike_source: str = "",
 ) -> BuyEntryEvaluation:
     min_expected_net_usdc = maker_min_expected_net_usdc
     entry_mode = "value"
@@ -552,6 +553,21 @@ def evaluate_buy_entry_controls(
             min_expected_net_usdc=min_expected_net_usdc,
             entry_mode=entry_mode,
             size_multiplier=size_multiplier,
+        )
+    if not market_strike_entry_eligible:
+        return BuyEntryEvaluation(
+            skip=True,
+            min_expected_net_usdc=min_expected_net_usdc,
+            entry_mode=entry_mode,
+            event_type="ORDER_SKIP_MARKET_STRIKE_UNVERIFIED",
+            reason="market_strike_unverified",
+            payload={
+                "slug": current_slug,
+                "instrument_id": str(inst_id),
+                "strike_status": str(market_strike_status or "pending"),
+                "strike_source": str(market_strike_source or ""),
+                "engine": "market_strike_provenance_guard",
+            },
         )
     if twap_reference_degraded:
         return BuyEntryEvaluation(
@@ -660,23 +676,6 @@ def evaluate_buy_entry_controls(
                 "engine": "new_signal",
             },
         )
-    if (
-        current_inst_inventory_qty >= max_locked_side_position
-        and str(inventory_full_behavior or "STOP_BUY").upper() == "WIDEN_SPREAD"
-    ):
-        min_expected_net_usdc = (
-            maker_min_expected_net_usdc * max(Decimal("1"), maker_reload_min_expected_net_multiplier)
-        )
-    if (
-        maker_reload_min_expected_net_multiplier > Decimal("1")
-        and current_inst_inventory_qty + Decimal("0.000001")
-        >= maker_reload_inventory_threshold_shares
-    ):
-        min_expected_net_usdc = (
-            maker_min_expected_net_usdc * maker_reload_min_expected_net_multiplier
-        )
-        # Reload always uses value mode regardless of trend detection.
-        entry_mode = "value"
     active_side_txt = str(active_side_value or "NONE").upper()
     quality_adjustment = evaluate_entry_quality_adjustment(
         candidate_entry_price=candidate_entry_price,
@@ -1188,29 +1187,6 @@ def apply_locked_side_recycle_sell_pricing(
         f"fair={float(fair):.4f} bid={float(best_bid):.4f} ask={float(best_ask):.4f}"
         + (f" prev={prev_reason}" if prev_reason else "")
     )
-    return desired_entry
-
-
-def apply_reload_edge_guard(
-    *,
-    desired_entry: dict[str, Any],
-    side: str,
-    current_inst_inventory_qty: Decimal,
-    maker_reload_inventory_threshold_shares: Decimal,
-    maker_reload_min_directional_edge_ps: Decimal,
-) -> dict[str, Any]:
-    if (
-        side != "buy"
-        or current_inst_inventory_qty + Decimal("0.000001") < maker_reload_inventory_threshold_shares
-    ):
-        return desired_entry
-    # Same principle as the removed initial directional-edge veto: this raw
-    # metric embeds a hypothetical forced exit and must not contradict the
-    # final robust-net decision for a permitted partial-fill reload.  Preserve
-    # it in telemetry so historical analyses remain possible.
-    directional_edge_ps = desired_entry.get("directional_edge_ps")
-    desired_entry["reload_min_directional_edge_ps"] = maker_reload_min_directional_edge_ps
-    desired_entry["reload_directional_edge_ps_telemetry"] = directional_edge_ps
     return desired_entry
 
 

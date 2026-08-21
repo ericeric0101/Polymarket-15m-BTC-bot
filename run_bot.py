@@ -163,7 +163,6 @@ from bot.quote_service import (
     apply_weak_pfair_size_adjustment,
     attach_desired_entry_runtime_metadata,
     apply_confirmed_inventory_sell_guard,
-    apply_reload_edge_guard,
     build_active_maker_order_state,
     build_desired_quote_entry,
     build_directional_snapshot,
@@ -275,7 +274,6 @@ class IntegratedBTCStrategy(
     def __init__(
         self,
         redis_client=None,
-        enable_grafana=True,
         test_mode=False,
         selected_slug: Optional[str] = None,
         enable_terminal_dashboard: bool = False,
@@ -297,7 +295,6 @@ class IntegratedBTCStrategy(
         self._last_dashboard_pause_log_ts = 0.0
         initialize_strategy_settings(
             self,
-            enable_grafana=enable_grafana,
             test_mode=test_mode,
             enable_terminal_dashboard=enable_terminal_dashboard,
             project_root=project_root,
@@ -1196,16 +1193,6 @@ class IntegratedBTCStrategy(
 
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
 
-    def _increment_order_metric(self, status: str) -> None:
-        """
-        Increment order counters on Grafana exporter when available.
-        """
-        if self.grafana_exporter and hasattr(self.grafana_exporter, "increment_order_counter"):
-            try:
-                self.grafana_exporter.increment_order_counter(status)
-            except Exception as e:
-                logger.debug(f"Failed to increment order metric [{status}]: {e}")
-
     def _init_live_prom_metrics(self) -> None:
         """Initialize Prometheus gauges/counters for live trading metrics."""
         try:
@@ -1243,19 +1230,6 @@ class IntegratedBTCStrategy(
             self._prom_live_pnl.set(self._live_cumulative_pnl)
             win_rate = (self._live_total_wins / self._live_total_trades * 100) if self._live_total_trades > 0 else 0
             self._prom_live_win_rate.set(win_rate)
-
-            # Also push to grafana_exporter if available
-            if self.grafana_exporter:
-                try:
-                    self.grafana_exporter.increment_trade_counter(won=won)
-                    dur_sec = duration_ns / 1e9 if duration_ns else 0
-                    if dur_sec > 0:
-                        self.grafana_exporter.record_trade_duration(dur_sec)
-                    # Update PnL gauge exposed by exporter
-                    self.grafana_exporter.total_pnl.set(self._live_cumulative_pnl)
-                    self.grafana_exporter.win_rate.set(win_rate)
-                except Exception:
-                    pass
 
             logger.info(
                 f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
@@ -1786,10 +1760,6 @@ class IntegratedBTCStrategy(
                 inventory_delta_shares=self.inventory_delta_shares,
                 early_sell_only_sec=float(self.maker_early_sell_only_sec),
                 time_left_sec_global=time_left_sec_global,
-                directional_edge_gate_enabled=self.maker_directional_edge_gate_enabled,
-                regime_guard_active=regime_guard_active,
-                min_directional_edge_ps=self.maker_min_directional_edge_ps,
-                min_directional_edge_ps_conservative=self.maker_min_directional_edge_ps_conservative,
                 now_ts=now_ts,
                 buy_cooldown_until_ts=float(self.buy_cooldown_until_ts),
                 momentum_buy_filter_pct=self.maker_momentum_buy_filter_pct,
@@ -1804,7 +1774,6 @@ class IntegratedBTCStrategy(
                 reduce_only_no_new_sell_last_sec=self.maker_reduce_only_no_new_sell_last_sec,
                 forced_sell_only=forced_sell_only,
                 active_side=self.active_side.value,
-                min_directional_edge_ps_down=self.maker_min_directional_edge_ps_down,
             )
             side_disable_reason_by_side = guard_outcome.side_disable_reason_by_side
             reduce_only_reason = guard_outcome.reduce_only.reason
@@ -2008,6 +1977,15 @@ class IntegratedBTCStrategy(
                 )
                 current_price = self._capture_market_open_spot()
                 price_to_beat = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+                market_strike_status = str(
+                    getattr(self, "market_strike_status_by_slug", {}).get(current_slug, "pending")
+                )
+                market_strike_source = str(
+                    self.market_strike_source_by_slug.get(current_slug, "")
+                )
+                market_strike_entry_eligible = bool(
+                    getattr(self, "_market_strike_is_entry_eligible", lambda _slug: False)(current_slug)
+                )
                 locked_side_runtime = self._resolve_locked_side_runtime_state(
                     now_ts=now_ts,
                     slug=current_slug,
@@ -2060,9 +2038,7 @@ class IntegratedBTCStrategy(
                     first_entry_max_time_left_sec=int(getattr(self, "first_entry_max_time_left_sec", 0)),
                     locked_side_score_abs=Decimal(str(getattr(self, "active_side_lock_score_abs", Decimal("0")))),
                     maker_min_expected_net_usdc=self.maker_min_expected_net_usdc,
-                    maker_reload_min_expected_net_multiplier=self.maker_reload_min_expected_net_multiplier,
                     current_inst_inventory_qty=current_inst_inventory_qty,
-                    maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
                     max_locked_side_position=self.max_locked_side_position,
                     inventory_full_behavior=self.inventory_full_behavior,
                     twap_reference_degraded=bool(
@@ -2081,6 +2057,9 @@ class IntegratedBTCStrategy(
                     entry_quality_allow_size_down=bool(
                         getattr(self, "entry_quality_allow_size_down", False)
                     ),
+                    market_strike_entry_eligible=market_strike_entry_eligible,
+                    market_strike_status=market_strike_status,
+                    market_strike_source=market_strike_source,
                 )
                 # Defaults keep rejected candidates observable even when the
                 # quote context is incomplete and therefore has no quote plan.
@@ -2754,13 +2733,6 @@ class IntegratedBTCStrategy(
                     # because closing inventory shouldn't require the strict entry edge minimum.
                     desired_entry["should_quote"] = True
 
-                desired_entry = apply_reload_edge_guard(
-                    desired_entry=desired_entry,
-                    side=side,
-                    current_inst_inventory_qty=current_inst_inventory_qty,
-                    maker_reload_inventory_threshold_shares=self.maker_reload_inventory_threshold_shares,
-                    maker_reload_min_directional_edge_ps=self.maker_reload_min_directional_edge_ps,
-                )
                 desired_entry = maybe_apply_trapped_inventory_recovery(
                     desired_entry=desired_entry,
                     side=side,
@@ -3253,10 +3225,6 @@ class IntegratedBTCStrategy(
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),
                 "maker_urgent_exit_enabled": self.maker_urgent_exit_enabled,
-                "maker_min_directional_edge_ps_down": float(self.maker_min_directional_edge_ps_down),
-                "maker_reload_inventory_threshold_shares": float(self.maker_reload_inventory_threshold_shares),
-                "maker_reload_min_expected_net_multiplier": float(self.maker_reload_min_expected_net_multiplier),
-                "maker_reload_min_directional_edge_ps": float(self.maker_reload_min_directional_edge_ps),
                 "taker_exit_eval_interval_sec": float(self.taker_exit_eval_interval_sec),
                 "taker_exit_stop_loss_confirmations": int(self.taker_exit_stop_loss_confirmations),
                 "taker_exit_stop_loss_usdc": float(self.taker_exit_stop_loss_usdc),
@@ -3338,9 +3306,6 @@ class IntegratedBTCStrategy(
         except Exception as e:
             logger.debug(f"Initial balance refresh failed: {e}")
         
-        # Start Grafana if enabled
-        if self.grafana_exporter:
-            start_background_thread(self._start_grafana_sync, "grafana-sync")
         if self.terminal_dashboard:
             self._terminal_dashboard_stop_event.clear()
             self._terminal_dashboard_thread = start_background_thread(
@@ -3830,14 +3795,6 @@ class IntegratedBTCStrategy(
     def _start_maker_worker(self, bid_decimal: Decimal, ask_decimal: Decimal) -> None:
         start_maker_worker(self, bid_decimal, ask_decimal)
 
-    def _start_grafana_sync(self):
-        """Start Grafana in separate thread."""
-        try:
-            self.grafana_exporter.start()
-            logger.info("Grafana metrics started on port 8000")
-        except Exception as e:
-            logger.error(f"Failed to start Grafana: {e}")
-    
     def _find_btc_instrument(self):
         return find_btc_instrument(self)
 

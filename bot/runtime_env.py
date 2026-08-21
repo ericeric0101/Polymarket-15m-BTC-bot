@@ -104,10 +104,12 @@ SENSITIVE_ENV_KEYS = frozenset(
 
 # Canonical names in .env map to legacy readers that have not yet been
 # converged. The mapping is intentionally one-way.
+# Migration-only compatibility map. Runtime configuration no longer applies
+# these aliases to its process environment; the migration tool uses this map
+# to convert old local files into the supported operator surface.
 CANONICAL_TO_LEGACY = {
     "ENTRY_SCORE_MIN": "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW",
     "FIRST_ENTRY_SCORE_MIN": "DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW",
-    "FIRST_ENTRY_MAX_TIME_LEFT_SEC": "FIRST_ENTRY_MAX_TIME_LEFT_SEC",
     "ENTRY_MAX_FAIR_PRICE": "MAKER_MAX_FAIR_PRICE",
     "EXTERNAL_CONFIRMATION_ENABLED": "EXTERNAL_ENTRY_CONFIRMATION_ENABLED",
     "EXTERNAL_CONFLICT_BOOK_MID_THRESHOLD_PS": "EXTERNAL_ENTRY_CONFIRMATION_BOOK_MID_THRESHOLD_PS",
@@ -139,32 +141,6 @@ def _profile_path(profile_name: str, repo_root: Path) -> Path:
     return path
 
 
-def _apply_canonical_aliases(environ: MutableMapping[str, str], external_keys: set[str]) -> None:
-    for canonical, legacy in CANONICAL_TO_LEGACY.items():
-        value = environ.get(canonical)
-        if value is not None and legacy not in external_keys:
-            environ[legacy] = value
-
-    if "ENTRY_MIN_TIME_LEFT_SEC" in environ and "MAKER_MIN_MINUTES_TO_CLOSE" not in external_keys:
-        seconds = float(environ["ENTRY_MIN_TIME_LEFT_SEC"])
-        if seconds < 0:
-            raise ValueError("ENTRY_MIN_TIME_LEFT_SEC must be >= 0")
-        environ["MAKER_MIN_MINUTES_TO_CLOSE"] = str(seconds / 60.0)
-
-    if "EXTERNAL_CONFLICT_ACTION" in environ and "EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT" not in external_keys:
-        action = environ["EXTERNAL_CONFLICT_ACTION"].strip().lower()
-        if action not in {"skip", "size_down"}:
-            raise ValueError("EXTERNAL_CONFLICT_ACTION must be 'skip' or 'size_down'")
-        environ["EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT"] = "1" if action == "skip" else "0"
-
-    if "HIGH_PRICE_TARGET_SHARES" in environ and "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER" not in external_keys:
-        target = float(environ["MARKET_TARGET_SHARES"])
-        high_price_target = float(environ["HIGH_PRICE_TARGET_SHARES"])
-        if target <= 0 or high_price_target <= 0 or high_price_target > target:
-            raise ValueError("HIGH_PRICE_TARGET_SHARES must be > 0 and <= MARKET_TARGET_SHARES")
-        environ["MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_ENABLED"] = "1"
-        environ["MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER"] = str(high_price_target / target)
-
 def load_runtime_env(
     *,
     repo_root: Path | None = None,
@@ -190,5 +166,4 @@ def load_runtime_env(
         _set_if_not_external(target_environ, key, value, external_keys)
     for key, value in local_values.items():
         _set_if_not_external(target_environ, key, value, external_keys)
-    _apply_canonical_aliases(target_environ, external_keys)
     return profile_path

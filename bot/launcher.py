@@ -277,7 +277,6 @@ def init_redis():
 
 def run_integrated_bot(
     simulation: bool = True,
-    enable_grafana: bool = True,
     test_mode: bool = True,
     enable_terminal_dashboard: bool = False,
 ):
@@ -303,7 +302,6 @@ def run_integrated_bot(
         "Startup config: "
         f"mode={'SIMULATION' if simulation else 'LIVE'} "
         f"redis={'on' if redis_client else 'off'} "
-        f"grafana={'on' if enable_grafana else 'off'} "
         f"terminal_dashboard={'on' if enable_terminal_dashboard else 'off'} "
         f"auto_rollover={'on' if auto_rollover_enabled else 'off'}({auto_rollover_sec}s)"
     )
@@ -441,7 +439,6 @@ def run_integrated_bot(
 
         strategy = IntegratedBTCStrategy(
             redis_client=redis_client,
-            enable_grafana=enable_grafana,
             test_mode=test_mode,
             selected_slug=primary_slug,
             enable_terminal_dashboard=enable_terminal_dashboard,
@@ -573,11 +570,6 @@ def main():
         help="Run in LIVE mode (real money at risk!). Default is simulation."
     )
     parser.add_argument(
-        "--no-grafana",
-        action="store_true",
-        help="Disable Grafana metrics"
-    )
-    parser.add_argument(
         "--test-mode",
         action="store_true",
         help="Run in TEST MODE (trade every minute for faster testing)"
@@ -596,7 +588,6 @@ def main():
     args = parser.parse_args()
 
     simulation = not args.live
-    enable_grafana = not args.no_grafana
     # The CLOB execution client is always live-capable. Dry-run must therefore
     # be enabled explicitly for every invocation that did not opt into --live.
     test_mode = bool(args.test_mode or not args.live)
@@ -640,7 +631,6 @@ def main():
     try:
         run_integrated_bot(
             simulation=simulation,
-            enable_grafana=enable_grafana,
             test_mode=test_mode,
             enable_terminal_dashboard=enable_terminal_dashboard,
         )

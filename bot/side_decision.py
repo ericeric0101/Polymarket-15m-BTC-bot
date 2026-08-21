@@ -466,6 +466,16 @@ class SideDecisionMixin:
         strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
         if strike_dec is None or strike_dec <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unavailable", inputs
+        strike_eligible = getattr(self, "_market_strike_is_entry_eligible", lambda _slug: False)(
+            str(self.current_market_slug or "")
+        )
+        if not strike_eligible:
+            inputs["strike_status"] = str(
+                getattr(self, "market_strike_status_by_slug", {}).get(
+                    str(self.current_market_slug or ""), "pending"
+                )
+            )
+            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "strike_unverified", inputs
         inputs["strike"] = float(strike_dec)
 
         # Lock per-market open spot for open-drift style reference and logging.
@@ -686,7 +696,7 @@ class SideDecisionMixin:
 
         side, score, reason, inputs = self._compute_side_decision(now_ts)
         pre_entry_flip_allowed = self._pre_entry_flip_allowed(proposed_side=side)
-        if reason in {"spot_unavailable", "strike_unavailable"}:
+        if reason in {"spot_unavailable", "strike_unavailable", "strike_unverified"}:
             self.side_decision_score = score
             self.side_decision_reason = reason
             self.side_decision_ts = now_ts
@@ -888,8 +898,7 @@ class SideDecisionMixin:
             "REGIME GUARD triggered: "
             f"window={window} neg={neg_count}/{self.regime_guard_n_markets} "
             f"sum={window_sum:.4f} <= trigger={float(self.regime_guard_trigger_sum_pnl_usdc):.4f}; "
-            f"raise BUY edge gate to {float(self.maker_min_directional_edge_ps_conservative):.4f} "
-            f"for {self.regime_guard_cooldown_sec}s"
+            f"recording a {self.regime_guard_cooldown_sec}s conservative interval"
         )
         self._db_strategy_event(
             "REGIME_GUARD_TRIGGERED",

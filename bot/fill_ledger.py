@@ -209,9 +209,9 @@ class FillLedgerMixin:
         filled_id: str,
         filled_inst: Any,
         liquidity_side_raw: Any,
-    ) -> None:
+    ) -> bool:
         if side_for_ledger != "buy" or not current_slug:
-            return
+            return False
         thesis_epoch = (
             self._current_thesis_epoch(current_slug)
             if hasattr(self, "_current_thesis_epoch")
@@ -224,7 +224,7 @@ class FillLedgerMixin:
         )
         counted_ids = self.market_buy_counted_order_ids_by_slug.setdefault(budget_key, set())
         if not filled_id or filled_id in counted_ids:
-            return
+            return False
         counted_ids.add(filled_id)
         new_buy_count = int(self.market_buy_count_by_slug.get(budget_key, 0)) + 1
         self.market_buy_count_by_slug[budget_key] = new_buy_count
@@ -244,6 +244,7 @@ class FillLedgerMixin:
                 "liquidity_side": str(liquidity_side_raw or ""),
             },
         )
+        return True
 
     def _record_observed_fee_rate_from_fill(
         self: FillLedgerHost,

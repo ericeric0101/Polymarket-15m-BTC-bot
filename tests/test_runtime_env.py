@@ -14,9 +14,9 @@ def test_profile_loads_before_local_canonical_overrides(tmp_path):
     profile_dir = root / "config" / "profiles"
     profile_dir.mkdir(parents=True)
     (profile_dir / "test-profile.env").write_text(
-        "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW=0.20\n"
-        "MAKER_FIXED_SHARES=8\n"
-        "MAKER_MIN_MINUTES_TO_CLOSE=3\n",
+        "ENTRY_SCORE_MIN=0.20\n"
+        "MARKET_TARGET_SHARES=8\n"
+        "ENTRY_MIN_TIME_LEFT_SEC=180\n",
         encoding="utf-8",
     )
     (root / ".env").write_text(
@@ -31,26 +31,26 @@ def test_profile_loads_before_local_canonical_overrides(tmp_path):
     path = load_runtime_env(repo_root=root, environ=environ)
 
     assert path == profile_dir / "test-profile.env"
-    assert environ["DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW"] == "0.25"
-    assert environ["MAKER_FIXED_SHARES"] == "10"
-    assert environ["MAKER_MIN_MINUTES_TO_CLOSE"] == "1.0"
+    assert environ["ENTRY_SCORE_MIN"] == "0.25"
+    assert environ["MARKET_TARGET_SHARES"] == "10"
+    assert environ["ENTRY_MIN_TIME_LEFT_SEC"] == "60"
 
 
-def test_shell_legacy_override_remains_highest_priority(tmp_path):
+def test_shell_canonical_override_remains_highest_priority(tmp_path):
     profile_dir = tmp_path / "config" / "profiles"
     profile_dir.mkdir(parents=True)
     (profile_dir / "test-profile.env").write_text(
-        "MAKER_FIXED_SHARES=8\n", encoding="utf-8"
+        "MARKET_TARGET_SHARES=8\n", encoding="utf-8"
     )
     (tmp_path / ".env").write_text(
         "STRATEGY_PROFILE=test-profile\nMARKET_TARGET_SHARES=10\n",
         encoding="utf-8",
     )
-    environ = {"MAKER_FIXED_SHARES": "6"}
+    environ = {"MARKET_TARGET_SHARES": "6"}
 
     load_runtime_env(repo_root=tmp_path, environ=environ)
 
-    assert environ["MAKER_FIXED_SHARES"] == "6"
+    assert environ["MARKET_TARGET_SHARES"] == "6"
 
 
 def test_invalid_profile_name_is_rejected(tmp_path):

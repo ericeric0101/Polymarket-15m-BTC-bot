@@ -273,6 +273,12 @@ class StrategyDBRuntimeMixin:
         strike_source = str(recovered.get("strike_source") or "trade_db_recovered")
         self.market_strike_cache_by_slug[slug] = strike
         self.market_strike_source_by_slug[slug] = strike_source
+        # A pre-D.3 journal lock did not retain both source candidates. It is
+        # useful for diagnostics only; a fresh market-scoped provenance check
+        # must verify it before any new BUY can rely on it.
+        if not hasattr(self, "market_strike_status_by_slug"):
+            self.market_strike_status_by_slug = {}
+        self.market_strike_status_by_slug[slug] = "recovered_unverified"
         self.market_strike_provisional_by_slug.pop(slug, None)
         self.market_strike_provisional_source_by_slug.pop(slug, None)
         if self.current_market_open_spot is None or Decimal(str(self.current_market_open_spot or "0")) <= 0:

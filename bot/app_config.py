@@ -111,14 +111,7 @@ class MakerConfig:
     smart_money_weight_directional: float
     smart_money_weight_unknown: float
     quote_sides: str
-    directional_edge_gate_enabled: bool
-    min_directional_edge_ps: Decimal
-    min_directional_edge_ps_down: Decimal
-    min_directional_edge_ps_conservative: Decimal
     min_expected_net_usdc: Decimal
-    reload_inventory_threshold_shares: Decimal
-    reload_min_expected_net_multiplier: Decimal
-    reload_min_directional_edge_ps: Decimal
     use_post_only: bool
     post_only_strict: bool
     max_inventory_shares: Decimal
@@ -220,15 +213,13 @@ class MakerConfig:
         if self.min_shares <= 0 or self.exchange_min_shares <= 0:
             raise ValueError("Maker min share settings must be > 0")
         if self.high_entry_price_size_adjust_threshold < 0:
-            raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD must be >= 0")
+            raise ValueError("HIGH_PRICE_THRESHOLD must be >= 0")
         if self.high_entry_price_size_adjust_multiplier <= 0:
-            raise ValueError("MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER must be > 0")
+            raise ValueError("High-price size multiplier must be > 0")
         if self.kelly_sizing_fraction < 0 or self.kelly_sizing_fraction > 1:
             raise ValueError("KELLY_SIZING_FRACTION must be in [0, 1]")
         if self.kelly_sizing_max_collateral_fraction < 0 or self.kelly_sizing_max_collateral_fraction > 1:
             raise ValueError("KELLY_SIZING_MAX_COLLATERAL_FRACTION must be in [0, 1]")
-        if self.reload_inventory_threshold_shares < 0:
-            raise ValueError("MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES must be >= 0")
         if self.continuation_entry_size_multiplier <= 0:
             raise ValueError("CONTINUATION_ENTRY_SIZE_MULTIPLIER must be > 0")
         if self.trapped_inventory_recovery_min_qty < 0:
@@ -303,9 +294,9 @@ class SideDecisionConfig:
         if self.side_thesis_weak_confirmations_new < 1:
             raise ValueError("SIDE_THESIS_WEAK_CONFIRMATIONS_NEW must be >= 1")
         if self.directional_entry_min_score_abs_new < 0:
-            raise ValueError("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
+            raise ValueError("ENTRY_SCORE_MIN must be >= 0")
         if self.directional_first_entry_min_score_abs_new < 0:
-            raise ValueError("DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW must be >= 0")
+            raise ValueError("FIRST_ENTRY_SCORE_MIN must be >= 0")
         if self.first_entry_max_time_left_sec < 0:
             raise ValueError("FIRST_ENTRY_MAX_TIME_LEFT_SEC must be >= 0")
         if self.side_thesis_weak_opposite_score_abs_new < 0:
@@ -402,7 +393,7 @@ class ExitConfig:
         if self.maker_urgent_exit_min_confirmations < 1:
             raise ValueError("MAKER_URGENT_EXIT_MIN_CONFIRMATIONS must be >= 1")
         if self.taker_exit_max_time_left_sec < 0:
-            raise ValueError("TAKER_EXIT_MAX_TIME_LEFT_SEC must be >= 0")
+            raise ValueError("RECOVERY_EXIT_MAX_TIME_LEFT_SEC must be >= 0")
         if self.taker_exit_min_bid < 0 or self.taker_exit_min_bid > Decimal("1"):
             raise ValueError("TAKER_EXIT_MIN_BID must be in [0, 1]")
         if self.taker_exit_disable_if_bid_below < 0 or self.taker_exit_disable_if_bid_below > Decimal("1"):
@@ -441,9 +432,6 @@ class MarketDataConfig:
     market_strike_anchor_max_lag_sec: int
     market_strike_anchor_near_sec: int
     market_strike_rest_retry_sec: int
-    market_strike_gamma_validate_interval_sec: int
-    market_strike_gamma_warn_abs_usd: Decimal
-    market_strike_gamma_warn_interval_sec: int
     quote_stale_sec: int
     quote_event_clock_skew_tolerance_sec: Decimal
     quote_resubscribe_grace_sec: int
@@ -514,13 +502,24 @@ class AppConfig:
 
         maker_min_shares = _env_decimal("MAKER_MIN_SHARES", "5")
         maker_exchange_min_shares = _env_decimal("MAKER_EXCHANGE_MIN_SHARES", "5")
-        maker_fixed_shares = _env_decimal("MAKER_FIXED_SHARES", "0")
-        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "25")
-        maker_reload_inventory_threshold_shares = _env_decimal(
-            "MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES",
-            str(maker_fixed_shares if maker_fixed_shares > 0 else maker_min_shares),
+        maker_fixed_shares = _env_decimal("MARKET_TARGET_SHARES", "0")
+        high_price_target_shares = _env_decimal(
+            "HIGH_PRICE_TARGET_SHARES", str(maker_fixed_shares)
         )
-        maker_min_directional_edge_ps_conservative = _env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS_CONSERVATIVE", "0.03")
+        if maker_fixed_shares > 0 and (
+            high_price_target_shares <= 0 or high_price_target_shares > maker_fixed_shares
+        ):
+            raise ValueError("HIGH_PRICE_TARGET_SHARES must be > 0 and <= MARKET_TARGET_SHARES")
+        high_price_size_multiplier = (
+            high_price_target_shares / maker_fixed_shares
+            if maker_fixed_shares > 0
+            else Decimal("1")
+        )
+        external_conflict_action = _env_str("EXTERNAL_CONFLICT_ACTION", "skip").strip().lower()
+        if external_conflict_action not in {"skip", "size_down"}:
+            raise ValueError("EXTERNAL_CONFLICT_ACTION must be 'skip' or 'size_down'")
+        entry_min_time_left_sec = max(0.0, _env_float("ENTRY_MIN_TIME_LEFT_SEC", 180.0))
+        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "25")
         fee_rate_default_decimal = _env_decimal("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
         if fee_rate_default_decimal < 0:
             fee_rate_default_decimal = CRYPTO_FEE_CURVE.fee_rate
@@ -588,37 +587,30 @@ class AppConfig:
                 weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
                 weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
                 weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
-                high_entry_price_size_adjust_enabled=_env_bool(
-                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_ENABLED",
-                    False,
+                high_entry_price_size_adjust_enabled=(
+                    maker_fixed_shares > 0 and high_price_target_shares < maker_fixed_shares
                 ),
                 high_entry_price_size_adjust_threshold=_env_decimal(
-                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_THRESHOLD",
+                    "HIGH_PRICE_THRESHOLD",
                     "0.70",
                 ),
-                high_entry_price_size_adjust_multiplier=_env_decimal(
-                    "MAKER_HIGH_ENTRY_PRICE_SIZE_ADJUST_MULTIPLIER",
-                    "0.5",
-                ),
+                high_entry_price_size_adjust_multiplier=high_price_size_multiplier,
                 kelly_sizing_enabled=_env_bool("KELLY_SIZING_ENABLED", False),
                 kelly_sizing_fraction=_env_decimal("KELLY_SIZING_FRACTION", "0.25"),
                 kelly_sizing_max_collateral_fraction=_env_decimal(
                     "KELLY_SIZING_MAX_COLLATERAL_FRACTION", "0.10"
                 ),
-                external_entry_confirmation_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_ENABLED", False),
+                external_entry_confirmation_enabled=_env_bool("EXTERNAL_CONFIRMATION_ENABLED", False),
                 external_entry_confirmation_shadow_enabled=_env_bool("EXTERNAL_ENTRY_CONFIRMATION_SHADOW_ENABLED", True),
                 external_entry_confirmation_book_mid_threshold_ps=_env_decimal(
-                    "EXTERNAL_ENTRY_CONFIRMATION_BOOK_MID_THRESHOLD_PS",
+                    "EXTERNAL_CONFLICT_BOOK_MID_THRESHOLD_PS",
                     "0.02",
                 ),
                 external_entry_confirmation_conflict_size_multiplier=_env_decimal(
                     "EXTERNAL_ENTRY_CONFIRMATION_CONFLICT_SIZE_MULTIPLIER",
                     "0.5",
                 ),
-                external_entry_confirmation_skip_strong_conflict=_env_bool(
-                    "EXTERNAL_ENTRY_CONFIRMATION_SKIP_STRONG_CONFLICT",
-                    False,
-                ),
+                external_entry_confirmation_skip_strong_conflict=(external_conflict_action == "skip"),
                 smart_money_enabled=_env_bool("SMART_MONEY_ENABLED", False),
                 smart_money_shadow_enabled=_env_bool("SMART_MONEY_SHADOW_ENABLED", True),
                 smart_money_min_cash_filter=max(0.0, _env_float("SMART_MONEY_MIN_CASH_FILTER", 10.0)),
@@ -665,20 +657,7 @@ class AppConfig:
                 ),
                 smart_money_weight_unknown=max(0.0, _env_float("SMART_MONEY_WEIGHT_UNKNOWN", 0.25)),
                 quote_sides=normalize_quote_mode(quote_sides_raw),
-                directional_edge_gate_enabled=_env_bool("MAKER_DIRECTIONAL_EDGE_GATE_ENABLED", False),
-                min_directional_edge_ps=_env_decimal("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"),
-                min_directional_edge_ps_down=_env_decimal(
-                    "MAKER_MIN_DIRECTIONAL_EDGE_PS_DOWN",
-                    _env_str("MAKER_MIN_DIRECTIONAL_EDGE_PS", "0.02"),
-                ),
-                min_directional_edge_ps_conservative=maker_min_directional_edge_ps_conservative,
-                min_expected_net_usdc=_env_decimal("MAKER_MIN_EXPECTED_NET_USDC", "0.0001"),
-                reload_inventory_threshold_shares=maker_reload_inventory_threshold_shares,
-                reload_min_expected_net_multiplier=_env_decimal("MAKER_RELOAD_MIN_EXPECTED_NET_MULTIPLIER", "2.0"),
-                reload_min_directional_edge_ps=_env_decimal(
-                    "MAKER_RELOAD_MIN_DIRECTIONAL_EDGE_PS",
-                    str(maker_min_directional_edge_ps_conservative),
-                ),
+                min_expected_net_usdc=_env_decimal("ENTRY_MIN_ROBUST_NET_USDC", "0.0001"),
                 use_post_only=_env_bool("ORDER_POST_ONLY", False),
                 post_only_strict=_env_bool_inverted("MAKER_POST_ONLY_STRICT", True),
                 max_inventory_shares=market_max_position_shares,
@@ -704,11 +683,11 @@ class AppConfig:
                 ),
                 execution_empirical_markout_lookback_hours=max(
                     1.0,
-                    _env_float("MAKER_EXECUTION_EMPIRICAL_MARKOUT_LOOKBACK_HOURS", 168.0),
+                    _env_float("EXECUTION_COST_LOOKBACK_HOURS", 168.0),
                 ),
                 execution_empirical_markout_min_samples=max(
                     1,
-                    _env_int("MAKER_EXECUTION_EMPIRICAL_MARKOUT_MIN_SAMPLES", 5),
+                    _env_int("EXECUTION_COST_MIN_SAMPLES", 5),
                 ),
                 orderbook_fetch_interval_sec=max(1, _env_int("ORDERBOOK_FETCH_INTERVAL_SEC", 5)),
                 orderbook_levels_limit=max(1, _env_int("ORDERBOOK_LEVELS_LIMIT", 10)),
@@ -720,9 +699,9 @@ class AppConfig:
                 order_ttl_sec=_env_int("ORDER_TTL_SEC", 20),
                 balance_pause_sec=_env_int("MAKER_BALANCE_PAUSE_SEC", 60),
                 error_pause_sec=_env_int("MAKER_ERROR_PAUSE_SEC", 30),
-                min_minutes_to_close=_env_float("MAKER_MIN_MINUTES_TO_CLOSE", 3.0),
+                min_minutes_to_close=entry_min_time_left_sec / 60.0,
                 min_fair_price=_env_decimal("MAKER_MIN_FAIR_PRICE", "0.05"),
-                max_fair_price=_env_decimal("MAKER_MAX_FAIR_PRICE", "0.95"),
+                max_fair_price=_env_decimal("ENTRY_MAX_FAIR_PRICE", "0.95"),
                 reduce_only_no_new_sell_last_sec=max(0, _env_int("MAKER_REDUCE_ONLY_NO_NEW_SELL_LAST_SEC", 45)),
                 fee_rate_default_decimal=fee_rate_default_decimal,
                 fee_rate_legacy_bps_default=_env_int("MAKER_FEE_RATE_BPS_DEFAULT", 0),
@@ -833,14 +812,14 @@ class AppConfig:
                 flip_fair_inversion_min_ps=_env_decimal("BI_SIDE_FLIP_FAIR_INVERSION_MIN_PS", "0.03"),
                 flip_min_score_up_held_new=_env_decimal("BI_SIDE_FLIP_MIN_SCORE_UP_HELD_NEW", str(held_flip_default)),
                 flip_max_score_down_held_new=_env_decimal("BI_SIDE_FLIP_MAX_SCORE_DOWN_HELD_NEW", str(-held_flip_default)),
-                directional_entry_min_score_abs_new=_env_decimal("DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW", str(entry_score_abs_default)),
+                directional_entry_min_score_abs_new=_env_decimal("ENTRY_SCORE_MIN", str(entry_score_abs_default)),
                 directional_first_entry_min_score_abs_new=max(
                     _env_decimal(
-                        "DIRECTIONAL_FIRST_ENTRY_MIN_SCORE_ABS_NEW",
+                        "FIRST_ENTRY_SCORE_MIN",
                         str(entry_score_abs_default),
                     ),
                     _env_decimal(
-                        "DIRECTIONAL_ENTRY_MIN_SCORE_ABS_NEW",
+                        "ENTRY_SCORE_MIN",
                         str(entry_score_abs_default),
                     ),
                 ),
@@ -867,7 +846,7 @@ class AppConfig:
                 tail_protect_tp_price=_env_decimal("TAIL_PROTECT_TP_PRICE", "0.95"),
                 tail_protect_tp_fraction=_env_decimal("TAIL_PROTECT_TP_FRACTION", "0.50"),
                 tail_protect_tp_min_entry_price=_env_decimal("TAIL_PROTECT_TP_MIN_ENTRY_PRICE", "0.75"),
-                taker_exit_enabled=_env_bool_inverted("TAKER_EXIT_ENABLED", True),
+                taker_exit_enabled=_env_bool_inverted("RECOVERY_EXIT_ENABLED", True),
                 taker_exit_min_net_usdc=_env_decimal("TAKER_EXIT_MIN_NET_USDC", "0.02"),
                 taker_exit_stop_loss_usdc=_env_decimal("TAKER_EXIT_STOP_LOSS_USDC", "0.15"),
                 catastrophic_stop_loss_enabled=_env_bool_inverted("CATASTROPHIC_STOP_LOSS_ENABLED", True),
@@ -881,7 +860,7 @@ class AppConfig:
                     _env_int("CATASTROPHIC_STOP_LOSS_CONFIRMATIONS", 2),
                 ),
                 taker_exit_max_hold_sec=_env_int("TAKER_EXIT_MAX_HOLD_SEC", 120),
-                taker_exit_min_hold_sec=_env_int("TAKER_EXIT_MIN_HOLD_SEC", 20),
+                taker_exit_min_hold_sec=_env_int("RECOVERY_EXIT_MIN_HOLD_SEC", 20),
                 taker_exit_cooldown_sec=_env_int("TAKER_EXIT_COOLDOWN_SEC", 8),
                 taker_exit_eval_interval_sec=max(0.0, _env_float("TAKER_EXIT_EVAL_INTERVAL_SEC", 1.0)),
                 taker_exit_slippage_buffer_pct=_env_decimal("TAKER_EXIT_SLIPPAGE_BUFFER_PCT", "0.002"),
@@ -891,9 +870,9 @@ class AppConfig:
                 taker_exit_wait_for_sell_quote_sec=max(0, _env_int("TAKER_EXIT_WAIT_FOR_SELL_QUOTE_SEC", 20)),
                 taker_exit_only_after_invalidation=_env_bool("TAKER_EXIT_ONLY_AFTER_INVALIDATION", False),
                 taker_exit_require_twap_confirmation=_env_bool_inverted(
-                    "TAKER_EXIT_REQUIRE_TWAP_CONFIRMATION", True
+                    "RECOVERY_EXIT_REQUIRE_TWAP_CONFIRMATION", True
                 ),
-                taker_exit_max_time_left_sec=max(0, _env_int("TAKER_EXIT_MAX_TIME_LEFT_SEC", 0)),
+                taker_exit_max_time_left_sec=max(0, _env_int("RECOVERY_EXIT_MAX_TIME_LEFT_SEC", 0)),
                 taker_exit_min_bid=_env_decimal("TAKER_EXIT_MIN_BID", "0"),
                 taker_exit_min_recovery_ratio=_env_decimal("TAKER_EXIT_MIN_RECOVERY_RATIO", "0"),
                 taker_exit_require_inventory=_env_bool("TAKER_EXIT_REQUIRE_INVENTORY", True),
@@ -982,9 +961,6 @@ class AppConfig:
                 market_strike_anchor_max_lag_sec=max(10, _env_int("MARKET_STRIKE_ANCHOR_MAX_LAG_SEC", 180)),
                 market_strike_anchor_near_sec=max(5, _env_int("MARKET_STRIKE_ANCHOR_NEAR_SEC", 30)),
                 market_strike_rest_retry_sec=max(10, _env_int("MARKET_STRIKE_REST_RETRY_SEC", 60)),
-                market_strike_gamma_validate_interval_sec=max(30, _env_int("MARKET_STRIKE_GAMMA_VALIDATE_INTERVAL_SEC", 180)),
-                market_strike_gamma_warn_abs_usd=max(Decimal("1"), _env_decimal("MARKET_STRIKE_GAMMA_WARN_ABS_USD", "5")),
-                market_strike_gamma_warn_interval_sec=max(30, _env_int("MARKET_STRIKE_GAMMA_WARN_INTERVAL_SEC", 120)),
                 quote_stale_sec=_env_int("QUOTE_STALE_SEC", 30),
                 quote_event_clock_skew_tolerance_sec=max(
                     Decimal("0"),

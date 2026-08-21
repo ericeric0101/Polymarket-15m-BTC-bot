@@ -43,7 +43,6 @@ class SpotPricerMixin:
     """Mixin providing BTC spot price, Binance WS, and fair probability logic."""
 
     _AUTHORITATIVE_STRIKE_SOURCES = {
-        "polymarket_crypto_price_open",
         "gamma_price_to_beat",
     }
 
@@ -502,6 +501,70 @@ class SpotPricerMixin:
     def _is_authoritative_strike_source(self, source: str) -> bool:
         return str(source or "") in self._AUTHORITATIVE_STRIKE_SOURCES
 
+    def _market_strike_is_entry_eligible(self, slug: str) -> bool:
+        """Return whether ``slug`` has a proven market-scoped settlement strike."""
+        slug_txt = str(slug or "")
+        strike = self.market_strike_cache_by_slug.get(slug_txt)
+        source = self.market_strike_source_by_slug.get(slug_txt, "")
+        status = getattr(self, "market_strike_status_by_slug", {}).get(slug_txt, "pending")
+        return bool(
+            isinstance(strike, Decimal)
+            and strike > 0
+            and self._is_authoritative_strike_source(source)
+            and status == "verified"
+        )
+
+    def _record_strike_provenance(
+        self,
+        *,
+        slug: str,
+        start_ts: int,
+        end_ts: int,
+        gamma_price_to_beat: Optional[Decimal],
+        gamma_event_slug: str,
+        crypto_open_price: Optional[Decimal],
+        status: str,
+    ) -> None:
+        """Journal the competing strike candidates once per material state."""
+        gamma_value = float(gamma_price_to_beat) if gamma_price_to_beat is not None else None
+        crypto_value = float(crypto_open_price) if crypto_open_price is not None else None
+        diff_abs = (
+            float(abs(gamma_price_to_beat - crypto_open_price))
+            if gamma_price_to_beat is not None and crypto_open_price is not None
+            else None
+        )
+        payload = {
+            "slug": slug,
+            "status": status,
+            "gamma_price_to_beat": gamma_value,
+            "gamma_event_slug": gamma_event_slug,
+            "crypto_open_price": crypto_value,
+            "diff_abs_usd": diff_abs,
+            "gamma_source": "gamma_event_metadata.priceToBeat",
+            "crypto_source": "polymarket_crypto_price.openPrice",
+            "crypto_request": {
+                "symbol": "BTC",
+                "event_start_ts": int(start_ts),
+                "event_end_ts": int(end_ts),
+                "variant": "fifteen",
+            },
+        }
+        signature = repr(payload)
+        signatures = getattr(self, "market_strike_last_provenance_signature_by_slug", None)
+        if signatures is None:
+            signatures = {}
+            self.market_strike_last_provenance_signature_by_slug = signatures
+        if signatures.get(slug) == signature:
+            return
+        signatures[slug] = signature
+        self._record_strike_event(
+            event_type="MARKET_STRIKE_PROVENANCE",
+            slug=slug,
+            strike=gamma_price_to_beat,
+            source="gamma_price_to_beat" if gamma_price_to_beat is not None else "pending",
+            extra=payload,
+        )
+
     def _record_strike_event(
         self,
         *,
@@ -631,44 +694,6 @@ class SpotPricerMixin:
     def _extract_strike_from_question(self, question_text: str) -> Optional[Decimal]:
         return extract_strike_from_question(question_text, self.latest_external_spot)
 
-    async def _maybe_validate_strike_with_gamma(self, slug: str, local_strike: Decimal) -> None:
-        now_ts = time.time()
-        last_validate = float(self.market_strike_last_gamma_validate_ts_by_slug.get(slug, 0.0))
-        if now_ts - last_validate < float(self.market_strike_gamma_validate_interval_sec):
-            return
-        self.market_strike_last_gamma_validate_ts_by_slug[slug] = now_ts
-        try:
-            market = await fetch_gamma_market_by_slug(slug)
-        except Exception:
-            return
-        if not isinstance(market, dict):
-            return
-        gamma_ptb = extract_price_to_beat_from_market_payload(market)
-        if gamma_ptb is None:
-            return
-        diff_abs = abs(gamma_ptb - local_strike)
-        if diff_abs <= self.market_strike_gamma_warn_abs_usd:
-            return
-        last_warn = float(self.market_strike_last_gamma_warn_ts_by_slug.get(slug, 0.0))
-        if now_ts - last_warn < float(self.market_strike_gamma_mismatch_warn_interval_sec):
-            return
-        self.market_strike_last_gamma_warn_ts_by_slug[slug] = now_ts
-        self._record_strike_event(
-            event_type="MARKET_STRIKE_VALIDATION_MISMATCH",
-            slug=slug,
-            strike=local_strike,
-            source=self.market_strike_source_by_slug.get(slug, "pending"),
-            extra={
-                "gamma_price_to_beat": float(gamma_ptb),
-                "diff_abs_usd": float(diff_abs),
-            },
-        )
-        logger.warning(
-            f"Strike validation mismatch for {slug}: "
-            f"local={float(local_strike):.2f} gamma_priceToBeat={float(gamma_ptb):.2f} "
-            f"diff=${float(diff_abs):.2f}. Keeping local opening strike."
-        )
-
     async def _get_market_strike_for_instrument(self, instrument_id: Any) -> Optional[Decimal]:
         inst = self._normalize_instrument_id(instrument_id)
         if inst is None:
@@ -684,22 +709,31 @@ class SpotPricerMixin:
         if slug and slug in self.market_strike_cache_by_slug:
             cached = self.market_strike_cache_by_slug[slug]
             source = self.market_strike_source_by_slug.get(slug, "pending")
-            if self._is_authoritative_strike_source(source):
-                await self._maybe_validate_strike_with_gamma(slug, cached)
+            if self._market_strike_is_entry_eligible(slug):
                 return cached
-            logger.warning(
-                f"[STRIKE] Ignoring non-authoritative cached strike for {slug}: "
-                f"source={source} value=${float(cached):.2f}. Waiting for Polymarket Chainlink open lock."
-            )
-            self._record_strike_event(
-                event_type="MARKET_STRIKE_CACHE_REJECTED",
-                slug=slug,
-                strike=cached,
-                source=source,
-            )
-            self._set_provisional_strike(slug=slug, strike=cached, source=source)
-            self.market_strike_cache_by_slug.pop(slug, None)
-            self.market_strike_source_by_slug.pop(slug, None)
+            if self._is_authoritative_strike_source(source):
+                # A market-scoped strike may be useful for diagnostics/exit
+                # context, but cannot be used for a new entry until the
+                # competing source provenance is verified again.
+                logger.warning(
+                    f"[STRIKE] Market-scoped strike is not entry-eligible for {slug}: "
+                    f"status={getattr(self, 'market_strike_status_by_slug', {}).get(slug, 'pending')} "
+                    f"value=${float(cached):.2f}."
+                )
+            if not self._is_authoritative_strike_source(source):
+                logger.warning(
+                    f"[STRIKE] Ignoring non-authoritative cached strike for {slug}: "
+                    f"source={source} value=${float(cached):.2f}. Waiting for market-scoped Price To Beat."
+                )
+                self._record_strike_event(
+                    event_type="MARKET_STRIKE_CACHE_REJECTED",
+                    slug=slug,
+                    strike=cached,
+                    source=source,
+                )
+                self._set_provisional_strike(slug=slug, strike=cached, source=source)
+                self.market_strike_cache_by_slug.pop(slug, None)
+                self.market_strike_source_by_slug.pop(slug, None)
 
         strike = None
 
@@ -726,9 +760,9 @@ class SpotPricerMixin:
             strike = self._extract_strike_from_question(question)
             return strike
 
-        # 3) Primary: Polymarket's published crypto Price To Beat. This is
-        # available during an active market and is stronger than any local
-        # reconstruction from a rolling TWAP or raw stream observation.
+        # 3) Gamma's market-scoped Price To Beat is the only entry-authoritative
+        # strike. The time-window crypto endpoint is a candidate used solely to
+        # prove (or disprove) semantic equivalence and is never locked by itself.
         end_ts = int(start_ts) + 900
         now_ts = time.time()
         if now_ts >= float(start_ts):
@@ -739,27 +773,67 @@ class SpotPricerMixin:
             last_try = float(attempt_state.get(slug, 0.0))
             if now_ts - last_try >= float(self.market_strike_rest_retry_sec):
                 attempt_state[slug] = now_ts
-                published_ptb = await fetch_crypto_price_to_beat(
+                gamma_market = await fetch_gamma_market_by_slug(slug)
+                gamma_event_slug = str(gamma_market.get("_gamma_event_slug") or "") if isinstance(gamma_market, dict) else ""
+                gamma_ptb = (
+                    extract_price_to_beat_from_market_payload(gamma_market)
+                    if isinstance(gamma_market, dict) and gamma_event_slug == slug
+                    else None
+                )
+                crypto_open_price = await fetch_crypto_price_to_beat(
                     start_ts=int(start_ts),
                     end_ts=end_ts,
                 )
-                if published_ptb is not None:
-                    self.market_strike_cache_by_slug[slug] = published_ptb
-                    self.market_strike_source_by_slug[slug] = "polymarket_crypto_price_open"
+                status_by_slug = getattr(self, "market_strike_status_by_slug", None)
+                if status_by_slug is None:
+                    status_by_slug = {}
+                    self.market_strike_status_by_slug = status_by_slug
+                provenance_by_slug = getattr(self, "market_strike_provenance_by_slug", None)
+                if provenance_by_slug is None:
+                    provenance_by_slug = {}
+                    self.market_strike_provenance_by_slug = provenance_by_slug
+                diff_abs = abs(gamma_ptb - crypto_open_price) if gamma_ptb is not None and crypto_open_price is not None else None
+                status = "verified" if gamma_ptb is not None else "pending_gamma_price_to_beat"
+                provenance_by_slug[slug] = {
+                    "status": status,
+                    "gamma_price_to_beat": gamma_ptb,
+                    "gamma_event_slug": gamma_event_slug,
+                    "crypto_open_price": crypto_open_price,
+                    "diff_abs_usd": diff_abs,
+                }
+                status_by_slug[slug] = status
+                self._record_strike_provenance(
+                    slug=slug,
+                    start_ts=int(start_ts),
+                    end_ts=end_ts,
+                    gamma_price_to_beat=gamma_ptb,
+                    gamma_event_slug=gamma_event_slug,
+                    crypto_open_price=crypto_open_price,
+                    status=status,
+                )
+                if gamma_ptb is not None:
+                    self.market_strike_cache_by_slug[slug] = gamma_ptb
+                    self.market_strike_source_by_slug[slug] = "gamma_price_to_beat"
                     self.market_strike_provisional_by_slug.pop(slug, None)
                     self.market_strike_provisional_source_by_slug.pop(slug, None)
                     self._strike_pending_log_state_by_slug.pop(slug, None)
                     self._record_strike_event(
                         event_type="MARKET_STRIKE_LOCKED",
                         slug=slug,
-                        strike=published_ptb,
-                        source="polymarket_crypto_price_open",
+                        strike=gamma_ptb,
+                        source="gamma_price_to_beat",
+                        extra={
+                            "strike_status": status,
+                            "crypto_open_price": float(crypto_open_price) if crypto_open_price is not None else None,
+                            "diff_abs_usd": float(diff_abs) if diff_abs is not None else None,
+                        },
                     )
                     logger.info(
-                        f"[STRIKE] Locked published Polymarket Price To Beat: "
-                        f"${float(published_ptb):.2f} for slug={slug}"
+                        f"[STRIKE] Locked verified market-scoped Price To Beat: "
+                        f"${float(gamma_ptb):.2f} for slug={slug}; "
+                        f"crypto candidate={'None' if crypto_open_price is None else f'${float(crypto_open_price):.2f}'}"
                     )
-                    return published_ptb
+                    return gamma_ptb
 
         # 4) Local opening references remain provisional until the published
         # Price To Beat is available. They are recorded for diagnostics only.
@@ -920,9 +994,14 @@ class SpotPricerMixin:
                 instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id)) if instrument_id is not None else None
                 outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
 
-                if strike is None:
+                slug = str(self.current_market_slug or "")
+                if strike is None or not self._market_strike_is_entry_eligible(slug):
+                    strike = None
                     if time.time() - self._last_strike_fallback_log_ts >= self.strike_fallback_log_interval_sec:
-                        logger.debug("Digital pricer fallback: strike unavailable, using drift mode.")
+                        logger.warning(
+                            "Digital pricer entry-safe fallback: market strike is unavailable or unverified; "
+                            "digital probability will not be used for a new BUY."
+                        )
                         self._last_strike_fallback_log_ts = time.time()
                 else:
                     now_ts = time.time()

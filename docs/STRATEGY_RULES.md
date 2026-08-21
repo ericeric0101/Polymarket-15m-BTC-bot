@@ -1,8 +1,8 @@
 # Strategy Rules
 
-This is the operational source of truth for the current BTC 15-minute
-strategy. It describes deployed behavior, not research ideas or superseded
-V1/V2 plans.
+`project_overview.md` at the repository root is the operational source of
+truth for the current BTC 15-minute strategy. This document is a concise
+operator reference to deployed behavior, not a separate decision authority.
 
 ## Objective
 

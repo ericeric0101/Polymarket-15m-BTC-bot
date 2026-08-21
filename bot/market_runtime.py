@@ -672,11 +672,6 @@ def handle_stop(strategy: Any) -> None:
         market_cycle_realized_net_usdc=strategy.market_cycle_realized_net_usdc,
     )
 
-    if strategy.grafana_exporter:
-        try:
-            strategy.grafana_exporter.stop()
-        except Exception:
-            pass
     if strategy.terminal_dashboard:
         try:
             strategy.terminal_dashboard.stop()

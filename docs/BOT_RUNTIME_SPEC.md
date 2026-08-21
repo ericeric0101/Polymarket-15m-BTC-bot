@@ -1,7 +1,8 @@
 # BTC 15-Minute Runtime Specification
 
-This is the current runtime contract. Historical V1 and early-V2 design notes
-are not operating instructions.
+`project_overview.md` at the repository root is the current decision authority.
+This document is a concise operational runtime reference; historical V1 and
+early-V2 design notes are not operating instructions.
 
 ## Scope
 

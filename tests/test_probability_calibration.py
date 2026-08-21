@@ -68,8 +68,6 @@ def test_first_entry_time_window_blocks_only_a_new_market_entry():
         directional_first_entry_min_score_abs_new=Decimal("0.20"),
         first_entry_max_time_left_sec=600,
         maker_min_expected_net_usdc=Decimal("0.01"),
-        maker_reload_min_expected_net_multiplier=Decimal("1"),
-        maker_reload_inventory_threshold_shares=Decimal("5"),
         current_slug="test",
         inst_id="up",
         time_left_sec=601.0,
@@ -90,9 +88,7 @@ def test_twap_degraded_reference_blocks_new_buy_entries():
         directional_entry_min_score_abs_new=Decimal("0.20"),
         directional_first_entry_min_score_abs_new=Decimal("0.20"),
         maker_min_expected_net_usdc=Decimal("0.01"),
-        maker_reload_min_expected_net_multiplier=Decimal("1"),
         current_inst_inventory_qty=Decimal("0"),
-        maker_reload_inventory_threshold_shares=Decimal("5"),
         current_slug="test",
         inst_id="up",
         twap_reference_degraded=True,
@@ -101,6 +97,30 @@ def test_twap_degraded_reference_blocks_new_buy_entries():
     assert out.skip is True
     assert out.event_type == "ORDER_SKIP_TWAP_REFERENCE_DEGRADED"
     assert out.reason == "twap_reference_degraded"
+
+
+def test_unverified_market_strike_blocks_new_buy_entries_before_other_gates():
+    out = evaluate_buy_entry_controls(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        side_score=Decimal("0.90"),
+        directional_entry_min_score_abs_new=Decimal("0.20"),
+        directional_first_entry_min_score_abs_new=Decimal("0.20"),
+        maker_min_expected_net_usdc=Decimal("0.01"),
+        current_inst_inventory_qty=Decimal("0"),
+        current_slug="test",
+        inst_id="up",
+        market_strike_entry_eligible=False,
+        market_strike_status="mismatch",
+        market_strike_source="gamma_price_to_beat",
+    )
+
+    assert out.skip is True
+    assert out.event_type == "ORDER_SKIP_MARKET_STRIKE_UNVERIFIED"
+    assert out.reason == "market_strike_unverified"
+    assert out.payload["strike_status"] == "mismatch"
 
 
 def test_twap_probability_uses_shorter_variance_horizon_before_final_window():

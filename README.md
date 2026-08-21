@@ -24,8 +24,9 @@ New BUY decisions follow five ordered layers:
 5. **Execution**: passive maker submission, TTL/requote controls, 10-share
    market cap, and a 5-share high-price or weak-probability tier.
 
-See [Strategy Rules](docs/STRATEGY_RULES.md) for the operational rules and
-[the Traditional Chinese guide](docs/readme_ZH.md) for the complete runbook.
+See [the authoritative project overview](project_overview.md) for the current
+decision contract and approved change sequence, and [the Traditional Chinese
+guide](docs/readme_ZH.md) for the complete runbook.
 
 ## Setup
 
@@ -96,7 +97,6 @@ Useful variants:
 
 ```bash
 ./.venv/bin/python run_bot.py --live --terminal-dashboard
-./.venv/bin/python run_bot.py --no-grafana
 ./.venv/bin/python run_bot.py --test-mode
 ```
 

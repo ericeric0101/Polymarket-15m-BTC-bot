@@ -26,7 +26,6 @@ from execution.maker_engine import MakerEngine, MakerEngineConfig
 from execution.parameter_tuner import ParameterTuner
 from execution.rebate_model import CRYPTO_FEE_CURVE
 from execution.rebate_reporter import RebateReporter
-from monitoring.grafana_exporter import get_grafana_exporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
@@ -40,7 +39,6 @@ from bot.trade_telemetry import TradeTelemetry
 def initialize_strategy_settings(
     strategy: Any,
     *,
-    enable_grafana: bool,
     test_mode: bool,
     enable_terminal_dashboard: bool,
     project_root: Path,
@@ -51,7 +49,6 @@ def initialize_strategy_settings(
     strategy.startup_verbose = config.observability.startup_verbose
 
     strategy.performance_tracker = get_performance_tracker()
-    strategy.grafana_exporter = get_grafana_exporter() if enable_grafana else None
     strategy.terminal_dashboard_enabled = config.observability.terminal_dashboard_enabled
     strategy.terminal_dashboard_refresh_sec = config.observability.terminal_dashboard_refresh_sec
     strategy.terminal_dashboard = (
@@ -150,14 +147,7 @@ def initialize_strategy_settings(
         logger.warning(
             f"Deprecated maker quote mode '{raw_quote_mode}' detected; coercing to UP-only 'both'."
         )
-    strategy.maker_directional_edge_gate_enabled = config.maker.directional_edge_gate_enabled
-    strategy.maker_min_directional_edge_ps = config.maker.min_directional_edge_ps
-    strategy.maker_min_directional_edge_ps_down = config.maker.min_directional_edge_ps_down
-    strategy.maker_min_directional_edge_ps_conservative = config.maker.min_directional_edge_ps_conservative
     strategy.maker_min_expected_net_usdc = config.maker.min_expected_net_usdc
-    strategy.maker_reload_inventory_threshold_shares = config.maker.reload_inventory_threshold_shares
-    strategy.maker_reload_min_expected_net_multiplier = config.maker.reload_min_expected_net_multiplier
-    strategy.maker_reload_min_directional_edge_ps = config.maker.reload_min_directional_edge_ps
     strategy.maker_use_post_only = config.maker.use_post_only
     strategy.maker_post_only_strict = config.maker.post_only_strict
     strategy.maker_max_inventory_shares = config.maker.max_inventory_shares
@@ -550,6 +540,8 @@ def initialize_strategy_settings(
     strategy._twap_reference_degraded = False
     strategy.market_strike_cache_by_slug = {}
     strategy.market_strike_source_by_slug = {}
+    strategy.market_strike_status_by_slug = {}
+    strategy.market_strike_provenance_by_slug = {}
     strategy.market_strike_provisional_by_slug = {}
     strategy.market_strike_provisional_source_by_slug = {}
     strategy.market_start_ts_by_slug = {}
@@ -557,11 +549,7 @@ def initialize_strategy_settings(
     strategy.market_strike_anchor_near_sec = config.market_data.market_strike_anchor_near_sec
     strategy.market_strike_rest_retry_sec = config.market_data.market_strike_rest_retry_sec
     strategy.market_strike_rest_last_try_ts_by_slug = {}
-    strategy.market_strike_gamma_validate_interval_sec = config.market_data.market_strike_gamma_validate_interval_sec
-    strategy.market_strike_gamma_warn_abs_usd = config.market_data.market_strike_gamma_warn_abs_usd
-    strategy.market_strike_gamma_mismatch_warn_interval_sec = config.market_data.market_strike_gamma_warn_interval_sec
-    strategy.market_strike_last_gamma_validate_ts_by_slug = {}
-    strategy.market_strike_last_gamma_warn_ts_by_slug = {}
+    strategy.market_strike_last_provenance_signature_by_slug = {}
     strategy._last_strike_slug_log_ts = 0.0
     strategy.no_quote_diag_interval_sec = config.observability.no_quote_diag_interval_sec
     strategy._last_no_quote_diag_ts_by_inst = {}

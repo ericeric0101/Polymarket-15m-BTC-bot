@@ -79,7 +79,6 @@ cp .env.example .env
 
 ```bash
 ./.venv/bin/python run_bot.py --test-mode
-./.venv/bin/python run_bot.py --no-grafana
 ./.venv/bin/python run_bot.py --terminal-dashboard
 ```
 

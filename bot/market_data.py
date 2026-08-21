@@ -252,6 +252,9 @@ async def fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
                     event = data[0]
+                    event_slug = str(event.get("slug") or "")
+                    if event_slug != str(slug):
+                        return None
                     # Expose priceToBeat inside the first market for legacy compatibility if available
                     event_meta = event.get("eventMetadata", {}) or {}
                     if not isinstance(event_meta, dict):
@@ -261,10 +264,12 @@ async def fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
 
                     markets = event.get("markets", [])
                     if isinstance(markets, list) and len(markets) > 0:
-                        market = markets[0]
+                        market = dict(markets[0])
                         if event_meta:
                             # Merge event metadata into market for easier extraction
                             market["eventMetadata"] = event_meta
+                        market["_gamma_event_slug"] = event_slug
+                        market["_gamma_event_id"] = event.get("id")
                         return market
     except Exception:
         pass

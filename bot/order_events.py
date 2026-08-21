@@ -389,13 +389,28 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                     f"cooldown={strategy.stop_loss_reentry_cooldown_sec}s"
                 )
     current_slug = str(strategy.current_market_slug or "")
-    strategy._record_market_buy_count_if_needed(
+    first_market_buy_fill = strategy._record_market_buy_count_if_needed(
         side_for_ledger=str(side_for_ledger or ""),
         current_slug=current_slug,
         filled_id=filled_id,
         filled_inst=filled_inst,
         liquidity_side_raw=liquidity_side_raw,
     )
+    if first_market_buy_fill:
+        strategy._cancel_maker_order_side(
+            side="buy",
+            instrument_id=filled_inst,
+            reason="first_buy_fill_no_reentry",
+        )
+        strategy._db_strategy_event(
+            "MARKET_BUY_ENTRY_CLOSED",
+            {
+                "slug": current_slug,
+                "instrument_id": str(filled_inst) if filled_inst else None,
+                "client_order_id": filled_id,
+                "reason": "first_buy_fill_no_reentry",
+            },
+        )
 
     strategy.consecutive_denied_orders = 0
     strategy.last_quote_update_ts = 0.0
@@ -470,7 +485,6 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         logger.info(f"Replenishing maker quote after fill on side={filled_side or 'unknown'}")
         strategy._start_maker_worker(strategy.latest_market_bid, strategy.latest_market_ask)
 
-    strategy._increment_order_metric("filled")
     strategy._update_inventory_metric()
 
 
@@ -645,7 +659,6 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             "eligibility with Polymarket before restarting."
         )
         strategy.rebate_reporter.record_denied()
-        strategy._increment_order_metric("rejected")
         return
     if "POST_ONLY_NOT_SUPPORTED" in reason:
         if strategy.maker_use_post_only:
@@ -666,7 +679,6 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
         strategy.consecutive_denied_orders = max(0, strategy.consecutive_denied_orders - 1)
         strategy._trigger_quote_watchdog_reload("orderbook_not_exist", now_ts)
         strategy.rebate_reporter.record_denied()
-        strategy._increment_order_metric("rejected")
         return
 
     if ("not enough balance" in lowered) or ("allowance" in lowered):
@@ -713,7 +725,6 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             )
             strategy.consecutive_denied_orders = max(0, strategy.consecutive_denied_orders - 1)
             strategy.rebate_reporter.record_denied()
-            strategy._increment_order_metric("rejected")
             return
         pause_sec = max(1, strategy.maker_error_pause_sec)
         strategy.quote_pause_until_ts = max(strategy.quote_pause_until_ts, now_ts + pause_sec)
@@ -727,5 +738,3 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
         strategy._activate_maker_kill_switch(
             f"Consecutive denied orders reached {strategy.consecutive_denied_orders}"
         )
-
-    strategy._increment_order_metric("rejected")
