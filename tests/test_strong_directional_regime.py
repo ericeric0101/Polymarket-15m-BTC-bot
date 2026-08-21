@@ -63,3 +63,30 @@ def test_strong_directional_regime_refuses_unmeasured_time_window():
     assert details["applied"] is False
     assert details["reason"] == "time_outside_measured_regime"
     assert updated == _quote_data()
+
+
+def test_strong_directional_regime_applies_measured_60_plus_bucket():
+    updated, details = apply_strong_directional_regime_economics(
+        _quote_data(),
+        active_side="UP",
+        outcome_side="UP",
+        side_locked=True,
+        side_score=Decimal("0.40"),
+        time_left_sec=480,
+        spot=Decimal("10080"),
+        strike=Decimal("10000"),
+        calibrations={"60_plus": {"win_probability": 0.88, "sample_count": 100}},
+        markout_calibrations={
+            "60_plus": {
+                "adverse_markout_per_share": 0.02,
+                "sample_count": 100,
+                "source": "entry_regime_bucket:60_plus",
+            },
+        },
+        min_expected_net_usdc=Decimal("0.001"),
+    )
+
+    assert details["applied"] is True
+    assert details["distance_bucket"] == "60_plus"
+    assert updated[2] is True
+    assert updated[3] == Decimal("1.70")  # 10 * (0.88 - 0.69) - 0.20

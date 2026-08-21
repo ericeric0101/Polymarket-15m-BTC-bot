@@ -86,8 +86,15 @@ def build_entry_regime_observation_payload(payload: Dict[str, Any]) -> Optional[
     if signed_spot_minus_strike is None:
         return None
 
-    if not (300.0 <= time_left_sec < 600.0 and 10.0 <= signed_spot_minus_strike < 30.0):
+    if not (300.0 <= time_left_sec < 600.0 and signed_spot_minus_strike >= 10.0):
         return None
+
+    if signed_spot_minus_strike < 30.0:
+        distance_bucket = "10_30"
+    elif signed_spot_minus_strike < 60.0:
+        distance_bucket = "30_60"
+    else:
+        distance_bucket = "60_plus"
 
     token_price_raw = payload.get("ask_up") if outcome == "UP" else payload.get("ask_down")
     token_price = None
@@ -99,7 +106,7 @@ def build_entry_regime_observation_payload(payload: Dict[str, Any]) -> Optional[
 
     return {
         "probe_kind": "entry_regime_observation",
-        "regime_tag": "mid_late_signed_spot_10_30",
+        "regime_tag": f"mid_late_signed_spot_{distance_bucket}",
         "observation_only": True,
         "main_candidate_outcome": outcome,
         "main_score": main_score,
@@ -109,7 +116,7 @@ def build_entry_regime_observation_payload(payload: Dict[str, Any]) -> Optional[
         "signed_spot_minus_strike": signed_spot_minus_strike,
         "token_price": token_price,
         "regime_time_bucket": "300_600",
-        "regime_signed_spot_bucket": "10_30",
+        "regime_signed_spot_bucket": distance_bucket,
     }
 
 

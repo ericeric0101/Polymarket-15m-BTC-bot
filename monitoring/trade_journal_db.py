@@ -319,7 +319,7 @@ class TradeJournalDB:
         calibrations: Dict[str, Dict[str, float | int | str]] = {
             "global": {**global_calibration, "source": "global_fallback"},
         }
-        for bucket in ("10_30", "30_60"):
+        for bucket in ("10_30", "30_60", "60_plus"):
             calibration = _summarize_adverse_markouts(
                 [
                     float(row[0] or 0.0)
@@ -357,7 +357,7 @@ class TradeJournalDB:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    WITH candidates AS (
+                    WITH eligible_candidates AS (
                       SELECT
                         e.id,
                         e.ts,
@@ -371,16 +371,26 @@ class TradeJournalDB:
                           WHEN 'BUY_UP' THEN CAST(json_extract(e.payload_json, '$.spot_minus_strike') AS REAL)
                           WHEN 'BUY_DOWN' THEN -CAST(json_extract(e.payload_json, '$.spot_minus_strike') AS REAL)
                         END AS signed_spot_distance,
-                        CAST(json_extract(e.payload_json, '$.time_left_sec') AS REAL) AS time_left_sec,
-                        ROW_NUMBER() OVER (
-                          PARTITION BY json_extract(e.payload_json, '$.slug')
-                          ORDER BY e.ts ASC, e.id ASC
-                        ) AS rn
+                        CAST(json_extract(e.payload_json, '$.time_left_sec') AS REAL) AS time_left_sec
                       FROM strategy_events e
                       WHERE e.event_type='LIVE_SIGNAL_COMPARE'
                         AND ABS(CAST(json_extract(e.payload_json, '$.main_score') AS REAL)) >= ?
                         AND CAST(json_extract(e.payload_json, '$.main_side_locked') AS INTEGER)=1
+                        AND CAST(json_extract(e.payload_json, '$.time_left_sec') AS REAL) >= 300
+                        AND CAST(json_extract(e.payload_json, '$.time_left_sec') AS REAL) < 600
+                        AND CASE json_extract(e.payload_json, '$.main_candidate_side')
+                          WHEN 'BUY_UP' THEN CAST(json_extract(e.payload_json, '$.spot_minus_strike') AS REAL)
+                          WHEN 'BUY_DOWN' THEN -CAST(json_extract(e.payload_json, '$.spot_minus_strike') AS REAL)
+                        END >= 10
                         AND julianday(e.ts) >= julianday('now', ?)
+                    ), candidates AS (
+                      SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY slug
+                          ORDER BY ts ASC, id ASC
+                        ) AS rn
+                      FROM eligible_candidates
                     ), settlements AS (
                       SELECT
                         json_extract(payload_json, '$.slug') AS slug,
@@ -396,6 +406,7 @@ class TradeJournalDB:
                       CASE
                         WHEN c.signed_spot_distance >= 10 AND c.signed_spot_distance < 30 THEN '10_30'
                         WHEN c.signed_spot_distance >= 30 AND c.signed_spot_distance < 60 THEN '30_60'
+                        WHEN c.signed_spot_distance >= 60 THEN '60_plus'
                       END AS distance_bucket,
                       COUNT(*) AS sample_count,
                       SUM(CASE WHEN c.outcome=s.outcome THEN 1 ELSE 0 END) AS wins
@@ -404,8 +415,7 @@ class TradeJournalDB:
                     WHERE c.rn=1
                       AND c.outcome IN ('UP', 'DOWN')
                       AND s.outcome IN ('UP', 'DOWN')
-                      AND c.time_left_sec >= 300 AND c.time_left_sec < 600
-                      AND c.signed_spot_distance >= 10 AND c.signed_spot_distance < 60
+                      AND c.signed_spot_distance >= 10
                     GROUP BY distance_bucket
                     """,
                     (float(min_score_abs), f"-{float(lookback_hours):g} hours"),
@@ -415,7 +425,7 @@ class TradeJournalDB:
                 bucket = str(row[0] or "")
                 sample_count = int(row[1] or 0)
                 wins = int(row[2] or 0)
-                if bucket not in {"10_30", "30_60"} or sample_count < int(min_samples):
+                if bucket not in {"10_30", "30_60", "60_plus"} or sample_count < int(min_samples):
                     continue
                 calibrated[bucket] = {
                     "sample_count": sample_count,

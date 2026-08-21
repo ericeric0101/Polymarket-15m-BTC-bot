@@ -4,7 +4,7 @@ The normal maker path uses market midpoint as fair, so its expected value is
 only spread capture.  A historical 10-second adverse markout cannot be a
 universal hard veto against that quantity.  This module does *not* reinstate
 the rejected raw fair model; it applies a settled, score-conditioned outcome
-frequency only inside measured 300-600s / $10-$60 distance bins.
+frequency only inside measured 300-600s directional-distance bins.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ MAX_TIME_LEFT_SEC = 600.0
 DISTANCE_BUCKETS = (
     ("10_30", Decimal("10"), Decimal("30")),
     ("30_60", Decimal("30"), Decimal("60")),
+    ("60_plus", Decimal("60"), None),
 )
 
 
@@ -68,7 +69,11 @@ def apply_strong_directional_regime_economics(
     if str(outcome_side).upper() == "DOWN":
         signed_distance = -signed_distance
     bucket = next(
-        (name for name, lower, upper in DISTANCE_BUCKETS if lower <= signed_distance < upper),
+        (
+            name
+            for name, lower, upper in DISTANCE_BUCKETS
+            if lower <= signed_distance and (upper is None or signed_distance < upper)
+        ),
         None,
     )
     if bucket is None:

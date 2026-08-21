@@ -4396,6 +4396,24 @@ def test_entry_regime_observation_payload_inverts_down_side_and_skips_outside_re
     assert build_entry_regime_observation_payload(outside_regime) is None
 
 
+def test_entry_regime_observation_payload_tags_60_plus_distance_bucket():
+    payload = {
+        "slug": "btc-updown-15m-test",
+        "main_candidate_side": "BUY_UP",
+        "main_active_side": "UP",
+        "main_score": 0.41,
+        "time_left_sec": 420.0,
+        "spot_minus_strike": 80.0,
+        "ask_up": 0.67,
+    }
+
+    observation = build_entry_regime_observation_payload(payload)
+
+    assert observation is not None
+    assert observation["regime_tag"] == "mid_late_signed_spot_60_plus"
+    assert observation["regime_signed_spot_bucket"] == "60_plus"
+
+
 def test_capture_market_open_spot_prefers_fresh_chainlink_over_stale_latest_external():
     now_ts = 1_000.0
     dummy = SimpleNamespace(

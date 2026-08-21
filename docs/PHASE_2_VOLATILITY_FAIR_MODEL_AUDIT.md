@@ -473,12 +473,27 @@ one-observation-per-market calibrations from the same 168-hour history:
 - locked side matches the traded outcome;
 - `abs(side_score) >= 0.35`;
 - 300–600 seconds remain;
-- signed spot-to-strike distance is either `$10–$30` or `$30–$60`;
+- signed spot-to-strike distance is `$10–$30`, `$30–$60`, or `$60+`;
 - each distance bin has at least 30 independent settled markets.
 
 Each bin receives its own measured probability. In a calibrated regime, the
 economics comparison is `shares * (p - entry_price) - fees - empirical_markout`;
 quote price, entry gates, sizing, and all exit logic remain unchanged.
+
+### $60+ Directional Regime Repair (2026-08-21)
+
+The initial implementation accidentally omitted the `$60+` bucket even though
+the journal contained sufficient independently settled examples. Its SQL also
+assigned `ROW_NUMBER()` before applying the 300–600 second measurement window,
+which could discard a market whose first valid in-window observation arrived
+after an earlier out-of-window row. The loader now filters score, time, and
+signed distance before selecting one observation per market, and loads the
+`60_plus` bucket once it reaches the same 30-market minimum.
+
+This is not an unconditional large-distance entry. It still requires a locked
+side, `abs(side_score) >= 0.35`, the measured 300–600 second window, valid
+markout calibration, and positive post-cost `robust_net`. The separate
+high-probability reduce-only safeguard remains in force near settlement.
 
 Every new `FILL_MARKOUT` now freezes its entry score, signed spot distance,
 remaining time, per-instrument volatility, reference source, and TWAP degraded

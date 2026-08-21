@@ -45,6 +45,8 @@ def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float)
             bucket = "10_30"
         elif Decimal("30") <= signed_distance < Decimal("60"):
             bucket = "30_60"
+        elif signed_distance >= Decimal("60"):
+            bucket = "60_plus"
     end_ts = getattr(strategy, "current_market_end_timestamp", None)
     time_left_sec = None
     if end_ts is not None:

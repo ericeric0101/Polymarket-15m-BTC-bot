@@ -75,6 +75,45 @@ def test_strong_directional_regime_calibration_uses_one_first_observation_per_ma
     assert calibration["win_probability"] == 2 / 3
 
 
+def test_strong_directional_regime_calibration_selects_first_eligible_60_plus_observation(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    for index in range(3):
+        slug = f"btc-updown-60-plus-{index}"
+        db.log_strategy_event(
+            "run", "LIVE_SIGNAL_COMPARE",
+            {
+                "slug": slug,
+                "main_candidate_side": "BUY_UP",
+                "main_score": 0.50,
+                "main_side_locked": True,
+                "spot_minus_strike": 80,
+                "time_left_sec": 700,
+            },
+        )
+        db.log_strategy_event(
+            "run", "LIVE_SIGNAL_COMPARE",
+            {
+                "slug": slug,
+                "main_candidate_side": "BUY_UP",
+                "main_score": 0.50,
+                "main_side_locked": True,
+                "spot_minus_strike": 80,
+                "time_left_sec": 480,
+            },
+        )
+        db.log_strategy_event("run", "MARKET_SETTLEMENT", {"slug": slug, "outcome": "UP"})
+
+    calibrations = db.load_strong_directional_regime_calibrations(
+        lookback_hours=168,
+        min_score_abs=0.35,
+        min_samples=3,
+    )
+
+    calibration = calibrations["60_plus"]
+    assert calibration["sample_count"] == 3
+    assert calibration["wins"] == 3
+
+
 def test_reconcile_redeem_cycle_rebuilds_missing_pnl_with_buy_fees(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     slug = "btc-updown-15m-test"
