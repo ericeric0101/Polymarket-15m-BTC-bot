@@ -520,8 +520,8 @@ class PricingRuntimeMixin:
         recent_buy_ts = float(self.recent_buy_fill_ts_by_inst.get(inst_key, 0.0)) if inst_key else 0.0
         after_buy_window_active = (
             recent_buy_ts > 0
-            and self.sellable_fallback_after_buy_sec > 0
-            and (time.time() - recent_buy_ts) <= float(self.sellable_fallback_after_buy_sec)
+            and self.sell_delay_after_buy_sec > 0
+            and (time.time() - recent_buy_ts) <= float(self.sell_delay_after_buy_sec)
         )
         after_buy_buffer = getattr(self, "sellable_after_buy_buffer_shares", Decimal("0"))
 
@@ -543,7 +543,7 @@ class PricingRuntimeMixin:
             onchain_qty is not None
             and onchain_qty <= 0
             and inst_key
-            and self.sellable_fallback_after_buy_sec > 0
+            and self.sell_delay_after_buy_sec > 0
         ):
             if after_buy_window_active:
                 if local_qty > 0:

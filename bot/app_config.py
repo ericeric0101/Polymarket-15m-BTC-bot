@@ -464,7 +464,6 @@ class MarketDataConfig:
 
 @dataclass(frozen=True)
 class OperationsConfig:
-    sellable_fallback_after_buy_sec: int
     sellable_after_buy_buffer_shares: Decimal
     auto_redeem_enabled: bool
     auto_redeem_apply: bool
@@ -1004,7 +1003,6 @@ class AppConfig:
                 clob_base_url=_env_str("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com"),
             ),
             operations=OperationsConfig(
-                sellable_fallback_after_buy_sec=max(0, _env_int("SELLABLE_FALLBACK_AFTER_BUY_SEC", 10)),
                 sellable_after_buy_buffer_shares=max(Decimal("0"), _env_decimal("SELLABLE_AFTER_BUY_BUFFER_SHARES", "0.05")),
                 auto_redeem_enabled=_env_bool_inverted("AUTO_REDEEM_ENABLED", False),
                 auto_redeem_apply=_env_bool_inverted("AUTO_REDEEM_APPLY", False),

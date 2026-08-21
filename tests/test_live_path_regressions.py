@@ -1110,7 +1110,7 @@ class DummySellableQtyStrategy(PricingRuntimeMixin):
     def __init__(self) -> None:
         self.live_inventory_cost = {"inst-down": {"qty": Decimal("5.312753")}}
         self.recent_buy_fill_ts_by_inst = {"inst-down": time.time()}
-        self.sellable_fallback_after_buy_sec = 10
+        self.sell_delay_after_buy_sec = 10
         self.sellable_after_buy_buffer_shares = Decimal("0.05")
         self.conditional_balance_safety_buffer_pct = Decimal("0.001")
         self._sell_recovery_venue_cap_by_inst = {}

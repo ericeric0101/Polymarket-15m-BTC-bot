@@ -245,6 +245,18 @@ the ladder's audit and lifecycle contract, but is not enough to retune recovery
 eligibility thresholds. Ordinary TP, urgent exit, recovery exit, and
 offside-near-close remain distinct policies and are not profile duplicates.
 
+## P3.2 Venue-Balance Synchronization Convergence (2026-08-21)
+
+`SELLABLE_FALLBACK_AFTER_BUY_SEC` duplicated the same post-BUY venue-balance
+window as `SELL_DELAY_AFTER_BUY_SEC`; both were ten seconds in the deployed
+profile. The fallback, ordinary SELL submission delay, and balance-reject retry
+now use the single canonical `SELL_DELAY_AFTER_BUY_SEC` boundary. The 0.05-share
+post-BUY buffer and the three-second balance-reject retry remain distinct:
+they respectively limit an optimistic temporary quantity and pace a venue
+rejection retry. This preserves the deployed timing while removing one profile
+key and reader. It does not alter watchdog handling, recovery-ladder policy,
+or take-profit behavior.
+
 ---
 
 # Phase 3: Execution-Lifecycle Audit
@@ -364,8 +376,8 @@ is not a second live entry gate.
 | `MAKER_INVENTORY_SKEW_MAX` | `MakerEngine.apply_inventory_skew` | Price skew, not a hard cap. | Move to quote pricing group; do not merge with position cap. |
 | `MAKER_STALE_INVENTORY_SEC`, `MAKER_STALE_INVENTORY_MULTIPLIER` | inventory-aware quoting | Stale internal inventory protection. | One `InventoryFreshnessPolicy`; distinct threshold and multiplier. |
 | `MAKER_RELOAD_INVENTORY_THRESHOLD_SHARES` | legacy reload-entry guard | Previously governed a second buy after a partial fill. | New entries are limited to one successful BUY per market; retire this reader during Phase 7 sizing. |
-| `SELLABLE_FALLBACK_AFTER_BUY_SEC`, `SELLABLE_AFTER_BUY_BUFFER_SHARES` | `pricing_runtime._get_effective_sellable_qty` | Temporary conservative fallback before venue token balance is visible. | `VenueBalanceSyncPolicy`; retain separately. |
-| `SELL_DELAY_AFTER_BUY_SEC`, `SELL_BALANCE_RETRY_PAUSE_SEC`, `SELL_RECOVERY_QTY_BUFFER_SHARES` | `order_submission`, `order_events` | Wait/retry/quantity buffer for venue balance synchronization. | Same `VenueBalanceSyncPolicy`; do not collapse until P4/P5 exit evidence is complete. |
+| `SELL_DELAY_AFTER_BUY_SEC`, `SELLABLE_AFTER_BUY_BUFFER_SHARES` | `pricing_runtime._get_effective_sellable_qty`, `order_submission` | Single post-BUY venue-balance wait and temporary conservative quantity buffer. | Canonical `VenueBalanceSyncPolicy`; the duplicate fallback wait was removed in P3.2. |
+| `SELL_BALANCE_RETRY_PAUSE_SEC`, `SELL_RECOVERY_QTY_BUFFER_SHARES` | `order_events`, `order_submission` | Pace a rejected SELL retry and cap a venue-reported balance. | Same `VenueBalanceSyncPolicy`; retain because their failure responsibilities are distinct. |
 | `CONDITIONAL_BALANCE_CHECK_INTERVAL_SEC`, `CONDITIONAL_BALANCE_SAFETY_BUFFER_PCT`, `MAKER_BALANCE_CHECK_INTERVAL_SEC`, `MAKER_BALANCE_PAUSE_SEC` | wallet/conditional-token polling and insufficient-balance pause | Different balance sources plus backoff. | Split into `CollateralBalancePolicy` and `ConditionalTokenBalancePolicy`; no numeric merge. |
 
 ## Inventory: Sizing and Capacity Inputs Participating in Lifecycle (9)
