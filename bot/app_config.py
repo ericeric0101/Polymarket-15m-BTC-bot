@@ -444,11 +444,8 @@ class MarketDataConfig:
     market_strike_gamma_validate_interval_sec: int
     market_strike_gamma_warn_abs_usd: Decimal
     market_strike_gamma_warn_interval_sec: int
-    quote_healthcheck_interval_sec: int
     quote_stale_sec: int
     quote_event_clock_skew_tolerance_sec: Decimal
-    quote_invalid_tick_reload_threshold: int
-    quote_reload_cooldown_sec: int
     quote_resubscribe_grace_sec: int
     stale_quote_synth_max_age_sec: float
     fee_rate_fetch_interval_sec: int
@@ -988,14 +985,11 @@ class AppConfig:
                 market_strike_gamma_validate_interval_sec=max(30, _env_int("MARKET_STRIKE_GAMMA_VALIDATE_INTERVAL_SEC", 180)),
                 market_strike_gamma_warn_abs_usd=max(Decimal("1"), _env_decimal("MARKET_STRIKE_GAMMA_WARN_ABS_USD", "5")),
                 market_strike_gamma_warn_interval_sec=max(30, _env_int("MARKET_STRIKE_GAMMA_WARN_INTERVAL_SEC", 120)),
-                quote_healthcheck_interval_sec=_env_int("QUOTE_HEALTHCHECK_INTERVAL_SEC", 10),
                 quote_stale_sec=_env_int("QUOTE_STALE_SEC", 30),
                 quote_event_clock_skew_tolerance_sec=max(
                     Decimal("0"),
                     _env_decimal("QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC", "0.25"),
                 ),
-                quote_invalid_tick_reload_threshold=_env_int("QUOTE_INVALID_TICK_RELOAD_THRESHOLD", 80),
-                quote_reload_cooldown_sec=_env_int("QUOTE_RELOAD_COOLDOWN_SEC", 60),
                 quote_resubscribe_grace_sec=max(5, _env_int("QUOTE_RESUBSCRIBE_GRACE_SEC", 12)),
                 stale_quote_synth_max_age_sec=_env_float("STALE_QUOTE_SYNTH_MAX_AGE_SEC", 10.0),
                 fee_rate_fetch_interval_sec=max(5, _env_int("FEE_RATE_FETCH_INTERVAL_SEC", fee_rate_cache_ttl_sec)),

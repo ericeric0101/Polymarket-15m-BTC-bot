@@ -205,7 +205,6 @@ def mark_quote_subscription_pending(
     """Require a new quote for the current market before declaring its feed healthy."""
     now_ts = time.time()
     instrument_keys = {str(inst_id) for inst_id in instrument_ids}
-    strategy.quote_subscription_started_ts = now_ts
     strategy.quote_recovery_started_ts = now_ts
     strategy.quote_recovery_pending_instruments = instrument_keys
     strategy.quote_recovery_attempts = 0

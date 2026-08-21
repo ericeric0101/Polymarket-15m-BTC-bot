@@ -133,6 +133,7 @@ from bot.ops import (
     log_strategy_run_start,
     run_auto_redeem_script,
     start_background_thread,
+    should_attempt_quote_watchdog_recovery,
     should_run_quote_watchdog,
     should_skip_auto_redeem_run,
 )
@@ -3547,6 +3548,20 @@ class IntegratedBTCStrategy(
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
         """
+        if not should_attempt_quote_watchdog_recovery(
+            now_ts=now_ts,
+            last_quote_watchdog_reload_ts=float(self.last_quote_watchdog_reload_ts),
+            quote_reload_cooldown_sec=float(self.quote_reload_cooldown_sec),
+        ):
+            remaining_sec = max(
+                0.0,
+                float(self.quote_reload_cooldown_sec) - (now_ts - self.last_quote_watchdog_reload_ts),
+            )
+            logger.debug(
+                "Quote watchdog recovery suppressed by reload cooldown: "
+                f"trigger={trigger} remaining={remaining_sec:.1f}s"
+            )
+            return
         trigger_source = str(trigger).split("|", 1)[0]
         trigger_counts = getattr(self, "quote_watchdog_trigger_counts", None)
         if not isinstance(trigger_counts, dict):

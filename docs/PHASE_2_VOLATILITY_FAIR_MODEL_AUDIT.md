@@ -257,6 +257,24 @@ rejection retry. This preserves the deployed timing while removing one profile
 key and reader. It does not alter watchdog handling, recovery-ladder policy,
 or take-profit behavior.
 
+## P3.3 Quote-Watchdog Convergence (2026-08-21)
+
+The watchdog retains two configurable safety boundaries:
+`QUOTE_STALE_SEC` identifies a dead quote transport and
+`QUOTE_RESUBSCRIBE_GRACE_SEC` bounds the wait for both binary outcome books
+after resubscription. The healthcheck cadence (10 seconds), invalid-tick
+threshold (80), reload cooldown (60 seconds), and transport heartbeat cadence
+(5 seconds) were fixed operational deployment values, so their profile keys
+and environment readers were removed.
+
+The reload cooldown is now evaluated before watchdog trigger counters are
+incremented, active orders are cancelled, or subscriptions are replaced. Thus
+an `empty_quote`, `incomplete_quote`, and timer observation from the same
+outage cannot inflate trigger counts or initiate duplicate recoveries. A fresh
+quote for each binary outcome still clears recovery state; an actual
+resubscribe timeout still requests a node rollover. This does not change entry
+logic, take-profit, venue-balance synchronization, or recovery-exit policy.
+
 ---
 
 # Phase 3: Execution-Lifecycle Audit
@@ -348,12 +366,12 @@ is not a second live entry gate.
 
 | Keys | Read / consumer path | Relationship | Candidate consolidation |
 | --- | --- | --- | --- |
-| `QUOTE_HEALTHCHECK_INTERVAL_SEC`, `QUOTE_STALE_SEC` | `run_bot._start_quote_watchdog_timer`, `ops.should_run_quote_watchdog` | Poll interval and stale threshold. | `QuoteHealthPolicy`; retain separately. |
-| `QUOTE_INVALID_TICK_RELOAD_THRESHOLD`, `QUOTE_RELOAD_COOLDOWN_SEC` | `run_bot._maybe_run_quote_watchdog`, `ops.handle_quote_watchdog_recovery` | Invalid-data escalation and reload suppression. | Same policy object, distinct failure controls. |
+| `QUOTE_STALE_SEC` | `run_bot._start_quote_watchdog_timer`, `ops.should_run_quote_watchdog` | Dead-transport safety boundary. | Retain as the canonical liveness threshold. |
+| Fixed healthcheck/invalid-tick/cooldown values | `run_bot._maybe_run_quote_watchdog`, `ops.handle_quote_watchdog_recovery` | 10-second healthcheck, 80 invalid ticks, 60-second recovery cooldown. | Profile readers removed in P3.3; the failure responsibilities remain distinct. |
 | `QUOTE_RESUBSCRIBE_GRACE_SEC` | `run_bot._start_quote_watchdog_timer` | Time before resubscribe failure escalates to node rollover. | `QuoteHealthPolicy.resubscribe_grace`. |
 | `QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC` | quote-age telemetry | Event-time validation tolerance; not quote staleness. | Keep as data-integrity invariant. |
 | `STALE_QUOTE_SYNTH_MAX_AGE_SEC` | `settings`, quote synthesis | Synthetic-book age ceiling. | Keep separate from watchdog stale threshold. |
-| `POLYMARKET_QUOTE_HEARTBEAT_SEC` | adapter transport heartbeat | Quiet-book liveness heartbeat. | Adapter transport policy, not strategy configuration. |
+| Fixed 5-second transport heartbeat | adapter transport heartbeat | Quiet-book liveness heartbeat. | Adapter transport policy, not strategy configuration. |
 | `NO_QUOTE_DIAG_INTERVAL_SEC` | diagnostics throttle | Observability only. | Move to Phase 6 operational defaults. |
 | `AUTO_NODE_ROLLOVER_ENABLED`, `AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT` | `launcher.run_integrated_bot` | Scheduled rebuild versus unexpected-exit recovery. | `NodeRecoveryPolicy`; keep two explicit booleans. |
 

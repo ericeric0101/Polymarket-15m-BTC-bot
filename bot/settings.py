@@ -469,12 +469,12 @@ def initialize_strategy_settings(
     strategy.maker_requote_min_age_sec = config.maker.requote_min_age_sec
     strategy.maker_requote_min_age_sec_sell = config.maker.requote_min_age_sec_sell
     strategy.maker_early_sell_only_sec = config.maker.early_sell_only_sec
-    strategy.quote_healthcheck_interval_sec = config.market_data.quote_healthcheck_interval_sec
+    strategy.quote_healthcheck_interval_sec = 10
     strategy.strategy_status_interval_sec = config.observability.strategy_status_interval_sec
     strategy.quote_stale_sec = config.market_data.quote_stale_sec
     strategy.quote_event_clock_skew_tolerance_sec = config.market_data.quote_event_clock_skew_tolerance_sec
-    strategy.quote_invalid_tick_reload_threshold = config.market_data.quote_invalid_tick_reload_threshold
-    strategy.quote_reload_cooldown_sec = config.market_data.quote_reload_cooldown_sec
+    strategy.quote_invalid_tick_reload_threshold = 80
+    strategy.quote_reload_cooldown_sec = 60
     strategy.quote_resubscribe_grace_sec = config.market_data.quote_resubscribe_grace_sec
     strategy.last_quote_update_ts = 0.0
     strategy.last_quote_update_ts_by_inst = {}
@@ -503,7 +503,6 @@ def initialize_strategy_settings(
     strategy.last_quote_watchdog_check_ts = 0.0
     strategy.last_quote_watchdog_reload_ts = 0.0
     strategy.quote_watchdog_trigger_counts = {}
-    strategy.quote_subscription_started_ts = 0.0
     strategy.quote_recovery_started_ts = 0.0
     strategy.quote_recovery_pending_instruments = set()
     strategy.quote_recovery_attempts = 0

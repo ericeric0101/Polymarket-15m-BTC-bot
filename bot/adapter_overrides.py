@@ -173,10 +173,7 @@ def _install_polymarket_data_overrides() -> None:
         if not hasattr(self, "_quote_heartbeat_emit_ns"):
             self._quote_heartbeat_emit_ns = {}
         if not hasattr(self, "_quote_heartbeat_sec"):
-            self._quote_heartbeat_sec = max(
-                0.1,
-                float(os.getenv("POLYMARKET_QUOTE_HEARTBEAT_SEC", "5")),
-            )
+            self._quote_heartbeat_sec = 5.0
         if not hasattr(self, "_quote_transport_heartbeat_task"):
             self._quote_transport_heartbeat_task = None
         if not hasattr(self, "_quote_delivery_pending"):

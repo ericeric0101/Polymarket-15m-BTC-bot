@@ -38,7 +38,7 @@ from bot.market_runtime import (
 )
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
-from bot.ops import should_run_quote_watchdog
+from bot.ops import should_attempt_quote_watchdog_recovery, should_run_quote_watchdog
 from bot.launcher import _strategy_requested_rollover
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
@@ -4603,6 +4603,19 @@ def test_dead_transport_still_triggers_quote_watchdog():
     )
     assert should_run
     assert stale_for == 35.0
+
+
+def test_quote_watchdog_reload_cooldown_suppresses_duplicate_outage_recovery():
+    assert not should_attempt_quote_watchdog_recovery(
+        now_ts=120.0,
+        last_quote_watchdog_reload_ts=100.0,
+        quote_reload_cooldown_sec=60.0,
+    )
+    assert should_attempt_quote_watchdog_recovery(
+        now_ts=160.0,
+        last_quote_watchdog_reload_ts=100.0,
+        quote_reload_cooldown_sec=60.0,
+    )
 
 
 def test_stale_exchange_event_stays_rejected_when_transport_is_alive():

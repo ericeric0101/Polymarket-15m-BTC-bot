@@ -147,6 +147,16 @@ def should_run_quote_watchdog(
     return stale_hit or invalid_hit, stale_for
 
 
+def should_attempt_quote_watchdog_recovery(
+    *,
+    now_ts: float,
+    last_quote_watchdog_reload_ts: float,
+    quote_reload_cooldown_sec: float,
+) -> bool:
+    """Return whether a quote-stream recovery is outside its reload cooldown."""
+    return now_ts - last_quote_watchdog_reload_ts >= quote_reload_cooldown_sec
+
+
 def handle_quote_watchdog_recovery(
     trigger: str,
     now_ts: float,
@@ -162,7 +172,11 @@ def handle_quote_watchdog_recovery(
     logger_error_fn: Callable[[str], None],
     trigger_count: int | None = None,
 ) -> tuple[bool, float, float | None, str | None]:
-    if now_ts - last_quote_watchdog_reload_ts < quote_reload_cooldown_sec:
+    if not should_attempt_quote_watchdog_recovery(
+        now_ts=now_ts,
+        last_quote_watchdog_reload_ts=last_quote_watchdog_reload_ts,
+        quote_reload_cooldown_sec=quote_reload_cooldown_sec,
+    ):
         return False, last_quote_watchdog_reload_ts, None, None
     prev_instrument = str(instrument_id) if instrument_id else None
     stale_for = (now_ts - last_valid_quote_ts) if last_valid_quote_ts > 0 else None
