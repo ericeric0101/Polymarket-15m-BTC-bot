@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 import os
+import time
 from typing import Any, Callable
+
+
+_CONDITIONAL_BALANCE_FAILURE_BACKOFF_MAX_SEC = 120.0
 
 
 def ensure_balance_clob_client(
@@ -113,7 +117,13 @@ def fetch_conditional_balance(
     force_refresh: bool,
     logger_debug_fn: Callable[[str], None],
 ) -> tuple[Any, Decimal | None, dict[str, Any] | None]:
-    now_ts = __import__("time").time()
+    now_ts = time.time()
+    retry_after_ts = float(cached_entry.get("retry_after_ts", 0.0)) if cached_entry else 0.0
+    # A forced refresh is normally used after a rejected sell.  It must not
+    # bypass a known upstream outage and hammer Polymarket's balance endpoint.
+    if cached_entry is not None and now_ts < retry_after_ts:
+        bal = cached_entry.get("balance")
+        return current_client, (Decimal(str(bal)) if bal is not None else None), cached_entry
     if (
         not force_refresh
         and cached_entry is not None
@@ -145,7 +155,22 @@ def fetch_conditional_balance(
                 }
                 return client, balance_shares, cached_entry
     except Exception as exc:
-        logger_debug_fn(f"Conditional balance fetch failed for token={token}: {exc}")
+        prior_failures = int(cached_entry.get("failure_count", 0)) if cached_entry else 0
+        failure_count = prior_failures + 1
+        retry_delay_sec = min(
+            _CONDITIONAL_BALANCE_FAILURE_BACKOFF_MAX_SEC,
+            max(float(conditional_balance_check_interval_sec), 1.0) * (2 ** (failure_count - 1)),
+        )
+        cached_entry = {
+            **(cached_entry or {}),
+            "failure_count": failure_count,
+            "retry_after_ts": now_ts + retry_delay_sec,
+            "last_failure": str(exc),
+        }
+        logger_debug_fn(
+            "Conditional balance fetch failed for token="
+            f"{token}: {exc}; retry suppressed for {retry_delay_sec:.0f}s"
+        )
 
     if cached_entry and cached_entry.get("balance") is not None:
         return client, Decimal(str(cached_entry.get("balance"))), cached_entry
