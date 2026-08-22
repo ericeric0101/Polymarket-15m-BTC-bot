@@ -1,115 +1,143 @@
-# Polymarket BTC 15 分鐘 Bot 操作手冊
+# Polymarket BTC 15 分鐘交易 Bot
 
-本文件是目前版本的繁中操作入口。策略規則請讀
-[STRATEGY_RULES.md](STRATEGY_RULES.md)，設定載入順序請讀
-[configuration.md](configuration.md)。早期 V1、UP-only 與 7-phase 設計文件不能作為現行操作依據。
+這是一個針對 Polymarket BTC 15 分鐘 Up/Down 市場、以 maker 為優先的實驗性交易 bot。本 repository 可以送出真實訂單；dry run 的輸出僅是研究證據，不能保證成交或獲利。
 
-## Bot 做什麼
+[`project_overview.md`](../project_overview.md) 是目前實作、已知技術債、證據與已核准變更順序的唯一權威。本 README 是精簡的操作入口；不可因它而將尚未完成的 Phase D 變更視為已部署。
 
-- 自動探索 `btc-updown-15m-*` 市場。
-- 對 `UP`、`DOWN` 或 `NONE` 做唯一方向判斷。
-- 使用 Chainlink 60 秒 TWAP 優先定價；只有符合 degraded-feed 規則時才使用外部現貨備援。
-- 使用 maker-first 掛單，並經固定五層決策鏈：硬安全、方向、模型一致性、經濟性、執行。
-- 目標倉位為 10 shares；高價進場降為 5 shares；每市場總預估曝險上限為 10 shares。
-- 所有策略、訂單與結算事件寫入 `logs/trade_journal.db`。
+英文版：[English README](../README.md)。
+
+## 目前 live 合約
+
+每個 15 分鐘市場，bot 只做一個方向決策：`UP`、`DOWN` 或 `NONE`；不是兩個獨立 bot 同時報兩個 outcome。
+
+1. **市場與 strike 安全性。** Gamma 用來確認市場身分與設定；與前端相容的 Polymarket `crypto-price` 請求（包含市場設定的 60 秒 TWAP 參數）提供唯一的 Price To Beat。若無法驗證該開盤值，新的 BUY 會 fail closed。
+2. **共用 fair 與方向。** `ForecastState` 是唯一的 live fair/sigma policy。`SignalEngine` 使用同一狀態、order book、trend 與 strike distance 產生帶正負號的 score：正值代表 UP、負值代表 DOWN。
+3. **進場閘門。** 新鮮市場資料、時間窗、方向信心、外部衝突檢查、倉位上限與共同的 `robust_net` economics gate 都必須通過。
+4. **每市場只進場一次。** 一筆成功的 maker BUY 會消耗該市場的進場額度。部分成交是這張單的正常結果；bot 不會在同一市場 reload 或補單。
+5. **出場與結算。** `HOLD_TO_REDEEM` 讓一般符合條件的盈利庫存持有至結算。若啟用且符合條件，static tail-protect TP 會以 `0.97` 掛出被動 GTC SELL。確認的 invalidation 可以接管為 recovery/urgent-exit ladder；它與一般 TP 是不同路徑。結算、redeem 與 PnL 事件都會寫入本機 journal。
+
+0.97 TP 不需要新鮮的 TWAP。TWAP stale 會阻止新 BUY，並在設定要求時阻止需要 TWAP 確認的 recovery exit；它本身不會取消已存在的 static TP。
+
+## 策略狀態
+
+- Phase A、B、C 與 D.3（canonical strike provenance）已完成。
+- D.4 目前只部署**觀測資料**：fill 會記錄 10/30 秒 markout、spot continuation、BBO/depth、volatility、time-left 及 UTC weekday/weekend 特徵。live economics 仍使用保守的 168 小時 execution-cost calibration；必須有至少 30 個獨立、current-version maker-BUY 市場，且完成必要的 out-of-sample review，才可選擇 12–48 小時候選窗口。
+- D.5 的設定／程式／文件 ownership 收尾尚未開始。versioned profile 目前有 218 個 assignment；不可因此把它視為 218 個日常 operator knobs，也不可只根據名稱刪除 key。
 
 ## 安裝
 
+直接使用 repository 的 virtual environment：
+
 ```bash
-cd /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main
+git clone https://github.com/ericeric0101/Polymarket-15m-BTC-bot.git
+cd Polymarket-15m-BTC-bot
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
-cp .env.example .env
+cp config/operator.env.example .env
 ```
 
-之後直接使用 `./.venv/bin/python`，不必執行 `.venv/bin/activate`。
+在 live 使用前，請於 `.env` 填入 wallet/CLOB/RPC credentials。絕不可 commit。
 
-## 設定
+設定優先順序：
 
-設定分成兩層：
+1. `config/profiles/btc15_twap_v3.env`：可版控、非機密的進階預設。
+2. 本機 `.env`：credentials、host settings，以及 `config/operator.env.example` 所列的 supported operator overlay。
+3. Shell/CI 環境變數：最高優先權。
 
-- `config/profiles/btc15_twap_v3.env`：可版控、不含秘密的進階策略預設。它目前承載 292 個舊設定，目的是維持遷移前行為，不是每日手動編輯入口。
-- `.env`：本機私密資料、連線資料與 55 個日常操作 key。`.env` 被 git 忽略，不能 commit。
+operator 範例目前列出 55 個 supported deployment keys。最終 reader inventory 與剩餘 profile-only/legacy setting 的移除屬於 D.5 工作；不要因此把 218-key profile 複製到 `.env`。
 
-載入優先順序為：profile -> `.env` -> shell/CI 環境變數。也就是本機 `.env` 可覆蓋 profile，而 command line shell variable 優先權最高。
-
-首次設定 `.env` 時，填入必要的私密與連線值，例如錢包私鑰、funder、CLOB 憑證、Polygon RPC 和 Telegram。不要把它們寫進 profile 或貼到終端紀錄。
-
-檢查 key 結構但不顯示數值：
+不印出 value 地驗證本機設定：
 
 ```bash
 ./.venv/bin/python scripts/inspect_env_contract.py --env .env --strict
 ```
 
-## 啟動前檢查
+若有舊的完整 `.env`，先 preview migration，再決定是否套用：
+
+```bash
+./.venv/bin/python scripts/migrate_env_to_profile.py --env .env --profile btc15_twap_v3
+./.venv/bin/python scripts/migrate_env_to_profile.py --env .env --profile btc15_twap_v3 --apply
+```
+
+## 執行
+
+在新部署或設定變更前先執行 preflight：
 
 ```bash
 ./.venv/bin/python run_bot.py --preflight-only
-./.venv/bin/python scripts/check_allowance.py --check-only
 ```
 
-第一個檢查市場發現、儀器與策略啟動條件；第二個檢查 collateral/conditional token allowance。若需要贖回已結算倉位：
-
-```bash
-./.venv/bin/python scripts/check_positions_and_redeem.py
-./.venv/bin/python scripts/check_positions_and_redeem.py --apply
-```
-
-`--apply` 會送出鏈上交易，僅在你確認錢包和 gas 正常時使用。
-
-## 啟動 Bot
-
-### Dry run
+沒有 `--live` 時預設為 dry run。它執行 live 的決策與本機 order lifecycle，但絕不送出 wallet order：
 
 ```bash
 ./.venv/bin/python run_bot.py
 ```
 
-沒有 `--live` 就是 dry run。它執行與 live 相同的決策、target/requote、TTL、取消與 submit-time controls，但不送出錢包訂單。用它收集 gate、shadow 和 order lifecycle 資料。
-
-### Live
+Live mode 必須明確指定指令，並在互動提示輸入 `yes`：
 
 ```bash
 ./.venv/bin/python run_bot.py --live
 ```
 
-這會在確認提示後使用真實資金。啟動前請確認只有一個 bot process 和一個 Telegram polling process，避免重複下單或 Telegram `getUpdates` conflict。
-
-### 常用選項
+常用變體：
 
 ```bash
+./.venv/bin/python run_bot.py --live --terminal-dashboard
 ./.venv/bin/python run_bot.py --test-mode
-./.venv/bin/python run_bot.py --terminal-dashboard
 ```
 
-`--test-mode` 仍不是 live；`--live` 才允許送出真實訂單。
+`--test-mode` 用於加速測試，不是 production strategy setting。同一 wallet、同一 host 絕不可啟動第二個 live launcher。
 
-## Dashboard 與資料分析
+## 操作與證據
 
 ```bash
+# 僅檢查 collateral/allowance。
+./.venv/bin/python scripts/check_allowance.py --check-only
+
+# 檢查已結算部位；--apply 會送出鏈上交易。
+./.venv/bin/python scripts/check_positions_and_redeem.py
+./.venv/bin/python scripts/check_positions_and_redeem.py --apply
+
+# 終端 journal dashboard。
 DASHBOARD_THEME=light ./.venv/bin/python dashboard.py
+
+# 以目前 gate 回放歷史訊號。
 ./.venv/bin/python scripts/replay_journal_signals.py --hours 168
+
+# D.4 markout/regime 證據；不改變 live policy。
+./.venv/bin/python scripts/market_regime_report.py --db logs/trade_journal.db --min-samples 30
+
+# Regression suite。
 ./.venv/bin/python -m pytest -q
 ```
 
-- `dashboard.py` 讀取 journal 顯示目前狀態、倉位與近期交易。
-- replay 是歷史診斷工具。只有標示為成本後、可執行的報告才可作為 live economics 判斷；settlement-only PnL 不含成交機率、費用和滑價。
-- 測試通過不代表策略一定獲利，只代表已驗證的程式行為未回歸。
+`logs/trade_journal.db` 是策略／訂單／fill／結算的唯一本機紀錄。只有真實 maker-BUY fill 才能計入 D.4 execution-cost selection；dry-run shadow fill 是有用診斷，但不能取代 live-fill evidence。
 
-## 日常排錯
+Telegram controller 為選用功能，且需要 `TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_OWNER_CHAT_ID`。通知傳送是 asynchronous 且 serialized，因此 Telegram outage 不會阻塞交易迴圈。conditional-token balance query 在上游 API 失敗後也會依 token back off；bot 會使用安全的 inventory fallback，而不會虛構餘額。
 
-| 現象 | 先做什麼 |
-| --- | --- |
-| `ModuleNotFoundError: nautilus_trader` | 使用 `./.venv/bin/python`，並確認 requirements 已安裝到 `.venv`。 |
-| `permission denied: .venv/bin/activate` | 不要直接執行它；使用 `source .venv/bin/activate`，或直接使用 `./.venv/bin/python`。 |
-| Telegram `Conflict: terminated by other getUpdates request` | 停止另一個使用同一 token 的 Telegram bot process。 |
-| quote watchdog / rollover | 查看 `logs/` 與 journal 的 `QUOTE_WATCHDOG_*` 事件，先確認 transport 而不是調整 entry gate。 |
-| redeem 成功但資產未見增加 | 檢查 selected collateral、wrap transaction 與鏈上 receipt；Data API 可能延遲更新。 |
+## Repository 地圖
 
-## 重要風控
+```text
+run_bot.py                    live/dry-run CLI entry point 與 strategy host
+bot/                          lifecycle、pricing、signals、quoting、exits、recovery
+execution/                    maker economics 與 Polymarket integration
+monitoring/trade_journal_db.py SQLite journal/report access
+config/profiles/              versioned non-secret strategy profile
+config/operator.env.example   supported local operator overlay
+scripts/                      preflight、replay、regime report、allowance、redeem
+docs/readme_ZH.md             本繁體中文 README 翻譯
+```
 
-- dry run 不會預測真實成交率；它只能在 live 等價 lifecycle 下提供比較資料。
-- 任何參數修改先保存 replay baseline，再一次只改一個因果面向。
-- 負 fair-edge 區間目前只記錄 shadow 研究，不是 live 放行規則。
-- 不因短期勝率提高就放寬 safety、方向、經濟性與倉位上限。
-- 每次 live 前確認 `.env` 的 wallet/funder、allowance、RPC、gas 與 auto-redeem 設定。
+若其他文件與 `project_overview.md` 衝突，以 overview 為準。
+
+## 驗證與風險
+
+任何有意的策略變更，都要先跑 `project_overview.md` 定義的 phase-specific evidence，至少再執行：
+
+```bash
+./.venv/bin/python -m pytest -q
+./.venv/bin/python scripts/inspect_env_contract.py --env .env --strict
+git diff --check
+```
+
+二元合約可能損失全部進場成本。場館可用性、訂單狀態、settlement reference、費用與流動性都可能改變。live 運行時必須監控，移動資金前必須獨立驗證 wallet/chain activity。本程式不是投資建議。

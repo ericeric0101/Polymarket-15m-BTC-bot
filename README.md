@@ -1,71 +1,92 @@
 # Polymarket BTC 15-Minute Trading Bot
 
 An experimental, maker-first trading bot for Polymarket BTC 15-minute Up/Down
-markets. The current live path is `run_bot.py` plus `bot/`, `execution/`, and
-`monitoring/`. It is a directional binary-market strategy: for each market it
-selects `UP`, `DOWN`, or `NONE`; it does not run independent bots on both
-outcomes.
+markets. This repository can submit real orders. Dry-run output is research
+evidence, not a guarantee of fills or profitability.
 
-This repository can submit real orders. Treat dry-run results as research, not
-as a guarantee of live fills or profitability.
+[`project_overview.md`](project_overview.md) is the single authority for the
+current implementation, known debt, evidence, and approved change sequence.
+This README is the concise operator entry point; it must not be used to infer
+that a planned Phase D change has already been deployed.
 
-## Current Strategy
+Traditional Chinese translation: [繁體中文 README](docs/readme_ZH.md).
 
-New BUY decisions follow five ordered layers:
+## Current live contract
 
-1. **Hard safety**: valid/fresh quote, settlement-aligned TWAP reference,
-   valid market data, and no strong external/book conflict.
-2. **Direction**: one locked `UP`/`DOWN`/`NONE` decision. The first entry uses
-   `FIRST_ENTRY_SCORE_MIN`, which is never lower than `ENTRY_SCORE_MIN`.
-3. **Model consistency**: strike/spot/fair-price validation and high-price
-   risk/reward controls.
-4. **Economics**: one common `robust_net` gate. Negative fair-edge buckets are
-   shadow research only and do not relax live economics.
-5. **Execution**: passive maker submission, TTL/requote controls, 10-share
-   market cap, and a 5-share high-price or weak-probability tier.
+For each 15-minute market, the bot makes one directional decision: `UP`,
+`DOWN`, or `NONE`. It is not two independent bots quoting both outcomes.
 
-See [the authoritative project overview](project_overview.md) for the current
-decision contract and approved change sequence, and [the Traditional Chinese
-guide](docs/readme_ZH.md) for the complete runbook.
+1. **Market and strike safety.** Gamma establishes the market identity and
+   configuration. The frontend-compatible Polymarket `crypto-price` request,
+   including the market's configured 60-second TWAP parameters, supplies the
+   canonical Price To Beat. If that opening value cannot be verified, new BUYs
+   fail closed.
+2. **Shared fair and direction.** `ForecastState` is the one live fair/sigma
+   policy. `SignalEngine` turns the same state, book, trend, and strike
+   distance into a signed score: positive for UP, negative for DOWN.
+3. **Entry gates.** Fresh market data, time window, direction confidence,
+   external conflict checks, position limits, and the common `robust_net`
+   economics gate must all pass.
+4. **One entry per market.** A successful maker BUY consumes the market's
+   entry budget. Partial fills are accepted as the result of that one order;
+   the bot never reloads or supplements the entry in that market.
+5. **Exit and settlement.** `HOLD_TO_REDEEM` keeps ordinary profitable
+   inventory through settlement. When enabled and eligible, the static
+   tail-protect TP is a passive GTC sell at `0.97`. A confirmed invalidation
+   can take ownership for the recovery/urgent-exit ladder; it is distinct from
+   the normal TP. Settlement, redeem, and PnL events are written to the local
+   journal.
+
+The 0.97 TP does not require a fresh TWAP. A stale TWAP blocks new BUYs and,
+when configured, TWAP-confirmed recovery exits; it does not cancel an existing
+static TP by itself.
+
+## Strategy status
+
+- Phases A, B, C, and D.3 (canonical strike provenance) are complete.
+- D.4 has deployed **observability only**: fills record 10/30-second markout,
+  spot continuation, BBO/depth, volatility, time-left, and UTC
+  weekday/weekend features. Live economics still use the conservative 168-hour
+  execution-cost calibration until a candidate 12–48-hour window has at least
+  30 independent, current-version maker-BUY markets and passes the required
+  out-of-sample review.
+- D.5 configuration/document/code ownership cleanup has not started. The
+  versioned profile currently has 218 assignments; do not treat that as 218
+  daily operator knobs or delete a key based only on its name.
 
 ## Setup
 
-Use the repository virtual environment directly; this avoids shell activation
-issues:
+Use the repository virtual environment directly:
 
 ```bash
 git clone https://github.com/ericeric0101/Polymarket-15m-BTC-bot.git
 cd Polymarket-15m-BTC-bot
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
-cp .env.example .env
+cp config/operator.env.example .env
 ```
 
-Fill the local `.env` with wallet/CLOB/RPC credentials before any live use.
-Do not commit it.
+Fill `.env` with wallet/CLOB/RPC credentials before live use. Never commit it.
 
-## Configuration Profiles
+Configuration precedence is:
 
-The bot loads configuration in this order:
+1. `config/profiles/btc15_twap_v3.env` — versioned, non-secret advanced
+   defaults.
+2. Local `.env` — credentials, host settings, and the supported operator
+   overlay shown in `config/operator.env.example`.
+3. Shell/CI environment — highest priority.
 
-1. `config/profiles/btc15_twap_v3.env`: version-controlled advanced strategy
-   baseline.
-2. Local `.env`: 55 supported day-to-day operator keys plus credentials and
-   host-only values.
-3. Shell or CI environment variables: highest priority.
+The operator example currently lists 55 supported deployment keys. The final
+reader inventory and removal of remaining profile-only/legacy settings are D.5
+work, not an invitation to copy the 218-key profile into `.env`.
 
-The profile is not a second secrets file. It contains reviewed, non-secret
-advanced defaults such as timing, retry, diagnostics, and experimental
-controls. Local `.env` contains credentials and the small set of settings an
-operator changes deliberately.
-
-Validate the split without printing values:
+Validate the local configuration without printing values:
 
 ```bash
 ./.venv/bin/python scripts/inspect_env_contract.py --env .env --strict
 ```
 
-For a legacy full `.env`, preview then apply a migration:
+For an old, full `.env`, preview a migration before applying it:
 
 ```bash
 ./.venv/bin/python scripts/migrate_env_to_profile.py --env .env --profile btc15_twap_v3
@@ -74,14 +95,14 @@ For a legacy full `.env`, preview then apply a migration:
 
 ## Run
 
-Always run a preflight before a new deployment or configuration change:
+Run preflight before a new deployment or configuration change:
 
 ```bash
 ./.venv/bin/python run_bot.py --preflight-only
 ```
 
-Dry run, the default without `--live`, exercises the live decision and order
-lifecycle but does not submit wallet orders:
+Dry run is the default. It exercises the live decision and local order
+lifecycle but never submits wallet orders:
 
 ```bash
 ./.venv/bin/python run_bot.py
@@ -100,64 +121,70 @@ Useful variants:
 ./.venv/bin/python run_bot.py --test-mode
 ```
 
-`--test-mode` is for accelerated testing and is not a production strategy
-setting. Never run a second live launcher for the same wallet on the same host.
+`--test-mode` is for accelerated testing, not a production strategy setting.
+Never run a second live launcher for the same wallet on the same host.
 
-## Operations
+## Operations and evidence
 
 ```bash
-# Inspect balance and allowance only.
+# Check collateral/allowance only.
 ./.venv/bin/python scripts/check_allowance.py --check-only
 
-# Inspect/redeem settled positions. --apply sends transactions.
+# Inspect settled positions; --apply sends chain transactions.
 ./.venv/bin/python scripts/check_positions_and_redeem.py
 ./.venv/bin/python scripts/check_positions_and_redeem.py --apply
 
-# Terminal database dashboard.
+# Terminal journal dashboard.
 DASHBOARD_THEME=light ./.venv/bin/python dashboard.py
 
-# Replay historical journal signals with current live gates.
+# Historical signal replay with current gates.
 ./.venv/bin/python scripts/replay_journal_signals.py --hours 168
 
-# Run the regression suite.
+# D.4 markout/regime evidence. It does not change live policy.
+./.venv/bin/python scripts/market_regime_report.py --db logs/trade_journal.db --min-samples 30
+
+# Regression suite.
 ./.venv/bin/python -m pytest -q
 ```
 
-`logs/trade_journal.db` is the canonical local record for strategy, order, fill,
-and settlement analysis. It does not replace independent wallet or chain
-verification before moving funds.
+`logs/trade_journal.db` is the canonical local strategy/order/fill/settlement
+record. Only real maker-BUY fills count toward D.4 execution-cost selection;
+dry-run shadow fills are useful diagnostics but do not replace live-fill
+evidence.
 
-## Repository Map
+The Telegram controller is optional and requires both `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_OWNER_CHAT_ID`. Notification delivery is asynchronous and serialized
+so a Telegram outage cannot block the trading loop. Conditional-token balance
+queries also back off per token after an upstream API failure; the bot uses its
+safe inventory fallback rather than inventing a balance.
+
+## Repository map
 
 ```text
-run_bot.py                    launcher and live/dry-run entry point
-bot/                          lifecycle, safety, direction, quoting, recovery
+run_bot.py                    live/dry-run CLI entry point and strategy host
+bot/                          lifecycle, pricing, signals, quoting, exits, recovery
 execution/                    maker economics and Polymarket integration
-monitoring/trade_journal_db.py SQLite journal
-config/profiles/              versioned non-secret strategy profiles
-scripts/                      preflight, replay, reports, allowance, redeem
-docs/                         current runbooks and archived design notes
-core/                         legacy/sidecar code; not the active live path
+monitoring/trade_journal_db.py SQLite journal/report access
+config/profiles/              versioned non-secret strategy profile
+config/operator.env.example   supported local operator overlay
+scripts/                      preflight, replay, regime report, allowance, redeem
+docs/readme_ZH.md             Traditional Chinese README translation
 ```
 
-Read [Documentation Index](docs/INDEX.md) before relying on a design note.
+When documentation conflicts with `project_overview.md`, the overview wins.
 
-## Verification
+## Verification and risk
 
-Run this sequence for every intentional strategy change:
+For any intentional strategy change, run the phase-specific evidence defined
+in `project_overview.md`, then at minimum:
 
 ```bash
 ./.venv/bin/python -m pytest -q
-./.venv/bin/python scripts/replay_journal_signals.py --hours 168
 ./.venv/bin/python scripts/inspect_env_contract.py --env .env --strict
+git diff --check
 ```
 
-Replay reports are settlement-only historical comparisons. They exclude future
-fill uncertainty, live fees, and live exits unless the report explicitly says
-otherwise.
-
-## Risk
-
-Binary contracts can lose their full entry cost. Polymarket/CLOB availability,
-order state, settlement references, fees, and liquidity can change. This code
-is not investment advice and must be monitored while running live.
+Binary contracts can lose the full entry cost. Venue availability, order state,
+settlement references, fees, and liquidity can change. Monitor live operation
+and independently verify wallet/chain activity before moving funds. This code
+is not investment advice.

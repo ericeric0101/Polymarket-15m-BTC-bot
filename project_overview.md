@@ -189,28 +189,51 @@ scripts may be run by operators against the local journal.  Ask before
 archiving any individual one; classify/retain them under a `scripts/research/`
 directory only after confirming the desired retention policy.
 
-## 4. Documentation audit
+## 4. Documentation disposition
 
-Judgment was made from current claims, code paths, commands, and numerical
-values—not filenames.  “Merge” means its current material belongs in this
-authority/operational guide; it must not remain a second decision authority.
+### Consolidation completed by explicit approval (2026-08-22)
 
-| Document | Classification | Evidence / cleanup action |
-|---|---|---|
-| `README.md` | Retain | Current launch, preflight, live/dry-run and verification commands agree with code. Link this authority. |
-| `docs/readme_ZH.md` | Merge | Accurate translated operator runbook, but duplicates README/runtime spec. Retain translation content only; remove independent strategy authority. |
-| `docs/configuration.md` | Merge | Correctly documents 55 local keys and aliases, but configuration inventory now belongs here; turn into a short operational reference. |
-| `docs/BOT_RUNTIME_SPEC.md`, `docs/BOT_RUNTIME_SPEC_ZH.md`, `docs/STRATEGY_RULES.md` | Merge | Broadly accurate current contracts but duplicate lifecycle/gates/exits in three places. Consolidate current rules here, retaining only language-specific operator instructions. |
-| `docs/JOURNAL_REPLAY.md` | Retain | Current supported report commands and explicit limitations; no decision-policy contradiction found. |
-| `docs/LEGACY_PATCH_STATUS.md` | Retain, update link | Static code confirms its sidecar/Grafana statement; its safe-cleanup order is useful. Link to this inventory. |
-| `docs/EXIT_EXECUTION_AUDIT.md`, `docs/P5-behavior-audit.md` | Archive/merge | Evidence for recovery ladder, but phase-scoped and duplicates current exit contract. Preserve as historical evidence, move outcome/contract here. |
-| `docs/PHASE_2_VOLATILITY_FAIR_MODEL_AUDIT.md` | Archive/merge | Contains useful provenance, but contradicts itself about resolved sigma paths and acts as an accumulating P1–P7 ledger. Historical only after its conclusions are captured here. |
-| `docs/decision-chain-phases-4-5.md`, `docs/baselines/a0541b7-phase-0.md` | Archive | Point-in-time validation/metrics (including 216-test and 168-hour counts), not current policy. |
-| `docs/bi-side_design.md`, `docs/directional-market-maker-refactor-plan.md`, `docs/pure_strategy.md` | Archive as superseded | Old parameters/formulas/design plans conflict with current `SignalEngine`, profile values, and shared forecast. |
-| `docs/polymarket_v2_cutover_runbook_2026-04-28.md`, `docs/polymarket_v2_remaining_work.md` | Archive, then review for operator facts | Dated V2 transition/remaining work; it should not direct current live changes. Some fee/collateral observations may be retained only after current adapter verification. |
-| `docs/repo_audit_prompt.md`, `docs/skills.md` | Archive/delete after user approval | Generic audit prompts/tooling, not repo operating documentation. |
-| `docs/INDEX.md` | Modify | It must name this file as authority and label all above historical files consistently. |
-| `core/README.md` | Retain | Accurate narrow explanation of retained `core` indirect dependency. |
+The documentation audit originally used **merge** rather than immediate
+deletion because static review alone cannot establish whether an operator uses
+a historical report, and several files contained operational facts that needed
+current-code verification. The owner subsequently approved deletion of all
+`docs/` Markdown files except the Traditional Chinese README, provided current
+facts were retained here or in the English README.
+
+The retained documentation surface is deliberately small:
+
+- `project_overview.md` — the only decision authority and implementation plan.
+- `README.md` — English operator quick start.
+- `docs/readme_ZH.md` — complete Traditional Chinese translation of README.
+- `core/README.md` — narrow retained explanation of the non-live `core`
+  dependency.
+
+Deleted `docs/` files and the reason they were not retained:
+
+| Former material | Disposition evidence |
+|---|---|
+| `BOT_RUNTIME_SPEC*`, `STRATEGY_RULES`, `configuration`, `INDEX` | Duplicated the lifecycle/configuration contract; several assertions were stale, including later-entry and normal-BUY TTL descriptions. README and Sections 1–2 above now carry the current operator/authority contract. |
+| `JOURNAL_REPLAY` | Its command and crucial limit are retained: replay/shadow results are diagnostic, and only real maker-BUY fills count toward D.4 live execution-cost selection. It contained no separate decision policy. |
+| `LEGACY_PATCH_STATUS` | Its only current operational fact is retained below under compatibility overrides. Grafana/sidecars were already removed. |
+| `bi-side_design`, `directional-market-maker-refactor-plan`, `pure_strategy` | Historical proposals with superseded thresholds, formulas, intramarket-flip assumptions, and phased roadmaps. P4/P5 regression boundaries are already recorded in the P1–P7 relationship below. |
+| `polymarket_v2_cutover_runbook_2026-04-28`, `polymarket_v2_remaining_work` | Dated worktree/cutover instructions and V1-era assumptions. The only still-relevant fee fallback risk is already recorded in Section 2 as `MAKER_FEE_RATE_BPS_DEFAULT`; no cutover instruction remains live. |
+
+### Retained operational facts from the removed documents
+
+- `bot.compat_patches.apply_compatibility_patches()` installs only process-local
+  runtime overrides from `bot.adapter_overrides`; it never rewrites
+  `site-packages`. `NAUTILUS_COMPAT_PATCH_MODE` supports `runtime`, `verify`,
+  and `off`. Dependency upgrades require a preflight/dry-run plus the focused
+  compatibility and full regression tests before live use.
+- `scripts/replay_journal_signals.py` compares recorded historical events; it
+  cannot establish future live-fill probability, future fees, or live-exit
+  outcomes. Use the same mode/window when comparing a change. D.4 selection is
+  based on `scripts/market_regime_report.py` and current-version **real**
+  maker-BUY 10/30-second markouts, not simulated fills.
+
+This approved documentation consolidation is a non-behavioral cleanup only.
+It does **not** mark D.5 complete: D.5 still owns the unresolved configuration,
+code-reader, Telegram contract, and P1–P7 evidence work after D.4 completes.
 
 ## 5. Implementation plan — four completed gates, no parallel fragments
 
@@ -460,15 +483,13 @@ selection.
 
 1. Should `TELEGRAM_CONTROLLER_ENABLED` be an operator-supported control, or
    should Telegram always be enabled/disabled by launcher policy?
-2. Which verified, market-scoped Polymarket field/API is the authoritative
-   frontend **Price To Beat** contract for D.3? Until a shadow capture proves
-   the contract, the implementation must use the D.3 fail-closed path rather
-   than guessing an endpoint equivalence.
-3. Which research scripts must remain reproducible/available to operators?
+2. Which research scripts must remain reproducible/available to operators?
    Static inspection cannot determine this.
-4. For remaining historical design documents, approve whether they are moved
-   to an archive directory, deleted from git, or retained with an explicit
-   historical header. This is a repository-history policy choice.
+
+The D.3 Price To Beat contract is no longer open: the verified
+frontend-compatible `crypto-price` request is the canonical input, as recorded
+in D.3. The historical-document retention decision was resolved by the
+2026-08-22 explicit deletion approval in Section 4.
 
 ## Relationship to prior P1–P7 work
 
