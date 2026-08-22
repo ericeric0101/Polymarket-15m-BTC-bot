@@ -114,7 +114,7 @@ def test_unverified_market_strike_blocks_new_buy_entries_before_other_gates():
         inst_id="up",
         market_strike_entry_eligible=False,
         market_strike_status="mismatch",
-        market_strike_source="gamma_price_to_beat",
+        market_strike_source="polymarket_crypto_price_twap_open",
     )
 
     assert out.skip is True

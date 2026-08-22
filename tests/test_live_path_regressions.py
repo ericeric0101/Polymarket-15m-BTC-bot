@@ -1619,16 +1619,18 @@ def test_strike_prefers_polymarket_chainlink_history_anchor():
     assert "btc-updown-15m-test" not in strategy.market_strike_cache_by_slug
 
 
-def test_strike_uses_verified_market_scoped_price_to_beat(monkeypatch):
+def test_strike_uses_frontend_twap_price_to_beat_for_verified_market(monkeypatch):
     strategy = DummySpotPricerStrategy()
+    requested = {}
 
-    async def _crypto_open_price(**_kwargs):
+    async def _crypto_open_price(**kwargs):
+        requested.update(kwargs)
         return Decimal("66611.11")
 
     async def _gamma_market(_slug):
         return {
             "_gamma_event_slug": "btc-updown-15m-test",
-            "eventMetadata": {"priceToBeat": "66611.11"},
+            "cryptoMarketConfig": {"twapEnabled": True, "twapLookbackSeconds": 60},
         }
 
     monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
@@ -1637,12 +1639,14 @@ def test_strike_uses_verified_market_scoped_price_to_beat(monkeypatch):
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
     assert strike == Decimal("66611.11")
-    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "gamma_price_to_beat"
+    assert strategy.market_strike_source_by_slug["btc-updown-15m-test"] == "polymarket_crypto_price_twap_open"
     assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "verified"
+    assert requested["twap_enabled"] is True
+    assert requested["twap_lookback_seconds"] == 60
     assert any(event == "MARKET_STRIKE_PROVENANCE" for event, _payload in strategy.strategy_events)
 
 
-def test_crypto_candidate_mismatch_does_not_override_verified_gamma_strike(monkeypatch):
+def test_frontend_twap_price_is_canonical_not_gamma_metadata(monkeypatch):
     strategy = DummySpotPricerStrategy()
 
     async def _crypto_open_price(**_kwargs):
@@ -1652,6 +1656,7 @@ def test_crypto_candidate_mismatch_does_not_override_verified_gamma_strike(monke
         return {
             "_gamma_event_slug": "btc-updown-15m-test",
             "eventMetadata": {"priceToBeat": "66650.00"},
+            "cryptoMarketConfig": {"twapEnabled": True, "twapLookbackSeconds": 60},
         }
 
     monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
@@ -1659,12 +1664,13 @@ def test_crypto_candidate_mismatch_does_not_override_verified_gamma_strike(monke
 
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
-    assert strike == Decimal("66650.00")
-    assert strategy.market_strike_cache_by_slug["btc-updown-15m-test"] == Decimal("66650.00")
+    assert strike == Decimal("66611.11")
+    assert strategy.market_strike_cache_by_slug["btc-updown-15m-test"] == Decimal("66611.11")
     assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "verified"
     assert strategy._market_strike_is_entry_eligible("btc-updown-15m-test")
     provenance = next(payload for event, payload in strategy.strategy_events if event == "MARKET_STRIKE_PROVENANCE")
-    assert provenance["diff_abs_usd"] == 38.89
+    assert provenance["crypto_request"]["twapEnabled"] is True
+    assert provenance["crypto_request"]["twapLookbackSeconds"] == 60
 
 
 def test_gamma_response_for_a_different_slug_is_not_entry_eligible(monkeypatch):
@@ -1676,7 +1682,7 @@ def test_gamma_response_for_a_different_slug_is_not_entry_eligible(monkeypatch):
     async def _gamma_market(_slug):
         return {
             "_gamma_event_slug": "btc-updown-15m-other",
-            "eventMetadata": {"priceToBeat": "66650.00"},
+            "cryptoMarketConfig": {"twapEnabled": True, "twapLookbackSeconds": 60},
         }
 
     monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
@@ -1685,8 +1691,37 @@ def test_gamma_response_for_a_different_slug_is_not_entry_eligible(monkeypatch):
     strike = asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
 
     assert strike is None
-    assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "pending_gamma_price_to_beat"
+    assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "pending_frontend_twap_open"
     assert not strategy._market_strike_is_entry_eligible("btc-updown-15m-test")
+
+
+def test_strike_retries_frontend_price_every_three_seconds_for_first_thirty_seconds(monkeypatch):
+    strategy = DummySpotPricerStrategy()
+    clock = {"now": 1000.0}
+    requests = []
+
+    async def _crypto_open_price(**kwargs):
+        requests.append(kwargs)
+        return None
+
+    async def _gamma_market(_slug):
+        return {
+            "_gamma_event_slug": "btc-updown-15m-test",
+            "cryptoMarketConfig": {"twapEnabled": True, "twapLookbackSeconds": 60},
+        }
+
+    monkeypatch.setattr("bot.spot_pricer.time.time", lambda: clock["now"])
+    monkeypatch.setattr("bot.spot_pricer.fetch_crypto_price_to_beat", _crypto_open_price)
+    monkeypatch.setattr("bot.spot_pricer.fetch_gamma_market_by_slug", _gamma_market)
+
+    asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+    clock["now"] = 1002.9
+    asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+    clock["now"] = 1003.0
+    asyncio.run(strategy._get_market_strike_for_instrument("inst-up"))
+
+    assert len(requests) == 2
+    assert strategy.market_strike_status_by_slug["btc-updown-15m-test"] == "pending_frontend_twap_open"
 
 
 def test_quote_plan_guards_uses_separate_buy_sell_momentum_thresholds():

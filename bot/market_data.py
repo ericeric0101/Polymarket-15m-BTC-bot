@@ -6,6 +6,7 @@ from typing import Any, Optional, Dict
 
 import httpx
 import re
+from urllib.parse import quote
 
 
 def fetch_coinbase_spot_sync(
@@ -121,8 +122,10 @@ async def fetch_crypto_price_to_beat(
     end_ts: int,
     symbol: str = "BTC",
     variant: str = "fifteen",
+    twap_enabled: bool = False,
+    twap_lookback_seconds: Optional[int] = None,
 ) -> Optional[Decimal]:
-    """Fetch Polymarket's published crypto opening Price To Beat."""
+    """Fetch the frontend's market-configured crypto opening Price To Beat."""
     if start_ts <= 0 or end_ts <= start_ts:
         return None
     params = {
@@ -131,6 +134,13 @@ async def fetch_crypto_price_to_beat(
         "variant": str(variant or "fifteen"),
         "endDate": datetime.fromtimestamp(end_ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if twap_enabled:
+        if twap_lookback_seconds not in {30, 60}:
+            return None
+        # These are part of the frontend request contract. Without them the
+        # endpoint can return a non-TWAP opening value for a TWAP market.
+        params["twapEnabled"] = "true"
+        params["twapLookbackSeconds"] = str(twap_lookback_seconds)
     try:
         async with httpx.AsyncClient(
             timeout=8.0
@@ -238,39 +248,38 @@ def estimate_external_spot_sigma_annualized(
 
 
 async def fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
-    """
-    Attempt to fetch full event which contains eventMetadata.priceToBeat.
-    Async implementation for use in strategical decision paths.
-    """
+    """Fetch the matching Gamma event and return its first market with identity."""
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
     timeout = 8.0
 
+    def _market_from_response(data: Any) -> Optional[Dict[str, Any]]:
+        event = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else None)
+        if not isinstance(event, dict):
+            return None
+        event_slug = str(event.get("slug") or "")
+        if event_slug != str(slug):
+            return None
+        markets = event.get("markets", [])
+        if not isinstance(markets, list) or not markets:
+            return None
+        market = dict(markets[0])
+        market["_gamma_event_slug"] = event_slug
+        market["_gamma_event_id"] = event.get("id")
+        return market
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{api_base}/events/slug/{quote(str(slug), safe='')}")
+            if resp.status_code == 200:
+                market = _market_from_response(resp.json())
+                if market is not None:
+                    return market
+            # Some recurring markets are not served by the documented slug
+            # route after their window rolls over. Retain the existing Gamma
+            # list lookup as a verified same-slug compatibility fallback.
             resp = await client.get(f"{api_base}/events", params={"slug": slug})
             if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and len(data) > 0:
-                    event = data[0]
-                    event_slug = str(event.get("slug") or "")
-                    if event_slug != str(slug):
-                        return None
-                    # Expose priceToBeat inside the first market for legacy compatibility if available
-                    event_meta = event.get("eventMetadata", {}) or {}
-                    if not isinstance(event_meta, dict):
-                        event_meta = {}
-                    if not event_meta and isinstance(event.get("event_metadata"), dict):
-                        event_meta = event.get("event_metadata") or {}
-
-                    markets = event.get("markets", [])
-                    if isinstance(markets, list) and len(markets) > 0:
-                        market = dict(markets[0])
-                        if event_meta:
-                            # Merge event metadata into market for easier extraction
-                            market["eventMetadata"] = event_meta
-                        market["_gamma_event_slug"] = event_slug
-                        market["_gamma_event_id"] = event.get("id")
-                        return market
+                return _market_from_response(resp.json())
     except Exception:
         pass
     return None

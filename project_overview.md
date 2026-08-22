@@ -50,7 +50,7 @@ flowchart LR
 
 | Stage | Runtime implementation and I/O | Governing keys |
 |---|---|---|
-| Shared fair model | `bot.spot_pricer._build_forecast_state` calls `bot.forecast_state.build_forecast_state`. Input: spot, a verified Gamma market-scoped strike, time left, UP market mid, reference-source/TWAP observation. Output: `ForecastState` with raw/default sigma, scale, bounds, time-decay, implied-vol floor, standard and native-TWAP probabilities. `bot.spot_pricer._compute_fair_probability` converts it to the token outcome fair. A missing/invalid Gamma market identity is fail-closed for new digital entries; the time-window crypto response is journal-only provenance. | `MAKER_FAIR_PRICER_MODE`, `MAKER_DIGITAL_VOL_*`, `MAKER_DIGITAL_SIGMA_*`, `MAKER_DIGITAL_IMPLIED_SIGMA_ENABLED`, `POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC`. |
+| Shared fair model | `bot.spot_pricer._build_forecast_state` calls `bot.forecast_state.build_forecast_state`. Input: spot, a verified frontend Price To Beat, time left, UP market mid, reference-source/TWAP observation. Output: `ForecastState` with raw/default sigma, scale, bounds, time-decay, implied-vol floor, standard and native-TWAP probabilities. `bot.spot_pricer._compute_fair_probability` converts it to the token outcome fair. Gamma verifies market identity and supplies its `cryptoMarketConfig`; the matching frontend `crypto-price` request supplies the canonical strike. Missing/invalid identity, config, or opening price is fail-closed for new digital entries. | `MAKER_FAIR_PRICER_MODE`, `MAKER_DIGITAL_VOL_*`, `MAKER_DIGITAL_SIGMA_*`, `MAKER_DIGITAL_IMPLIED_SIGMA_ENABLED`, `POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC`. |
 | Side decision and score | `bot.side_decision._compute_side_decision_new` obtains that same builder through `_build_forecast_state`, then calls `bot.signal_engine.SignalEngine.compute`. Input: spot, strike, `forecast.sigma_final`, remaining time, UP mid. Output: `ActiveSide`, signed `side_decision_score`, reason, audit payload; UP score is positive and DOWN negative. | `BI_SIDE_*`, `SIDE_SIGNAL_*`, `SIDE_THESIS_WEAK_*`, `REGIME_GUARD_*`. |
 
 **Sigma conclusion (verified):** quote fair and integrated side selection now use the
@@ -280,7 +280,7 @@ only as regression evidence; they are not a second roadmap.
   tune sigma (former P2.4), recovery/exit ladder (former P5), score threshold,
   or fair-price ceiling concurrently with D.3/D.4.
 
-#### D.3 — correct and fail-safe market strike provenance (critical; implementation verified, live shadow pending)
+#### D.3 — correct and fail-safe market strike provenance (COMPLETE; active-process verified 2026-08-22)
 
 - **Observed evidence (2026-08-21):** For
   `btc-updown-15m-1787322600`, the strategy journal's
@@ -291,51 +291,76 @@ only as regression evidence; they are not a second roadmap.
   same 10:30–10:45 ET interval displayed **Price To Beat $77,071.22**. The
   $34.20 discrepancy is far beyond display rounding and changes digital fair
   probability, side score, and entry economics.
-- **Cause established:** `bot.market_data.fetch_crypto_price_to_beat` calls
-  `/api/crypto/crypto-price` by start/end time and labels its `openPrice` as
-  authoritative. `bot.spot_pricer._get_market_strike_for_instrument` locks
-  that response immediately. The later Gamma comparison in
-  `_maybe_validate_strike_with_gamma` only emits
-  `MARKET_STRIKE_VALIDATION_MISMATCH` and explicitly keeps the local value;
-  it cannot protect live entries. This is a source-contract/provenance bug,
-  not a sigma, TWAP, or precision issue. The historic Gamma endpoint no
-  longer returned this expired event during this audit, so the supplied
-  contemporaneous UI capture is retained as the direct frontend evidence.
-- **Implementation scope and order:** do this before any remaining sigma or
-  exit tuning. First capture the exact slug, market/token identifiers, URL
-  parameters, raw response values, and both candidate strikes in the journal.
-  Then verify which market-scoped Polymarket field is the frontend's actual
-  settlement Price To Beat. Promote only that verified field to the canonical
-  strike. The time-window `/api/crypto/crypto-price` result is telemetry-only:
-  record it, but never let it alter fair, side, or BUY eligibility. Block new
-  digital entries only when Gamma's strike is absent, invalid, or not tied to
-  the requested slug; no manual mismatch tolerance controls a live decision.
-  Do not replace a locked strike mid-market without a verified market-scoped
-  identity and an explicit policy.
-- **Definition of done:** fixtures cover the exact mismatch shape and both
-  response schemas; regression tests prove a crypto candidate mismatch keeps
-  using the matching-slug Gamma strike, while missing/wrong-slug Gamma cannot
-  reach fair/side/BUY entry evaluation; journal payloads contain source
-  provenance; a shadow/preflight capture confirms the active market's bot
-  strike equals the UI Price To Beat; full `pytest -q`, a
-  representative replay/shadow comparison, and `git diff --check` pass.
-- **Live behavior:** **Yes, safety-critical.** It can suppress entries for a
-  market whose strike cannot be proven, and it will change fair probabilities
-  where the current endpoint is semantically wrong. **Implemented on
-  2026-08-21:** Gamma's market-scoped `priceToBeat` is now the only
-  entry-authoritative source; the time-window crypto endpoint is journaled as
-  a candidate; its disagreement does not block or alter Gamma-based digital
-  fair/side/BUY decisions. Missing, invalid, or wrong-slug Gamma data blocks
-  new digital entries. The prior warning-only validator and all mismatch
-  tolerance/interval keys are removed.
-  Focused regression coverage, full `pytest -q` (282 passed), preflight, and
-  `git diff --check` passed. A default dry-run was started and stopped without
-  submitting orders, but its order-book subscription supplied no valid quote,
-  so it did not reach strike resolution. **Do not mark D.3 COMPLETE** until a
-  healthy active-market shadow capture records `MARKET_STRIKE_PROVENANCE` and
-  confirms the bot's Gamma strike against the frontend Price To Beat.
+- **Cause established (2026-08-22):** Gamma's active market response has no
+  `eventMetadata.priceToBeat`; it exposes identity and
+  `cryptoMarketConfig={twapEnabled: true, twapLookbackSeconds: 60}` only.
+  Consequently the 2026-08-21 Gamma-only implementation fail-closed every
+  active market. Separately, the bot's former `/api/crypto/crypto-price`
+  call omitted `twapEnabled=true` and `twapLookbackSeconds=60`. For
+  `btc-updown-15m-1787329800`, it returned `77351.91173503861`, while the
+  frontend and its SSR query using those two parameters returned
+  `77320.58372519328` (the displayed $77,320.58). This is a request-contract
+  bug, not a tolerance, sigma, or precision issue.
+- **Canonical source and policy:** Gamma is the market identity/configuration
+  source, not the strike source. For a matching slug with a BTC 15-minute
+  `twapEnabled=true`, `twapLookbackSeconds=60` configuration, request
+  `/api/crypto/crypto-price` with the market's start/end timestamps, variant,
+  and those exact TWAP parameters. Its positive `openPrice` is the only
+  entry-authoritative Price To Beat. It is requested immediately, retried at
+  a fixed 3-second cadence for the first 30 seconds, then fails closed for the
+  market. Raw Chainlink, RTDS, Binance, question parsing, and malformed/wrong
+  Gamma data remain diagnostic-only and can never become a BUY strike. This
+  adds no new `.env` knob; all request semantics come from the market itself.
+  RTDS 60-second TWAP remains the real-time fair-model reference, but is not
+  used to reconstruct the opening strike because the official documentation
+  does not specify the feed's sampling boundaries.
+- **Implementation evidence (2026-08-22):** `fetch_crypto_price_to_beat` now
+  sends the config-derived parameters; `SpotPricerMixin` records them,
+  identity, attempt age, and result in `MARKET_STRIKE_PROVENANCE`, and locks
+  `polymarket_crypto_price_twap_open` only after a positive response. A
+  no-order historical dry run for the cited market returned the exact frontend
+  value `77320.58372519328` in **1.391 seconds**. Focused regression tests
+  cover parameter propagation, wrong-slug rejection, Gamma metadata being
+  non-authoritative, and the 3-second retry cadence. A second no-order
+  current-market preflight for `btc-updown-15m-1787355900` verified Gamma's
+  matching slug/config and returned `78334.48556044082` in **1.094 seconds**;
+  the market page SSR carried the identical decimal value. This is below the
+  30-second acceptance window, but is endpoint-level preflight only—not a
+  strategy-process shadow run. The subsequent live strategy run
+  `run_1787358911_4c84a7ba` completed that final check for
+  `btc-updown-15m-1787359500`: it journaled pending provenance at 0.000,
+  3.760, 7.318, and 11.215 seconds, then journaled both verified provenance
+  and `MARKET_STRIKE_LOCKED` at **14.658 seconds** with
+  `source=polymarket_crypto_price_twap_open`, `twapEnabled=true`,
+  `twapLookbackSeconds=60`, and `strike=77819.4820719676`. The current
+  frontend page SSR contains that identical decimal value.
+- **Definition of done:** full `pytest -q`, `git diff --check`, and a healthy
+  active-market dry run pass. The active dry run must record
+  `MARKET_STRIKE_PROVENANCE` and `MARKET_STRIKE_LOCKED` within 30 seconds,
+  with a value equal to the frontend's Price To Beat (decimal value preferred;
+  display-rounded value is an acceptable operator cross-check). **Satisfied
+  on 2026-08-22; D.3 is COMPLETE.** D.4 remains a separate, unstarted phase.
+- **Live behavior:** **Yes, safety-critical.** It restores entry eligibility
+  for valid active 60-second-TWAP markets, while correctly blocking a market
+  whose identity/configuration/opening value cannot be proven.
 
 #### Planned D.4 — unified short-horizon execution-cost and market-regime policy
+
+**Current status (2026-08-22): data-collection implementation deployed; live
+policy selection intentionally pending.** `scripts/market_regime_report.py`
+now reproduces the 12/24/36/48/168-hour maker-BUY 10s/30s markout comparison,
+with a 30-independent-sample threshold before any short-window policy can be
+considered. On the current journal snapshot, the 12h candidate has 3
+10-second samples and the 24–48h candidates each have 8, so none qualifies;
+the report selects `insufficient_out_of_sample_samples`. It also reports the
+weekday/weekend split separately rather than making it a trading rule. New
+fills journal schema v2 with immutable 10s/30s spot continuation, BBO
+bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC
+weekday/weekend features. This change is observability-only: it does not yet
+alter `robust_net`, `econ_gate`, score thresholds, or execution cost. The
+canonical policy migration remains within D.4 and cannot be completed until
+the report has enough current-version observations for an out-of-sample
+selection.
 
 - **Problem and evidence:** The current empirical execution-cost calibration
   loads a single global 10-second maker-BUY markout estimate at startup. Its

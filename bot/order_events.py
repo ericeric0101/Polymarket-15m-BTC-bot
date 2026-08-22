@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
@@ -59,8 +60,29 @@ def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float)
         recent_vol = strategy._compute_recent_volatility(filled_inst)
     except Exception:
         pass
+    inst_key = str(filled_inst)
+    bid = ask = bid_depth = ask_depth = None
+    try:
+        bid, ask = getattr(strategy, "latest_quote_by_inst", {}).get(inst_key, (None, None))
+        bid = Decimal(str(bid)) if bid is not None else None
+        ask = Decimal(str(ask)) if ask is not None else None
+        bid_depth, ask_depth = getattr(strategy, "latest_quote_depth_by_inst", {}).get(inst_key, (None, None))
+    except Exception:
+        bid = ask = bid_depth = ask_depth = None
+
+    def _spot_continuation(window_sec: float) -> Optional[float]:
+        history = getattr(strategy, "external_spot_history", [])
+        try:
+            earlier = [item for item in history if float(item[0]) <= now_ts - window_sec]
+            baseline = Decimal(str(earlier[-1][1])) if earlier else None
+        except Exception:
+            baseline = None
+        if baseline is None or baseline <= 0 or spot is None:
+            return None
+        return float((spot - baseline) / baseline)
+
     return {
-        "markout_context_schema_version": 1,
+        "markout_context_schema_version": 2,
         "slug": slug or None,
         "entry_outcome_side": outcome_side,
         "entry_spot": float(spot) if spot is not None else None,
@@ -70,6 +92,15 @@ def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float)
         "entry_time_left_sec": time_left_sec,
         "entry_side_score": float(getattr(strategy, "side_decision_score", 0) or 0),
         "entry_recent_vol": float(recent_vol) if recent_vol is not None else None,
+        "entry_spot_continuation_10s": _spot_continuation(10.0),
+        "entry_spot_continuation_30s": _spot_continuation(30.0),
+        "entry_bbo_bid": float(bid) if bid is not None else None,
+        "entry_bbo_ask": float(ask) if ask is not None else None,
+        "entry_bbo_spread": float(ask - bid) if bid is not None and ask is not None else None,
+        "entry_bid_depth": float(bid_depth) if bid_depth is not None else None,
+        "entry_ask_depth": float(ask_depth) if ask_depth is not None else None,
+        "entry_weekday_utc": datetime.fromtimestamp(now_ts, timezone.utc).weekday(),
+        "entry_is_weekend_utc": datetime.fromtimestamp(now_ts, timezone.utc).weekday() >= 5,
         "entry_reference_source": str(getattr(strategy, "latest_external_spot_source", "") or ""),
         "entry_twap_degraded": bool(getattr(strategy, "_twap_reference_degraded", False)),
     }

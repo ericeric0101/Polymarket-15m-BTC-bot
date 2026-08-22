@@ -26,7 +26,6 @@ from bot.market_data import (
     fetch_binance_open_price_sync,
     fetch_gamma_market_by_slug,
     fetch_crypto_price_to_beat,
-    extract_price_to_beat_from_market_payload,
 )
 from bot.price_streams import (
     BINANCE_AGGTRADE_WS_URL,
@@ -43,8 +42,10 @@ class SpotPricerMixin:
     """Mixin providing BTC spot price, Binance WS, and fair probability logic."""
 
     _AUTHORITATIVE_STRIKE_SOURCES = {
-        "gamma_price_to_beat",
+        "polymarket_crypto_price_twap_open",
     }
+    _MARKET_STRIKE_INITIAL_RETRY_INTERVAL_SEC = 3.0
+    _MARKET_STRIKE_INITIAL_RESOLUTION_WINDOW_SEC = 30.0
 
     def _is_twap_spot_source(self, source: str) -> bool:
         return str(source or "").startswith("polymarket_chainlink_twap_")
@@ -520,34 +521,31 @@ class SpotPricerMixin:
         slug: str,
         start_ts: int,
         end_ts: int,
-        gamma_price_to_beat: Optional[Decimal],
         gamma_event_slug: str,
         crypto_open_price: Optional[Decimal],
+        twap_enabled: bool,
+        twap_lookback_seconds: Optional[int],
+        attempt_age_sec: float,
         status: str,
     ) -> None:
-        """Journal the competing strike candidates once per material state."""
-        gamma_value = float(gamma_price_to_beat) if gamma_price_to_beat is not None else None
+        """Journal the market configuration and strike retrieval result."""
         crypto_value = float(crypto_open_price) if crypto_open_price is not None else None
-        diff_abs = (
-            float(abs(gamma_price_to_beat - crypto_open_price))
-            if gamma_price_to_beat is not None and crypto_open_price is not None
-            else None
-        )
         payload = {
             "slug": slug,
             "status": status,
-            "gamma_price_to_beat": gamma_value,
             "gamma_event_slug": gamma_event_slug,
             "crypto_open_price": crypto_value,
-            "diff_abs_usd": diff_abs,
-            "gamma_source": "gamma_event_metadata.priceToBeat",
+            "market_identity_source": "gamma_market",
             "crypto_source": "polymarket_crypto_price.openPrice",
             "crypto_request": {
                 "symbol": "BTC",
                 "event_start_ts": int(start_ts),
                 "event_end_ts": int(end_ts),
                 "variant": "fifteen",
+                "twapEnabled": bool(twap_enabled),
+                "twapLookbackSeconds": twap_lookback_seconds,
             },
+            "attempt_age_sec": round(max(0.0, attempt_age_sec), 3),
         }
         signature = repr(payload)
         signatures = getattr(self, "market_strike_last_provenance_signature_by_slug", None)
@@ -560,8 +558,8 @@ class SpotPricerMixin:
         self._record_strike_event(
             event_type="MARKET_STRIKE_PROVENANCE",
             slug=slug,
-            strike=gamma_price_to_beat,
-            source="gamma_price_to_beat" if gamma_price_to_beat is not None else "pending",
+            strike=crypto_open_price,
+            source="polymarket_crypto_price_twap_open" if crypto_open_price is not None else "pending",
             extra=payload,
         )
 
@@ -760,9 +758,10 @@ class SpotPricerMixin:
             strike = self._extract_strike_from_question(question)
             return strike
 
-        # 3) Gamma's market-scoped Price To Beat is the only entry-authoritative
-        # strike. The time-window crypto endpoint is a candidate used solely to
-        # prove (or disprove) semantic equivalence and is never locked by itself.
+        # 3) Gamma verifies the requested market identity and provides the
+        # market's TWAP contract. The frontend's matching crypto-price request
+        # is the authoritative opening Price To Beat; Gamma does not expose a
+        # live eventMetadata.priceToBeat field for these markets.
         end_ts = int(start_ts) + 900
         now_ts = time.time()
         if now_ts >= float(start_ts):
@@ -770,19 +769,36 @@ class SpotPricerMixin:
             if attempt_state is None:
                 attempt_state = {}
                 self.market_strike_crypto_price_last_try_ts_by_slug = attempt_state
+            first_attempt_state = getattr(self, "market_strike_crypto_price_first_try_ts_by_slug", None)
+            if first_attempt_state is None:
+                first_attempt_state = {}
+                self.market_strike_crypto_price_first_try_ts_by_slug = first_attempt_state
             last_try = float(attempt_state.get(slug, 0.0))
-            if now_ts - last_try >= float(self.market_strike_rest_retry_sec):
+            first_try = float(first_attempt_state.setdefault(slug, now_ts))
+            attempt_age_sec = now_ts - first_try
+            retry_due = now_ts - last_try >= self._MARKET_STRIKE_INITIAL_RETRY_INTERVAL_SEC
+            if retry_due and attempt_age_sec <= self._MARKET_STRIKE_INITIAL_RESOLUTION_WINDOW_SEC:
                 attempt_state[slug] = now_ts
                 gamma_market = await fetch_gamma_market_by_slug(slug)
                 gamma_event_slug = str(gamma_market.get("_gamma_event_slug") or "") if isinstance(gamma_market, dict) else ""
-                gamma_ptb = (
-                    extract_price_to_beat_from_market_payload(gamma_market)
-                    if isinstance(gamma_market, dict) and gamma_event_slug == slug
+                crypto_config = gamma_market.get("cryptoMarketConfig") if isinstance(gamma_market, dict) else None
+                if not isinstance(crypto_config, dict) and isinstance(gamma_market, dict):
+                    crypto_config = gamma_market.get("crypto_market_config")
+                twap_enabled = bool(crypto_config.get("twapEnabled") is True) if isinstance(crypto_config, dict) else False
+                try:
+                    twap_lookback_seconds = int(crypto_config.get("twapLookbackSeconds")) if twap_enabled else None
+                except (TypeError, ValueError):
+                    twap_lookback_seconds = None
+                market_identity_verified = gamma_event_slug == slug
+                crypto_open_price = (
+                    await fetch_crypto_price_to_beat(
+                        start_ts=int(start_ts),
+                        end_ts=end_ts,
+                        twap_enabled=twap_enabled,
+                        twap_lookback_seconds=twap_lookback_seconds,
+                    )
+                    if market_identity_verified and twap_enabled and twap_lookback_seconds == 60
                     else None
-                )
-                crypto_open_price = await fetch_crypto_price_to_beat(
-                    start_ts=int(start_ts),
-                    end_ts=end_ts,
                 )
                 status_by_slug = getattr(self, "market_strike_status_by_slug", None)
                 if status_by_slug is None:
@@ -792,48 +808,50 @@ class SpotPricerMixin:
                 if provenance_by_slug is None:
                     provenance_by_slug = {}
                     self.market_strike_provenance_by_slug = provenance_by_slug
-                diff_abs = abs(gamma_ptb - crypto_open_price) if gamma_ptb is not None and crypto_open_price is not None else None
-                status = "verified" if gamma_ptb is not None else "pending_gamma_price_to_beat"
+                status = "verified" if crypto_open_price is not None else "pending_frontend_twap_open"
                 provenance_by_slug[slug] = {
                     "status": status,
-                    "gamma_price_to_beat": gamma_ptb,
                     "gamma_event_slug": gamma_event_slug,
                     "crypto_open_price": crypto_open_price,
-                    "diff_abs_usd": diff_abs,
+                    "twap_enabled": twap_enabled,
+                    "twap_lookback_seconds": twap_lookback_seconds,
+                    "attempt_age_sec": attempt_age_sec,
                 }
                 status_by_slug[slug] = status
                 self._record_strike_provenance(
                     slug=slug,
                     start_ts=int(start_ts),
                     end_ts=end_ts,
-                    gamma_price_to_beat=gamma_ptb,
                     gamma_event_slug=gamma_event_slug,
                     crypto_open_price=crypto_open_price,
+                    twap_enabled=twap_enabled,
+                    twap_lookback_seconds=twap_lookback_seconds,
+                    attempt_age_sec=attempt_age_sec,
                     status=status,
                 )
-                if gamma_ptb is not None:
-                    self.market_strike_cache_by_slug[slug] = gamma_ptb
-                    self.market_strike_source_by_slug[slug] = "gamma_price_to_beat"
+                if crypto_open_price is not None:
+                    self.market_strike_cache_by_slug[slug] = crypto_open_price
+                    self.market_strike_source_by_slug[slug] = "polymarket_crypto_price_twap_open"
                     self.market_strike_provisional_by_slug.pop(slug, None)
                     self.market_strike_provisional_source_by_slug.pop(slug, None)
                     self._strike_pending_log_state_by_slug.pop(slug, None)
                     self._record_strike_event(
                         event_type="MARKET_STRIKE_LOCKED",
                         slug=slug,
-                        strike=gamma_ptb,
-                        source="gamma_price_to_beat",
+                        strike=crypto_open_price,
+                        source="polymarket_crypto_price_twap_open",
                         extra={
                             "strike_status": status,
-                            "crypto_open_price": float(crypto_open_price) if crypto_open_price is not None else None,
-                            "diff_abs_usd": float(diff_abs) if diff_abs is not None else None,
+                            "twap_lookback_seconds": twap_lookback_seconds,
+                            "attempt_age_sec": attempt_age_sec,
                         },
                     )
                     logger.info(
-                        f"[STRIKE] Locked verified market-scoped Price To Beat: "
-                        f"${float(gamma_ptb):.2f} for slug={slug}; "
-                        f"crypto candidate={'None' if crypto_open_price is None else f'${float(crypto_open_price):.2f}'}"
+                        f"[STRIKE] Locked verified frontend TWAP Price To Beat: "
+                        f"${float(crypto_open_price):.2f} for slug={slug}; "
+                        f"twap_window={twap_lookback_seconds}s attempt_age={attempt_age_sec:.1f}s"
                     )
-                    return gamma_ptb
+                    return crypto_open_price
 
         # 4) Local opening references remain provisional until the published
         # Price To Beat is available. They are recorded for diagnostics only.
