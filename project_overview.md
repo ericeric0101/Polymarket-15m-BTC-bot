@@ -369,15 +369,20 @@ only as regression evidence; they are not a second roadmap.
 
 #### Planned D.4 — unified short-horizon execution-cost and market-regime policy
 
-**Current status (2026-08-22): data-collection implementation deployed; live
+**Current status (2026-08-23): data-collection implementation deployed; live
 policy selection intentionally pending.** `scripts/market_regime_report.py`
-now reproduces the 12/24/36/48/168-hour maker-BUY 10s/30s markout comparison,
-with a 30-independent-sample threshold before any short-window policy can be
-considered. On the current journal snapshot, the 12h candidate has 3
-10-second samples and the 24–48h candidates each have 8, so none qualifies;
-the report selects `insufficient_out_of_sample_samples`. It also reports the
-weekday/weekend split separately rather than making it a trading rule. New
-fills journal schema v2 with immutable 10s/30s spot continuation, BBO
+now admits only current `markout_context_schema_version=2` real maker-BUY
+observations, takes one first fill per market/horizon, and reports markout and
+settled counts separately. A 30-independent-**settled**-market threshold is
+required before any short-window policy can be considered. On the current
+journal snapshot, 12h has 11 markouts / 10 settled markets; 24–48h each have
+18 / 17. None qualifies; the report selects
+`insufficient_schema_v2_settled_samples`. The former report mixed 143 legacy
+markouts without D.4 context fields into its candidate counts; those rows are
+still available to the legacy 168h live calibration but are not valid evidence
+for a new regime policy. All current v2 markouts are presently weekend-UTC,
+so no weekday/weekend comparison is yet available. New fills journal schema v2
+with immutable 10s/30s spot continuation, BBO
 bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC
 weekday/weekend features. This change is observability-only: it does not yet
 alter `robust_net`, `econ_gate`, score thresholds, or execution cost. The
@@ -436,6 +441,33 @@ selection.
   P1–P6; P7 must be reconstructed from git/journal/test evidence rather than
   silently declared complete. Remaining stale comments and research/document
   retention decisions also make the current contract harder to maintain.
+  **Balance-admission audit is mandatory:** the active pre-check compares the
+  cached collateral balance with `MAKER_QUOTE_SIZE_USDC * 1.1`; it is not an
+  exact per-order/reserved-collateral check, and an unknown balance currently
+  does not block a BUY. `MAKER_BALANCE_PAUSE_SEC` is parsed and assigned but
+  has no identified runtime consumer. This may leave the venue as the first
+  component to reject an insufficient-pUSD order, or may keep an obsolete
+  operator key alive. These are evidence-backed audit findings, not authority
+  to remove or change the guard before its live dependencies are verified.
+  **Historical probe-data retention is resolved:** on 2026-08-23 the user
+  explicitly approved deletion of the unused June `trade_journal.db.gz`
+  archive and the March/April `pure_probe`, `pure_probe_smoke`, and
+  `shadow_probe` databases (including SQLite sidecars). They are not live,
+  D.4, or canonical-journal inputs. Their manual report scripts remain code
+  candidates for D.5; they must either be removed or be changed to require an
+  operator-supplied recreated research DB, rather than silently assuming the
+  deleted default files exist. `smart_money_wallets.db` remains live-shadow
+  input and is retained.
+  **P5 exit-lifecycle regression fixed (2026-08-24):** a confirmed but
+  transient side invalidation could queue cancellation of a normal 0.97 TP to
+  free the conditional tokens for recovery, then clear before the cancel ack.
+  The old reservation state suppressed both the recovery replacement and the
+  ordinary TP re-creation. The fix releases only the pre-submission
+  `awaiting_existing_sell_cancel` reservation on `SIDE_INVALIDATION_CLEARED`;
+  after the venue cancel acknowledgement, the normal quote loop can restore
+  the TP. It deliberately does not interrupt an already-submitted passive or
+  aggressive recovery exit. Regression coverage is in
+  `tests/test_recovery_exit_ladder.py` and the focused live-path suite.
 - **Required single standard:** after D.4 fixes the canonical data-driven
   regime inputs, regenerate the reader inventory mechanically. Classify every
   key as credential/host, supported local operator override, data-calibrated
@@ -444,10 +476,19 @@ selection.
   and keep advanced values internal or data-calibrated only when their default
   and fallback are tested. There must be one owner for each calculation and
   no duplicate commentary or obsolete audit document claiming live authority.
+  The balance path must have one explicit owner: fresh pUSD collateral,
+  outstanding BUY reservations, intended price × quantity, and the configured
+  inventory cap must be reconciled before admission. Its unknown/stale-data
+  behavior must be fail-safe by an explicitly tested policy, rather than an
+  accidental cache fallback or venue rejection.
 - **Definition of done:** a checked inventory covers the current profile,
   operator example, `AppConfig`, direct environment readers, migration tool,
   and manual scripts; all confirmed dead readers/keys/comments/files are
   removed in one cleanup change; Telegram's supported contract is decided;
+  balance-admission tests cover fresh sufficient/insufficient balance, stale
+  or unavailable balance, reserved collateral, exact order cost, and the
+  sell-only transition; `MAKER_BALANCE_PAUSE_SEC` is either wired to the
+  documented policy or removed only after its lack of dependencies is proven;
   P1–P7 each has a concise current-code/test/journal evidence row (including
   the former P7); one documentation authority remains; full tests, strict env
   contract/migration fixtures, preflight, and `git diff --check` pass.

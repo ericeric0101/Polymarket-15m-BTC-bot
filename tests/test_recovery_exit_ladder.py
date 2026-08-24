@@ -242,3 +242,50 @@ def test_recovery_sell_release_is_requested_before_sellable_qty_is_available() -
         ("sell", "recovery_exit_replace_existing_sell", instrument_id),
     ]
     assert strategy.recovery_exit_stage_by_inst[instrument_id] == "awaiting_existing_sell_cancel"
+
+
+def test_invalidation_clear_releases_only_pending_recovery_handoff() -> None:
+    instrument_id = "up-token"
+
+    class Strategy(TakerExitMixin):
+        current_market_slug = "btc-updown-15m-test"
+
+        def __init__(self, stage):
+            self.recovery_exit_stage_by_inst = {instrument_id: stage}
+            self.events = []
+
+        def _normalize_instrument_id(self, value):
+            return value
+
+        def _instrument_key(self, value):
+            return str(value)
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    pending = Strategy("awaiting_existing_sell_cancel")
+    assert pending._release_pending_recovery_sell_reservation(
+        instrument_id=instrument_id,
+        reason="side_invalidation_cleared_before_recovery_submit",
+    )
+    assert pending.recovery_exit_stage_by_inst == {}
+    assert pending.events == [
+        (
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": "btc-updown-15m-test",
+                "instrument_id": instrument_id,
+                "exit_reason": "invalidation_recovery",
+                "outcome": "recovery_handoff_released",
+                "reason": "side_invalidation_cleared_before_recovery_submit",
+            },
+        ),
+    ]
+
+    submitted = Strategy("passive")
+    assert not submitted._release_pending_recovery_sell_reservation(
+        instrument_id=instrument_id,
+        reason="side_invalidation_cleared_before_recovery_submit",
+    )
+    assert submitted.recovery_exit_stage_by_inst == {instrument_id: "passive"}
+    assert submitted.events == []

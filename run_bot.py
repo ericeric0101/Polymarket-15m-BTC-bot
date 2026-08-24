@@ -907,6 +907,7 @@ class IntegratedBTCStrategy(
         *,
         now_ts: float,
         slug: str,
+        instrument_id: Any,
         side: ActiveSide,
         spot: Optional[Decimal],
         strike: Optional[Decimal],
@@ -949,6 +950,12 @@ class IntegratedBTCStrategy(
                 },
             )
         elif (not confirmed) and prev_confirmed:
+            release_recovery = getattr(self, "_release_pending_recovery_sell_reservation", None)
+            if callable(release_recovery):
+                release_recovery(
+                    instrument_id=instrument_id,
+                    reason="side_invalidation_cleared_before_recovery_submit",
+                )
             self._db_strategy_event(
                 "SIDE_INVALIDATION_CLEARED",
                 {
@@ -1025,6 +1032,7 @@ class IntegratedBTCStrategy(
         spot_supports, invalidation_confirmed = self._update_side_invalidation_state(
             now_ts=now_ts,
             slug=slug,
+            instrument_id=inst_id,
             side=self.active_side,
             spot=current_price,
             strike=price_to_beat,

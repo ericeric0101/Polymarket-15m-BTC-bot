@@ -75,6 +75,41 @@ class TakerExitHost(Protocol):
 class TakerExitMixin:
     """Mixin providing taker exit position management logic."""
 
+    def _release_pending_recovery_sell_reservation(
+        self,
+        *,
+        instrument_id: Any,
+        reason: str,
+    ) -> bool:
+        """Release only a recovery handoff that has not submitted an exit yet.
+
+        A recovery decision first cancels the normal 0.97 TP because both sell
+        paths reserve the same conditional tokens.  If the invalidation clears
+        before that cancel acknowledgement, retaining the handoff reservation
+        suppresses the normal TP indefinitely.  Do not touch an already
+        submitted passive/aggressive recovery order: only the pre-submission
+        ``awaiting_existing_sell_cancel`` state is reversible.
+        """
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return False
+        inst_key = self._instrument_key(inst)
+        stages = getattr(self, "recovery_exit_stage_by_inst", None)
+        if not isinstance(stages, dict) or stages.get(inst_key) != "awaiting_existing_sell_cancel":
+            return False
+        stages.pop(inst_key, None)
+        self._db_strategy_event(
+            "EXIT_AUDIT_OUTCOME",
+            {
+                "slug": str(self.current_market_slug or ""),
+                "instrument_id": inst_key,
+                "exit_reason": "invalidation_recovery",
+                "outcome": "recovery_handoff_released",
+                "reason": reason,
+            },
+        )
+        return True
+
     async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
             return
