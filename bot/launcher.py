@@ -73,6 +73,50 @@ def _strategy_requested_rollover(node: Optional[TradingNode]) -> bool:
         return False
 
 
+def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str]:
+    """Return exposure that makes an automatic node stop unsafe.
+
+    Stopping a Nautilus node invokes the strategy shutdown hook, which cancels
+    every tracked maker order. A scheduled operational refresh must therefore
+    not stop a strategy while it owns conditional-token inventory or a live
+    SELL that protects inventory whose local ledger may still be catching up.
+    This is deliberately a fixed safety invariant, not an operator-tuned
+    timeout or profile setting.
+    """
+    if node is None:
+        return []
+    try:
+        strategies = list(node.trader.strategies())
+    except Exception:
+        return []
+
+    reasons: list[str] = []
+    terminal_states = ("REJECTED", "FILLED", "CANCELED", "CANCELLED")
+    for index, strategy in enumerate(strategies):
+        try:
+            inventory = float(getattr(strategy, "inventory_delta_shares", 0) or 0)
+        except (TypeError, ValueError):
+            inventory = 0.0
+        if inventory > 0:
+            reasons.append(f"strategy[{index}]:inventory={inventory:.6f}")
+
+        active_orders = getattr(strategy, "active_maker_orders", {})
+        if not isinstance(active_orders, dict):
+            continue
+        for order_key, state in active_orders.items():
+            if not isinstance(state, dict):
+                continue
+            side = str(state.get("side", "") or "").lower()
+            if side != "sell" and not str(order_key).lower().startswith("sell:"):
+                continue
+            order = state.get("order")
+            status = str(getattr(order, "status", "") or "").upper()
+            if any(terminal in status for terminal in terminal_states):
+                continue
+            reasons.append(f"strategy[{index}]:active_sell={order_key}")
+    return reasons
+
+
 def _request_clob_l2_api_creds_direct(*, client, clob_host: str) -> Optional[Dict[str, str]]:
     """
     Direct HTTP fallback for CLOB API-key create/derive using py-clob's signer headers.
@@ -475,18 +519,35 @@ def run_integrated_bot(
 
             if auto_rollover_enabled:
                 def _rollover_worker() -> None:
-                    if rollover_stop.wait(auto_rollover_sec):
+                    wait_sec = auto_rollover_sec
+                    last_deferred_log_ts = 0.0
+                    while not rollover_stop.wait(wait_sec):
+                        exposure_reasons = _strategy_rollover_exposure_reasons(node)
+                        if exposure_reasons:
+                            now_ts = time.time()
+                            if now_ts - last_deferred_log_ts >= 60.0:
+                                logger.warning(
+                                    "Auto node rollover deferred: preserving live exit protection "
+                                    f"({'; '.join(exposure_reasons)})."
+                                )
+                                last_deferred_log_ts = now_ts
+                            # Recheck frequently after the original timer expires. The
+                            # normal exit lifecycle, not this operational timer,
+                            # decides when the protected position is gone.
+                            wait_sec = 5.0
+                            continue
+
+                        rollover_requested.set()
+                        logger.warning(
+                            f"Auto node rollover timer reached ({auto_rollover_sec}s). "
+                            "Stopping current node for market refresh."
+                        )
+                        try:
+                            if node is not None:
+                                node.stop()
+                        except Exception as e:
+                            logger.error(f"Failed to stop node during auto rollover: {e}")
                         return
-                    rollover_requested.set()
-                    logger.warning(
-                        f"Auto node rollover timer reached ({auto_rollover_sec}s). "
-                        "Stopping current node for market refresh."
-                    )
-                    try:
-                        if node is not None:
-                            node.stop()
-                    except Exception as e:
-                        logger.error(f"Failed to stop node during auto rollover: {e}")
 
                 rollover_thread = threading.Thread(target=_rollover_worker, daemon=True)
                 rollover_thread.start()

@@ -39,7 +39,7 @@ from bot.market_runtime import (
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
 from bot.ops import should_attempt_quote_watchdog_recovery, should_run_quote_watchdog
-from bot.launcher import _strategy_requested_rollover
+from bot.launcher import _strategy_requested_rollover, _strategy_rollover_exposure_reasons
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -5052,6 +5052,42 @@ def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():
     node.dispose()
     assert requested_before_dispose
     assert _strategy_requested_rollover(node) is False
+
+
+def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
+    class Order:
+        status = "ACCEPTED"
+
+    class Strategy:
+        def __init__(self, inventory, active_orders):
+            self.inventory_delta_shares = inventory
+            self.active_maker_orders = active_orders
+
+    class Trader:
+        def __init__(self, strategies):
+            self._strategies = strategies
+
+        def strategies(self):
+            return self._strategies
+
+    class Node:
+        def __init__(self, strategies):
+            self.trader = Trader(strategies)
+
+    inventory_only = Node([Strategy(Decimal("5.5"), {})])
+    assert _strategy_rollover_exposure_reasons(inventory_only) == [
+        "strategy[0]:inventory=5.500000"
+    ]
+
+    sell_only = Node([Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": Order()}})])
+    assert _strategy_rollover_exposure_reasons(sell_only) == [
+        "strategy[0]:active_sell=sell:up-token"
+    ]
+
+    terminal_sell = Node([
+        Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": SimpleNamespace(status="CANCELED")}})
+    ])
+    assert _strategy_rollover_exposure_reasons(terminal_sell) == []
 
 
 def test_unchanged_top_of_book_emits_bounded_heartbeat():

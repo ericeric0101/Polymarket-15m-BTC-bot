@@ -468,6 +468,16 @@ selection.
   the TP. It deliberately does not interrupt an already-submitted passive or
   aggressive recovery exit. Regression coverage is in
   `tests/test_recovery_exit_ladder.py` and the focused live-path suite.
+  **Operational rollover exit-safety fix (2026-08-24):** an hourly automatic
+  node refresh could stop in the middle of a held position. Strategy shutdown
+  cancels all tracked maker orders, including a successfully submitted 0.97
+  TP; this was observed after a BUY at 23:06:49, TP submission at 23:07:04,
+  and rollover stop at 23:07:33. The launcher now defers only the automatic
+  rollover while any strategy reports positive inventory or a non-terminal
+  SELL, polling every five seconds and logging the safety hold at most once per
+  minute. It resumes the normal operational refresh once exit protection is
+  gone. This is a fixed safety invariant rather than another `.env` knob;
+  regression coverage is in `tests/test_live_path_regressions.py`.
 - **Required single standard:** after D.4 fixes the canonical data-driven
   regime inputs, regenerate the reader inventory mechanically. Classify every
   key as credential/host, supported local operator override, data-calibrated
