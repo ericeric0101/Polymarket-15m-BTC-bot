@@ -68,3 +68,57 @@ def test_report_excludes_legacy_markouts_and_requires_settlement(tmp_path, capsy
     assert summary["markout_sample_count"] == 2
     assert summary["settled_sample_count"] == 1
     assert report["selection"]["reason"] == "insufficient_schema_v2_settled_samples"
+
+
+def test_report_walk_forward_uses_only_embargoed_settled_markets(tmp_path, capsys, monkeypatch):
+    module = _load_report_module()
+    db_path = tmp_path / "journal.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE order_events (ts TEXT, run_id TEXT, event_type TEXT, side TEXT, payload_json TEXT)")
+    conn.execute("CREATE TABLE strategy_events (ts TEXT, run_id TEXT, event_type TEXT, payload_json TEXT)")
+    base = {
+        "liquidity_class": "maker",
+        "horizon_sec": 10,
+        "markout_context_schema_version": 2,
+        "entry_is_weekend_utc": False,
+    }
+    _event(
+        conn,
+        "order_events",
+        "2026-08-22T00:00:00+00:00",
+        "FILL_MARKOUT",
+        {**base, "slug": "first", "signed_markout_ps": -0.02},
+        side="BUY",
+    )
+    _event(
+        conn,
+        "order_events",
+        "2026-08-22T00:16:00+00:00",
+        "FILL_MARKOUT",
+        {**base, "slug": "second", "signed_markout_ps": -0.04},
+        side="BUY",
+    )
+    _event(conn, "strategy_events", "2026-08-22T00:15:00+00:00", "MARKET_SETTLEMENT", {"slug": "first"})
+    _event(conn, "strategy_events", "2026-08-22T00:31:00+00:00", "MARKET_SETTLEMENT", {"slug": "second"})
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "market_regime_report.py",
+            "--db",
+            str(db_path),
+            "--min-samples",
+            "1",
+            "--oos-min-samples",
+            "1",
+        ],
+    )
+    assert module.main() == 0
+    report = json.loads(capsys.readouterr().out)
+
+    oos = report["walk_forward_oos"]["12"]
+    assert oos["evaluation_count"] == 1
+    assert oos["mean_estimated_penalty_per_share"] == 0.02
+    assert oos["mean_actual_adverse_markout_per_share"] == 0.04

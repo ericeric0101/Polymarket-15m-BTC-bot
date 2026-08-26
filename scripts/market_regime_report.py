@@ -11,6 +11,7 @@ from datetime import datetime
 
 WINDOWS = (12, 24, 36, 48, 168)
 MARKOUT_CONTEXT_SCHEMA_VERSION = 2
+SETTLEMENT_EMBARGO_SEC = 15 * 60
 
 
 def _adverse(payload: dict) -> float:
@@ -35,6 +36,86 @@ def _summary(observations) -> dict[str, float | int] | None:
         "adverse_markout_per_share": sum(min(value, cap) for value in values) / len(values),
         "raw_mean_adverse_markout_per_share": sum(values) / len(values),
         "winsor_cap_per_share": cap,
+    }
+
+
+def _walk_forward_oos(
+    observations,
+    *,
+    window_hours: int,
+    min_train_samples: int,
+) -> dict[str, object]:
+    """Score a penalty estimate using only settled, embargoed prior markets.
+
+    The target is the first 10-second maker-BUY markout for a later settled
+    market.  The 15-minute embargo prevents a market's own outcome or an
+    adjacent still-open market from entering its calibration history.
+    """
+    eligible = sorted(
+        [(ts, payload) for ts, payload in observations if payload.get("settled")],
+        key=lambda item: item[0],
+    )
+    evaluations = []
+    for target_ts, target_payload in eligible:
+        history_start = target_ts.timestamp() - (window_hours * 3600)
+        history_end = target_ts.timestamp() - SETTLEMENT_EMBARGO_SEC
+        history = [
+            (ts, payload)
+            for ts, payload in eligible
+            if history_start <= ts.timestamp() < history_end
+        ]
+        if len(history) < min_train_samples:
+            continue
+        estimate = _summary(history)
+        if estimate is None:
+            continue
+        actual = _adverse(target_payload)
+        evaluations.append(
+            {
+                "target_ts": target_ts.isoformat(),
+                "actual_adverse_markout_per_share": actual,
+                "estimated_penalty_per_share": estimate["adverse_markout_per_share"],
+                "training_sample_count": len(history),
+                "target_is_weekend_utc": bool(target_payload.get("entry_is_weekend_utc")),
+            }
+        )
+    if not evaluations:
+        return {
+            "evaluation_count": 0,
+            "reason": "insufficient_embargoed_training_samples",
+        }
+    actuals = [float(item["actual_adverse_markout_per_share"]) for item in evaluations]
+    estimates = [float(item["estimated_penalty_per_share"]) for item in evaluations]
+    by_regime = {}
+    for weekend in (False, True):
+        items = [item for item in evaluations if item["target_is_weekend_utc"] == weekend]
+        if not items:
+            continue
+        regime_actuals = [float(item["actual_adverse_markout_per_share"]) for item in items]
+        regime_estimates = [float(item["estimated_penalty_per_share"]) for item in items]
+        by_regime["weekend" if weekend else "weekday"] = {
+            "evaluation_count": len(items),
+            "mean_actual_adverse_markout_per_share": sum(regime_actuals) / len(items),
+            "mean_estimated_penalty_per_share": sum(regime_estimates) / len(items),
+        }
+    return {
+        "evaluation_count": len(evaluations),
+        "first_target_ts": evaluations[0]["target_ts"],
+        "last_target_ts": evaluations[-1]["target_ts"],
+        "mean_actual_adverse_markout_per_share": sum(actuals) / len(actuals),
+        "mean_estimated_penalty_per_share": sum(estimates) / len(estimates),
+        "mean_signed_error_per_share": sum(
+            actual - estimate for actual, estimate in zip(actuals, estimates)
+        ) / len(actuals),
+        "mean_absolute_error_per_share": sum(
+            abs(actual - estimate) for actual, estimate in zip(actuals, estimates)
+        ) / len(actuals),
+        "underestimate_rate": sum(
+            actual > estimate for actual, estimate in zip(actuals, estimates)
+        ) / len(actuals),
+        "training_sample_count_min": min(int(item["training_sample_count"]) for item in evaluations),
+        "training_sample_count_max": max(int(item["training_sample_count"]) for item in evaluations),
+        "by_target_regime": by_regime,
     }
 
 
@@ -77,6 +158,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default="./logs/trade_journal.db")
     parser.add_argument("--min-samples", type=int, default=30)
+    parser.add_argument(
+        "--oos-min-samples",
+        type=int,
+        default=30,
+        help="Minimum independent walk-forward evaluations before a policy can be reviewed.",
+    )
     args = parser.parse_args()
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     rows = conn.execute(
@@ -109,6 +196,7 @@ def main() -> int:
         "latest_observation": latest.isoformat(),
         "candidate_windows": {},
         "weekday_weekend": {},
+        "walk_forward_oos": {},
     }
     for hours in WINDOWS:
         cutoff = latest.timestamp() - hours * 3600
@@ -123,17 +211,42 @@ def main() -> int:
             if bool(payload.get("entry_is_weekend_utc")) == weekend
         ]
         report["weekday_weekend"]["weekend" if weekend else "weekday"] = _summary(regime_observations)
+    primary_observations = _first_per_market(
+        observations,
+        cutoff=float("-inf"),
+        horizon=10,
+    )
+    for hours in WINDOWS:
+        report["walk_forward_oos"][str(hours)] = _walk_forward_oos(
+            primary_observations,
+            window_hours=hours,
+            min_train_samples=args.min_samples,
+        )
     viable = [
         hours
         for hours in (12, 24, 36, 48)
         if (report["candidate_windows"][str(hours)]["10"] or {}).get("settled_sample_count", 0)
         >= args.min_samples
     ]
+    oos_viable = [
+        hours
+        for hours in viable
+        if int(report["walk_forward_oos"][str(hours)].get("evaluation_count", 0))
+        >= args.oos_min_samples
+    ]
+    if not viable:
+        reason = "insufficient_schema_v2_settled_samples"
+    elif not oos_viable:
+        reason = "insufficient_out_of_sample_evaluations"
+    else:
+        reason = "requires_operator_review"
     report["selection"] = {
         "selected_window_hours": None,
-        "reason": "insufficient_schema_v2_settled_samples" if not viable else "requires_out_of_sample_review",
+        "reason": reason,
         "minimum_samples": args.min_samples,
+        "minimum_oos_evaluations": args.oos_min_samples,
         "eligible_candidates": viable,
+        "oos_eligible_candidates": oos_viable,
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

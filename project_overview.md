@@ -369,26 +369,56 @@ only as regression evidence; they are not a second roadmap.
 
 #### Planned D.4 — unified short-horizon execution-cost and market-regime policy
 
-**Current status (2026-08-23): data-collection implementation deployed; live
-policy selection intentionally pending.** `scripts/market_regime_report.py`
-now admits only current `markout_context_schema_version=2` real maker-BUY
-observations, takes one first fill per market/horizon, and reports markout and
-settled counts separately. A 30-independent-**settled**-market threshold is
-required before any short-window policy can be considered. On the current
-journal snapshot, 12h has 11 markouts / 10 settled markets; 24–48h each have
-18 / 17. None qualifies; the report selects
-`insufficient_schema_v2_settled_samples`. The former report mixed 143 legacy
-markouts without D.4 context fields into its candidate counts; those rows are
-still available to the legacy 168h live calibration but are not valid evidence
-for a new regime policy. All current v2 markouts are presently weekend-UTC,
-so no weekday/weekend comparison is yet available. New fills journal schema v2
-with immutable 10s/30s spot continuation, BBO
+**Current status (2026-08-26): data collection and the first reproducible
+walk-forward report are deployed; live policy selection remains intentionally
+pending.** `scripts/market_regime_report.py` admits only current
+`markout_context_schema_version=2` real maker-BUY observations and takes one
+first fill per market/horizon. It now evaluates each candidate penalty using
+only already-settled prior markets with a 15-minute embargo, so a market's own
+outcome or an adjacent open market cannot enter its calibration history. The
+report requires 30 independent settled training markets and 30 independent
+out-of-sample evaluations before a candidate can be reviewed; it never changes
+live policy.
+
+- **Observed snapshot (latest markout 2026-08-26T13:50:50Z):** The 10-second
+  and 30-second horizons each contain 55 independent v2 markets, 50 of which
+  are settled. The 48-hour 10-second candidate has 35 observations / 31
+  settled markets and is the only 12–48-hour candidate to pass the training
+  threshold. Its winsorized-p90 penalty is 0.03729 per share (raw mean
+  0.04300; cap 0.135), compared with 0.03564 per share across the available
+  v2 168-hour data. This is not a selected live value.
+- **Observed OOS result:** 12h, 24h, and 36h have no embargoed evaluation with
+  30 prior settled markets. 48h has only three OOS targets: realized adverse
+  markout averaged 0.04667 per share versus a 0.03743 estimate. The v2 168h
+  comparator has 20 OOS targets, with realized 0.05575 versus estimated
+  0.03445 per share, 0.02130 mean underestimation, and a 45% underestimation
+  rate. These are warning observations, not sufficient evidence to select a
+  48h policy. The report correctly returns
+  `insufficient_out_of_sample_evaluations`.
+- **Weekday/weekend result:** Weekday has 37 observations / 33 settled,
+  penalty 0.03581 per share; weekend has 18 / 17, penalty 0.03861. The
+  difference is only 0.00280 per share and its bootstrap interval crosses
+  zero. All weekend observations come from a single Saturday and there are no
+  weekend OOS targets. Do not introduce a weekday/weekend multiplier or a
+  weekend profile.
+- **Other regime observations:** The 300–450-second entry-time bucket has a
+  0.0659 per-share penalty (16 markets), compared with 0.0255 at 450–600
+  seconds (38 markets). Wider BBO spread and higher realized quote volatility
+  also show higher adverse markout directionally. Every subgroup remains too
+  small for a live branch; retain them as journaled shadow features only.
+- **Current decision:** Make no live D.4 change. Retain the existing 168-hour
+  global fallback (the latest live calibration was 0.03468 per share) while
+  collecting data. The 48h 0.03729 value and weekend 0.03861 value are
+  shadow references, not profile settings. Reconsider only after the 48h
+  candidate has at least 30 independent OOS targets and a pre-specified
+  comparison demonstrates improved or preserved realized robust outcome
+  without weakening risk limits. A separate weekday/weekend policy also
+  requires independent, multi-weekend training and OOS evidence.
+
+New fills journal schema v2 with immutable 10s/30s spot continuation, BBO
 bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC
-weekday/weekend features. This change is observability-only: it does not yet
-alter `robust_net`, `econ_gate`, score thresholds, or execution cost. The
-canonical policy migration remains within D.4 and cannot be completed until
-the report has enough current-version observations for an out-of-sample
-selection.
+weekday/weekend features. This remains observability-only: it does not alter
+`robust_net`, `econ_gate`, score thresholds, or execution cost.
 
 - **Problem and evidence:** The current empirical execution-cost calibration
   loads a single global 10-second maker-BUY markout estimate at startup. Its
