@@ -5079,6 +5079,17 @@ def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
         "strategy[0]:inventory=5.500000"
     ]
 
+    # The sell path itself rejects quantities below 0.01. A fee residual at
+    # this scale has no live exit order to protect and must not wedge a stale
+    # node forever.
+    dust_only = Node([Strategy(Decimal("0.0055"), {})])
+    assert _strategy_rollover_exposure_reasons(dust_only) == []
+
+    min_sellable_inventory = Node([Strategy(Decimal("0.01"), {})])
+    assert _strategy_rollover_exposure_reasons(min_sellable_inventory) == [
+        "strategy[0]:inventory=0.010000"
+    ]
+
     sell_only = Node([Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": Order()}})])
     assert _strategy_rollover_exposure_reasons(sell_only) == [
         "strategy[0]:active_sell=sell:up-token"

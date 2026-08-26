@@ -48,6 +48,13 @@ from telegram_bot import start_telegram_bot_thread
 from telegram_notifier import TelegramNotifier
 
 
+# This is the execution layer's minimum nonzero quantity: quote submission
+# treats anything below it as unsellable (see apply_sellable_inventory_guard).
+# Keep automatic-rollover protection consistent so fee residual dust cannot
+# indefinitely prevent a stale-instrument refresh.
+_MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES = 0.01
+
+
 def _install_fresh_main_thread_event_loop() -> None:
     try:
         current_loop = asyncio.get_event_loop_policy().get_event_loop()
@@ -97,7 +104,7 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
             inventory = float(getattr(strategy, "inventory_delta_shares", 0) or 0)
         except (TypeError, ValueError):
             inventory = 0.0
-        if inventory > 0:
+        if inventory >= _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES:
             reasons.append(f"strategy[{index}]:inventory={inventory:.6f}")
 
         active_orders = getattr(strategy, "active_maker_orders", {})
