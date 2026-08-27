@@ -511,6 +511,55 @@ weekday/weekend features. This remains observability-only: it does not alter
   residual on 2026-08-25. It resumes the normal operational refresh once exit
   protection is gone. This is a fixed safety invariant rather than another `.env` knob;
   regression coverage is in `tests/test_live_path_regressions.py`.
+  **P5 loss-path audit (2026-08-22 through 2026-08-26):** the canonical
+  journal contains 15 settled negative cycles (aggregate **-$67.97**, before
+  treating fee dust as a meaningful position). Six exited at $0.001–$0.08 and
+  realized **-$29.11**; nine had no effective exit fill and settled worthless
+  for **-$38.86**. Six of those nine did submit the near-close emergency path,
+  but it requested IOC and the venue recorded it as FOK, so lack of a single
+  full-size match left the entire position to settlement. The remaining three
+  had no emergency-fill record; their journaled policy state was
+  `hold_to_redeem_enabled` until the end or an invalidation only appeared too
+  late. Ten of the 15 markets did record recovery decisions blocked by the
+  50% floor; their best blocked recovery ratios ranged from 31.9% to 49.3%.
+  The other five have no such block record, so their losses cannot be used as
+  evidence for lowering that floor. This is evidence that the current loss
+  outcome is not explainable by one threshold alone.
+  The reviewed 2026-08-26 UP loss (`btc-updown-15m-1787779800`, bought 10 at
+  $0.67, settled -$6.70) shows all three linked mechanisms: at $0.30 the
+  invalidation recovery ratio was 44.8%, below the active 50% floor; a
+  transient qualifying window at $0.34 cleared before the TP-cancel handoff
+  could submit; and the later $0.41 window (61.2%) began the TP replacement
+  but had deteriorated to $0.13 by the emergency submission, which the venue
+  rejected as non-fillable FOK. A later $0.01 attempt also did not produce a
+  fill. BBO alone cannot prove that all 9.99 shares were executable at $0.34
+  or $0.41, because the journal does not yet retain an L2 executable-depth
+  snapshot at the decision point.
+  **Contemporaneous winner control (same 2026-08-22 onward journal):** among
+  40 settled profitable cycles, 14 had a recorded best bid below 70% of entry
+  at some point and nine fell below 50% of entry before later winning. More
+  importantly, six of those winners had an actual
+  `recovery_ratio_below_min` decision while a side invalidation was confirmed;
+  their blocked recovery ratios ranged from 21.3% to 46.7%, and all later
+  recovered to a profit. Thus this is not merely ordinary intramarket
+  volatility before an intact thesis: lowering the recovery floor could have
+  exited real winners after the same confirmed-invalidation gate. The control
+  set must therefore include winner and loser price paths, confirmation state,
+  time-to-close, and executable liquidity—not just the loss sample or a
+  scalar volatility measure.
+  **D.5/P5 required exit-policy work (not D.4):** keep one recovery/urgent
+  exit owner and add the missing decision-time execution evidence (L2 depth,
+  available size, requested versus venue-effective TIF, cancel-ack latency,
+  fill/reject/remaining quantity). Use the 15-cycle loss set plus subsequent
+  independent data to replay candidate policies: the current 50% recovery
+  floor, bounded lower-recovery exits, and a venue-compatible partial-fill
+  / sliced IOC-or-FAK route. Select none merely because it reduces an
+  individual loss; it must improve or preserve out-of-sample realized outcome
+  under explicit loss and liquidity limits. Any change to the recovery floor,
+  TP-cancel/replacement sequence, quantity, or FOK/partial-fill behavior is a
+  separately approved **live-behavior change** after D.4, with full replay and
+  focused exit-ladder tests. Do not claim that an exit was available from a
+  top-of-book price without enough depth to execute the requested quantity.
 - **Required single standard:** after D.4 fixes the canonical data-driven
   regime inputs, regenerate the reader inventory mechanically. Classify every
   key as credential/host, supported local operator override, data-calibrated
@@ -532,7 +581,10 @@ weekday/weekend features. This remains observability-only: it does not alter
   or unavailable balance, reserved collateral, exact order cost, and the
   sell-only transition; `MAKER_BALANCE_PAUSE_SEC` is either wired to the
   documented policy or removed only after its lack of dependencies is proven;
-  P1–P7 each has a concise current-code/test/journal evidence row (including
+  P5 exit coverage includes a reproducible loss-path report that separates
+  low-price fills, FOK/non-fillable emergency attempts, and hold-to-redeem
+  settlements, and records executable depth/latency for future cases; P1–P7
+  each has a concise current-code/test/journal evidence row (including
   the former P7); one documentation authority remains; full tests, strict env
   contract/migration fixtures, preflight, and `git diff --check` pass.
 - **Live behavior:** Removing dead code/comments/docs is **No**. Any
