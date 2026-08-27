@@ -2,11 +2,13 @@ from pathlib import Path
 from decimal import Decimal
 
 from bot.app_config import AppConfig
+from bot.runtime_env import CORE_ENV_KEYS
 from scripts.inspect_env_contract import OPERATOR_KEYS, _code_keys, _keys
 
 
 def test_operator_template_has_no_duplicate_or_empty_keys():
-    assert len(OPERATOR_KEYS) == 54
+    assert len(OPERATOR_KEYS) == 53
+    assert "AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT" not in CORE_ENV_KEYS
     assert all(key and key.upper() == key for key in OPERATOR_KEYS)
     template = Path(__file__).parents[1] / "config" / "operator.env.example"
     assert _keys(template) == OPERATOR_KEYS

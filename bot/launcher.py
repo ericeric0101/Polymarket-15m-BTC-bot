@@ -53,6 +53,17 @@ from telegram_notifier import TelegramNotifier
 # Keep automatic-rollover protection consistent so fee residual dust cannot
 # indefinitely prevent a stale-instrument refresh.
 _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES = 0.01
+_MARKET_DISCOVERY_RETRY_SEC = 15.0
+
+
+class MarketDiscoveryUnavailable(RuntimeError):
+    """Gamma has not published a usable current/future BTC market yet.
+
+    This is an availability condition, not a strategy or credential failure.
+    A node must never be built without instrument IDs, but the launcher should
+    wait and retry rather than treat a transient Gamma publication gap as an
+    unexpected node crash.
+    """
 
 
 def _install_fresh_main_thread_event_loop() -> None:
@@ -348,7 +359,6 @@ def run_integrated_bot(
     auto_rollover_sec = 3600
     auto_rollover_cooldown_sec = 3
     auto_rollover_max_failures = 5
-    auto_restart_on_unexpected_exit = os.getenv("AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT", "0").strip().lower() in ("1", "true", "yes", "on")
     logger.info(
         "Startup config: "
         f"mode={'SIMULATION' if simulation else 'LIVE'} "
@@ -358,7 +368,7 @@ def run_integrated_bot(
     )
     if startup_verbose:
         logger.info(
-            f"Startup detail: restart_on_unexpected_exit={'on' if auto_restart_on_unexpected_exit else 'off'} "
+            f"Startup detail: unexpected_exit_restart=on "
             f"rollover_cooldown={auto_rollover_cooldown_sec}s max_failures={auto_rollover_max_failures}"
         )
 
@@ -390,13 +400,19 @@ def run_integrated_bot(
         _install_fresh_main_thread_event_loop()
         btc_slugs = resolve_btc_15m_market_slugs()
         if not btc_slugs:
-            raise RuntimeError("No BTC 15-min market slugs resolved. Refusing to start.")
+            raise MarketDiscoveryUnavailable(
+                "No BTC 15-min market slugs resolved; waiting for Gamma publication."
+            )
 
         primary_slug, primary_instrument_ids = resolve_best_btc_15m_market(btc_slugs)
         if not primary_slug:
-            raise RuntimeError("No primary BTC 15-min slug selected. Refusing to start.")
+            raise MarketDiscoveryUnavailable(
+                "No primary BTC 15-min slug selected; waiting for Gamma publication."
+            )
         if not primary_instrument_ids:
-            raise RuntimeError(f"No instrument IDs resolved for slug {primary_slug}. Refusing to start.")
+            raise MarketDiscoveryUnavailable(
+                f"No instrument IDs resolved for slug {primary_slug}; waiting for Gamma publication."
+            )
 
         load_slug_count = max(1, int(os.getenv("BTC_MARKET_LOAD_SLUG_COUNT", "3")))
         ordered_slugs: List[str] = [primary_slug] + [s for s in btc_slugs if s != primary_slug]
@@ -510,13 +526,16 @@ def run_integrated_bot(
     cycle_idx = 0
     consecutive_failures = 0
     user_stopped = False
+    retry_delay_sec = auto_rollover_cooldown_sec
 
     while True:
         cycle_idx += 1
         cycle_started_at = time.time()
+        retry_delay_sec = auto_rollover_cooldown_sec
         node: Optional[TradingNode] = None
         rollover_requested = threading.Event()
         strategy_requested_rollover = False
+        node_run_returned = False
         rollover_stop = threading.Event()
         rollover_thread: Optional[threading.Thread] = None
 
@@ -561,10 +580,21 @@ def run_integrated_bot(
 
             logger.info(f"Bot cycle {cycle_idx} starting...")
             node.run()
-            consecutive_failures = 0
+            node_run_returned = True
         except KeyboardInterrupt:
             user_stopped = True
             logger.info("Shutdown requested by user.")
+        except MarketDiscoveryUnavailable as e:
+            # Gamma can have a short gap between publishing the deterministic
+            # 15-minute slug and serving its token IDs.  No node was built, so
+            # no order or exit is affected; retry discovery on a bounded,
+            # intentional cadence without consuming the crash-failure budget.
+            rollover_requested.set()
+            retry_delay_sec = _MARKET_DISCOVERY_RETRY_SEC
+            logger.warning(
+                f"Node cycle {cycle_idx} deferred: {e} "
+                f"Retrying market discovery in {retry_delay_sec:.0f}s."
+            )
         except Exception as e:
             consecutive_failures += 1
             recent_errors = list(dashboard_state.recent_errors)[-19:]
@@ -579,6 +609,15 @@ def run_integrated_bot(
             if strategy_requested_rollover:
                 rollover_requested.set()
                 logger.info("Strategy requested rollover (stale instruments)")
+            if node_run_returned:
+                if rollover_requested.is_set():
+                    consecutive_failures = 0
+                else:
+                    # A node that returns without an intended rollover is
+                    # retryable, but must consume the same bounded failure
+                    # budget as an exception so a clean-return loop cannot
+                    # restart forever.
+                    consecutive_failures += 1
             if node is not None:
                 try:
                     node.dispose()
@@ -602,19 +641,11 @@ def run_integrated_bot(
             logger.info("Starting next cycle after scheduled auto rollover...")
         else:
             run_sec = int(time.time() - cycle_started_at)
-            if auto_restart_on_unexpected_exit:
-                logger.warning(
-                    f"Node cycle exited without rollover request (runtime={run_sec}s). "
-                    "Attempting auto rebuild."
-                )
-            else:
-                logger.warning(
-                    f"Node cycle exited without rollover request (runtime={run_sec}s). "
-                    "Stopping loop to avoid restart churn. "
-                    "Set AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT=1 to force auto rebuild."
-                )
-                break
-        time.sleep(auto_rollover_cooldown_sec)
+            logger.warning(
+                f"Node cycle exited without rollover request (runtime={run_sec}s). "
+                "Attempting automatic rebuild."
+            )
+        time.sleep(retry_delay_sec)
 
 
 def acquire_live_process_lock() -> ProcessLock | None:

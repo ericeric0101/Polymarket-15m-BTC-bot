@@ -39,7 +39,12 @@ from bot.market_runtime import (
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
 from bot.ops import should_attempt_quote_watchdog_recovery, should_run_quote_watchdog
-from bot.launcher import _strategy_requested_rollover, _strategy_rollover_exposure_reasons
+from bot.launcher import (
+    MarketDiscoveryUnavailable,
+    _MARKET_DISCOVERY_RETRY_SEC,
+    _strategy_requested_rollover,
+    _strategy_rollover_exposure_reasons,
+)
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -88,6 +93,13 @@ from run_bot import IntegratedBTCStrategy
 class DummyOrder:
     def __init__(self, client_order_id: str) -> None:
         self.client_order_id = client_order_id
+
+
+def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
+    error = MarketDiscoveryUnavailable("instrument IDs not published")
+
+    assert isinstance(error, RuntimeError)
+    assert _MARKET_DISCOVERY_RETRY_SEC == 15.0
 
 
 def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():

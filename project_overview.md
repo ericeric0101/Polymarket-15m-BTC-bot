@@ -511,6 +511,22 @@ weekday/weekend features. This remains observability-only: it does not alter
   residual on 2026-08-25. It resumes the normal operational refresh once exit
   protection is gone. This is a fixed safety invariant rather than another `.env` knob;
   regression coverage is in `tests/test_live_path_regressions.py`.
+  **Gamma publication-gap recovery (2026-08-28):** during an automatic node
+  refresh, Gamma can temporarily return deterministic BTC 15-minute slug
+  candidates without serving the corresponding event/token IDs. Previously
+  this safe refusal to build a node was counted as an unexpected crash, so a
+  deployment with crash-restart disabled stopped entirely. It is now a named
+  market-availability condition: no node and no order are created, and the
+  launcher retries Gamma discovery after 15 seconds without consuming the
+  crash-failure budget. This is operational availability only; it does not
+  relax Gamma/instrument validation or alter any live decision.
+  **Unexpected-node restart ownership (2026-08-28):**
+  `AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT` is retired. An unexpected node exit
+  now always attempts the existing bounded automatic rebuild path; the
+  launcher still aborts after its fixed consecutive-failure limit. This
+  removes a host-local switch that could make identical code stop on one
+  deployment and recover on another. It changes operational availability, not
+  entry, pricing, or exit policy.
   **P5 loss-path audit (2026-08-22 through 2026-08-26):** the canonical
   journal contains 15 settled negative cycles (aggregate **-$67.97**, before
   treating fee dust as a meaningful position). Six exited at $0.001–$0.08 and
