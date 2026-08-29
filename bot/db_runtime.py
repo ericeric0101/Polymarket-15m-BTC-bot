@@ -25,6 +25,7 @@ class StrategyDBRuntimeMixin:
             lookback_hours=lookback_hours,
             horizon_sec=horizon_sec,
             min_samples=min_samples,
+            taipei_weeknight_schema_v2_only=True,
         )
         calibration = calibrations.get("global")
         self.maker_buy_markout_calibrations = calibrations

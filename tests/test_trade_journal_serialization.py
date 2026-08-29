@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from decimal import Decimal
+from datetime import datetime, timezone
 
 import pytest
 
@@ -72,3 +73,32 @@ def test_journal_uses_regime_markout_only_after_that_regime_has_samples(tmp_path
     assert calibrations["global"]["sample_count"] == 3
     assert calibrations["10_30"]["sample_count"] == 3
     assert "30_60" not in calibrations
+
+
+def test_journal_session_calibration_uses_v2_first_fill_per_taipei_weeknight_market(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    payload = {
+        "liquidity_class": "maker", "horizon_sec": 10,
+        "markout_context_schema_version": 2, "slug": "night-market",
+    }
+    db.log_order_event("run", "FILL_MARKOUT", side="BUY", payload={**payload, "signed_markout_ps": -0.02})
+    db.log_order_event("run", "FILL_MARKOUT", side="BUY", payload={**payload, "signed_markout_ps": -0.20})
+    db.log_order_event(
+        "run", "FILL_MARKOUT", side="BUY",
+        payload={**payload, "slug": "day-market", "signed_markout_ps": -0.50},
+    )
+    with sqlite3.connect(db.db_path) as conn:
+        # 2026-08-28 20:00 Taipei (Friday night) and 2026-08-31 10:00 Taipei (Monday day).
+        conn.execute("UPDATE order_events SET ts=? WHERE id=1", ("2026-08-28T12:00:00+00:00",))
+        conn.execute("UPDATE order_events SET ts=? WHERE id=2", ("2026-08-28T12:01:00+00:00",))
+        conn.execute("UPDATE order_events SET ts=? WHERE id=3", ("2026-08-31T02:00:00+00:00",))
+        conn.commit()
+
+    calibrations = db.load_maker_buy_markout_calibrations(
+        lookback_hours=10000, horizon_sec=10, min_samples=1,
+        taipei_weeknight_schema_v2_only=True,
+    )
+
+    assert calibrations["global"]["sample_count"] == 1
+    assert calibrations["global"]["adverse_markout_per_share"] == pytest.approx(0.02)
+    assert calibrations["global"]["source"] == "taipei_weeknight_schema_v2_first_market"

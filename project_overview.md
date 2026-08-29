@@ -369,9 +369,11 @@ only as regression evidence; they are not a second roadmap.
 
 #### Planned D.4 — unified short-horizon execution-cost and market-regime policy
 
-**Current status (2026-08-26): data collection and the first reproducible
-walk-forward report are deployed; live policy selection remains intentionally
-pending.** `scripts/market_regime_report.py` admits only current
+**Current status (2026-08-29): data collection and the first reproducible
+walk-forward report are deployed. The 48h-versus-168h model selection remains
+pending, but the operator has explicitly approved a separate exposure-control
+policy: do not open new BUY positions outside Taipei weekday night sessions.**
+`scripts/market_regime_report.py` admits only current
 `markout_context_schema_version=2` real maker-BUY observations and takes one
 first fill per market/horizon. It now evaluates each candidate penalty using
 only already-settled prior markets with a 15-minute embargo, so a market's own
@@ -406,14 +408,27 @@ live policy.
   seconds (38 markets). Wider BBO spread and higher realized quote volatility
   also show higher adverse markout directionally. Every subgroup remains too
   small for a live branch; retain them as journaled shadow features only.
-- **Current decision:** Make no live D.4 change. Retain the existing 168-hour
-  global fallback (the latest live calibration was 0.03468 per share) while
-  collecting data. The 48h 0.03729 value and weekend 0.03861 value are
-  shadow references, not profile settings. Reconsider only after the 48h
-  candidate has at least 30 independent OOS targets and a pre-specified
+- **Approved exposure-control policy (2026-08-29):** `apply_quote_plan_guards`
+  now blocks **new BUY quotes only** outside the Taipei sessions that start
+  Monday--Friday at 19:00 and end at 07:00 the following day (thus Friday's
+  session may run to Saturday 07:00; Saturday/Sunday nights do not open).
+  The process, SELL/reduce-only exits, cancellation, reconciliation and
+  redemption continue normally. This is not an inference that a regime model
+  is proven; it is an operator-approved safety boundary based on realized
+  operation and avoids trapping existing inventory by shutting the bot down.
+- **Approved live calibration (2026-08-29):** retain the conservative 168h
+  window, but measure it only from the same eligible population: observations
+  on/after 2026-08-22, `markout_context_schema_version=2`, real maker BUYs,
+  Taipei weekday-night entry session, and first 10-second fill per market.
+  At deployment the journal has 62 independent samples: winsorized-P90
+  penalty **$0.03218/share** (raw mean $0.03685; cap $0.125). This single
+  penalty remains the input to `robust_net`/`econ_gate`; no weekday/weekend
+  multiplier or shorter-window profile is installed.
+- **Model-selection decision:** 48h remains unselected. Reconsider only after
+  the 48h candidate has at least 30 independent OOS targets and the fixed
   comparison demonstrates improved or preserved realized robust outcome
-  without weakening risk limits. A separate weekday/weekend policy also
-  requires independent, multi-weekend training and OOS evidence.
+  without weakening risk limits. The weekend stratum still lacks sufficient
+  independent OOS data; it is now intentionally outside the entry policy.
 
 New fills journal schema v2 with immutable 10s/30s spot continuation, BBO
 bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC

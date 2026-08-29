@@ -1,0 +1,45 @@
+"""Taipei trading-session policy for opening new BUY positions.
+
+This deliberately controls entries only.  The process stays alive outside the
+entry session so it can cancel orders, exit inventory, reconcile and redeem.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+
+TAIPEI = ZoneInfo("Asia/Taipei")
+# The policy was approved on 2026-08-29.  Keeping an explicit deployment
+# boundary makes replaying older journal timestamps deterministic.
+ENTRY_SESSION_ENFORCED_FROM_UTC = datetime(2026, 8, 29, tzinfo=timezone.utc)
+MARKOUT_CALIBRATION_START_UTC = datetime(2026, 8, 22, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class EntrySessionDecision:
+    allowed: bool
+    reason: str
+    local_time: datetime
+
+
+def is_taipei_weeknight_entry_session(when: datetime) -> bool:
+    """Allow Mon--Fri 19:00--07:00 Taipei sessions (Friday ends Sat 07:00)."""
+    local = when.astimezone(TAIPEI)
+    if 19 <= local.hour:
+        return local.weekday() < 5
+    if local.hour < 7:
+        # After midnight belongs to the previous calendar day's session.
+        return local.weekday() > 0
+    return False
+
+
+def new_buy_session_decision(now_ts: float) -> EntrySessionDecision:
+    when = datetime.fromtimestamp(float(now_ts), tz=timezone.utc)
+    local = when.astimezone(TAIPEI)
+    if when < ENTRY_SESSION_ENFORCED_FROM_UTC:
+        return EntrySessionDecision(True, "entry_session_policy_not_yet_enforced", local)
+    if is_taipei_weeknight_entry_session(when):
+        return EntrySessionDecision(True, "taipei_weeknight_entry_session", local)
+    return EntrySessionDecision(False, "taipei_day_or_weekend", local)

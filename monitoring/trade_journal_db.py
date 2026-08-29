@@ -11,6 +11,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from bot.entry_session_policy import MARKOUT_CALIBRATION_START_UTC, is_taipei_weeknight_entry_session
+
 from loguru import logger
 
 
@@ -281,6 +283,7 @@ class TradeJournalDB:
         lookback_hours: float,
         horizon_sec: int,
         min_samples: int,
+        taipei_weeknight_schema_v2_only: bool = False,
     ) -> Dict[str, Dict[str, float | int | str]]:
         """Return global fallback plus independently measured entry regimes."""
         try:
@@ -294,19 +297,44 @@ class TradeJournalDB:
                       END AS adverse_markout_per_share,
                       json_extract(payload_json, '$.entry_regime_bucket') AS entry_regime_bucket,
                       CAST(json_extract(payload_json, '$.entry_side_score') AS REAL) AS entry_side_score,
-                      CAST(json_extract(payload_json, '$.entry_time_left_sec') AS REAL) AS entry_time_left_sec
+                      CAST(json_extract(payload_json, '$.entry_time_left_sec') AS REAL) AS entry_time_left_sec,
+                      ts,
+                      json_extract(payload_json, '$.slug') AS slug,
+                      CAST(json_extract(payload_json, '$.markout_context_schema_version') AS INTEGER)
+                        AS markout_context_schema_version
                     FROM order_events
                     WHERE event_type='FILL_MARKOUT'
                       AND side='BUY'
                       AND json_extract(payload_json, '$.liquidity_class')='maker'
                       AND CAST(json_extract(payload_json, '$.horizon_sec') AS INTEGER)=?
                       AND julianday(ts) >= julianday('now', ?)
+                    ORDER BY ts ASC, id ASC
                     """,
                     (int(horizon_sec), f"-{float(lookback_hours):g} hours"),
                 ).fetchall()
         except Exception as e:
             logger.debug(f"TradeJournalDB load markout calibrations failed: {e}")
             return {}
+        if taipei_weeknight_schema_v2_only:
+            selected_rows = []
+            seen_markets: set[str] = set()
+            for row in rows:
+                try:
+                    observed_at = datetime.fromisoformat(str(row[4]).replace("Z", "+00:00"))
+                    slug = str(row[5] or "")
+                    if (
+                        observed_at < MARKOUT_CALIBRATION_START_UTC
+                        or int(row[6] or 0) != 2
+                        or not slug
+                        or slug in seen_markets
+                        or not is_taipei_weeknight_entry_session(observed_at)
+                    ):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                seen_markets.add(slug)
+                selected_rows.append(row)
+            rows = selected_rows
         global_values = [float(row[0] or 0.0) for row in rows]
         global_calibration = _summarize_adverse_markouts(
             global_values,
@@ -317,7 +345,14 @@ class TradeJournalDB:
         if not global_calibration:
             return {}
         calibrations: Dict[str, Dict[str, float | int | str]] = {
-            "global": {**global_calibration, "source": "global_fallback"},
+            "global": {
+                **global_calibration,
+                "source": (
+                    "taipei_weeknight_schema_v2_first_market"
+                    if taipei_weeknight_schema_v2_only
+                    else "global_fallback"
+                ),
+            },
         }
         for bucket in ("10_30", "30_60", "60_plus"):
             calibration = _summarize_adverse_markouts(

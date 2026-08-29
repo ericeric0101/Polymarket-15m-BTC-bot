@@ -1,4 +1,5 @@
 from decimal import Decimal
+from datetime import datetime, timezone
 
 from bot.quoting import apply_quote_plan_guards, set_side_should_quote
 from bot.enums import MarketPhase
@@ -71,3 +72,36 @@ def test_legacy_directional_edge_gate_is_telemetry_not_a_buy_veto():
     )
 
     assert outcome.side_disable_reason_by_side.get("buy") is None
+
+
+def test_quote_plan_guards_blocks_new_buy_but_not_sell_outside_entry_session():
+    side_plan = {
+        "buy": (Decimal("0.50"), object(), True, Decimal("0.10")),
+        "sell": (Decimal("0.52"), object(), True, Decimal("0.10")),
+    }
+    outcome = apply_quote_plan_guards(
+        side_plan=side_plan,
+        quote_sides_mode="both",
+        phase_value=MarketPhase.ACTIVE.value,
+        inventory_delta_shares=Decimal("2"),
+        early_sell_only_sec=0.0,
+        time_left_sec_global=600.0,
+        # Monday 10:00 Taipei, after the policy enforcement date.
+        now_ts=datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc).timestamp(),
+        buy_cooldown_until_ts=0.0,
+        momentum_buy_filter_pct=Decimal("0"),
+        momentum_sell_filter_pct=Decimal("0"),
+        momentum_window_ticks=2,
+        momentum_history=[],
+        fair=Decimal("0.50"),
+        min_fair_price=Decimal("0.05"),
+        max_fair_price=Decimal("0.95"),
+        end_ts=None,
+        min_minutes_to_close=3.0,
+        reduce_only_no_new_sell_last_sec=45,
+        forced_sell_only=False,
+    )
+
+    assert side_plan["buy"][2] is False
+    assert side_plan["sell"][2] is True
+    assert outcome.side_disable_reason_by_side["buy"] == "entry_session_blocked_taipei_day_or_weekend"
