@@ -48,10 +48,10 @@ from telegram_bot import start_telegram_bot_thread
 from telegram_notifier import TelegramNotifier
 
 
-# This is the execution layer's minimum nonzero quantity: quote submission
-# treats anything below it as unsellable (see apply_sellable_inventory_guard).
-# Keep automatic-rollover protection consistent so fee residual dust cannot
-# indefinitely prevent a stale-instrument refresh.
+# The execution layer has a hard lower bound for nonzero balance checks, but a
+# venue SELL must also meet the strategy's configured exchange minimum (5 by
+# default).  Rollover protection uses the latter when available so dust that
+# cannot form an order does not indefinitely prevent a stale-instrument refresh.
 _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES = 0.01
 _MARKET_DISCOVERY_RETRY_SEC = 15.0
 
@@ -115,7 +115,15 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
             inventory = float(getattr(strategy, "inventory_delta_shares", 0) or 0)
         except (TypeError, ValueError):
             inventory = 0.0
-        if inventory >= _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES:
+        try:
+            exchange_min = float(
+                getattr(strategy, "maker_exchange_min_shares", _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES)
+                or _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES
+            )
+        except (TypeError, ValueError):
+            exchange_min = _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES
+        protected_min = max(_MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES, exchange_min)
+        if inventory + 0.000001 >= protected_min:
             reasons.append(f"strategy[{index}]:inventory={inventory:.6f}")
 
         active_orders = getattr(strategy, "active_maker_orders", {})

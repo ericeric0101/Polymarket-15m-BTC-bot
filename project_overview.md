@@ -518,13 +518,14 @@ weekday/weekend features. This remains observability-only: it does not alter
   cancels all tracked maker orders, including a successfully submitted 0.97
   TP; this was observed after a BUY at 23:06:49, TP submission at 23:07:04,
   and rollover stop at 23:07:33. The launcher now defers only the automatic
-  rollover while any strategy reports at least the execution layer's minimum
-  sellable quantity (0.01 share) or a non-terminal SELL, polling every five
-  seconds and logging the safety hold at most once per minute. A fee residual
-  below 0.01 share cannot form a venue SELL and must not wedge stale-market
-  recovery; this correction was verified against the observed 0.0055-share
-  residual on 2026-08-25. It resumes the normal operational refresh once exit
-  protection is gone. This is a fixed safety invariant rather than another `.env` knob;
+  rollover while any strategy reports at least its **configured exchange
+  minimum SELL quantity** (5 shares by default) or a non-terminal SELL,
+  polling every five seconds and logging the safety hold at most once per
+  minute. A residual below that venue minimum cannot form a SELL and must not
+  wedge stale-market recovery; this includes the observed 0.0055-share
+  residual on 2026-08-25 and the 0.01-share residual corrected on 2026-08-31.
+  It resumes the normal operational refresh once exit protection is gone. This
+  is a fixed safety invariant rather than another `.env` knob;
   regression coverage is in `tests/test_live_path_regressions.py`.
   **Gamma publication-gap recovery (2026-08-28):** during an automatic node
   refresh, Gamma can temporarily return deterministic BTC 15-minute slug

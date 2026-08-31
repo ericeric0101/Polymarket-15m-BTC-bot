@@ -5071,9 +5071,11 @@ def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
         status = "ACCEPTED"
 
     class Strategy:
-        def __init__(self, inventory, active_orders):
+        def __init__(self, inventory, active_orders, maker_exchange_min_shares=None):
             self.inventory_delta_shares = inventory
             self.active_maker_orders = active_orders
+            if maker_exchange_min_shares is not None:
+                self.maker_exchange_min_shares = maker_exchange_min_shares
 
     class Trader:
         def __init__(self, strategies):
@@ -5100,6 +5102,16 @@ def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
     min_sellable_inventory = Node([Strategy(Decimal("0.01"), {})])
     assert _strategy_rollover_exposure_reasons(min_sellable_inventory) == [
         "strategy[0]:inventory=0.010000"
+    ]
+
+    # Production's default exchange minimum is 5 shares.  A 0.01-share
+    # residual cannot form a SELL, so it must not keep a stale node alive.
+    configured_dust = Node([Strategy(Decimal("0.01"), {}, Decimal("5"))])
+    assert _strategy_rollover_exposure_reasons(configured_dust) == []
+
+    configured_min_sellable = Node([Strategy(Decimal("5"), {}, Decimal("5"))])
+    assert _strategy_rollover_exposure_reasons(configured_min_sellable) == [
+        "strategy[0]:inventory=5.000000"
     ]
 
     sell_only = Node([Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": Order()}})])
