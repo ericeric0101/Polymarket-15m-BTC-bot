@@ -481,19 +481,23 @@ weekday/weekend features. This remains observability-only: it does not alter
 observation (2026-09-01):** a new read-only
 Hyperliquid Outcome observer is **mainnet WebSocket-only**, using the explicit
 active BTC daily outcome id (`HYPERLIQUID_OUTCOME_DAILY_MARKET_ID`, initially
-`1313`) and the HIP-4 YES/NO side coins. It subscribes to `allMids` and both
-`l2Book` streams with reconnect/resubscribe handling; REST and testnet are not
-price sources or fallbacks. It records local receive time, source age, market
-id and raw YES/NO/BBO prices beside existing Polymarket 15-minute lead/lag
-snapshots (now every five seconds). The daily Outcome id must be updated at
-its market rollover; a stale or disconnected stream is journaled and never
-changes execution behavior.
+`1313`) and generic HIP-4 **side 0/side 1** coins—no unverified YES/NO or
+UP/DOWN semantic label. It subscribes to `allMids` and both `l2Book` streams
+with reconnect/resubscribe handling; REST and testnet are not price sources or
+fallbacks. It separately journals mid/book receive ages, per-side exchange
+timestamps, BBO prices, spread/depth and connection state. A disconnected or
+stale stream is never analysis-available. For daily rollover it may consume
+only a recent (`<=180s`) `OUTCOME_SHADOW_CYCLE` 1d selection from the other
+local Outcome bot's read-only journal, then resubscribes; without fresh local
+authority it retains the explicit configured id rather than guessing.
 `scripts/hyperliquid_outcome_lead_lag_report.py` tests whether the *current*
-Outcome YES move precedes a future 5/15/30/60-second Polymarket UP move.
-This is collection and research only: it has no wallet, order, stop-loss,
-confidence, `robust_net`, or entry-gate connection. The two products have
-different strikes and horizons, so levels must never be treated as directly
-comparable probabilities; only time-aligned changes are eligible for research.
+Outcome side-0 BBO move precedes a future 5/15/30/60-second Polymarket UP
+move. It groups by strategy run, Polymarket slug and Outcome id, and retains
+zero/non-following movements rather than selectively removing them. This is
+collection and research only: it has no wallet, order, stop-loss, confidence,
+`robust_net`, or entry-gate connection. The two products have different
+strikes and horizons, so levels must never be treated as directly comparable
+probabilities; only time-aligned changes are eligible for research.
 
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 

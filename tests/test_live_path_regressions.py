@@ -4392,9 +4392,11 @@ def test_external_lead_lag_observation_records_each_horizon_once():
             self.latest_external_spot_source_ts = 100.0
             self.hyperliquid_outcome_observer = type("Observer", (), {
                 "snapshot": lambda _self: {
-                    "available": True, "age_sec": 0.1, "source": "test",
-                    "market_id": 99, "yes_mid": 0.60, "no_mid": 0.40,
-                    "btc_mark": 100.0, "target_price": 99.0, "expiry_utc": "20260902-0300",
+                    "available": True, "analysis_available": True, "stream_connected": True,
+                    "mids_age_sec": 0.1, "side0_book_age_sec": 0.1, "side1_book_age_sec": 0.1,
+                    "source": "test", "market_id": 99, "side0_all_mid": 0.60,
+                    "side1_all_mid": 0.40, "side0_bbo_mid": 0.60, "side1_bbo_mid": 0.40,
+                    "side0_bid": 0.59, "side0_ask": 0.61, "btc_mark": 100.0,
                 },
             })()
             self.events = []
@@ -4419,7 +4421,7 @@ def test_external_lead_lag_observation_records_each_horizon_once():
     assert all(payload["elapsed_sec"] >= payload["horizon_target_sec"] for payload in first_outcomes)
     assert all(math.isclose(payload["up_mid_change_ps"], 0.05) for payload in first_outcomes)
     assert all(math.isclose(payload["binance_return_bps"], 100.0) for payload in first_outcomes)
-    assert all(math.isclose(payload["hyperliquid_outcome_yes_mid_change_ps"], 0.0) for payload in first_outcomes)
+    assert all(math.isclose(payload["hyperliquid_outcome_side0_bbo_mid_change_ps"], 0.0) for payload in first_outcomes)
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():
