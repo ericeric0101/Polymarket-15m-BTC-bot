@@ -1,19 +1,23 @@
-from bot.hyperliquid_outcome_observer import discover_btc_daily_outcome
+from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver, outcome_coins
 from scripts.hyperliquid_outcome_lead_lag_report import build_report
 
 
-def test_discovers_nearest_btc_daily_outcome_and_uses_canonical_side_coins():
-    market = discover_btc_daily_outcome({"outcomes": [
-        {"outcome": 100, "description": "class:priceBinary|underlying:BTC|expiry:20260903-0300|targetPrice:80000|period:1d"},
-        {"outcome": 99, "description": "class:priceBinary|underlying:BTC|expiry:20260902-0300|targetPrice:79000|period:1d"},
-        {"outcome": 98, "description": "class:priceBinary|underlying:ETH|expiry:20260902-0300|targetPrice:3000|period:1d"},
-    ]})
+def test_mainnet_ws_observer_uses_canonical_side_coins_and_stream_updates():
+    assert outcome_coins(1313) == ("#13130", "#13131")
+    observer = HyperliquidOutcomeObserver(market_id=1313, ws_url="wss://example.invalid/ws")
+    observer._on_message({"channel": "allMids", "data": {"mids": {
+        "#13130": "0.044", "#13131": "0.956", "BTC": "77499.5",
+    }}})
+    observer._on_message({"channel": "l2Book", "data": {
+        "coin": "#13130", "time": 123, "levels": [[{"px": "0.044"}], [{"px": "0.04662"}]],
+    }})
+    snapshot = observer.snapshot()
 
-    assert market is not None
-    assert market.outcome_id == 99
-    assert market.yes_coin == "#990"
-    assert market.no_coin == "#991"
-    assert str(market.target_price) == "79000"
+    assert snapshot["available"] is True
+    assert snapshot["source"] == "hyperliquid_outcome_mainnet_ws"
+    assert snapshot["yes_mid"] == 0.044
+    assert snapshot["yes_bid"] == 0.044
+    assert snapshot["yes_ask"] == 0.04662
 
 
 def test_lead_lag_report_compares_current_outcome_move_to_future_polymarket_move():

@@ -3223,7 +3223,11 @@ class IntegratedBTCStrategy(
         self.hyperliquid_outcome_observer.start()
         self._db_strategy_event(
             "HYPERLIQUID_OUTCOME_OBSERVER_STARTED",
-            {"read_only": True, "source": "hyperliquid_outcome_rest", "cadence_sec": 2.0},
+            {
+                "read_only": True,
+                "source": "hyperliquid_outcome_mainnet_ws",
+                "market_id": self.hyperliquid_outcome_observer.market_id,
+            },
         )
         self._db_strategy_event(
             "STRATEGY_START",

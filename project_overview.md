@@ -479,11 +479,15 @@ weekday/weekend features. This remains observability-only: it does not alter
 
 **Approved D.4 observability extension — HIP-4 Outcome cross-market
 observation (2026-09-01):** a new read-only
-Hyperliquid Outcome observer discovers the nearest BTC `period:1d`
-`priceBinary` contract from `outcomeMeta`, then records its YES/NO `allMids`
-every two seconds and BBO evidence every 15 seconds. It records the local
-receive time, source age, market id, daily strike/expiry and raw prices beside
-the existing Polymarket 15-minute lead/lag snapshots (now every five seconds).
+Hyperliquid Outcome observer is **mainnet WebSocket-only**, using the explicit
+active BTC daily outcome id (`HYPERLIQUID_OUTCOME_DAILY_MARKET_ID`, initially
+`1313`) and the HIP-4 YES/NO side coins. It subscribes to `allMids` and both
+`l2Book` streams with reconnect/resubscribe handling; REST and testnet are not
+price sources or fallbacks. It records local receive time, source age, market
+id and raw YES/NO/BBO prices beside existing Polymarket 15-minute lead/lag
+snapshots (now every five seconds). The daily Outcome id must be updated at
+its market rollover; a stale or disconnected stream is journaled and never
+changes execution behavior.
 `scripts/hyperliquid_outcome_lead_lag_report.py` tests whether the *current*
 Outcome YES move precedes a future 5/15/30/60-second Polymarket UP move.
 This is collection and research only: it has no wallet, order, stop-loss,
