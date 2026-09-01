@@ -4390,6 +4390,13 @@ def test_external_lead_lag_observation_records_each_horizon_once():
             self.latest_external_spot = Decimal("99.0")
             self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
             self.latest_external_spot_source_ts = 100.0
+            self.hyperliquid_outcome_observer = type("Observer", (), {
+                "snapshot": lambda _self: {
+                    "available": True, "age_sec": 0.1, "source": "test",
+                    "market_id": 99, "yes_mid": 0.60, "no_mid": 0.40,
+                    "btc_mark": 100.0, "target_price": 99.0, "expiry_utc": "20260902-0300",
+                },
+            })()
             self.events = []
 
         def _db_strategy_event(self, event_type, payload):
@@ -4407,11 +4414,12 @@ def test_external_lead_lag_observation_records_each_horizon_once():
     outcomes = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_OUTCOME"]
     first_id = snapshots[0]["observation_id"]
     first_outcomes = [payload for payload in outcomes if payload["observation_id"] == first_id]
-    assert len(snapshots) == 4
+    assert len(snapshots) == 5
     assert [payload["horizon_target_sec"] for payload in first_outcomes] == [5, 15, 30, 60]
     assert all(payload["elapsed_sec"] >= payload["horizon_target_sec"] for payload in first_outcomes)
     assert all(math.isclose(payload["up_mid_change_ps"], 0.05) for payload in first_outcomes)
     assert all(math.isclose(payload["binance_return_bps"], 100.0) for payload in first_outcomes)
+    assert all(math.isclose(payload["hyperliquid_outcome_yes_mid_change_ps"], 0.0) for payload in first_outcomes)
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():

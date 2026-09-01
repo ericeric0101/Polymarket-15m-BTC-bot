@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 
 LEAD_LAG_HORIZONS_SEC = (5, 15, 30, 60)
-LEAD_LAG_SNAPSHOT_INTERVAL_SEC = 15.0
+LEAD_LAG_SNAPSHOT_INTERVAL_SEC = 5.0
 LEAD_LAG_STATE_TTL_SEC = 120.0
 
 
@@ -45,6 +45,8 @@ class LeadLagObservationMixin:
         twap_price = _number(getattr(self, "_polymarket_chainlink_twap_price", None))
         binance_price = _number(getattr(self, "_binance_ws_price", None))
         reference_price = _number(getattr(self, "latest_external_spot", None))
+        outcome_observer = getattr(self, "hyperliquid_outcome_observer", None)
+        outcome = outcome_observer.snapshot() if outcome_observer is not None else {"available": False}
         return {
             "slug": slug,
             "observed_ts": now_ts,
@@ -65,6 +67,17 @@ class LeadLagObservationMixin:
                 if binance_price is not None and twap_price is not None
                 else None
             ),
+            "hyperliquid_outcome_available": bool(outcome.get("available", False)),
+            "hyperliquid_outcome_age_sec": outcome.get("age_sec"),
+            "hyperliquid_outcome_source": outcome.get("source"),
+            "hyperliquid_outcome_market_id": outcome.get("market_id"),
+            "hyperliquid_outcome_yes_mid": outcome.get("yes_mid"),
+            "hyperliquid_outcome_no_mid": outcome.get("no_mid"),
+            "hyperliquid_outcome_yes_bid": outcome.get("yes_bid"),
+            "hyperliquid_outcome_yes_ask": outcome.get("yes_ask"),
+            "hyperliquid_outcome_btc_mark": outcome.get("btc_mark"),
+            "hyperliquid_outcome_target_price": outcome.get("target_price"),
+            "hyperliquid_outcome_expiry_utc": outcome.get("expiry_utc"),
         }
 
     def _lead_lag_observation_on_quote(self, now_ts: float) -> None:
@@ -99,6 +112,8 @@ class LeadLagObservationMixin:
                 twap_start = _number(state.get("twap_price"))
                 binance_end = _number(future.get("binance_price"))
                 twap_end = _number(future.get("twap_price"))
+                outcome_yes_start = _number(state.get("hyperliquid_outcome_yes_mid"))
+                outcome_yes_end = _number(future.get("hyperliquid_outcome_yes_mid"))
                 payload = {
                     **state,
                     "horizon_target_sec": horizon_sec,
@@ -121,6 +136,11 @@ class LeadLagObservationMixin:
                     "twap_return_bps": (
                         ((twap_end / twap_start) - 1.0) * 10_000.0
                         if twap_start and twap_end
+                        else None
+                    ),
+                    "hyperliquid_outcome_yes_mid_change_ps": (
+                        outcome_yes_end - outcome_yes_start
+                        if outcome_yes_start is not None and outcome_yes_end is not None
                         else None
                     ),
                 }

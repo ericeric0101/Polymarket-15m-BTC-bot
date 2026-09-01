@@ -477,6 +477,20 @@ weekday/weekend features. This remains observability-only: it does not alter
   blocked until D.3 has established a correct strike, so the calibration is
   not trained on a corrupted fair/side input.
 
+**Approved D.4 observability extension — HIP-4 Outcome cross-market
+observation (2026-09-01):** a new read-only
+Hyperliquid Outcome observer discovers the nearest BTC `period:1d`
+`priceBinary` contract from `outcomeMeta`, then records its YES/NO `allMids`
+every two seconds and BBO evidence every 15 seconds. It records the local
+receive time, source age, market id, daily strike/expiry and raw prices beside
+the existing Polymarket 15-minute lead/lag snapshots (now every five seconds).
+`scripts/hyperliquid_outcome_lead_lag_report.py` tests whether the *current*
+Outcome YES move precedes a future 5/15/30/60-second Polymarket UP move.
+This is collection and research only: it has no wallet, order, stop-loss,
+confidence, `robust_net`, or entry-gate connection. The two products have
+different strikes and horizons, so levels must never be treated as directly
+comparable probabilities; only time-aligned changes are eligible for research.
+
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
 - **Problem:** The original 228-key inventory is stale (the current profile

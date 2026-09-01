@@ -52,6 +52,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/trade_telemetry.py",
         "monitoring/trade_journal_db.py",
         "bot/lead_lag_observation.py",
+        "bot/hyperliquid_outcome_observer.py",
         "bot/order_submission.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",
@@ -3218,6 +3219,11 @@ class IntegratedBTCStrategy(
             selected_slug=self.selected_slug,
             maker_quote_sides=self.maker_quote_sides,
             maker_quote_size_usdc=self.maker_quote_size_usdc,
+        )
+        self.hyperliquid_outcome_observer.start()
+        self._db_strategy_event(
+            "HYPERLIQUID_OUTCOME_OBSERVER_STARTED",
+            {"read_only": True, "source": "hyperliquid_outcome_rest", "cadence_sec": 2.0},
         )
         self._db_strategy_event(
             "STRATEGY_START",

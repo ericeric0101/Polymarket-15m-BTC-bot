@@ -125,6 +125,7 @@ class TradeJournalDB:
         );
 
         CREATE INDEX IF NOT EXISTS idx_strategy_events_run_ts ON strategy_events(run_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_strategy_events_type_id ON strategy_events(event_type, id);
         """
         try:
             with self._connect() as conn:

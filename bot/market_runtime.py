@@ -620,6 +620,12 @@ def handle_generic_event(strategy: Any, event: Any) -> None:
 def handle_stop(strategy: Any) -> None:
     """Called when strategy stops."""
     strategy._stopping = True
+    outcome_observer = getattr(strategy, "hyperliquid_outcome_observer", None)
+    if outcome_observer is not None:
+        try:
+            outcome_observer.stop()
+        except Exception:
+            logger.debug("Failed to stop Hyperliquid Outcome observer", exc_info=True)
     stop_event_threads(
         stop_events=[
             strategy._lifecycle_stop_event,

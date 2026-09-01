@@ -34,6 +34,7 @@ from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEng
 from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 from bot.trade_telemetry import TradeTelemetry
+from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver
 
 
 def initialize_strategy_settings(
@@ -712,5 +713,6 @@ def initialize_strategy_settings(
     strategy._fair_edge_bucket_shadow_by_id = {}
     strategy._lead_lag_pending = {}
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
+    strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver()
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0
