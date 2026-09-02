@@ -1,7 +1,5 @@
 import json
-import sqlite3
 import time
-from datetime import datetime, timezone
 
 from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver, outcome_coins
 from scripts.hyperliquid_outcome_lead_lag_report import build_report
@@ -48,17 +46,24 @@ def test_l2_update_cannot_make_an_old_all_mids_value_fresh():
 
 
 def test_recent_daily_selection_from_other_bot_is_rollover_authority(tmp_path):
-    authority_db = tmp_path / "outcome_shadow.db"
-    with sqlite3.connect(authority_db) as conn:
-        conn.execute("CREATE TABLE strategy_events (id INTEGER PRIMARY KEY, ts TEXT, event_type TEXT, payload_json TEXT)")
-        conn.execute(
-            "INSERT INTO strategy_events (ts, event_type, payload_json) VALUES (?, 'OUTCOME_SHADOW_CYCLE', ?)",
-            (datetime.now(timezone.utc).isoformat(), json.dumps({"outcome_id": 1314, "period": "1d"})),
-        )
-        conn.commit()
-    observer = HyperliquidOutcomeObserver(market_id=1313, authority_db=str(authority_db))
+    authority_path = tmp_path / "outcome_market_authority.json"
+    authority_path.write_text(json.dumps({
+        "market_id": 1314, "period": "1d", "side0_coin": "#13140",
+        "side1_coin": "#13141", "updated_at_ms": int(time.time() * 1000),
+    }), encoding="utf-8")
+    observer = HyperliquidOutcomeObserver(market_id=1313, authority_path=str(authority_path))
 
     assert observer._authority_market_id() == 1314
+
+
+def test_rollover_authority_rejects_stale_or_mismatched_state(tmp_path):
+    authority_path = tmp_path / "outcome_market_authority.json"
+    authority_path.write_text(json.dumps({
+        "market_id": 1314, "period": "1d", "side0_coin": "#bad",
+        "side1_coin": "#13141", "updated_at_ms": int(time.time() * 1000),
+    }), encoding="utf-8")
+    observer = HyperliquidOutcomeObserver(authority_path=str(authority_path))
+    assert observer._authority_market_id() is None
 
 
 def test_lead_lag_report_keeps_groups_separate_and_counts_non_following_moves():

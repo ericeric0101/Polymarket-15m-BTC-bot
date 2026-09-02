@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sqlite3
 import threading
 import time
 from decimal import Decimal
@@ -17,7 +16,7 @@ import websockets
 
 HYPERLIQUID_MAINNET_WS_URL = "wss://api.hyperliquid.xyz/ws"
 MAX_STREAM_AGE_SEC = 5.0
-DEFAULT_AUTHORITY_DB = "/Users/cheng-kaihuang/hyperliquid_prediction_bot/logs/outcome_shadow.db"
+DEFAULT_AUTHORITY_PATH = "/Users/cheng-kaihuang/hyperliquid_prediction_bot/logs/outcome_market_authority.json"
 
 
 def outcome_coins(outcome_id: int) -> tuple[str, str]:
@@ -43,10 +42,10 @@ def _book_top(book: Any) -> tuple[Optional[float], Optional[float], Optional[flo
 class HyperliquidOutcomeObserver:
     """Observe one configured daily market; never make a network REST request."""
 
-    def __init__(self, *, market_id: Optional[int] = None, ws_url: Optional[str] = None, authority_db: Optional[str] = None) -> None:
+    def __init__(self, *, market_id: Optional[int] = None, ws_url: Optional[str] = None, authority_path: Optional[str] = None) -> None:
         self.market_id = int(market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID", "1313"))
         self.ws_url = os.getenv("HYPERLIQUID_OUTCOME_WS_URL") or ws_url or HYPERLIQUID_MAINNET_WS_URL
-        self.authority_db = authority_db or os.getenv("HYPERLIQUID_OUTCOME_AUTHORITY_DB", DEFAULT_AUTHORITY_DB)
+        self.authority_path = authority_path or os.getenv("HYPERLIQUID_OUTCOME_AUTHORITY_PATH", DEFAULT_AUTHORITY_PATH)
         self._lock, self._stop = threading.Lock(), threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._authority_thread: Optional[threading.Thread] = None
@@ -107,25 +106,21 @@ class HyperliquidOutcomeObserver:
             self._snapshot = {**self._snapshot, **changes}
 
     def _authority_market_id(self) -> Optional[int]:
-        """Read the other bot's recent 1d selection; never query a web API."""
-        if not self.authority_db or not Path(self.authority_db).is_file():
+        """Read the other bot's atomically published current 1d market."""
+        if not self.authority_path or not Path(self.authority_path).is_file():
             return None
         try:
-            uri = f"file:{Path(self.authority_db).resolve()}?mode=ro"
-            with sqlite3.connect(uri, uri=True, timeout=1.0) as conn:
-                row = conn.execute(
-                    "SELECT ts, payload_json FROM strategy_events WHERE event_type='OUTCOME_SHADOW_CYCLE' ORDER BY id DESC LIMIT 1"
-                ).fetchone()
-            if not row:
+            payload = json.loads(Path(self.authority_path).read_text(encoding="utf-8"))
+            updated_at_ms = int(payload["updated_at_ms"])
+            if time.time() - (updated_at_ms / 1000.0) > 180.0:
                 return None
-            observed_ts = __import__("datetime").datetime.fromisoformat(str(row[0]).replace("Z", "+00:00")).timestamp()
-            if time.time() - observed_ts > 180.0:
-                return None
-            payload = json.loads(row[1])
             if str(payload.get("period") or "").lower() not in {"1d", "daily", "24h"}:
                 return None
-            return int(payload["outcome_id"])
-        except Exception:
+            market_id = int(payload["market_id"])
+            if (str(payload.get("side0_coin")), str(payload.get("side1_coin"))) != outcome_coins(market_id):
+                return None
+            return market_id
+        except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
             return None
 
     def _authority_loop(self) -> None:

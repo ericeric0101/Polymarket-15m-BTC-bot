@@ -4375,10 +4375,10 @@ def test_forecast_snapshot_telemetry_preserves_shadow_payload_and_serializes_dec
     assert payload["forecast_strike_lock_state"] == "authoritative"
 
 
-def test_external_lead_lag_observation_records_each_horizon_once():
+def test_external_lead_lag_observation_enqueues_raw_snapshots_only():
     class Harness(LeadLagObservationMixin):
         def __init__(self):
-            self.trade_db = object()
+            self.run_id = "run-test"
             self.current_market_slug = "btc-updown-15m-test"
             self.current_market_end_timestamp = 1_000.0
             self.current_up_instrument_id = "up-token"
@@ -4399,10 +4399,10 @@ def test_external_lead_lag_observation_records_each_horizon_once():
                     "side0_bid": 0.59, "side0_ask": 0.61, "btc_mark": 100.0,
                 },
             })()
-            self.events = []
-
-        def _db_strategy_event(self, event_type, payload):
-            self.events.append((event_type, payload))
+            self.rows = []
+            self.lead_lag_db = type("LeadLagDB", (), {
+                "enqueue_snapshot": lambda _self, **row: self.rows.append(row),
+            })()
 
     strategy = Harness()
     strategy._lead_lag_observation_on_quote(100.0)
@@ -4412,16 +4412,12 @@ def test_external_lead_lag_observation_records_each_horizon_once():
     for timestamp in (105.0, 115.0, 130.0, 160.0):
         strategy._lead_lag_observation_on_quote(timestamp)
 
-    snapshots = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_SNAPSHOT"]
-    outcomes = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_OUTCOME"]
-    first_id = snapshots[0]["observation_id"]
-    first_outcomes = [payload for payload in outcomes if payload["observation_id"] == first_id]
-    assert len(snapshots) == 5
-    assert [payload["horizon_target_sec"] for payload in first_outcomes] == [5, 15, 30, 60]
-    assert all(payload["elapsed_sec"] >= payload["horizon_target_sec"] for payload in first_outcomes)
-    assert all(math.isclose(payload["up_mid_change_ps"], 0.05) for payload in first_outcomes)
-    assert all(math.isclose(payload["binance_return_bps"], 100.0) for payload in first_outcomes)
-    assert all(math.isclose(payload["hyperliquid_outcome_side0_bbo_mid_change_ps"], 0.0) for payload in first_outcomes)
+    assert len(strategy.rows) == 5
+    assert [row["observed_ts"] for row in strategy.rows] == [100.0, 105.0, 115.0, 130.0, 160.0]
+    assert all(row["run_id"] == "run-test" for row in strategy.rows)
+    assert all(row["polymarket_slug"] == "btc-updown-15m-test" for row in strategy.rows)
+    assert all(row["hyperliquid_market_id"] == 99 for row in strategy.rows)
+    assert all(row["payload"]["hyperliquid_outcome_side0_bbo_mid"] == 0.60 for row in strategy.rows)
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():

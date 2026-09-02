@@ -29,6 +29,7 @@ from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
+from monitoring.lead_lag_db import LeadLagDB
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
 from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
@@ -711,8 +712,8 @@ def initialize_strategy_settings(
     strategy.shadow_simulation_aged_quote_max_age_sec = config.operations.shadow_simulation_aged_quote_max_age_sec
     strategy._shadow_simulations_by_slug = {}
     strategy._fair_edge_bucket_shadow_by_id = {}
-    strategy._lead_lag_pending = {}
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
+    strategy.lead_lag_db = LeadLagDB()
     strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver()
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

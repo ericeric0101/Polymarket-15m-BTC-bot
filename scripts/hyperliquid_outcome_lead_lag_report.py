@@ -26,18 +26,18 @@ def load_snapshots(db_path: str | Path) -> list[dict[str, Any]]:
     with sqlite3.connect(uri, uri=True, timeout=2.0) as conn:
         conn.execute("PRAGMA query_only=ON")
         rows = conn.execute(
-            "SELECT run_id, payload_json FROM strategy_events WHERE event_type='EXTERNAL_LEAD_LAG_SNAPSHOT' ORDER BY id"
+            "SELECT run_id, polymarket_slug, hyperliquid_market_id, observed_ts_ms, payload_json FROM snapshots ORDER BY id"
         ).fetchall()
     snapshots = []
-    for run_id, raw in rows:
+    for run_id, slug, market_id, observed_ts_ms, raw in rows:
         try:
             payload = json.loads(raw)
             if not bool(payload.get("hyperliquid_outcome_analysis_available")):
                 continue
             snapshots.append({
-                "run_id": str(run_id), "slug": str(payload["slug"]),
-                "market_id": int(payload["hyperliquid_outcome_market_id"]),
-                "ts": float(payload["observed_ts"]),
+                "run_id": str(run_id), "slug": str(slug),
+                "market_id": int(market_id),
+                "ts": float(observed_ts_ms) / 1000.0,
                 "outcome_side0": float(payload["hyperliquid_outcome_side0_bbo_mid"]),
                 "polymarket_up": float(payload["up_mid"]),
             })
@@ -78,7 +78,7 @@ def build_report(snapshots: list[dict[str, Any]], *, snapshot_interval_sec: floa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only quality-gated Outcome → Polymarket lead/lag report")
-    parser.add_argument("--db", default="logs/trade_journal.db")
+    parser.add_argument("--db", default="logs/hyperliquid_lead_lag.db")
     print(json.dumps(build_report(load_snapshots(parser.parse_args().db)), indent=2, sort_keys=True))
 
 

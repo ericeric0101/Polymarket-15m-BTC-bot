@@ -626,6 +626,12 @@ def handle_stop(strategy: Any) -> None:
             outcome_observer.stop()
         except Exception:
             logger.debug("Failed to stop Hyperliquid Outcome observer", exc_info=True)
+    lead_lag_db = getattr(strategy, "lead_lag_db", None)
+    if lead_lag_db is not None:
+        try:
+            lead_lag_db.stop()
+        except Exception:
+            logger.debug("Failed to flush Hyperliquid lead/lag observations", exc_info=True)
     stop_event_threads(
         stop_events=[
             strategy._lifecycle_stop_event,

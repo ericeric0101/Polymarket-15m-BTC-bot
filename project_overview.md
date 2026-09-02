@@ -486,13 +486,20 @@ UP/DOWN semantic label. It subscribes to `allMids` and both `l2Book` streams
 with reconnect/resubscribe handling; REST and testnet are not price sources or
 fallbacks. It separately journals mid/book receive ages, per-side exchange
 timestamps, BBO prices, spread/depth and connection state. A disconnected or
-stale stream is never analysis-available. For daily rollover it may consume
-only a recent (`<=180s`) `OUTCOME_SHADOW_CYCLE` 1d selection from the other
-local Outcome bot's read-only journal, then resubscribes; without fresh local
-authority it retains the explicit configured id rather than guessing.
+stale stream is never analysis-available. For daily rollover it reads only a
+recent (`<=180s`) atomically replaced local
+`outcome_market_authority.json`, published by the Outcome bot with the market
+id, period, side coins, strike and expiry. It validates the side coin ids
+against the Outcome-id encoding before resubscribing; it never scans or blocks
+on the multi-GB Outcome journal. Without fresh local authority it retains the
+explicit configured id rather than guessing. The Polymarket bot stores raw
+five-second cross-market snapshots in its own `logs/hyperliquid_lead_lag.db`
+through a bounded background batch writer; it does not synchronously write
+high-frequency research rows or derived horizons into `trade_journal.db`.
 `scripts/hyperliquid_outcome_lead_lag_report.py` tests whether the *current*
 Outcome side-0 BBO move precedes a future 5/15/30/60-second Polymarket UP
-move. It groups by strategy run, Polymarket slug and Outcome id, and retains
+move by calculating the horizons offline. It groups by strategy run,
+Polymarket slug and Outcome id, and retains
 zero/non-following movements rather than selectively removing them. This is
 collection and research only: it has no wallet, order, stop-loss, confidence,
 `robust_net`, or entry-gate connection. The two products have different
