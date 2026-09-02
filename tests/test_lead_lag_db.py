@@ -34,16 +34,23 @@ def test_report_loads_only_quality_gated_rows_from_dedicated_db(tmp_path):
     db.enqueue_snapshot(
         run_id="run-a", polymarket_slug="btc-a", hyperliquid_market_id=1313,
         observed_ts=100.0,
-        payload={"hyperliquid_outcome_analysis_available": True, "hyperliquid_outcome_side0_bbo_mid": 0.5, "up_mid": 0.4},
+        payload={
+            "hyperliquid_outcome_available": True, "hyperliquid_outcome_mids_age_sec": 0.1,
+            "twap_age_sec": 0.2, "hyperliquid_outcome_btc_mark": 100.0, "twap_price": 99.0,
+            "binance_price": 101.0, "binance_age_sec": 0.2,
+        },
     )
     db.enqueue_snapshot(
         run_id="run-a", polymarket_slug="btc-a", hyperliquid_market_id=1313,
         observed_ts=105.0,
-        payload={"hyperliquid_outcome_analysis_available": False, "hyperliquid_outcome_side0_bbo_mid": 0.51, "up_mid": 0.41},
+        payload={
+            "hyperliquid_outcome_available": False, "hyperliquid_outcome_mids_age_sec": 0.1,
+            "twap_age_sec": 0.2, "hyperliquid_outcome_btc_mark": 101.0, "twap_price": 100.0,
+        },
     )
     db.stop()
 
     assert load_snapshots(db_path) == [{
         "run_id": "run-a", "slug": "btc-a", "market_id": 1313,
-        "ts": 100.0, "outcome_side0": 0.5, "polymarket_up": 0.4,
+        "ts": 100.0, "outcome_btc_mark": 100.0, "polymarket_twap": 99.0, "binance_price": 101.0,
     }]

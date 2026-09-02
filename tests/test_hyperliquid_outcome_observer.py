@@ -66,17 +66,23 @@ def test_rollover_authority_rejects_stale_or_mismatched_state(tmp_path):
     assert observer._authority_market_id() is None
 
 
-def test_lead_lag_report_keeps_groups_separate_and_counts_non_following_moves():
+def test_lead_lag_report_tests_btc_mark_against_twap_and_keeps_groups_separate():
+    outcome_marks = [100.0, 110.0, 130.0, 160.0, 200.0, 250.0]
+    twaps = [90.0, 100.0, 110.0, 130.0, 160.0, 200.0]
     snapshots = [
-        {"run_id": "r", "slug": "a", "market_id": 1, "ts": float(index * 5), "outcome_side0": 0.50 + index * 0.01, "polymarket_up": 0.40}
-        for index in range(4)
+        {"run_id": "r", "slug": "a", "market_id": 1, "ts": float(index * 5),
+         "outcome_btc_mark": outcome_marks[index], "polymarket_twap": twaps[index],
+         "binance_price": outcome_marks[index]}
+        for index in range(len(outcome_marks))
     ] + [
-        {"run_id": "r", "slug": "b", "market_id": 2, "ts": float(index * 5), "outcome_side0": 0.50, "polymarket_up": 0.60 + index * 0.01}
-        for index in range(4)
+        {"run_id": "r", "slug": "b", "market_id": 2, "ts": float(index * 5),
+         "outcome_btc_mark": 200.0, "polymarket_twap": 210.0, "binance_price": 200.0}
+        for index in range(5)
     ]
     report = build_report(snapshots)
 
     assert report["group_count"] == 2
-    assert report["horizons"]["5"]["sample_count"] == 4
-    assert report["horizons"]["5"]["outcome_move_sample_count"] == 2
-    assert report["horizons"]["5"]["sign_agreement_rate"] == 0.0
+    outcome = report["outcome_btc_mark_to_polymarket_twap"]
+    assert outcome["5"]["sample_count"] == 4
+    assert outcome["5"]["follow_through_rate"] == 1.0
+    assert outcome["5"]["correlation"] == 1.0

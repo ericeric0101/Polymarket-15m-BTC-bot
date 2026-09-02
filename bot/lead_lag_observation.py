@@ -39,7 +39,7 @@ class LeadLagObservationMixin:
             return None
         return (bid + ask) / 2.0
 
-    def _lead_lag_snapshot_payload(self, *, slug: str, now_ts: float, up_mid: float) -> dict[str, Any]:
+    def _lead_lag_snapshot_payload(self, *, slug: str, now_ts: float, up_mid: Optional[float]) -> dict[str, Any]:
         twap_price = _number(getattr(self, "_polymarket_chainlink_twap_price", None))
         binance_price = _number(getattr(self, "_binance_ws_price", None))
         reference_price = _number(getattr(self, "latest_external_spot", None))
@@ -69,6 +69,7 @@ class LeadLagObservationMixin:
             "hyperliquid_outcome_analysis_available": bool(outcome.get("analysis_available", False)),
             "hyperliquid_outcome_stream_connected": bool(outcome.get("stream_connected", False)),
             "hyperliquid_outcome_mids_age_sec": outcome.get("mids_age_sec"),
+            "hyperliquid_outcome_mids_received_ts": outcome.get("mids_received_ts"),
             "hyperliquid_outcome_side0_book_age_sec": outcome.get("side0_book_age_sec"),
             "hyperliquid_outcome_side1_book_age_sec": outcome.get("side1_book_age_sec"),
             "hyperliquid_outcome_source": outcome.get("source"),
@@ -95,9 +96,10 @@ class LeadLagObservationMixin:
         slug = str(getattr(self, "current_market_slug", "") or "")
         if not slug:
             return
+        # The primary study is Outcome BTC mark -> Polymarket BTC reference.
+        # Preserve the contract mid when available, but do not let a missing
+        # contract quote censor an otherwise valid reference-price sample.
         up_mid = self._lead_lag_up_mid()
-        if up_mid is None:
-            return
 
         last_by_slug = getattr(self, "_lead_lag_last_snapshot_ts_by_slug", None)
         if not isinstance(last_by_slug, dict):

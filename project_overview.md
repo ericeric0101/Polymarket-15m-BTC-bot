@@ -496,15 +496,17 @@ explicit configured id rather than guessing. The Polymarket bot stores raw
 five-second cross-market snapshots in its own `logs/hyperliquid_lead_lag.db`
 through a bounded background batch writer; it does not synchronously write
 high-frequency research rows or derived horizons into `trade_journal.db`.
-`scripts/hyperliquid_outcome_lead_lag_report.py` tests whether the *current*
-Outcome side-0 BBO move precedes a future 5/15/30/60-second Polymarket UP
-move by calculating the horizons offline. It groups by strategy run,
-Polymarket slug and Outcome id, and retains
-zero/non-following movements rather than selectively removing them. This is
-collection and research only: it has no wallet, order, stop-loss, confidence,
-`robust_net`, or entry-gate connection. The two products have different
-strikes and horizons, so levels must never be treated as directly comparable
-probabilities; only time-aligned changes are eligible for research.
+`scripts/hyperliquid_outcome_lead_lag_report.py` has one primary research
+question: whether the **Outcome `allMids["BTC"]` reference mark** moves before
+Polymarket's frontend Chainlink TWAP/reference price. It evaluates future
+5/10/15/30/60-second TWAP changes after a pre-specified ≥$5 Outcome move, and
+reports Binance → that same TWAP as the benchmark. Outcome contract side-0/1
+BBO and the Polymarket UP mid remain raw diagnostic fields only; they are not
+the lead/lag outcome and their incompatible strikes/horizons must never be
+treated as comparable probabilities. It groups by strategy run, Polymarket
+slug and Outcome id, preserving zero/non-following observations and excluding
+stale or gapped price pairs. This is collection and research only: it has no
+wallet, order, stop-loss, confidence, `robust_net`, or entry-gate connection.
 
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
