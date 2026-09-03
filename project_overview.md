@@ -499,7 +499,7 @@ high-frequency research rows or derived horizons into `trade_journal.db`.
 `scripts/hyperliquid_outcome_lead_lag_report.py` has one primary research
 question: whether the **Outcome `allMids["BTC"]` reference mark** moves before
 Polymarket's frontend Chainlink TWAP/reference price. It evaluates future
-5/10/15/30/60-second TWAP changes after a pre-specified ≥$5 Outcome move, and
+5/10/15/30/60-second TWAP changes after a fixed ≥$5 Outcome move, and
 reports Binance → that same TWAP as the benchmark. Outcome contract side-0/1
 BBO and the Polymarket UP mid remain raw diagnostic fields only; they are not
 the lead/lag outcome and their incompatible strikes/horizons must never be
@@ -507,6 +507,96 @@ treated as comparable probabilities. It groups by strategy run, Polymarket
 slug and Outcome id, preserving zero/non-following observations and excluding
 stale or gapped price pairs. This is collection and research only: it has no
 wallet, order, stop-loss, confidence, `robust_net`, or entry-gate connection.
+
+**Proposed D.4.1 — event-driven Outcome-mark protective-exit research
+(2026-09-03; not live authority):** The initial 10.95-hour collection supports
+a narrower hypothesis: a fresh Outcome `allMids["BTC"]` move has more
+5/10-second explanatory power for Polymarket's Chainlink TWAP than the current
+Binance benchmark, while Binance is as good or better at 30/60 seconds. This
+does **not** mean Outcome is a superior long-horizon spot source. The working
+model is a short-lived *reference-price propagation* feature: Outcome can
+identify that Polymarket's settlement reference has not caught up yet, whereas
+Binance better captures the later continuation. The current five-second
+collector cannot establish a sub-five-second lead, and the first `$5` move
+threshold was selected during exploratory work; its definition is frozen now
+and must be evaluated on subsequent, independent data before it may influence
+an order.
+
+- **Research feature and data plane:** replace quote-callback sampling with
+  event-driven, mainnet-WS observations. Each Outcome BTC mark, Polymarket raw
+  Chainlink spot/TWAP tick, Binance aggTrade tick, and Polymarket CLOB BBO
+  must carry `received_monotonic_ns`, wall-clock receipt time, source event
+  timestamp when supplied, source freshness, market/slug and connection epoch.
+  A bounded in-memory queue feeds one serial strategy-owned evaluator; SQLite,
+  JSON serialization, reporting, and ordinary logging remain background work.
+  No foreign WebSocket thread may submit or cancel an order directly.
+- **Canonical state machine:** introduce a pure, deterministic
+  `OutcomeLeadLagState` that consumes ticks and exposes only
+  `unavailable`, `observe`, `supports_position`, `adverse_candidate`, or
+  `adverse_confirmed`. It must calculate fixed 250ms/1s/5s/10s Outcome,
+  Polymarket-TWAP, and Binance returns; Outcome-minus-TWAP residual; source
+  agreement; tick freshness; and a debounce/persistence count. Any missing,
+  stale, out-of-order, cross-epoch, or large-clock-skew input is
+  `unavailable`, never directional evidence. The 250ms and 1s fields are new
+  measurements, not assumed evidence from the existing five-second report.
+- **Complete decision matrix:** direction is always relative to the *held*
+  UP/DOWN token, never Outcome side 0/1 semantics. `supports_position` means
+  a fresh Outcome shock agrees with the held direction; it is a **hold-only**
+  feature, not permission to add size. An opposite shock with no persistence,
+  no untranslated Outcome-vs-TWAP residual, Binance disagreement, stale data,
+  too-wide CLOB spread, inadequate bid depth, unsellable inventory, or a
+  pending sell is `observe`/`hold`. A confirmed opposite shock with executable
+  economics becomes an exit *candidate*: if the position is net profitable it
+  is a `protect_profit` candidate; if net losing it is a stricter `cut_loss`
+  candidate requiring the fixed adverse threshold and independent
+  confirmation. For each candidate, shadow all three actions—hold, bounded
+  passive protection, and bounded aggressive exit—at full and configured
+  partial quantity. This matrix deliberately keeps the documented historical
+  winner/reversal control: an adverse tick alone must not liquidate a position
+  that later recovers.
+- **One exit owner and executable mechanics:** any future live candidate must
+  enter the existing recovery/urgent-exit ownership state machine, first
+  reserve and cancel a conflicting TP, wait for cancellation/account truth,
+  re-check sellable quantity, fresh BBO, depth, fees, price bound and
+  time-to-close, then submit at most one price-bounded FAK/marketable-limit
+  attempt. The adapter's generic market path is venue-effective **FOK**, so a
+  naked "market" order, assumed partial fill, direct WebSocket-thread submit,
+  or duplicate TP/recovery sell is prohibited. Record all rejection, remaining
+  quantity, cancel-ack, submission and fill evidence. A stale/failed source
+  can only remove this feature; it must never force an exit.
+- **Latency instrumentation and acceptance gates:** measure, with monotonic
+  clocks, `Outcome receive → state update → decision → handoff → cancel start
+  / cancel ack → sign start/end → submit start/end → venue response`. First
+  establish p50/p95/p99 under live load. The local state update/handoff target
+  is p99 ≤50ms after an accepted tick; all external network and venue timings
+  are measurements, not promises. Before live authority, accumulate separate
+  shadow outcomes at 1/5/10/30/60 seconds, executable CLOB depth/slippage and
+  counterfactual net PnL for hold/passive/FAK. Require a frozen, subsequent
+  OOS sample across multiple days, weekday/weekend and volatility regimes that
+  improves realized robust outcome without increasing false exits or violating
+  the existing recovery controls.
+- **Language and deployment decision:** Python is sufficient for the current
+  5–10-second opportunity if the hot path is event-driven and contains only
+  bounded in-memory arithmetic/state transitions. The present bottlenecks are
+  the five-second callback, synchronous/network-bound CLOB operations,
+  cancellation acknowledgement, order signing/submission, and any hot-path
+  database/log/fair/fee work—not Python arithmetic or the GIL. First build and
+  benchmark the Python serial evaluator and background persistence. Consider a
+  Rust (or other native) market-data/feature sidecar only if measured queue
+  lag or evaluator p99 exceeds 50ms, or the validated opportunity is below
+  roughly 100ms. Do not split the order lifecycle across languages until the
+  single-owner cancel/inventory/FAK protocol has passed shadow and replay;
+  extra IPC and duplicate state can cost more than Python. Rust is therefore
+  an evidence-triggered optimization, not a prerequisite for this phase.
+- **Implementation order:** (1) add immutable tick envelopes and monotonic
+  latency journals; (2) implement the pure state machine plus exhaustive unit
+  and replay matrix; (3) run event-driven shadow mode with no order authority;
+  (4) produce OOS counterfactual reports stratified by position direction,
+  PnL state, agreement, residual, liquidity and regime; (5) integrate only a
+  disabled-by-default exit-candidate handoff with the existing single exit
+  owner; (6) enable any live bounded FAK behavior only through a separately
+  approved policy change. Entry sizing, new entries, stop-loss settings and
+  current D.4/D.5 gates remain unchanged throughout D.4.1.
 
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
