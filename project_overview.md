@@ -613,6 +613,87 @@ an order.
   approved policy change. Entry sizing, new entries, stop-loss settings and
   current D.4/D.5 gates remain unchanged throughout D.4.1.
 
+**D.4.1 concrete code-update plan (approved planning scope; all runtime
+behavior stays shadow-only):**
+
+1. **Configuration and types — add, disabled by default.** Add an
+   `OutcomeLeadLagConfig` section in `bot/app_config.py` and bind it in
+   `bot/settings.py`. Its initial mode is exactly `off` or `shadow`; no `live`
+   value may be accepted in this work item. Freeze the feature version,
+   250ms/1s/5s/10s windows, source max ages, residual/shock/debounce settings,
+   raw retention days, compact retention days and micro-markout horizons in
+   the configuration snapshot. Add `bot/outcome_lead_lag_types.py` with
+   immutable `ReferenceTick`, `LeadLagDecision`, `LeadLagCandidate`, and
+   `LatencySpan` dataclasses. Prices use fixed-point integer units in durable
+   records; monotonic time is only for in-process latency ordering.
+2. **Ingress — do no work on foreign WebSocket threads.** Extend
+   `bot/hyperliquid_outcome_observer.py` with an optional lightweight tick
+   listener that emits only a validated `allMids["BTC"]` update after its
+   receive timestamp is captured. Extend `bot/spot_pricer.py` to emit the raw
+   Chainlink spot, Chainlink TWAP and Binance ticks at their existing receive
+   sites. Extend `bot/market_runtime.py::handle_quote_tick` to emit the
+   Polymarket UP/DOWN BBO/depth tick. Each producer performs bounded
+   `put_nowait` only; it must not call SQLite, JSON encode, calculate fair
+   probability, request fees, cancel, or submit an order. Keep
+   `bot/lead_lag_observation.py` temporarily as the five-second compatibility
+   sampler until the event-driven shadow report matches it on overlapping
+   windows.
+3. **Serial evaluator — new pure feature module and runtime owner.** Add
+   `bot/outcome_lead_lag_state.py` for `OutcomeLeadLagState.apply(tick)`, with
+   no strategy, network, database or clock dependency beyond supplied values.
+   Add `bot/outcome_lead_lag_runtime.py`, owned and started/stopped by the
+   strategy, to drain the bounded queue serially, call the pure state, stamp
+   `decision_ns`, and hand only a `LeadLagCandidate` to a strategy-owned
+   shadow callback. It must coalesce superseded reference ticks under load,
+   retain a bounded ring for candidate windows, and fail closed on overflow.
+   It must never start a maker worker or touch `submit_order`.
+4. **Dedicated persistence and retention — evolve, do not overload the
+   journal.** Extend `monitoring/lead_lag_db.py` (or split its raw writer into
+   `monitoring/lead_lag_event_db.py`) with background batch tables for
+   `reference_1s`, `candidate_windows`, `lead_lag_decisions`,
+   `lead_lag_markouts`, and `latency_spans`. Add
+   `scripts/archive_lead_lag_research.py`: it finalizes due micro-markouts,
+   verifies counts/horizons, atomically moves closed raw partitions to a
+   compressed archive, and prunes only eligible raw partitions. It must not
+   mutate `logs/trade_journal.db`; no deletion, `VACUUM`, or archive job runs
+   automatically in the first deployment.
+5. **Shadow policy and counterfactuals — no execution handoff.** Add
+   `bot/outcome_lead_lag_shadow.py` to translate a state decision plus current
+   position/BBO/depth snapshot into hold, protect-profit candidate, or
+   cut-loss candidate. It records the full decision matrix and schedules
+   markouts at 250ms/1s/5s/10s/30s/60s plus an executable hold/passive/bounded-
+   FAK counterfactual. It does not cancel TP or create an order. Extend
+   `scripts/hyperliquid_outcome_lead_lag_report.py` with OOS, regime,
+   direction, PnL-state, source-agreement, liquidity, false-exit, and Binance-
+   benchmark breakdowns; retain the existing five-second report for continuity
+   until the new report is validated.
+6. **Latency audit — instrument before optimizing.** Add a small
+   `monitoring/lead_lag_latency.py` helper and call it at source receive,
+   queue enqueue/dequeue, state decision, candidate handoff, future
+   cancel-request/cancel-ack, sign, submit, venue response and fill points.
+   Extend `bot/order_runtime.py`, `bot/order_submission.py`,
+   `bot/taker_exit.py`, and `bot/order_events.py` only to record timestamps;
+   do not alter their execution semantics. Add a read-only
+   `scripts/lead_lag_latency_report.py` that outputs p50/p95/p99 and missing
+   span counts by run/venue/exit path.
+7. **Only after OOS approval — isolated disabled live handoff.** Add a
+   feature-flagged `bot/outcome_lead_lag_exit_handoff.py` that maps a confirmed
+   candidate into the existing recovery-exit ownership protocol. It is shipped
+   disabled, rejects all calls unless an explicit future policy approval
+   changes the config, and has no direct order client dependency. It must
+   enforce TP cancellation acknowledgement, account truth, sellable quantity,
+   BBO depth, maximum executable price, FAK semantics, one outstanding exit,
+   and complete audit payload before delegating to the existing exit owner.
+8. **Tests and rollout gates.** Add focused tests for every state transition,
+   duplicate/out-of-order ticks, staleness, overflow/coalescing, source
+   disagreement, UP/DOWN mapping, profitable/loss candidate matrices,
+   insufficient depth, TP cancellation races, FAK rejection/partial-fill
+   evidence, retention horizon protection and latency-span completeness. Add
+   deterministic replay fixtures from the dedicated DB. Require full suite,
+   shadow-only soak, p99 local decision/handoff ≤50ms, and frozen subsequent
+   OOS robust-outcome improvement before a separate request may enable the
+   live handoff.
+
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
 - **Problem:** The original 228-key inventory is stale (the current profile
