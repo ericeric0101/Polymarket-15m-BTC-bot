@@ -475,6 +475,22 @@ class OperationsConfig:
 
 
 @dataclass(frozen=True)
+class OutcomeLeadLagConfig:
+    mode: str
+    feature_version: str
+    max_source_age_ms: int
+    shock_cents: int
+    residual_cents: int
+    debounce_ticks: int
+    raw_retention_days: int
+    compact_retention_days: int
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"off", "shadow"}:
+            raise ValueError("OUTCOME_LEAD_LAG_MODE must be off or shadow")
+
+
+@dataclass(frozen=True)
 class AppConfig:
     observability: ObservabilityConfig
     compatibility: CompatibilityConfig
@@ -484,6 +500,7 @@ class AppConfig:
     risk: RiskConfig
     market_data: MarketDataConfig
     operations: OperationsConfig
+    outcome_lead_lag: OutcomeLeadLagConfig
 
     @classmethod
     def from_env(cls, *, enable_terminal_dashboard: bool) -> "AppConfig":
@@ -1008,5 +1025,15 @@ class AppConfig:
                     0.1,
                     _env_float("SHADOW_SIMULATION_AGED_QUOTE_MAX_AGE_SEC", 30.0),
                 ),
+            ),
+            outcome_lead_lag=OutcomeLeadLagConfig(
+                mode=_env_str("OUTCOME_LEAD_LAG_MODE", "shadow").strip().lower(),
+                feature_version=_env_str("OUTCOME_LEAD_LAG_FEATURE_VERSION", "outcome_lead_lag_v1").strip() or "outcome_lead_lag_v1",
+                max_source_age_ms=max(50, _env_int("OUTCOME_LEAD_LAG_MAX_SOURCE_AGE_MS", 1000)),
+                shock_cents=max(1, _env_int("OUTCOME_LEAD_LAG_SHOCK_CENTS", 500)),
+                residual_cents=max(1, _env_int("OUTCOME_LEAD_LAG_RESIDUAL_CENTS", 300)),
+                debounce_ticks=max(1, _env_int("OUTCOME_LEAD_LAG_DEBOUNCE_TICKS", 2)),
+                raw_retention_days=max(2, _env_int("OUTCOME_LEAD_LAG_RAW_RETENTION_DAYS", 7)),
+                compact_retention_days=max(7, _env_int("OUTCOME_LEAD_LAG_COMPACT_RETENTION_DAYS", 90)),
             ),
         )

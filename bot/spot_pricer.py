@@ -35,6 +35,7 @@ from bot.price_streams import (
     extract_polymarket_chainlink_tick,
 )
 from bot.forecast_state import ForecastState, build_forecast_state
+from bot.outcome_lead_lag_ingress import publish_strategy_tick
 from execution.maker_engine import MakerEngine
 
 
@@ -142,11 +143,13 @@ class SpotPricerMixin:
                                 tick.received_at_ts,
                                 source="polymarket_chainlink_ws",
                             )
+                            publish_strategy_tick(self, source="polymarket_spot", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if self._is_twap_spot_source(tick.source):
                             self._polymarket_chainlink_twap_price = tick.price
                             self._polymarket_chainlink_twap_price_ts = tick.received_at_ts
                             self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
+                            publish_strategy_tick(self, source="polymarket_twap", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if not self._is_twap_spot_source(tick.source):
                             self._record_polymarket_chainlink_observation(
                                 tick.price,
@@ -279,6 +282,7 @@ class SpotPricerMixin:
                                     tick.received_at_ts,
                                     source="binance_ws",
                                 )
+                                publish_strategy_tick(self, source="binance", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         except Exception as exc:
                             logger.warning(f"Binance WS tick processing failed: {exc}")
             except Exception as e:

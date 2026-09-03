@@ -522,6 +522,14 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 def handle_order_canceled(strategy: Any, event: Any) -> None:
     """Handle cancel acknowledgements to clear pending-cancel state."""
     canceled_id = str(getattr(event, "client_order_id", "") or "")
+    cancel_started_ns = getattr(strategy, "_lead_lag_cancel_started_ns_by_order_id", {}).pop(canceled_id, None)
+    lead_lag_db = getattr(strategy, "lead_lag_db", None)
+    if cancel_started_ns is not None and lead_lag_db is not None:
+        lead_lag_db.enqueue_latency(
+            run_id=str(getattr(strategy, "run_id", "")), client_order_id=canceled_id,
+            name="cancel_request_to_ack", started_monotonic_ns=int(cancel_started_ns),
+            ended_monotonic_ns=time.perf_counter_ns(), created_epoch_ns=time.time_ns(),
+        )
     taker_exit_reason = getattr(strategy, "taker_exit_reason_by_client_order_id", {}).get(canceled_id)
     taker_exit_execution = getattr(
         strategy,

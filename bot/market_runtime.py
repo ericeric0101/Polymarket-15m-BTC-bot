@@ -16,6 +16,7 @@ from bot.adapter_overrides import quote_provenance_for_tick
 from bot.edge_observation import build_quote_age_telemetry
 from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_selection
 from bot.ops import log_strategy_run_stop, stop_event_threads
+from bot.outcome_lead_lag_ingress import publish_strategy_tick
 
 
 def quote_tick_event_timestamp(tick: Any, fallback_now: float) -> float:
@@ -525,6 +526,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # Quote plans need the local time at which a current CLOB book was
         # emitted, not the book's last internal market-update timestamp.
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = adapter_emitted_ts
+        publish_strategy_tick(strategy, source="polymarket_bbo", price=(bid_decimal + ask_decimal) / 2, bid=bid_decimal, ask=ask_decimal, bid_size=bid_size_decimal, ask_size=ask_size_decimal)
         pending_instruments = getattr(strategy, "quote_recovery_pending_instruments", set())
         if str(tick.instrument_id) in pending_instruments:
             # A binary market needs a fresh book for every subscribed outcome.
@@ -626,6 +628,12 @@ def handle_stop(strategy: Any) -> None:
             outcome_observer.stop()
         except Exception:
             logger.debug("Failed to stop Hyperliquid Outcome observer", exc_info=True)
+    lead_lag_runtime = getattr(strategy, "outcome_lead_lag_runtime", None)
+    if lead_lag_runtime is not None:
+        try:
+            lead_lag_runtime.stop()
+        except Exception:
+            logger.debug("Failed to stop Outcome lead/lag runtime", exc_info=True)
     lead_lag_db = getattr(strategy, "lead_lag_db", None)
     if lead_lag_db is not None:
         try:

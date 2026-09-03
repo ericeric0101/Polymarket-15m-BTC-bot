@@ -36,6 +36,10 @@ from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 from bot.trade_telemetry import TradeTelemetry
 from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver
+from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
+from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
+from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
+from bot.outcome_lead_lag_ingress import publish_strategy_tick
 
 
 def initialize_strategy_settings(
@@ -713,7 +717,26 @@ def initialize_strategy_settings(
     strategy._shadow_simulations_by_slug = {}
     strategy._fair_edge_bucket_shadow_by_id = {}
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
+    strategy._lead_lag_cancel_started_ns_by_order_id = {}
     strategy.lead_lag_db = LeadLagDB()
-    strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver()
+    lead_lag = config.outcome_lead_lag
+    strategy.outcome_lead_lag_mode = lead_lag.mode
+    strategy.outcome_lead_lag_runtime = None
+    if lead_lag.mode == "shadow":
+        strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(strategy)
+        strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
+            config=OutcomeLeadLagStateConfig(
+                feature_version=lead_lag.feature_version, max_source_age_ms=lead_lag.max_source_age_ms,
+                shock_cents=lead_lag.shock_cents, residual_cents=lead_lag.residual_cents,
+                debounce_ticks=lead_lag.debounce_ticks,
+            ),
+            db=strategy.lead_lag_db,
+            candidate_handler=strategy.outcome_lead_lag_shadow.record_candidate,
+            tick_handler=strategy.outcome_lead_lag_shadow.on_tick,
+        )
+        strategy.outcome_lead_lag_runtime.start()
+    strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver(
+        tick_listener=(lambda price, _market_id: publish_strategy_tick(strategy, source="outcome_btc_mark", price=price)) if strategy.outcome_lead_lag_runtime is not None else None,
+    )
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

@@ -42,7 +42,7 @@ def _book_top(book: Any) -> tuple[Optional[float], Optional[float], Optional[flo
 class HyperliquidOutcomeObserver:
     """Observe one configured daily market; never make a network REST request."""
 
-    def __init__(self, *, market_id: Optional[int] = None, ws_url: Optional[str] = None, authority_path: Optional[str] = None) -> None:
+    def __init__(self, *, market_id: Optional[int] = None, ws_url: Optional[str] = None, authority_path: Optional[str] = None, tick_listener=None) -> None:
         self.market_id = int(market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID", "1313"))
         self.ws_url = os.getenv("HYPERLIQUID_OUTCOME_WS_URL") or ws_url or HYPERLIQUID_MAINNET_WS_URL
         self.authority_path = authority_path or os.getenv("HYPERLIQUID_OUTCOME_AUTHORITY_PATH", DEFAULT_AUTHORITY_PATH)
@@ -51,6 +51,7 @@ class HyperliquidOutcomeObserver:
         self._authority_thread: Optional[threading.Thread] = None
         self._pending_market_id: Optional[int] = None
         self._last_error_log_ts = 0.0
+        self._tick_listener = tick_listener
         self._set_market(self.market_id, reason="not_connected")
 
     def _set_market(self, market_id: int, *, reason: str) -> None:
@@ -149,10 +150,16 @@ class HyperliquidOutcomeObserver:
         if channel == "allMids" and isinstance(data, dict):
             mids = data.get("mids", data)
             if isinstance(mids, dict):
+                btc_mark = _number(mids.get("BTC"))
                 self._merge(
                     mids_received_ts=now_ts, side0_all_mid=_number(mids.get(side0_coin)),
-                    side1_all_mid=_number(mids.get(side1_coin)), btc_mark=_number(mids.get("BTC")),
+                    side1_all_mid=_number(mids.get(side1_coin)), btc_mark=btc_mark,
                 )
+                if btc_mark is not None and self._tick_listener is not None:
+                    try:
+                        self._tick_listener(btc_mark, self.market_id)
+                    except Exception:
+                        pass
         elif channel == "l2Book" and isinstance(data, dict):
             coin = str(data.get("coin") or "")
             if coin not in {side0_coin, side1_coin}:

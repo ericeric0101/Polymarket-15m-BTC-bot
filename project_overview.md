@@ -644,8 +644,9 @@ behavior stays shadow-only):**
    Add `bot/outcome_lead_lag_runtime.py`, owned and started/stopped by the
    strategy, to drain the bounded queue serially, call the pure state, stamp
    `decision_ns`, and hand only a `LeadLagCandidate` to a strategy-owned
-   shadow callback. It must coalesce superseded reference ticks under load,
-   retain a bounded ring for candidate windows, and fail closed on overflow.
+   shadow callback. It must retain a bounded ring for candidate windows and
+   fail closed on overflow; any future coalescing must preserve inter-source
+   event ordering and is separately regression-tested.
    It must never start a maker worker or touch `submit_order`.
 4. **Dedicated persistence and retention — evolve, do not overload the
    journal.** Extend `monitoring/lead_lag_db.py` (or split its raw writer into
@@ -693,6 +694,22 @@ behavior stays shadow-only):**
    shadow-only soak, p99 local decision/handoff ≤50ms, and frozen subsequent
    OOS robust-outcome improvement before a separate request may enable the
    live handoff.
+
+**D.4.1 implementation record (2026-09-03):** The shadow-only foundation is
+implemented: `OutcomeLeadLagConfig` accepts only `off`/`shadow`;
+`outcome_lead_lag_types`, `outcome_lead_lag_state`, `outcome_lead_lag_runtime`,
+`outcome_lead_lag_ingress`, and `outcome_lead_lag_shadow` provide immutable
+tick envelopes, bounded serial evaluation, compact references, candidates and
+250ms–60s TWAP micro-markouts. Mainnet Outcome, Chainlink spot/TWAP, Binance,
+and CLOB BBO now feed the runtime through non-blocking ingress. The dedicated
+DB owns compact references, decisions, markouts and latency spans; manual
+retention preview and latency report scripts are available. Order handoff and
+cancel-request→ack latency are recorded without changing execution behavior.
+`outcome_lead_lag_exit_handoff` is an explicit disabled guard that always
+rejects. No state may create, cancel, alter, or submit an order. Full suite:
+**308 passed**. The remaining work is operational evidence—shadow soak,
+latency distribution and frozen subsequent OOS validation—not implementation
+authority for a live exit.
 
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
