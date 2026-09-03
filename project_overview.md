@@ -575,6 +575,21 @@ an order.
   OOS sample across multiple days, weekday/weekend and volatility regimes that
   improves realized robust outcome without increasing false exits or violating
   the existing recovery controls.
+- **Storage, retention and markouts:** seconds-level processing does not imply
+  permanent per-tick JSON journaling. Keep a bounded in-memory tick ring and a
+  short-retention high-resolution research store (initially seven days); write
+  durable compact one-second OHLC/last/reference rows, every candidate's
+  bounded pre/post-event tick window, feature version, decision, CLOB depth,
+  latency and execution evidence. Retain those candidate records and their
+  1/5/10/30/60-second *micro-markouts* for OOS analysis, then archive compact
+  daily aggregates/read-only partitions rather than silently deleting them.
+  The separate D.4 24/48-hour trade/penalty markouts remain mandatory: no raw
+  data may be removed before all due 48-hour observations are finalized and
+  their durable outcome/settlement records are written. `trade_journal.db` is
+  execution/audit authority, not the high-rate tick sink; do not purge or
+  vacuum its existing data in-place. Any later archival/retention job must be
+  atomic, verify row counts and horizons, preserve order/settlement/audit rows,
+  and be separately approved.
 - **Language and deployment decision:** Python is sufficient for the current
   5–10-second opportunity if the hot path is event-driven and contains only
   bounded in-memory arithmetic/state transitions. The present bottlenecks are
