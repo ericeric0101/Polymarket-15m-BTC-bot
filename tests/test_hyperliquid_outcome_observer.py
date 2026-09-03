@@ -45,6 +45,16 @@ def test_l2_update_cannot_make_an_old_all_mids_value_fresh():
     assert snapshot["analysis_available"] is False
 
 
+def test_application_pong_is_tracked_but_not_treated_as_market_freshness():
+    observer = HyperliquidOutcomeObserver(market_id=1313)
+    observer._merge(stream_connected=True, mids_received_ts=time.time() - 10.0)
+    observer._on_message({"channel": "pong"})
+    snapshot = observer.snapshot()
+
+    assert snapshot["last_app_pong_ts"] > 0
+    assert snapshot["available"] is False
+
+
 def test_recent_daily_selection_from_other_bot_is_rollover_authority(tmp_path):
     authority_path = tmp_path / "outcome_market_authority.json"
     authority_path.write_text(json.dumps({

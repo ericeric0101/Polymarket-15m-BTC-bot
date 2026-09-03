@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import threading
 import time
 from decimal import Decimal
@@ -16,6 +17,8 @@ import websockets
 
 HYPERLIQUID_MAINNET_WS_URL = "wss://api.hyperliquid.xyz/ws"
 MAX_STREAM_AGE_SEC = 5.0
+APPLICATION_HEARTBEAT_INTERVAL_SEC = 20.0
+APPLICATION_PONG_TIMEOUT_SEC = 45.0
 DEFAULT_AUTHORITY_PATH = "/Users/cheng-kaihuang/hyperliquid_prediction_bot/logs/outcome_market_authority.json"
 
 
@@ -145,6 +148,9 @@ class HyperliquidOutcomeObserver:
 
     def _on_message(self, payload: dict[str, Any]) -> None:
         channel, data, now_ts = payload.get("channel"), payload.get("data"), time.time()
+        if channel == "pong":
+            self._merge(last_app_pong_ts=now_ts)
+            return
         with self._lock:
             side0_coin, side1_coin = self._snapshot["side0_coin"], self._snapshot["side1_coin"]
         if channel == "allMids" and isinstance(data, dict):
@@ -182,7 +188,11 @@ class HyperliquidOutcomeObserver:
                 with self._lock:
                     side0_coin, side1_coin = self._snapshot["side0_coin"], self._snapshot["side1_coin"]
                 async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10) as ws:
-                    self._merge(stream_connected=True, connected_ts=time.time(), reason=None)
+                    connected_ts = time.time()
+                    self._merge(
+                        stream_connected=True, connected_ts=connected_ts, reason=None,
+                        last_app_ping_ts=None, last_app_pong_ts=None,
+                    )
                     reconnect_attempt = 0
                     for subscription in ({"type": "allMids"}, {"type": "l2Book", "coin": side0_coin}, {"type": "l2Book", "coin": side1_coin}):
                         await ws.send(json.dumps({"method": "subscribe", "subscription": subscription}))
@@ -190,6 +200,15 @@ class HyperliquidOutcomeObserver:
                         if self._maybe_roll_market():
                             await ws.close()
                             break
+                        heartbeat_now = time.time()
+                        with self._lock:
+                            last_ping_ts = self._snapshot.get("last_app_ping_ts") or 0.0
+                            last_pong_ts = self._snapshot.get("last_app_pong_ts") or connected_ts
+                        if heartbeat_now - float(last_ping_ts) >= APPLICATION_HEARTBEAT_INTERVAL_SEC:
+                            await ws.send(json.dumps({"method": "ping"}))
+                            self._merge(last_app_ping_ts=heartbeat_now)
+                        if heartbeat_now - float(last_pong_ts) >= APPLICATION_PONG_TIMEOUT_SEC:
+                            raise TimeoutError("Hyperliquid application pong timeout")
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
                         except asyncio.TimeoutError:
@@ -204,4 +223,5 @@ class HyperliquidOutcomeObserver:
                     logger.warning(f"Hyperliquid Outcome WebSocket unavailable: {type(exc).__name__}: {exc}")
                     self._last_error_log_ts = now_ts
                 reconnect_attempt += 1
-                await asyncio.sleep(min(30.0, float(2 ** min(reconnect_attempt - 1, 5))))
+                delay = min(30.0, float(2 ** min(reconnect_attempt - 1, 5)))
+                await asyncio.sleep(delay + random.uniform(0.0, min(0.5, delay * 0.1)))

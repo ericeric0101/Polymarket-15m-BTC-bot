@@ -711,6 +711,14 @@ rejects. No state may create, cancel, alter, or submit an order. Full suite:
 latency distribution and frozen subsequent OOS validation—not implementation
 authority for a live exit.
 
+**Outcome WS heartbeat repair (2026-09-03):** The Hyperliquid mainnet observer
+now sends the documented application-level `{ "method": "ping" }` every 20
+seconds, records `pong`, and proactively reconnects after 45 seconds without
+a pong. WebSocket control ping remains transport keepalive only; a pong never
+counts as fresh market data. Reconnect backoff now includes bounded jitter.
+This fixes the observed approximately 60-second direct-close pattern without
+using REST/testnet or changing any trading behavior.
+
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
 - **Problem:** The original 228-key inventory is stale (the current profile
