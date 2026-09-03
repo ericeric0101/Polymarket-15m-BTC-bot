@@ -723,12 +723,16 @@ def initialize_strategy_settings(
     strategy.outcome_lead_lag_mode = lead_lag.mode
     strategy.outcome_lead_lag_runtime = None
     if lead_lag.mode == "shadow":
-        strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(strategy)
+        strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(
+            strategy, max_markout_delay_ms=lead_lag.markout_max_delay_ms,
+        )
         strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
             config=OutcomeLeadLagStateConfig(
                 feature_version=lead_lag.feature_version, max_source_age_ms=lead_lag.max_source_age_ms,
                 shock_cents=lead_lag.shock_cents, residual_cents=lead_lag.residual_cents,
                 debounce_ticks=lead_lag.debounce_ticks,
+                baseline_window_samples=lead_lag.baseline_window_samples,
+                baseline_warmup_samples=lead_lag.baseline_warmup_samples,
             ),
             db=strategy.lead_lag_db,
             candidate_handler=strategy.outcome_lead_lag_shadow.record_candidate,

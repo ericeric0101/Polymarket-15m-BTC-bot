@@ -11,6 +11,10 @@ from typing import Any
 
 
 class LeadLagDB:
+    # SQLite treats NULL values as distinct in UNIQUE/PRIMARY KEY checks.
+    # Cross-market references have no Outcome market id, so persist a stable
+    # sentinel instead of NULL to make one-second upserts real.
+    GLOBAL_MARKET_ID = -1
     def __init__(self, db_path: str = "logs/hyperliquid_lead_lag.db") -> None:
         self.db_path = str(Path(db_path))
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +68,10 @@ class LeadLagDB:
                     elapsed_ns INTEGER NOT NULL, created_epoch_ns INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_lead_lag_latency_name ON latency_spans(name, created_epoch_ns);
+                CREATE INDEX IF NOT EXISTS idx_lead_lag_markout_horizon_time
+                  ON lead_lag_markouts(horizon_ms, candidate_epoch_ns);
+                CREATE INDEX IF NOT EXISTS idx_lead_lag_decision_time
+                  ON lead_lag_decisions(decision_epoch_ns);
             """)
 
     def enqueue_snapshot(self, *, run_id: str, polymarket_slug: str, hyperliquid_market_id: int | None, observed_ts: float, payload: dict[str, Any]) -> None:
@@ -76,7 +84,8 @@ class LeadLagDB:
             return
 
     def enqueue_reference_1s(self, *, run_id: str, slug: str, market_id: int | None, bucket_epoch_ms: int, source: str, price_cents: int, received_epoch_ns: int) -> None:
-        self._enqueue_sql("reference", (str(run_id), str(slug), market_id, int(bucket_epoch_ms), str(source), int(price_cents), int(received_epoch_ns)))
+        persisted_market_id = self.GLOBAL_MARKET_ID if market_id is None else int(market_id)
+        self._enqueue_sql("reference", (str(run_id), str(slug), persisted_market_id, int(bucket_epoch_ms), str(source), int(price_cents), int(received_epoch_ns)))
 
     def enqueue_decision(self, *, run_id: str, slug: str, market_id: int | None, decision_epoch_ns: int, payload: dict[str, Any]) -> None:
         self._enqueue_sql("decision", (str(run_id), str(slug), market_id, int(decision_epoch_ns), dict(payload)))

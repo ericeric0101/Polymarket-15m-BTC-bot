@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from statistics import median
 from dataclasses import dataclass
 
 from bot.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
@@ -9,12 +10,14 @@ from bot.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
 
 @dataclass(frozen=True)
 class OutcomeLeadLagStateConfig:
-    feature_version: str = "outcome_lead_lag_v1"
+    feature_version: str = "outcome_lead_lag_v2"
     max_source_age_ms: int = 1_000
     shock_cents: int = 500
     residual_cents: int = 300
     debounce_ticks: int = 2
     windows_ms: tuple[int, ...] = (250, 1_000, 5_000, 10_000)
+    baseline_window_samples: int = 120
+    baseline_warmup_samples: int = 30
 
 
 class OutcomeLeadLagState:
@@ -26,6 +29,8 @@ class OutcomeLeadLagState:
         self._history: dict[str, deque[ReferenceTick]] = defaultdict(lambda: deque(maxlen=512))
         self._persistence = 0
         self._last_direction = 0
+        self._basis_samples: deque[int] = deque(maxlen=max(1, self.config.baseline_window_samples))
+        self._last_basis_outcome_ns: int | None = None
 
     def _return_for_window(self, source: str, tick: ReferenceTick, window_ms: int) -> int | None:
         history = self._history[source]
@@ -37,6 +42,26 @@ class OutcomeLeadLagState:
         self._persistence = 0
         self._last_direction = 0
         return LeadLagDecision("unavailable", 0, 0, 0, 0, self.config.feature_version, tick.received_monotonic_ns, reason)
+
+    def _update_basis(self, outcome: ReferenceTick, twap: ReferenceTick) -> int | None:
+        """Return the robust raw Outcome--TWAP basis after one new Outcome mark.
+
+        The two references are different venue feeds and can legitimately have
+        a sizeable static level difference.  Only the deviation from their
+        recent basis is a possible untranslated move.
+        """
+        # Score against the basis known *before* the current Outcome update.
+        # Otherwise the event being tested would immediately calibrate itself
+        # away, especially with a short warm-up in deterministic tests.
+        baseline = (
+            int(median(self._basis_samples))
+            if len(self._basis_samples) >= self.config.baseline_warmup_samples
+            else None
+        )
+        if self._last_basis_outcome_ns != outcome.received_monotonic_ns:
+            self._basis_samples.append(outcome.price_cents - twap.price_cents)
+            self._last_basis_outcome_ns = outcome.received_monotonic_ns
+        return baseline
 
     def apply(self, tick: ReferenceTick) -> LeadLagDecision:
         previous = self._latest.get(tick.source)
@@ -51,17 +76,32 @@ class OutcomeLeadLagState:
             return self._unavailable(tick, "stale_reference")
         if outcome.connection_epoch != tick.connection_epoch and tick.source == "outcome_btc_mark":
             return self._unavailable(tick, "cross_epoch")
+        raw_residual = outcome.price_cents - twap.price_cents
+        baseline = self._update_basis(outcome, twap)
+        if baseline is None:
+            return LeadLagDecision("observe", 0, 0, 0, 0, self.config.feature_version,
+                                   tick.received_monotonic_ns, "basis_warmup",
+                                   raw_residual_cents=raw_residual,
+                                   follower_price_cents=twap.price_cents)
         outcome_return = self._return_for_window("outcome_btc_mark", outcome, 1_000)
         window_returns = tuple((window, self._return_for_window("outcome_btc_mark", outcome, window)) for window in self.config.windows_ms)
+        residual = raw_residual - baseline
         if outcome_return is None:
-            return LeadLagDecision("observe", 0, 0, outcome.price_cents - twap.price_cents, 0, self.config.feature_version, tick.received_monotonic_ns, "insufficient_history", window_returns)
-        residual = outcome.price_cents - twap.price_cents
+            return LeadLagDecision("observe", 0, 0, residual, 0, self.config.feature_version,
+                                   tick.received_monotonic_ns, "insufficient_history", window_returns,
+                                   raw_residual, baseline, twap.price_cents)
         direction = 1 if outcome_return > 0 else -1 if outcome_return < 0 else 0
         qualifying = direction and abs(outcome_return) >= self.config.shock_cents and abs(residual) >= self.config.residual_cents and (residual > 0) == (direction > 0)
         if not qualifying:
             self._persistence, self._last_direction = 0, 0
-            return LeadLagDecision("observe", direction, outcome_return, residual, 0, self.config.feature_version, tick.received_monotonic_ns, "no_untranslated_shock", window_returns)
+            return LeadLagDecision("observe", direction, outcome_return, residual, 0,
+                                   self.config.feature_version, tick.received_monotonic_ns,
+                                   "no_untranslated_shock", window_returns, raw_residual,
+                                   baseline, twap.price_cents)
         self._persistence = self._persistence + 1 if direction == self._last_direction else 1
         self._last_direction = direction
         state = "adverse_confirmed" if self._persistence >= self.config.debounce_ticks else "adverse_candidate"
-        return LeadLagDecision(state, direction, outcome_return, residual, self._persistence, self.config.feature_version, tick.received_monotonic_ns, "outcome_shock_untranslated", window_returns)
+        return LeadLagDecision(state, direction, outcome_return, residual, self._persistence,
+                               self.config.feature_version, tick.received_monotonic_ns,
+                               "outcome_shock_untranslated", window_returns, raw_residual,
+                               baseline, twap.price_cents)

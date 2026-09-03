@@ -719,6 +719,30 @@ counts as fresh market data. Reconnect backoff now includes bounded jitter.
 This fixes the observed approximately 60-second direct-close pattern without
 using REST/testnet or changing any trading behavior.
 
+**D.4.1 event-data quality correction (2026-09-04):** The first shadow soak
+showed that event ingress and local decision latency were healthy, but it also
+exposed three research-data defects: `NULL` cross-market IDs defeated SQLite
+one-second uniqueness, a continuously confirmed shock created a new candidate
+on every tick, and a nominal micro-markout could be written only when a later
+TWAP update arrived. The shadow runtime now persists cross-market references
+with a stable `-1` market-id sentinel, so each `(run, slug, source, second)`
+has a real upsert key; persists state transitions rather than every unchanged
+decision; and hands a candidate to shadow only on confirmed-signal entry or
+confirmed direction reversal. It does not alter a live order path.
+
+Outcome and Polymarket reference levels are now compared against a frozen
+rolling median Outcome-minus-TWAP basis after an explicit warm-up. `residual`
+therefore means deviation from venue basis, while raw residual and baseline
+remain in the durable decision for audit. Every new markout carries its target
+horizon, actual elapsed time, observation delay, and a `timely` quality flag.
+The default feature version is `outcome_lead_lag_v2`; a new run must retain
+that version rather than mixing v1 observations with calibrated v2 evidence.
+`scripts/outcome_lead_lag_event_report.py` accepts only timely records and
+deduplicates historical candidates to one direction per second. Pre-correction
+event markouts intentionally fail this gate; they remain raw operational
+evidence only and cannot validate sub-second alpha. The system remains exactly
+`off`/`shadow`—no candidate may cancel, modify, or submit an order.
+
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
 - **Problem:** The original 228-key inventory is stale (the current profile

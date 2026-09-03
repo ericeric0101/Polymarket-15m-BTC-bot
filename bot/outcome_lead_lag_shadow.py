@@ -8,8 +8,9 @@ from decimal import Decimal
 class OutcomeLeadLagShadow:
     HORIZONS_MS = (250, 1_000, 5_000, 10_000, 30_000, 60_000)
 
-    def __init__(self, strategy) -> None:
+    def __init__(self, strategy, *, max_markout_delay_ms: int = 1_000) -> None:
         self.strategy, self.pending = strategy, []
+        self.max_markout_delay_ms = max(0, int(max_markout_delay_ms))
 
     def record_candidate(self, candidate) -> None:
         held = str(getattr(self.strategy, "active_side", "NONE"))
@@ -22,10 +23,12 @@ class OutcomeLeadLagShadow:
                 "execution_blocked": True, "decision": candidate.decision.__dict__, "held_side": held,
             },
         )
-        try:
-            baseline = int((Decimal(str(getattr(self.strategy, "_polymarket_chainlink_twap_price", 0))) * 100).to_integral_value())
-        except Exception:
-            baseline = None
+        baseline = candidate.decision.follower_price_cents
+        if baseline is None:
+            try:
+                baseline = int((Decimal(str(getattr(self.strategy, "_polymarket_chainlink_twap_price", 0))) * 100).to_integral_value())
+            except Exception:
+                baseline = None
         self.pending.append((candidate, baseline if baseline and baseline > 0 else None, set()))
 
     def on_tick(self, tick, _decision) -> None:
@@ -44,6 +47,10 @@ class OutcomeLeadLagShadow:
                         payload={"execution_blocked": True, "baseline_twap_cents": baseline,
                                  "markout_twap_cents": tick.price_cents,
                                  "twap_change_cents": tick.price_cents - baseline,
+                                 "target_horizon_ms": horizon,
+                                 "observation_delay_ms": int(elapsed_ms - horizon),
+                                 "observed_elapsed_ms": int(elapsed_ms),
+                                 "timely": elapsed_ms <= horizon + self.max_markout_delay_ms,
                                  "decision": candidate.decision.__dict__},
                     )
                     written.add(horizon)

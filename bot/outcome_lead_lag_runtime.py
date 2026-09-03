@@ -18,6 +18,9 @@ class OutcomeLeadLagRuntime:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.dropped_ticks = 0
+        self._last_persisted_signature: tuple[object, ...] | None = None
+        self._active_candidate_direction = 0
+        self._active_candidate_scope: tuple[str, str] | None = None
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -57,11 +60,26 @@ class OutcomeLeadLagRuntime:
                 bucket_epoch_ms=(tick.received_epoch_ns // 1_000_000 // 1_000) * 1_000,
                 source=tick.source, price_cents=tick.price_cents, received_epoch_ns=tick.received_epoch_ns,
             )
-            self._db.enqueue_decision(
-                run_id=tick.run_id, slug=tick.slug, market_id=tick.market_id,
-                decision_epoch_ns=decision_epoch_ns, payload={**asdict(decision), "source": tick.source},
-            )
+            decision_scope = (tick.run_id, tick.slug, tick.market_id)
+            candidate_scope = (tick.run_id, tick.slug)
+            signature = (decision_scope, decision.state, decision.direction, decision.reason)
+            if signature != self._last_persisted_signature:
+                self._db.enqueue_decision(
+                    run_id=tick.run_id, slug=tick.slug, market_id=tick.market_id,
+                    decision_epoch_ns=decision_epoch_ns, payload={**asdict(decision), "source": tick.source},
+                )
+                self._last_persisted_signature = signature
             if self._tick_handler is not None:
                 self._tick_handler(tick, decision)
-            if decision.state in {"adverse_candidate", "adverse_confirmed"} and self._candidate_handler is not None:
+            # A candidate is an edge-triggered research event, not every tick
+            # while the same move remains confirmed.  A confirmed reversal is
+            # a new event; any non-confirmed state re-arms the next entry.
+            entering_confirmed = decision.state == "adverse_confirmed" and (
+                candidate_scope != self._active_candidate_scope or decision.direction != self._active_candidate_direction
+            )
+            if decision.state != "adverse_confirmed":
+                self._active_candidate_direction, self._active_candidate_scope = 0, None
+            elif entering_confirmed:
+                self._active_candidate_direction, self._active_candidate_scope = decision.direction, candidate_scope
+            if entering_confirmed and self._candidate_handler is not None:
                 self._candidate_handler(LeadLagCandidate(decision, tick.run_id, tick.slug, tick.market_id, decision_epoch_ns))

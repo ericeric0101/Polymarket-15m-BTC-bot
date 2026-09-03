@@ -3,6 +3,7 @@ import sqlite3
 
 from monitoring.lead_lag_db import LeadLagDB
 from scripts.hyperliquid_outcome_lead_lag_report import load_snapshots
+from scripts.outcome_lead_lag_event_report import load_quality_gated_markouts, summarize
 
 
 def test_lead_lag_db_batches_raw_snapshots_and_flushes_on_stop(tmp_path):
@@ -67,3 +68,32 @@ def test_lead_lag_db_persists_compact_reference_decision_and_latency(tmp_path):
         assert conn.execute("SELECT count(*) FROM reference_1s").fetchone()[0] == 1
         assert conn.execute("SELECT payload_json FROM lead_lag_decisions").fetchone()[0] == '{"state": "observe"}'
         assert conn.execute("SELECT elapsed_ns FROM latency_spans").fetchone()[0] == 150
+
+
+def test_reference_compaction_uses_global_market_sentinel_for_null_market_id(tmp_path):
+    db_path = tmp_path / "lead_lag.db"
+    db = LeadLagDB(str(db_path))
+    for price in (7_700_000, 7_700_100):
+        db.enqueue_reference_1s(
+            run_id="r", slug="s", market_id=None, bucket_epoch_ms=1_000,
+            source="binance", price_cents=price, received_epoch_ns=1_000_000_000,
+        )
+    db.stop()
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT market_id, price_cents FROM reference_1s").fetchall()
+    assert rows == [(LeadLagDB.GLOBAL_MARKET_ID, 7_700_100)]
+
+
+def test_event_report_excludes_late_markouts_and_deduplicates_candidate_second(tmp_path):
+    db_path = tmp_path / "lead_lag.db"
+    db = LeadLagDB(str(db_path))
+    payload = {"timely": True, "twap_change_cents": 100, "observed_elapsed_ms": 300, "decision": {"direction": 1}}
+    db.enqueue_markout(run_id="r", slug="s", market_id=None, candidate_epoch_ns=1_000_000_000, horizon_ms=250, observed_epoch_ns=1_300_000_000, payload=payload)
+    # A historical duplicate in the same direction/second must not become a
+    # second independent observation in the report.
+    db.enqueue_markout(run_id="r", slug="s", market_id=None, candidate_epoch_ns=1_100_000_000, horizon_ms=250, observed_epoch_ns=1_400_000_000, payload=payload)
+    db.enqueue_markout(run_id="r", slug="s", market_id=None, candidate_epoch_ns=2_000_000_000, horizon_ms=250, observed_epoch_ns=2_400_000_000, payload={**payload, "timely": False})
+    db.stop()
+    rows = load_quality_gated_markouts(str(db_path))
+    assert len(rows) == 1
+    assert summarize(rows)["250"]["direction_hit_rate"] == 1.0

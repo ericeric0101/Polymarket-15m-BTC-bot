@@ -37,6 +37,13 @@ class LeadLagDecision:
     decision_monotonic_ns: int
     reason: str
     window_returns_cents: tuple[tuple[int, int | None], ...] = ()
+    # ``residual_cents`` is relative to the rolling Outcome--TWAP basis, not
+    # the raw cross-venue level difference.  Retain both values so research
+    # can audit the calibration instead of silently treating venue basis as
+    # a lead/lag signal.
+    raw_residual_cents: int = 0
+    baseline_cents: int | None = None
+    follower_price_cents: int | None = None
 
 
 @dataclass(frozen=True)

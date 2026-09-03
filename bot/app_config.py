@@ -482,12 +482,17 @@ class OutcomeLeadLagConfig:
     shock_cents: int
     residual_cents: int
     debounce_ticks: int
+    baseline_window_samples: int
+    baseline_warmup_samples: int
+    markout_max_delay_ms: int
     raw_retention_days: int
     compact_retention_days: int
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow"}:
             raise ValueError("OUTCOME_LEAD_LAG_MODE must be off or shadow")
+        if self.baseline_warmup_samples > self.baseline_window_samples:
+            raise ValueError("OUTCOME_LEAD_LAG_BASELINE_WARMUP_SAMPLES cannot exceed baseline window")
 
 
 @dataclass(frozen=True)
@@ -1028,11 +1033,14 @@ class AppConfig:
             ),
             outcome_lead_lag=OutcomeLeadLagConfig(
                 mode=_env_str("OUTCOME_LEAD_LAG_MODE", "shadow").strip().lower(),
-                feature_version=_env_str("OUTCOME_LEAD_LAG_FEATURE_VERSION", "outcome_lead_lag_v1").strip() or "outcome_lead_lag_v1",
+                feature_version=_env_str("OUTCOME_LEAD_LAG_FEATURE_VERSION", "outcome_lead_lag_v2").strip() or "outcome_lead_lag_v2",
                 max_source_age_ms=max(50, _env_int("OUTCOME_LEAD_LAG_MAX_SOURCE_AGE_MS", 1000)),
                 shock_cents=max(1, _env_int("OUTCOME_LEAD_LAG_SHOCK_CENTS", 500)),
                 residual_cents=max(1, _env_int("OUTCOME_LEAD_LAG_RESIDUAL_CENTS", 300)),
                 debounce_ticks=max(1, _env_int("OUTCOME_LEAD_LAG_DEBOUNCE_TICKS", 2)),
+                baseline_window_samples=max(2, _env_int("OUTCOME_LEAD_LAG_BASELINE_WINDOW_SAMPLES", 120)),
+                baseline_warmup_samples=max(1, _env_int("OUTCOME_LEAD_LAG_BASELINE_WARMUP_SAMPLES", 30)),
+                markout_max_delay_ms=max(0, _env_int("OUTCOME_LEAD_LAG_MARKOUT_MAX_DELAY_MS", 1000)),
                 raw_retention_days=max(2, _env_int("OUTCOME_LEAD_LAG_RAW_RETENTION_DAYS", 7)),
                 compact_retention_days=max(7, _env_int("OUTCOME_LEAD_LAG_COMPACT_RETENTION_DAYS", 90)),
             ),
