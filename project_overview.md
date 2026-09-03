@@ -743,6 +743,16 @@ event markouts intentionally fail this gate; they remain raw operational
 evidence only and cannot validate sub-second alpha. The system remains exactly
 `off`/`shadow`—no candidate may cancel, modify, or submit an order.
 
+**v1 research-DB retirement (2026-09-04, user-approved):** Before deleting
+`logs/hyperliquid_lead_lag.db`, its final inventory was 10,039 stored five-
+second snapshots (9,092 quality-gated report rows), 874,215 compact-reference
+rows, 983,623 decisions, 653,231 markouts, and 874,296 latency spans. The
+five-second report retained the exploratory short-horizon result—Outcome
+follow-through 65.2% at 5s and 66.7% at 10s, versus Binance 61.1% and 65.0%—
+but the v1 event markouts had no valid timing/de-duplication semantics. The
+dedicated DB and SQLite sidecars were therefore intentionally removed; this
+does not touch `trade_journal.db` or either bot's live/outcome authority data.
+
 #### Planned D.5 — close configuration, code, document, and P1–P7 ownership
 
 - **Problem:** The original 228-key inventory is stale (the current profile
