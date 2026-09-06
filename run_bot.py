@@ -121,6 +121,8 @@ from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
 from bot.recovery import StrategyRecoveryMixin
 from bot.shadow_simulation import ShadowSimulationMixin
+from bot.depth_risk_shadow import DepthRiskShadowMixin
+from bot.depth_risk import cap_buy_quantity
 from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
@@ -258,6 +260,7 @@ class IntegratedBTCStrategy(
     QuoteRuntimeMixin,
     StrategyRecoveryMixin,
     ShadowSimulationMixin,
+    DepthRiskShadowMixin,
     LeadLagObservationMixin,
     StrategyLifecycleMixin,
     Strategy,
@@ -3097,9 +3100,53 @@ class IntegratedBTCStrategy(
                             requested_quantity = Decimal(str(requested_quantity)) * Decimal(
                                 str(desired_entry.get("size_multiplier", "1") or "1")
                             )
+                        if bool(getattr(self, "depth_risk_sizing_enabled", True)):
+                            inventory_headroom = max(
+                                Decimal("0"),
+                                Decimal(str(self.maker_max_inventory_shares))
+                                - Decimal(str(current_inst_inventory_qty)),
+                            )
+                            depth_decision = cap_buy_quantity(
+                                entry_price=Decimal(str(desired_entry.get("price", "0") or "0")),
+                                tick_size=quote_ctx.tick,
+                                asks=quote_ctx.ask_levels,
+                                max_entry_notional_usdc=Decimal(str(self.depth_risk_max_entry_notional_usdc)),
+                                max_loss_usdc=Decimal(str(self.depth_risk_max_loss_usdc)),
+                                depth_fraction=Decimal(str(self.depth_risk_depth_fraction)),
+                                boundary_ticks=int(self.depth_risk_price_boundary_ticks),
+                                inventory_headroom=inventory_headroom,
+                                # Existing quality controls reduce the budget; they never expand it.
+                                size_multiplier=Decimal(str(desired_entry.get("size_multiplier", "1") or "1")),
+                            )
+                            desired_entry["depth_risk_sizing"] = depth_decision.as_payload()
+                            requested_quantity = depth_decision.quantity
+                            multiplier = Decimal(
+                                str(desired_entry.get("size_multiplier", "1") or "1")
+                            )
+                            # order_submission applies size_multiplier once.  Pass the
+                            # pre-multiplier target so its final submitted quantity is
+                            # exactly the L2/risk-capped quantity evaluated here.
+                            if requested_quantity > 0 and multiplier > 0:
+                                desired_entry["target_qty_override"] = (
+                                    requested_quantity / multiplier
+                                )
+                            if requested_quantity < self.maker_exchange_min_shares:
+                                desired_entry["should_quote"] = False
+                                desired_entry["diag_reason"] = (
+                                    "depth_risk_cap_below_exchange_min "
+                                    f"limit={depth_decision.limiting_factor} "
+                                    f"qty={float(requested_quantity):.6f}"
+                                )
                         desired_entry = synchronize_desired_buy_economics_to_quantity(
                             desired_entry=desired_entry,
                             requested_quantity=requested_quantity,
+                        )
+                        self._record_depth_risk_shadow(
+                            instrument_id=inst_id,
+                            tick_size=quote_ctx.tick,
+                            asks=quote_ctx.ask_levels,
+                            bids=quote_ctx.bid_levels,
+                            now_ts=now_ts,
                         )
                     self._emit_buy_observe_diagnostic(
                         inst_id=inst_id,

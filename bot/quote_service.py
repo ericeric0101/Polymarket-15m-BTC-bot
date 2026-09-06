@@ -176,6 +176,7 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "target_qty_override": desired.get("target_qty_override"),
         "planned_quantity": desired.get("planned_quantity"),
         "economics_quantity_multiplier": desired.get("economics_quantity_multiplier"),
+        "depth_risk_sizing": desired.get("depth_risk_sizing"),
     }
 
 

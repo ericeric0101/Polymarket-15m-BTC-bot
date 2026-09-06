@@ -90,6 +90,13 @@ def initialize_strategy_settings(
     strategy.maker_min_shares = config.maker.min_shares
     strategy.maker_exchange_min_shares = config.maker.exchange_min_shares
     strategy.maker_fixed_shares = config.maker.fixed_shares
+    strategy.depth_risk_sizing_enabled = config.maker.depth_risk_sizing_enabled
+    strategy.depth_risk_max_entry_notional_usdc = config.maker.depth_risk_max_entry_notional_usdc
+    strategy.depth_risk_max_loss_usdc = config.maker.depth_risk_max_loss_usdc
+    strategy.depth_risk_depth_fraction = config.maker.depth_risk_depth_fraction
+    strategy.depth_risk_price_boundary_ticks = config.maker.depth_risk_price_boundary_ticks
+    strategy.depth_risk_shadow_enabled = config.maker.depth_risk_shadow_enabled
+    strategy.depth_risk_shadow_interval_sec = config.maker.depth_risk_shadow_interval_sec
     strategy.maker_weak_pfair_size_adjust_enabled = config.maker.weak_pfair_size_adjust_enabled
     strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
     strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
@@ -716,6 +723,8 @@ def initialize_strategy_settings(
     strategy.shadow_simulation_aged_quote_max_age_sec = config.operations.shadow_simulation_aged_quote_max_age_sec
     strategy._shadow_simulations_by_slug = {}
     strategy._fair_edge_bucket_shadow_by_id = {}
+    strategy._depth_risk_shadow_states = {}
+    strategy._depth_risk_shadow_last_ts_by_inst = {}
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
     strategy._lead_lag_cancel_started_ns_by_order_id = {}
     strategy.lead_lag_db = LeadLagDB()

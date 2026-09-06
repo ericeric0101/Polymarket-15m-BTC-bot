@@ -547,6 +547,13 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                 ask_decimal,
                 quote_received_ts,
             )
+        if hasattr(strategy, "_depth_risk_shadow_on_quote"):
+            strategy._depth_risk_shadow_on_quote(
+                tick.instrument_id,
+                bid_decimal,
+                ask_decimal,
+                quote_received_ts,
+            )
         if is_preferred_quote:
             strategy.last_valid_quote_ts = quote_received_ts
             strategy.consecutive_invalid_quote_ticks = 0

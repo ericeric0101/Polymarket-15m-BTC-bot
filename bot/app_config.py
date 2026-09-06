@@ -74,6 +74,13 @@ class MakerConfig:
     min_shares: Decimal
     exchange_min_shares: Decimal
     fixed_shares: Decimal
+    depth_risk_sizing_enabled: bool
+    depth_risk_max_entry_notional_usdc: Decimal
+    depth_risk_max_loss_usdc: Decimal
+    depth_risk_depth_fraction: Decimal
+    depth_risk_price_boundary_ticks: int
+    depth_risk_shadow_enabled: bool
+    depth_risk_shadow_interval_sec: float
     weak_pfair_size_adjust_enabled: bool
     weak_pfair_size_adjust_lower: Decimal
     weak_pfair_size_adjust_upper: Decimal
@@ -605,6 +612,23 @@ class AppConfig:
                 min_shares=maker_min_shares,
                 exchange_min_shares=maker_exchange_min_shares,
                 fixed_shares=maker_fixed_shares,
+                depth_risk_sizing_enabled=_env_bool_inverted("DEPTH_RISK_SIZING_ENABLED", True),
+                depth_risk_max_entry_notional_usdc=max(
+                    Decimal("0"), _env_decimal("DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC", "10.0")
+                ),
+                depth_risk_max_loss_usdc=max(
+                    Decimal("0"), _env_decimal("DEPTH_RISK_MAX_LOSS_USDC", "10.0")
+                ),
+                depth_risk_depth_fraction=max(
+                    Decimal("0"), min(Decimal("1"), _env_decimal("DEPTH_RISK_DEPTH_FRACTION", "0.10"))
+                ),
+                depth_risk_price_boundary_ticks=max(
+                    0, _env_int("DEPTH_RISK_PRICE_BOUNDARY_TICKS", 2)
+                ),
+                depth_risk_shadow_enabled=_env_bool_inverted("DEPTH_RISK_SHADOW_ENABLED", True),
+                depth_risk_shadow_interval_sec=max(
+                    1.0, _env_float("DEPTH_RISK_SHADOW_INTERVAL_SEC", 15.0)
+                ),
                 weak_pfair_size_adjust_enabled=_env_bool("MAKER_WEAK_PFAIR_SIZE_ADJUST_ENABLED", True),
                 weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
                 weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),

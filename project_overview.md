@@ -70,7 +70,7 @@ overwritten by `ForecastState.probability_for_outcome`.
 | Quote cycle | `bot.quote_runtime._prepare_quote_cycle` blocks bad phases, checks balance/inventory, invokes protective exits, cancels expired exit-owned orders, then schedules `_evaluate_quote_targets`. | `MAKER_QUOTE_REFRESH_SEC`, `MARKET_MAX_POSITION_SHARES`, `MAKER_MAX_CONSECUTIVE_*`, `MAKER_GATE_BLOCK_GRACE_SEC`, balance-sync keys. |
 | Candidate/entry gates | `run_bot._evaluate_quote_targets` combines fair/book into `MakerEngine.generate_quote_plan`, then `bot.quote_service.evaluate_buy_entry_controls`, external confirmation, shadow veto, and `bot.quoting.apply_quote_plan_guards`. Inputs: fair, book, side/score, inventory and phase. Output: permitted BUY/SELL plan with reason and economics diagnostics. | `ENTRY_SCORE_MIN` → legacy score reader; `FIRST_ENTRY_SCORE_MIN`, `FIRST_ENTRY_MAX_TIME_LEFT_SEC`, `ENTRY_MIN_TIME_LEFT_SEC`, `ENTRY_MAX_FAIR_PRICE`, `MAKER_MIN_FAIR_PRICE`, external/smart-money keys, momentum keys, `MAKER_*EXPECTED_NET*`, fee/markout keys. |
 | Economics | `MakerEngine.generate_quote_plan` computes fair edge, fee and empirical execution penalty; `evaluate_buy_entry_controls` permits a new BUY only if the final scaled `robust_net` meets the common threshold. Directional edge values are telemetry, not an additional BUY veto (`bot.quoting.apply_quote_plan_guards`). | `ENTRY_MIN_ROBUST_NET_USDC` → `MAKER_MIN_EXPECTED_NET_USDC`; `EXECUTION_COST_*` → empirical-markout readers; `MAKER_ECON_FEE_RATE_DECIMAL`, fee-cache/default keys. |
-| Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, and final `synchronize_desired_buy_economics_to_quantity`. Output: size that preserves economics after every cap. High-price tier is derived from canonical absolute targets. | `MARKET_TARGET_SHARES` → `MAKER_FIXED_SHARES`; `HIGH_PRICE_THRESHOLD` and `HIGH_PRICE_TARGET_SHARES` → high-price multiplier; `MARKET_MAX_POSITION_SHARES`; weak-pfair and Kelly keys. |
+| Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing high-price/weak-signal/Kelly multipliers only reduce the risk caps. | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`; `MARKET_TARGET_SHARES` remains legacy compatibility and is no longer a scale-up authority. |
 | Submission / repricing | `bot.quote_runtime._submit_quote_cycle` → `run_bot._submit_maker_quote` → `bot.order_submission.submit_maker_quote`. A maker entry is `LimitOrder` / **GTC**; `ORDER_POST_ONLY` requests post-only where adapter supports it. Existing entries are preserved if target version/hysteresis is unchanged; cancellation is handled by `bot.order_runtime`. The documented normal `ORDER_TTL_SEC` is no longer a TTL for unchanged BUYs. | `ORDER_POST_ONLY`, `MAKER_POST_ONLY_STRICT`, `ORDER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_HYSTERESIS_TICKS`, `MAX_REQUOTE_PER_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`; `ORDER_TTL_SEC` applies to exit-owned orders. |
 
 ### 4. Fills, exits, settlement and cash accounting
@@ -778,7 +778,38 @@ does not touch `trade_journal.db` or either bot's live/outcome authority data.
   candidates for D.5; they must either be removed or be changed to require an
   operator-supplied recreated research DB, rather than silently assuming the
   deleted default files exist. `smart_money_wallets.db` remains live-shadow
-  input and is retained.
+input and is retained.
+
+**L2 risk sizing and large-order shadow (2026-09-07):** New BUY size is no
+longer controlled solely by `MARKET_TARGET_SHARES`. After all existing
+quality reductions, `bot.depth_risk.cap_buy_quantity` applies the explicit
+minimum of: (1) the configured entry-notional risk budget converted at the
+limit price, (2) the configured full-loss budget converted at the limit
+price, (3) `DEPTH_RISK_DEPTH_FRACTION` of cumulative **ask** L2 liquidity no
+worse than the configured tick boundary, and (4) same-outcome inventory
+headroom. An absent or empty L2 book returns zero and blocks the BUY below the
+venue minimum; it never silently falls back to a fixed share count. Existing
+high-price, weak-pfair, confirmation, and Kelly policies only shrink the
+risk budget. No SELL quantity, TP cancellation, recovery, or taker-exit
+authority was changed. If a later quote reduces the approved BUY size,
+an older larger resting BUY is cancelled only after the normal requote-minimum
+age and is recreated on the following cycle; increased depth never causes an
+existing resting BUY to be enlarged.
+
+`bot.depth_risk_shadow.DepthRiskShadowMixin` is observational in both dry-run
+and live operation: once per instrument per `DEPTH_RISK_SHADOW_INTERVAL_SEC`,
+it simulates immediate, boundary-limited L2 BUYs of **10, 25, 50, 100, and 200
+shares**, records requested/fill quantity, fill rate, VWAP and slippage, then
+uses the visible bid book for estimated executable exit depth and immediate
+round-trip markout. At 5/10/30/60 seconds it records a separate conservative
+BBO markout against the hypothetical entry VWAP. It never creates, changes,
+or cancels an order. `scripts/depth_risk_shadow_report.py --db
+logs/trade_journal.db` summarizes candidate fill/slippage/exit depth and each
+markout horizon by size. These data are a capacity/market-impact study, not
+evidence to raise risk budgets. Any increase above the current ten-share risk
+budget requires sufficient fresh samples for all five tiers, stable fill and
+exit rates, non-adverse markouts after fees, and a separate approved policy
+change.
   **P5 exit-lifecycle regression fixed (2026-08-24):** a confirmed but
   transient side invalidation could queue cancellation of a normal 0.97 TP to
   free the conditional tokens for recovery, then clear before the cancel ack.

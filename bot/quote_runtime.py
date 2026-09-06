@@ -321,6 +321,20 @@ class QuoteRuntimeMixin:
             )
 
             current = self.active_maker_orders.get(order_key)
+            if current and side == "buy":
+                try:
+                    desired_qty = Decimal(str(desired.get("planned_quantity") or "0"))
+                    current_qty = Decimal(str(current.get("quantity") or "0"))
+                except Exception:
+                    desired_qty, current_qty = Decimal("0"), Decimal("0")
+                # A depth/risk reduction is safety-critical: an older, larger
+                # resting BUY may not outlive the new cap.  Do not scale up an
+                # existing order merely because visible depth later improves.
+                if desired_qty > 0 and desired_qty + Decimal("0.000001") < current_qty:
+                    created_ts = float(current.get("created_ts", 0.0) or 0.0)
+                    if created_ts <= 0 or now_ts - created_ts >= float(self.maker_requote_min_age_sec):
+                        self._cancel_maker_order_side(order_key, reason="depth_risk_size_reduce")
+                    continue
             if desired.get("fair_edge_bucket_shadow"):
                 # A real open order retains ownership of the order key. The
                 # counterfactual is only submit-time observable when it would
