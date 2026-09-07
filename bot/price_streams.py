@@ -12,6 +12,8 @@ from typing import Any, Optional
 # can complete a handshake without delivering messages.
 BINANCE_AGGTRADE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
 POLYMARKET_LIVE_WS_URL = "wss://ws-live-data.polymarket.com"
+RTDS_APPLICATION_HEARTBEAT_TEXT = "PING"
+RTDS_APPLICATION_HEARTBEAT_INTERVAL_SEC = 5.0
 POLYMARKET_CHAINLINK_TWAP_TOPIC_BY_WINDOW = {
     30: "crypto_prices_twap_thirty",
     60: "crypto_prices_twap_sixty",
@@ -36,6 +38,18 @@ class PriceTick:
     received_at_ts: float
     window_seconds: Optional[int] = None
     raw_summary: str = ""
+
+
+def rtds_application_heartbeat_due(*, now_monotonic: float, last_sent_monotonic: float) -> bool:
+    """Return whether a direct RTDS client must send its documented ``PING``."""
+    return now_monotonic - last_sent_monotonic >= RTDS_APPLICATION_HEARTBEAT_INTERVAL_SEC
+
+
+def chainlink_observation_ts(tick: PriceTick) -> Optional[float]:
+    """Return the source observation clock, never the local receipt clock."""
+    if tick.updated_at_ms is None or tick.updated_at_ms <= 0:
+        return None
+    return float(tick.updated_at_ms) / 1000.0
 
 
 def safe_json_loads(raw: Any) -> Optional[Any]:

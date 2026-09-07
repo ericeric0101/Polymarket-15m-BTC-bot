@@ -814,7 +814,7 @@ class IntegratedBTCStrategy(
         )
         twap = _candidate(
             getattr(self, "_polymarket_chainlink_twap_price", None),
-            float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0),
+            float(getattr(self, "_polymarket_chainlink_twap_observation_ts", 0.0) or 0.0),
             f"polymarket_chainlink_twap_{twap_window}s_ws",
         )
         binance = _candidate(

@@ -30,9 +30,12 @@ from bot.market_data import (
 from bot.price_streams import (
     BINANCE_AGGTRADE_WS_URL,
     POLYMARKET_LIVE_WS_URL,
+    RTDS_APPLICATION_HEARTBEAT_TEXT,
     build_polymarket_chainlink_subscribe_payload,
+    chainlink_observation_ts,
     extract_binance_aggtrade_tick,
     extract_polymarket_chainlink_tick,
+    rtds_application_heartbeat_due,
 )
 from bot.forecast_state import ForecastState, build_forecast_state
 from bot.outcome_lead_lag_ingress import publish_strategy_tick
@@ -124,9 +127,19 @@ class SpotPricerMixin:
                     mode = f"TWAP {twap_window}s" if use_twap else "spot"
                     logger.info(f"✓ Polymarket Chainlink WS connected ({mode})")
                     ws.send(_json.dumps(subscribe_payload))
+                    last_application_ping_monotonic = 0.0
                     while not self._polymarket_chainlink_ws_stop_event.is_set():
+                        now_monotonic = time.monotonic()
+                        if rtds_application_heartbeat_due(
+                            now_monotonic=now_monotonic,
+                            last_sent_monotonic=last_application_ping_monotonic,
+                        ):
+                            # RTDS requires this application frame; websocket
+                            # protocol ping is not a substitute.
+                            ws.send(RTDS_APPLICATION_HEARTBEAT_TEXT)
+                            last_application_ping_monotonic = now_monotonic
                         try:
-                            raw = ws.recv(timeout=5)
+                            raw = ws.recv(timeout=1)
                         except TimeoutError:
                             continue
                         tick = extract_polymarket_chainlink_tick(raw)
@@ -146,8 +159,12 @@ class SpotPricerMixin:
                             publish_strategy_tick(self, source="polymarket_spot", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if self._is_twap_spot_source(tick.source):
                             self._polymarket_chainlink_twap_price = tick.price
+                            # Preserve receipt and source clocks separately.
+                            # RTDS documents payload.timestamp as Chainlink's
+                            # observation time and mandates it for freshness.
                             self._polymarket_chainlink_twap_price_ts = tick.received_at_ts
                             self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
+                            self._polymarket_chainlink_twap_observation_ts = chainlink_observation_ts(tick)
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
                             publish_strategy_tick(self, source="polymarket_twap", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if not self._is_twap_spot_source(tick.source):
@@ -313,13 +330,14 @@ class SpotPricerMixin:
                 binance_price = self._binance_ws_price
         require_twap = bool(getattr(self, "require_twap_reference_spot", True))
         twap_price = getattr(self, "_polymarket_chainlink_twap_price", None)
-        twap_ts = float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0)
+        twap_received_ts = float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0)
+        twap_ts = float(getattr(self, "_polymarket_chainlink_twap_observation_ts", 0.0) or 0.0)
         twap_window = int(getattr(self, "_polymarket_chainlink_twap_window_sec", 0) or getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60)
 
         # Primary: Polymarket Chainlink TWAP WS if fresh.
         if twap_price is not None:
-            age = time.time() - twap_ts
-            if age < 10.0:
+            age = time.time() - twap_ts if twap_ts > 0 else float("inf")
+            if 0.0 <= age < 10.0:
                 price = twap_price
                 if bool(getattr(self, "_twap_reference_degraded", False)):
                     logger.info("Polymarket Chainlink TWAP recovered; new entries may resume")
@@ -346,7 +364,12 @@ class SpotPricerMixin:
                     logger.info(f"✓ First BTC reference spot via Polymarket Chainlink {twap_window}s TWAP WS: ${price:,.2f}")
                     self._logged_first_spot = True
                 return price
-            logger.debug(f"Polymarket Chainlink TWAP WS price stale ({age:.1f}s)")
+            receipt_age = time.time() - twap_received_ts if twap_received_ts > 0 else float("inf")
+            logger.debug(
+                "Polymarket Chainlink TWAP observation stale or missing "
+                f"(observation_age={age:.1f}s, receipt_age="
+                f"{receipt_age:.1f}s)"
+            )
 
         if require_twap:
             # The final outcome is TWAP-based, but pausing the whole signal
@@ -367,6 +390,9 @@ class SpotPricerMixin:
                             "TWAP_REFERENCE_DEGRADED",
                             {
                                 "twap_age_sec": (time.time() - twap_ts) if twap_ts > 0 else None,
+                                "twap_received_age_sec": (
+                                    time.time() - twap_received_ts if twap_received_ts > 0 else None
+                                ),
                                 "fallback_preference": "binance_ws_then_coinbase_http",
                             },
                         )

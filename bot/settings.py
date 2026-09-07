@@ -694,6 +694,7 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_twap_price = None
     strategy._polymarket_chainlink_twap_price_ts = 0.0
     strategy._polymarket_chainlink_twap_event_ts_ms = None
+    strategy._polymarket_chainlink_twap_observation_ts = 0.0
     strategy._polymarket_chainlink_twap_window_sec = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None

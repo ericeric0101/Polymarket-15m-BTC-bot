@@ -56,7 +56,12 @@ class LeadLagObservationMixin:
             "binance_price": binance_price,
             "binance_age_sec": _age(now_ts, getattr(self, "_binance_ws_price_ts", 0.0)),
             "twap_price": twap_price,
-            "twap_age_sec": _age(now_ts, getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0)),
+            "twap_age_sec": _age(
+                now_ts, getattr(self, "_polymarket_chainlink_twap_observation_ts", 0.0)
+            ),
+            "twap_received_age_sec": _age(
+                now_ts, getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0)
+            ),
             "reference_price": reference_price,
             "reference_source": str(getattr(self, "latest_external_spot_source", "") or ""),
             "reference_age_sec": _age(now_ts, getattr(self, "latest_external_spot_source_ts", 0.0)),

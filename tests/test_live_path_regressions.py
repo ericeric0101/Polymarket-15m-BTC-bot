@@ -50,7 +50,9 @@ from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSn
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.price_streams import (
     build_polymarket_chainlink_subscribe_payload,
+    chainlink_observation_ts,
     extract_polymarket_chainlink_tick,
+    rtds_application_heartbeat_due,
 )
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
@@ -3027,6 +3029,13 @@ def test_extract_polymarket_chainlink_twap_tick_prefers_full_accuracy_e18():
     assert tick.updated_at_ms == 1785178800000
     assert tick.window_seconds == 60
     assert tick.source == "polymarket_chainlink_twap_60s_ws"
+    assert chainlink_observation_ts(tick) == 1785178800.0
+
+
+def test_rtds_application_heartbeat_is_due_immediately_then_every_five_seconds():
+    assert rtds_application_heartbeat_due(now_monotonic=100.0, last_sent_monotonic=0.0)
+    assert not rtds_application_heartbeat_due(now_monotonic=104.9, last_sent_monotonic=100.0)
+    assert rtds_application_heartbeat_due(now_monotonic=105.0, last_sent_monotonic=100.0)
 
 
 def test_runtime_compatibility_overrides_install():
@@ -4507,6 +4516,7 @@ def test_capture_market_open_spot_prefers_fresh_twap_over_snapshot_chainlink():
     dummy = SimpleNamespace(
         _polymarket_chainlink_twap_price=Decimal("101.50"),
         _polymarket_chainlink_twap_price_ts=999.6,
+        _polymarket_chainlink_twap_observation_ts=999.6,
         _polymarket_chainlink_twap_window_sec=60,
         polymarket_chainlink_twap_window_sec=60,
         _polymarket_chainlink_price=Decimal("101.25"),
@@ -5147,6 +5157,7 @@ def test_stale_twap_degrades_to_fresh_binance_instead_of_stopping_pipeline():
     strategy.external_spot_source_delta_abs_max_usd = Decimal("0")
     strategy._polymarket_chainlink_twap_price = Decimal("65000")
     strategy._polymarket_chainlink_twap_price_ts = now_ts - 11.0
+    strategy._polymarket_chainlink_twap_observation_ts = now_ts - 11.0
     strategy._polymarket_chainlink_twap_window_sec = 60
     strategy._polymarket_chainlink_price = Decimal("65001")
     strategy._polymarket_chainlink_price_ts = now_ts
@@ -5171,3 +5182,23 @@ def test_stale_twap_degrades_to_fresh_binance_instead_of_stopping_pipeline():
         last_emit_ns=1_000_000_000,
         heartbeat_sec=5.0,
     )
+
+
+def test_delayed_twap_receipt_is_not_fresh_when_chainlink_observation_is_old():
+    strategy = DummySpotPricerStrategy()
+    now_ts = time.time()
+    strategy.require_twap_reference_spot = True
+    strategy.external_spot_source_delta_abs_max_usd = Decimal("0")
+    strategy._polymarket_chainlink_twap_price = Decimal("65000")
+    strategy._polymarket_chainlink_twap_price_ts = now_ts
+    strategy._polymarket_chainlink_twap_observation_ts = now_ts - 11.0
+    strategy._polymarket_chainlink_twap_window_sec = 60
+    strategy._binance_ws_price = Decimal("64999")
+    strategy._binance_ws_price_ts = now_ts
+    strategy.strategy_events = []
+
+    price = asyncio.run(strategy._fetch_external_spot_price())
+
+    assert price == Decimal("64999")
+    assert strategy.latest_external_spot_source == "binance_ws"
+    assert strategy.strategy_events[-1][0] == "TWAP_REFERENCE_DEGRADED"
