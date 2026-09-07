@@ -815,6 +815,7 @@ class TradeJournalDB:
                     "strike": strike_dec,
                     "strike_source": source,
                     "authoritative": bool(payload.get("authoritative", False)),
+                    "strike_status": str(payload.get("strike_status") or ""),
                     "sample_dt_sec": payload.get("sample_dt_sec"),
                 }
         except Exception as e:

@@ -1,3 +1,7 @@
+from decimal import Decimal
+from types import SimpleNamespace
+
+from bot.db_runtime import StrategyDBRuntimeMixin
 from monitoring.trade_journal_db import TradeJournalDB
 
 
@@ -11,6 +15,40 @@ def _fill(db, *, slug, order_id, side, price, qty, fee=0.0):
         qty=qty,
         payload={"slug": slug, "effective_fee_usdc": fee},
     )
+
+
+class _RecoveryStrategy(StrategyDBRuntimeMixin):
+    def __init__(self, db, slug="btc-updown-15m-test"):
+        self.trade_db = db
+        self.current_market_slug = slug
+        self.market_strike_cache_by_slug = {}
+        self.market_strike_source_by_slug = {}
+        self.market_strike_status_by_slug = {}
+        self.market_strike_provisional_by_slug = {}
+        self.market_strike_provisional_source_by_slug = {}
+        self.current_market_open_spot = None
+        self.events = []
+
+    def _is_authoritative_strike_source(self, source):
+        return source == "polymarket_crypto_price_twap_open"
+
+    def _db_strategy_event(self, event_type, payload):
+        self.events.append((event_type, payload))
+
+
+class _FallbackCalibrationStrategy(StrategyDBRuntimeMixin):
+    def __init__(self):
+        self.trade_db = None
+        self.maker_engine = SimpleNamespace(config=SimpleNamespace())
+        self.maker_execution_empirical_markout_lookback_hours = 168.0
+        self.maker_execution_empirical_markout_min_samples = 30
+        self.maker_fixed_shares = Decimal("10")
+        self.maker_buy_markout_calibrations = {}
+        self.strong_directional_regime_calibration = None
+        self.events = []
+
+    def _db_strategy_event(self, event_type, payload):
+        self.events.append((event_type, payload))
 
 
 def test_market_guard_counts_survive_restart_and_ignore_partial_fill_rows(tmp_path):
@@ -32,6 +70,67 @@ def test_market_guard_counts_survive_restart_and_ignore_partial_fill_rows(tmp_pa
         "buy_count": 1,
         "protective_exit_count": 1,
     }
+
+
+def test_recovery_preserves_explicitly_verified_authoritative_strike(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-test"
+    db.log_strategy_event(
+        "run",
+        "MARKET_STRIKE_LOCKED",
+        {
+            "slug": slug,
+            "strike": 66611.11,
+            "strike_source": "polymarket_crypto_price_twap_open",
+            "authoritative": True,
+            "strike_status": "verified",
+        },
+    )
+
+    strategy = _RecoveryStrategy(db, slug)
+    strategy._recover_market_strike_from_trade_db_on_startup()
+
+    assert strategy.market_strike_cache_by_slug[slug] == Decimal("66611.11")
+    assert strategy.market_strike_status_by_slug[slug] == "verified"
+    recovered = strategy.events[-1][1]
+    assert recovered["strike_status"] == "verified"
+
+
+def test_recovery_keeps_legacy_strike_unverified_without_recorded_status(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-test"
+    db.log_strategy_event(
+        "run",
+        "MARKET_STRIKE_LOCKED",
+        {
+            "slug": slug,
+            "strike": 66611.11,
+            "strike_source": "polymarket_crypto_price_twap_open",
+            "authoritative": True,
+        },
+    )
+
+    strategy = _RecoveryStrategy(db, slug)
+    strategy._recover_market_strike_from_trade_db_on_startup()
+
+    assert strategy.market_strike_status_by_slug[slug] == "recovered_unverified"
+
+
+def test_insufficient_journal_uses_frozen_d4_168h_penalty_fallback():
+    strategy = _FallbackCalibrationStrategy()
+    strategy.maker_execution_empirical_markout_lookback_hours = 48.0
+    strategy.maker_execution_empirical_markout_min_samples = 5
+
+    strategy._apply_empirical_execution_penalty_calibration()
+
+    assert strategy.maker_engine.config.maker_execution_empirical_adverse_markout_per_share == Decimal("0.02515")
+    event_type, payload = strategy.events[0]
+    assert event_type == "EXECUTION_PENALTY_FALLBACK_APPLIED"
+    assert payload["fallback_applied"] is True
+    assert payload["source"] == "d4_fixed_168h_fallback"
+    assert payload["lookback_hours"] == 168.0
+    assert payload["configured_lookback_hours"] == 48.0
+    assert payload["minimum_independent_samples"] == 30
 
 
 def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):

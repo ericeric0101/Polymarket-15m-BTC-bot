@@ -7,6 +7,14 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 
+# D.4 frozen fallback.  These are independent weekday maker-BUY markets, not
+# a value inferred from the current journal.  It deliberately retains the
+# conservative 168-hour estimator while a rebuilt journal accrues enough new
+# 10-second markouts to calibrate itself.
+_D4_168H_FALLBACK_ADVERSE_MARKOUT_PER_SHARE = Decimal("0.02515")
+_D4_168H_FALLBACK_SAMPLE_COUNT = 84
+
+
 class StrategyDBRuntimeMixin:
     def _apply_empirical_execution_penalty_calibration(self) -> None:
         """Replace synthetic entry stress with observed maker BUY adverse markouts."""
@@ -14,27 +22,59 @@ class StrategyDBRuntimeMixin:
         config = getattr(engine, "config", None)
         if not config:
             return
-        config.maker_execution_empirical_adverse_markout_per_share = None
-        if not self.trade_db:
-            return
-
-        lookback_hours = float(self.maker_execution_empirical_markout_lookback_hours)
-        horizon_sec = 10
-        min_samples = int(self.maker_execution_empirical_markout_min_samples)
-        calibrations = self.trade_db.load_maker_buy_markout_calibrations(
-            lookback_hours=lookback_hours,
-            horizon_sec=horizon_sec,
-            min_samples=min_samples,
-            taipei_weeknight_schema_v2_only=True,
+        configured_lookback_hours = float(
+            self.maker_execution_empirical_markout_lookback_hours
         )
-        calibration = calibrations.get("global")
-        self.maker_buy_markout_calibrations = calibrations
-        if not calibration:
-            logger.info(
-                "Execution-cost calibration unavailable; new BUY entries remain blocked: "
-                f"horizon={horizon_sec}s lookback={lookback_hours:.0f}h min_samples={min_samples}"
+        # D.4 has explicitly rejected 48h: it has only 29 OOS targets and
+        # underestimates adverse markout more than the selected 168h policy.
+        # Keep selection in code, rather than letting an operator profile
+        # silently change the risk model at restart.
+        lookback_hours = 168.0
+        horizon_sec = 10
+        min_samples = max(30, int(self.maker_execution_empirical_markout_min_samples))
+        if configured_lookback_hours != lookback_hours:
+            logger.warning(
+                "Ignoring unsupported execution-cost lookback override: "
+                f"configured={configured_lookback_hours:.0f}h selected={lookback_hours:.0f}h"
             )
-            return
+        config.maker_execution_empirical_adverse_markout_per_share = None
+        calibrations: Dict[str, Dict[str, Any]] = {}
+        if self.trade_db:
+            calibrations = self.trade_db.load_maker_buy_markout_calibrations(
+                lookback_hours=lookback_hours,
+                horizon_sec=horizon_sec,
+                min_samples=min_samples,
+                taipei_weeknight_schema_v2_only=True,
+            )
+        calibration = calibrations.get("global")
+        if not calibration:
+            calibration = {
+                "source": "d4_fixed_168h_fallback",
+                "sample_count": _D4_168H_FALLBACK_SAMPLE_COUNT,
+                "horizon_sec": horizon_sec,
+                "lookback_hours": 168.0,
+                "adverse_markout_per_share": float(
+                    _D4_168H_FALLBACK_ADVERSE_MARKOUT_PER_SHARE
+                ),
+                "raw_mean_adverse_markout_per_share": 0.02454,
+                "winsor_cap_per_share": None,
+                "method": "d4_frozen_168h_estimator",
+                "fallback_reason": "insufficient_current_journal_samples",
+                "d4_48h_oos_targets": 29,
+                "d4_48h_underestimation_rate": 0.379,
+                "d4_168h_oos_targets": 53,
+                "d4_168h_underestimation_rate": 0.302,
+            }
+            calibrations = {"global": calibration}
+            event_type = "EXECUTION_PENALTY_FALLBACK_APPLIED"
+            logger.warning(
+                "Execution-cost calibration unavailable from current journal; "
+                "applying frozen D.4 conservative 168h fallback: "
+                f"adverse_markout=${float(_D4_168H_FALLBACK_ADVERSE_MARKOUT_PER_SHARE):.5f}/share"
+            )
+        else:
+            event_type = "EXECUTION_PENALTY_CALIBRATED"
+        self.maker_buy_markout_calibrations = calibrations
 
         adverse_markout_ps = Decimal(str(calibration["adverse_markout_per_share"]))
         if adverse_markout_ps <= 0:
@@ -45,24 +85,31 @@ class StrategyDBRuntimeMixin:
             "sample_count": int(calibration["sample_count"]),
             "horizon_sec": horizon_sec,
             "lookback_hours": lookback_hours,
+            "configured_lookback_hours": configured_lookback_hours,
+            "minimum_independent_samples": min_samples,
             "adverse_markout_per_share": float(adverse_markout_ps),
             "raw_mean_adverse_markout_per_share": float(
                 calibration["raw_mean_adverse_markout_per_share"]
             ),
-            "winsor_cap_per_share": float(calibration["winsor_cap_per_share"]),
+            "winsor_cap_per_share": (
+                float(calibration["winsor_cap_per_share"])
+                if calibration.get("winsor_cap_per_share") is not None
+                else None
+            ),
             "method": str(calibration["method"]),
+            "fallback_applied": event_type == "EXECUTION_PENALTY_FALLBACK_APPLIED",
             "regime_calibrations": calibrations,
             "risk_cap_at_fixed_shares_usdc": float(
                 adverse_markout_ps * Decimal(str(getattr(self, "maker_fixed_shares", 0)))
             ),
         }
         logger.info(
-            "Execution penalty calibrated from maker BUY fills: "
+            "Execution penalty loaded for maker BUY entries: "
             f"samples={payload['sample_count']} horizon={horizon_sec}s method={payload['method']} "
             f"adverse_markout=${float(adverse_markout_ps):.6f}/share "
             f"raw_mean=${payload['raw_mean_adverse_markout_per_share']:.6f}/share"
         )
-        self._db_strategy_event("EXECUTION_PENALTY_CALIBRATED", payload)
+        self._db_strategy_event(event_type, payload)
 
         # The only live exception to midpoint spread-capture economics is a
         # separately measured, high-score regime. Each distance bucket needs
@@ -73,7 +120,7 @@ class StrategyDBRuntimeMixin:
             lookback_hours=lookback_hours,
             min_score_abs=0.35,
             min_samples=30,
-        )
+        ) if self.trade_db else {}
         if not regimes:
             logger.info("Strong directional regime calibrations unavailable; midpoint economics remains canonical.")
             return
@@ -274,12 +321,20 @@ class StrategyDBRuntimeMixin:
         strike_source = str(recovered.get("strike_source") or "trade_db_recovered")
         self.market_strike_cache_by_slug[slug] = strike
         self.market_strike_source_by_slug[slug] = strike_source
-        # A pre-D.3 journal lock did not retain both source candidates. It is
-        # useful for diagnostics only; a fresh market-scoped provenance check
-        # must verify it before any new BUY can rely on it.
+        # A legacy lock without an explicit verified status remains diagnostic
+        # only.  Newer locks persist both authoritative source and verification
+        # status, so a process restart must not downgrade a proven same-market
+        # opening strike and disable every entry until the next rollover.
         if not hasattr(self, "market_strike_status_by_slug"):
             self.market_strike_status_by_slug = {}
-        self.market_strike_status_by_slug[slug] = "recovered_unverified"
+        recovered_verified = bool(
+            recovered.get("authoritative", False)
+            and self._is_authoritative_strike_source(strike_source)
+            and recovered.get("strike_status") == "verified"
+        )
+        self.market_strike_status_by_slug[slug] = (
+            "verified" if recovered_verified else "recovered_unverified"
+        )
         self.market_strike_provisional_by_slug.pop(slug, None)
         self.market_strike_provisional_source_by_slug.pop(slug, None)
         if self.current_market_open_spot is None or Decimal(str(self.current_market_open_spot or "0")) <= 0:
@@ -297,6 +352,7 @@ class StrategyDBRuntimeMixin:
                 "strike": float(strike),
                 "strike_source": strike_source,
                 "authoritative": bool(recovered.get("authoritative", False)),
+                "strike_status": self.market_strike_status_by_slug[slug],
                 "recovered_from_ts": recovered.get("ts"),
                 "sample_dt_sec": sample_dt_sec,
             },

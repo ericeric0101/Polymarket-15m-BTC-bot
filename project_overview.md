@@ -429,6 +429,30 @@ live policy.
   comparison demonstrates improved or preserved realized robust outcome
   without weakening risk limits. The weekend stratum still lacks sufficient
   independent OOS data; it is now intentionally outside the entry policy.
+- **D.4 fixed fallback after journal reconstruction (2026-09-07):** The
+  execution journal can be rebuilt or unavailable before it has the minimum
+  number of current 10-second maker-BUY markouts. This must not silently turn
+  off the economics gate. Until the same eligible current-journal population
+  reaches its configured sample floor, runtime uses the frozen weekday
+  **168-hour adverse-markout penalty of $0.02515/share**
+  (`d4_fixed_168h_fallback`). It is derived from the last valid D.4 evidence:
+  97 independent markets / 84 settled samples; raw adverse mean
+  $0.02454/share. The 48h candidate had only 29 OOS targets and underestimated
+  adverse markout by 37.9%, versus 30.2% for 168h (53 OOS targets); it remains
+  prohibited as a fallback or live selection. Each startup records either
+  `EXECUTION_PENALTY_CALIBRATED` from current samples or
+  `EXECUTION_PENALTY_FALLBACK_APPLIED`, including the source and frozen D.4
+  evidence. Replacing this fixed fallback requires a new documented D.4 OOS
+  decision, not an environment-only change. Runtime selects exactly 168 hours
+  and enforces at least 30 independent samples even if a local environment
+  value attempts to request a shorter window or lower sample floor.
+- **Verified strike recovery (2026-09-07):** A restart now preserves
+  `verified` only when the latest same-slug `MARKET_STRIKE_LOCKED` event
+  explicitly recorded both an authoritative source and `strike_status=verified`.
+  Legacy records lacking that status remain `recovered_unverified` and still
+  require fresh verification. This prevents a restart from incorrectly
+  disabling entries after a valid Chainlink-TWAP opening strike while retaining
+  the provenance guard for older/incomplete journal records.
 
 New fills journal schema v2 with immutable 10s/30s spot continuation, BBO
 bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC
