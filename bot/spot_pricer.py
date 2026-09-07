@@ -36,6 +36,7 @@ from bot.price_streams import (
     extract_binance_aggtrade_tick,
     extract_polymarket_chainlink_tick,
     rtds_application_heartbeat_due,
+    rtds_silent_stall_due,
 )
 from bot.forecast_state import ForecastState, build_forecast_state
 from bot.outcome_lead_lag_ingress import publish_strategy_tick
@@ -115,6 +116,9 @@ class SpotPricerMixin:
                     ping_timeout=None,
                 ) as ws:
                     reconnect_delay = 1.0
+                    self._polymarket_chainlink_twap_reconnect_count = (
+                        int(getattr(self, "_polymarket_chainlink_twap_reconnect_count", 0)) + 1
+                    )
                     use_twap = bool(getattr(self, "polymarket_chainlink_twap_enabled", True))
                     twap_window = int(getattr(self, "polymarket_chainlink_twap_window_sec", 60) or 60)
                     twap_symbol = str(getattr(self, "polymarket_chainlink_twap_symbol", "btc/usd") or "btc/usd")
@@ -128,6 +132,17 @@ class SpotPricerMixin:
                     logger.info(f"✓ Polymarket Chainlink WS connected ({mode})")
                     ws.send(_json.dumps(subscribe_payload))
                     last_application_ping_monotonic = 0.0
+                    last_valid_twap_monotonic = time.monotonic()
+                    self._db_strategy_event(
+                        "POLYMARKET_TWAP_WS_CONNECTED",
+                        {
+                            "mode": mode,
+                            "reconnect_count": self._polymarket_chainlink_twap_reconnect_count,
+                            "silence_reconnect_sec": float(
+                                getattr(self, "polymarket_chainlink_twap_silence_reconnect_sec", 15.0)
+                            ),
+                        },
+                    )
                     while not self._polymarket_chainlink_ws_stop_event.is_set():
                         now_monotonic = time.monotonic()
                         if rtds_application_heartbeat_due(
@@ -138,6 +153,35 @@ class SpotPricerMixin:
                             # protocol ping is not a substitute.
                             ws.send(RTDS_APPLICATION_HEARTBEAT_TEXT)
                             last_application_ping_monotonic = now_monotonic
+                        max_silence_sec = float(
+                            getattr(self, "polymarket_chainlink_twap_silence_reconnect_sec", 15.0)
+                        )
+                        if use_twap and rtds_silent_stall_due(
+                            now_monotonic=now_monotonic,
+                            last_valid_twap_monotonic=last_valid_twap_monotonic,
+                            max_silence_sec=max_silence_sec,
+                        ):
+                            self._polymarket_chainlink_twap_silent_stall_count = (
+                                int(getattr(self, "_polymarket_chainlink_twap_silent_stall_count", 0)) + 1
+                            )
+                            silence_sec = now_monotonic - last_valid_twap_monotonic
+                            self._db_strategy_event(
+                                "POLYMARKET_TWAP_SILENT_STALL",
+                                {
+                                    "silence_sec": silence_sec,
+                                    "max_silence_sec": max_silence_sec,
+                                    "silent_stall_count": self._polymarket_chainlink_twap_silent_stall_count,
+                                    "reconnect_count": self._polymarket_chainlink_twap_reconnect_count,
+                                    "last_twap_received_age_sec": max(
+                                        0.0,
+                                        time.time()
+                                        - float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0),
+                                    ),
+                                },
+                            )
+                            raise ConnectionError(
+                                f"RTDS silent TWAP stall for {silence_sec:.1f}s; reconnecting"
+                            )
                         try:
                             raw = ws.recv(timeout=1)
                         except TimeoutError:
@@ -158,6 +202,7 @@ class SpotPricerMixin:
                             )
                             publish_strategy_tick(self, source="polymarket_spot", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if self._is_twap_spot_source(tick.source):
+                            last_valid_twap_monotonic = time.monotonic()
                             self._polymarket_chainlink_twap_price = tick.price
                             # Preserve receipt and source clocks separately.
                             # RTDS documents payload.timestamp as Chainlink's

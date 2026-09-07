@@ -45,6 +45,13 @@ def rtds_application_heartbeat_due(*, now_monotonic: float, last_sent_monotonic:
     return now_monotonic - last_sent_monotonic >= RTDS_APPLICATION_HEARTBEAT_INTERVAL_SEC
 
 
+def rtds_silent_stall_due(
+    *, now_monotonic: float, last_valid_twap_monotonic: float, max_silence_sec: float
+) -> bool:
+    """Whether a connected RTDS socket has stopped delivering valid TWAP ticks."""
+    return now_monotonic - last_valid_twap_monotonic >= max_silence_sec
+
+
 def chainlink_observation_ts(tick: PriceTick) -> Optional[float]:
     """Return the source observation clock, never the local receipt clock."""
     if tick.updated_at_ms is None or tick.updated_at_ms <= 0:

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "snapshot_id": "d4_weekday_maker_buy_10s_168h_v1",
+  "created_at": "2026-09-08T00:00:00+00:00",
+  "expires_at": "2026-10-08T00:00:00+00:00",
+  "scope": {
+    "liquidity_class": "maker",
+    "side": "BUY",
+    "horizon_sec": 10,
+    "entry_session": "taipei_weeknight",
+    "markout_context_schema_version": 2,
+    "lookback_hours": 168,
+    "minimum_independent_samples": 30
+  },
+  "penalty": {
+    "adverse_markout_per_share": "0.02515",
+    "raw_mean_adverse_markout_per_share": "0.02454",
+    "method": "d4_frozen_168h_estimator"
+  },
+  "evidence": {
+    "independent_markets": 97,
+    "settled_training_samples": 84,
+    "oos_48h_targets": 29,
+    "oos_48h_actual_adverse_markout_per_share": "0.02983",
+    "oos_48h_estimated_adverse_markout_per_share": "0.02161",
+    "oos_48h_underestimation_rate": "0.379",
+    "oos_168h_targets": 53,
+    "oos_168h_actual_adverse_markout_per_share": "0.02217",
+    "oos_168h_estimated_adverse_markout_per_share": "0.02515",
+    "oos_168h_underestimation_rate": "0.302"
+  }
+}

@@ -453,6 +453,30 @@ live policy.
   require fresh verification. This prevents a restart from incorrectly
   disabling entries after a valid Chainlink-TWAP opening strike while retaining
   the provenance guard for older/incomplete journal records.
+- **Portable bootstrap calibration and RTDS liveness (2026-09-08):** A new
+  host, journal migration, or accidental loss of raw local fill history must
+  not make the execution-cost model either zero or unknowable. The repository
+  now carries the versioned, read-only
+  `config/execution_penalty_snapshot.json` artifact. It freezes the approved
+  D.4 weekday maker-BUY 10-second / 168-hour evidence, `$0.02515/share`
+  adverse penalty, 84 settled samples, 53 168h OOS targets, and its explicit
+  expiry. At startup, a valid snapshot produces
+  `EXECUTION_PENALTY_FALLBACK_APPLIED`; after the local journal reaches at
+  least 30 independent eligible samples, the local 168h calibration takes
+  precedence and produces `EXECUTION_PENALTY_CALIBRATED`. A missing, malformed,
+  scope-mismatched, or expired snapshot fails closed: it never substitutes zero
+  execution cost or relaxes `robust_net`. This bootstrap policy therefore can
+  trade a genuine post-cost opportunity on a new machine, but does not promise
+  an entry when the available book edge is smaller than the approved penalty.
+
+  The direct Polymarket Chainlink RTDS connection additionally has a liveness
+  watchdog. `POLYMARKET_CHAINLINK_TWAP_SILENCE_RECONNECT_SEC=15` measures time
+  since the last **valid TWAP** tick, not arbitrary socket traffic. On expiry it
+  writes `POLYMARKET_TWAP_SILENT_STALL` with tick age and reconnect counters,
+  closes and resubscribes the socket, and remains entry-blocked until a fresh
+  Chainlink TWAP observation arrives. Binance and Outcome remain diagnostic /
+  research sources; neither can replace the settlement reference to bypass this
+  guard.
 
 New fills journal schema v2 with immutable 10s/30s spot continuation, BBO
 bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC

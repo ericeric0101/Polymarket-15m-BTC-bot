@@ -433,6 +433,7 @@ class MarketDataConfig:
     polymarket_chainlink_twap_enabled: bool
     polymarket_chainlink_twap_window_sec: int
     polymarket_chainlink_twap_symbol: str
+    polymarket_chainlink_twap_silence_reconnect_sec: float
     require_twap_reference_spot: bool
     twap_degraded_block_new_entries: bool
     external_spot_source_delta_abs_max_usd: Decimal
@@ -452,6 +453,8 @@ class MarketDataConfig:
             raise ValueError("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC must be 30 or 60")
         if self.require_twap_reference_spot and not self.polymarket_chainlink_twap_enabled:
             raise ValueError("REQUIRE_TWAP_REFERENCE_SPOT requires POLYMARKET_CHAINLINK_TWAP_ENABLED")
+        if self.polymarket_chainlink_twap_silence_reconnect_sec < 10:
+            raise ValueError("POLYMARKET_CHAINLINK_TWAP_SILENCE_RECONNECT_SEC must be >= 10")
 
 
 @dataclass(frozen=True)
@@ -996,6 +999,10 @@ class AppConfig:
                 polymarket_chainlink_twap_enabled=_env_bool_inverted("POLYMARKET_CHAINLINK_TWAP_ENABLED", True),
                 polymarket_chainlink_twap_window_sec=polymarket_twap_window_sec,
                 polymarket_chainlink_twap_symbol=_env_str("POLYMARKET_CHAINLINK_TWAP_SYMBOL", "btc/usd").strip().lower() or "btc/usd",
+                polymarket_chainlink_twap_silence_reconnect_sec=max(
+                    10.0,
+                    _env_float("POLYMARKET_CHAINLINK_TWAP_SILENCE_RECONNECT_SEC", 15.0),
+                ),
                 require_twap_reference_spot=_env_bool_inverted("REQUIRE_TWAP_REFERENCE_SPOT", True),
                 twap_degraded_block_new_entries=_env_bool_inverted(
                     "TWAP_DEGRADED_BLOCK_NEW_ENTRIES", True

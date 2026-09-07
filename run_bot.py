@@ -48,6 +48,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/forecast_state.py",
         "bot/strong_directional_regime.py",
         "bot/db_runtime.py",
+        "config/execution_penalty_snapshot.json",
         "bot/order_events.py",
         "bot/trade_telemetry.py",
         "monitoring/trade_journal_db.py",

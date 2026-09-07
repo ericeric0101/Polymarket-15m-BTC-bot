@@ -5,14 +5,7 @@ from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from loguru import logger
-
-
-# D.4 frozen fallback.  These are independent weekday maker-BUY markets, not
-# a value inferred from the current journal.  It deliberately retains the
-# conservative 168-hour estimator while a rebuilt journal accrues enough new
-# 10-second markouts to calibrate itself.
-_D4_168H_FALLBACK_ADVERSE_MARKOUT_PER_SHARE = Decimal("0.02515")
-_D4_168H_FALLBACK_SAMPLE_COUNT = 84
+from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 
 
 class StrategyDBRuntimeMixin:
@@ -48,29 +41,21 @@ class StrategyDBRuntimeMixin:
             )
         calibration = calibrations.get("global")
         if not calibration:
-            calibration = {
-                "source": "d4_fixed_168h_fallback",
-                "sample_count": _D4_168H_FALLBACK_SAMPLE_COUNT,
-                "horizon_sec": horizon_sec,
-                "lookback_hours": 168.0,
-                "adverse_markout_per_share": float(
-                    _D4_168H_FALLBACK_ADVERSE_MARKOUT_PER_SHARE
-                ),
-                "raw_mean_adverse_markout_per_share": 0.02454,
-                "winsor_cap_per_share": None,
-                "method": "d4_frozen_168h_estimator",
-                "fallback_reason": "insufficient_current_journal_samples",
-                "d4_48h_oos_targets": 29,
-                "d4_48h_underestimation_rate": 0.379,
-                "d4_168h_oos_targets": 53,
-                "d4_168h_underestimation_rate": 0.302,
-            }
+            calibration = load_execution_penalty_snapshot()
+            if not calibration:
+                logger.warning(
+                    "Execution-cost calibration unavailable and portable D.4 snapshot is missing, "
+                    "invalid, or expired; new BUY entries remain blocked."
+                )
+                self.maker_buy_markout_calibrations = {}
+                return
             calibrations = {"global": calibration}
             event_type = "EXECUTION_PENALTY_FALLBACK_APPLIED"
             logger.warning(
                 "Execution-cost calibration unavailable from current journal; "
-                "applying frozen D.4 conservative 168h fallback: "
-                f"adverse_markout=${float(_D4_168H_FALLBACK_ADVERSE_MARKOUT_PER_SHARE):.5f}/share"
+                "applying portable D.4 conservative 168h snapshot: "
+                f"snapshot={calibration['snapshot_id']} "
+                f"adverse_markout=${float(calibration['adverse_markout_per_share']):.5f}/share"
             )
         else:
             event_type = "EXECUTION_PENALTY_CALIBRATED"
@@ -98,6 +83,10 @@ class StrategyDBRuntimeMixin:
             ),
             "method": str(calibration["method"]),
             "fallback_applied": event_type == "EXECUTION_PENALTY_FALLBACK_APPLIED",
+            "snapshot_id": str(calibration.get("snapshot_id") or ""),
+            "snapshot_expires_at": str(calibration.get("expires_at") or ""),
+            "fallback_reason": str(calibration.get("fallback_reason") or ""),
+            "d4_evidence": calibration.get("evidence"),
             "regime_calibrations": calibrations,
             "risk_cap_at_fixed_shares_usdc": float(
                 adverse_markout_ps * Decimal(str(getattr(self, "maker_fixed_shares", 0)))

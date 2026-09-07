@@ -548,6 +548,7 @@ def initialize_strategy_settings(
     strategy.polymarket_chainlink_twap_enabled = config.market_data.polymarket_chainlink_twap_enabled
     strategy.polymarket_chainlink_twap_window_sec = config.market_data.polymarket_chainlink_twap_window_sec
     strategy.polymarket_chainlink_twap_symbol = config.market_data.polymarket_chainlink_twap_symbol
+    strategy.polymarket_chainlink_twap_silence_reconnect_sec = config.market_data.polymarket_chainlink_twap_silence_reconnect_sec
     strategy.require_twap_reference_spot = config.market_data.require_twap_reference_spot
     strategy.twap_degraded_block_new_entries = config.market_data.twap_degraded_block_new_entries
     strategy._twap_reference_degraded = False
@@ -698,6 +699,8 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_twap_window_sec = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
+    strategy._polymarket_chainlink_twap_silent_stall_count = 0
+    strategy._polymarket_chainlink_twap_reconnect_count = 0
     strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd
     strategy.active_side_lock_score_abs = Decimal("0")
     from bot.signal_engine import SignalEngine, SignalEngineConfig

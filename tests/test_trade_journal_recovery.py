@@ -1,5 +1,9 @@
 from decimal import Decimal
 from types import SimpleNamespace
+from datetime import datetime, timezone
+
+import bot.db_runtime as db_runtime
+from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 
 from bot.db_runtime import StrategyDBRuntimeMixin
 from monitoring.trade_journal_db import TradeJournalDB
@@ -116,10 +120,29 @@ def test_recovery_keeps_legacy_strike_unverified_without_recorded_status(tmp_pat
     assert strategy.market_strike_status_by_slug[slug] == "recovered_unverified"
 
 
-def test_insufficient_journal_uses_frozen_d4_168h_penalty_fallback():
+def test_insufficient_journal_uses_portable_d4_168h_penalty_fallback(monkeypatch):
     strategy = _FallbackCalibrationStrategy()
     strategy.maker_execution_empirical_markout_lookback_hours = 48.0
     strategy.maker_execution_empirical_markout_min_samples = 5
+    monkeypatch.setattr(
+        db_runtime,
+        "load_execution_penalty_snapshot",
+        lambda: {
+            "snapshot_id": "test-d4-snapshot",
+            "expires_at": "2026-10-08T00:00:00+00:00",
+            "source": "d4_portable_168h_snapshot",
+            "sample_count": 84,
+            "horizon_sec": 10,
+            "lookback_hours": 168.0,
+            "adverse_markout_per_share": Decimal("0.02515"),
+            "raw_mean_adverse_markout_per_share": Decimal("0.02454"),
+            "winsor_cap_per_share": None,
+            "method": "d4_frozen_168h_estimator",
+            "fallback_reason": "insufficient_current_journal_samples",
+            "minimum_independent_samples": 30,
+            "evidence": {"settled_training_samples": 84},
+        },
+    )
 
     strategy._apply_empirical_execution_penalty_calibration()
 
@@ -127,10 +150,29 @@ def test_insufficient_journal_uses_frozen_d4_168h_penalty_fallback():
     event_type, payload = strategy.events[0]
     assert event_type == "EXECUTION_PENALTY_FALLBACK_APPLIED"
     assert payload["fallback_applied"] is True
-    assert payload["source"] == "d4_fixed_168h_fallback"
+    assert payload["source"] == "d4_portable_168h_snapshot"
     assert payload["lookback_hours"] == 168.0
     assert payload["configured_lookback_hours"] == 48.0
     assert payload["minimum_independent_samples"] == 30
+    assert payload["snapshot_id"] == "test-d4-snapshot"
+
+
+def test_execution_penalty_snapshot_is_valid_before_its_expiry():
+    snapshot = load_execution_penalty_snapshot(
+        now=datetime(2026, 9, 8, tzinfo=timezone.utc),
+    )
+
+    assert snapshot is not None
+    assert snapshot["source"] == "d4_portable_168h_snapshot"
+    assert snapshot["adverse_markout_per_share"] == Decimal("0.02515")
+
+
+def test_execution_penalty_snapshot_fails_closed_after_expiry():
+    snapshot = load_execution_penalty_snapshot(
+        now=datetime(2026, 10, 8, tzinfo=timezone.utc),
+    )
+
+    assert snapshot is None
 
 
 def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):
