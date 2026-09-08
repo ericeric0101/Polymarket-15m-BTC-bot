@@ -24,9 +24,6 @@ class FastFollowLiveConfig:
     max_slippage_ticks: int = 1
     max_entries_per_night: int = 6
     max_loss_usdc_per_night: Decimal = Decimal("5")
-    # Outcome lead/lag has no approved authority to liquidate an existing
-    # position by default.  It must be explicitly opted in after OOS review.
-    reversal_exit_enabled: bool = False
 
 
 def _night_key(now_ts: float) -> str | None:
@@ -60,7 +57,6 @@ class OutcomeFastFollowLive:
         self._attempted_slugs: set[str] = set()
         self._pending_order_ids: dict[str, dict] = {}
         self._position_instruments: set[str] = set()
-        self._reversal_price_floor_by_inst: dict[str, Decimal] = {}
         self._night_entries: dict[str, int] = {}
         self._night_realized_pnl: dict[str, Decimal] = {}
         self._loaded_nights: set[str] = set()
@@ -115,8 +111,6 @@ class OutcomeFastFollowLive:
         metadata = self._pending_order_ids.pop(client_order_id, None)
         if metadata is not None and side == "buy":
             self._position_instruments.add(instrument_id)
-        if side == "sell":
-            self._reversal_price_floor_by_inst.pop(self.strategy._instrument_key(instrument_id), None)
         if side == "sell" and instrument_id in self._position_instruments and realized_net_usdc is not None:
             key = _night_key(time.time())
             if key is not None:
@@ -127,103 +121,6 @@ class OutcomeFastFollowLive:
             exchange_min = Decimal(str(getattr(self.strategy, "maker_exchange_min_shares", "5")))
             if Decimal(str(state.get("qty", "0"))) < exchange_min:
                 self._position_instruments.discard(instrument_id)
-
-    def _try_reversal_exit(
-        self, *, candidate, instrument_id, inst_key: str, side: str,
-        wanted_side: str, best_bid: Decimal, best_ask: Decimal,
-    ) -> bool:
-        if not self.config.reversal_exit_enabled:
-            return False
-        if side == wanted_side:
-            return False
-        state = getattr(self.strategy, "live_inventory_cost", {}).get(inst_key, {})
-        held = Decimal(str(state.get("qty", "0")))
-        exchange_min = Decimal(str(getattr(self.strategy, "maker_exchange_min_shares", "5")))
-        if held < exchange_min or best_bid <= 0:
-            return False
-        # A fast-follow signal must never bypass the established hold/TP owner.
-        # Standard exit logic remains responsible for independently configured
-        # hard invalidation and stop-loss policy.
-        if bool(getattr(self.strategy, "hold_to_redeem_enabled", False)) or bool(
-            getattr(self.strategy, "tail_protect_tp_enabled", False)
-        ):
-            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
-                "slug": candidate.slug, "reason": "existing_hold_or_tp_policy",
-                "best_bid": float(best_bid),
-            })
-            return False
-        mid = (best_bid + best_ask) / Decimal("2") if best_bid + best_ask > 0 else Decimal("0")
-        spread_pct = (best_ask - best_bid) / mid if mid > 0 else Decimal("1")
-        max_spread = Decimal(str(getattr(self.strategy, "taker_exit_stop_loss_max_spread_pct", "0.03")))
-        if spread_pct > max_spread:
-            return False
-        for active in getattr(self.strategy, "active_maker_orders", {}).values():
-            if str(active.get("side", "")).lower() != "sell":
-                continue
-            if self.strategy._instrument_key(active.get("instrument_id")) != inst_key:
-                continue
-            self.strategy._cancel_maker_order_side(
-                "sell", reason="outcome_fast_follow_reversal", instrument_id=instrument_id,
-            )
-            return False
-        sellable = Decimal(str(self.strategy._get_effective_sellable_qty(instrument_id=instrument_id)))
-        quantity = min(held, sellable)
-        if quantity < exchange_min:
-            return False
-        avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
-        fee_rate = Decimal(str(self.strategy._infer_market_fee_rate_default() or "0"))
-        if avg_entry <= 0:
-            # Unknown cost is not a conservatively profitable position.  This
-            # guards missed fill acknowledgements and prevents a ghost balance
-            # from being liquidated as fictional profit.
-            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
-                "slug": candidate.slug, "reason": "unknown_cost_basis",
-                "best_bid": float(best_bid), "quantity": float(quantity),
-            })
-            return False
-        conservative_fee = max(Decimal("0"), best_bid * quantity * fee_rate)
-        est_net = (best_bid - avg_entry) * quantity - conservative_fee
-        if est_net <= 0:
-            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
-                "slug": candidate.slug, "reason": "non_profitable_after_fee",
-                "best_bid": float(best_bid), "avg_entry": float(avg_entry),
-                "estimated_net_usdc": float(est_net),
-            })
-            return False
-        prior_floor = self._reversal_price_floor_by_inst.get(inst_key)
-        if prior_floor is not None and best_bid < prior_floor:
-            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
-                "slug": candidate.slug, "reason": "reversal_retry_below_prior_bid",
-                "best_bid": float(best_bid), "prior_bid_floor": float(prior_floor),
-            })
-            return False
-        submitted = self.strategy._submit_taker_exit_order(
-            instrument_id=instrument_id,
-            quantity=quantity,
-            reason="outcome_fast_follow_reversal",
-            est_net_if_exit=est_net,
-            best_bid=best_bid,
-            fee_rate=fee_rate,
-            decision_payload={
-                "slug": candidate.slug,
-                "prior_side": side,
-                "confirmed_side": wanted_side,
-                "signal_created_epoch_ns": candidate.created_epoch_ns,
-                "execution_penalty_bypassed": True,
-            },
-            execution_mode="limit_fok",
-        )
-        if submitted:
-            self._reversal_price_floor_by_inst[inst_key] = best_bid
-            with self._lock:
-                if self._pending is candidate:
-                    self._pending = None
-            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_SUBMITTED", {
-                "slug": candidate.slug, "instrument_id": inst_key,
-                "prior_side": side, "confirmed_side": wanted_side,
-                "quantity": float(quantity), "best_bid": float(best_bid),
-            })
-        return submitted
 
     def on_quote(self, *, instrument_id, best_bid: Decimal, best_ask: Decimal, ask_size: Decimal | None, now_ts: float) -> bool:
         with self._lock:
@@ -243,13 +140,9 @@ class OutcomeFastFollowLive:
         side = getattr(self.strategy._side_for_instrument_id(instrument_id), "value", "NONE")
         wanted_side = "UP" if candidate.decision.direction > 0 else "DOWN"
         inst_key = self.strategy._instrument_key(instrument_id)
-        if self._try_reversal_exit(
-            candidate=candidate, instrument_id=instrument_id, inst_key=inst_key,
-            side=side, wanted_side=wanted_side, best_bid=best_bid, best_ask=best_ask,
-        ):
-            return True
-        # Entry budgets never suppress a protective reversal exit. They apply
-        # only after the current instrument has been checked for held exposure.
+        # Entry-only authority: an opposite-side signal never sells, cancels
+        # TP, or otherwise alters an existing position.  The normal strategy
+        # remains the sole owner of every exit path.
         if slug in self._attempted_slugs or int(getattr(self.strategy, "market_buy_count_total_by_slug", {}).get(slug, 0)) > 0:
             return False
         night = _night_key(now_ts)
@@ -291,13 +184,13 @@ class OutcomeFastFollowLive:
         if instrument is None:
             return False
         for state in getattr(self.strategy, "active_maker_orders", {}).values():
-            if str(state.get("side", "")).lower() != "buy":
-                continue
             if self.strategy._instrument_key(state.get("instrument_id")) != inst_key:
                 continue
-            self.strategy._cancel_maker_order_side(
-                "buy", reason="fast_follow_entry", instrument_id=instrument_id,
-            )
+            self.strategy._db_strategy_event("FAST_FOLLOW_ENTRY_BLOCKED", {
+                "slug": slug, "reason": "existing_order_owner",
+                "instrument_id": inst_key,
+                "order_side": str(state.get("side", "")).lower(),
+            })
             return False
         base_shares = Decimal(str(getattr(self.strategy, "maker_fixed_shares", "10")))
         high_threshold = Decimal(str(getattr(self.strategy, "maker_high_entry_price_size_adjust_threshold", "0.70")))

@@ -260,9 +260,7 @@ def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold()
     assert any(event == "ORDER_FAST_FOLLOW_SUBMIT" for event, _ in events)
 
 
-def test_live_fast_follow_reversal_uses_exact_quantity_bounded_fok_exit():
-    submitted, _kwargs, _events = _live_harness(ask=Decimal("0.60"))
-    # Recreate a fresh owner because the helper consumed its first candidate.
+def test_entry_only_fast_follow_never_sells_an_opposite_existing_position():
     now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
     exits = []
     strategy = SimpleNamespace(
@@ -278,75 +276,52 @@ def test_live_fast_follow_reversal_uses_exact_quantity_bounded_fok_exit():
         _cancel_maker_order_side=lambda *_args, **_kwargs: None,
         _db_strategy_event=lambda *_args, **_kwargs: None,
     )
-    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig(reversal_exit_enabled=True))
-    owner._attempted_slugs.add("s")
+    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
     decision = LeadLagDecision(
         "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
         "twap_followed_outcome", follower_price_cents=7_700_100,
     )
     owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
-    assert owner.on_quote(
+    assert not owner.on_quote(
         instrument_id="DOWN.INST", best_bid=Decimal("0.59"),
         best_ask=Decimal("0.60"), ask_size=Decimal("100"), now_ts=now_ts,
     )
-    assert exits[0]["quantity"] == Decimal("5.5")
-    assert exits[0]["best_bid"] == Decimal("0.59")
-    assert exits[0]["execution_mode"] == "limit_fok"
-
-
-def test_live_fast_follow_reversal_is_disabled_and_never_sells_an_unknown_or_losing_cost_basis():
-    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
-    exits, events = [], []
-
-    def strategy_for(avg_entry, *, hold=False):
-        return SimpleNamespace(
-            current_market_slug="s", market_buy_count_total_by_slug={},
-            live_inventory_cost={"DOWN.INST": {"qty": "5.5", "avg_entry_price": avg_entry}},
-            maker_exchange_min_shares=Decimal("5"), active_maker_orders={},
-            taker_exit_stop_loss_max_spread_pct=Decimal("0.03"), hold_to_redeem_enabled=hold,
-            _side_for_instrument_id=lambda _inst: SimpleNamespace(value="DOWN"),
-            _instrument_key=lambda inst: str(inst),
-            _get_effective_sellable_qty=lambda **_kwargs: Decimal("5.5"),
-            _infer_market_fee_rate_default=lambda: Decimal("0"),
-            _submit_taker_exit_order=lambda **kwargs: exits.append(kwargs) or True,
-            _cancel_maker_order_side=lambda *_args, **_kwargs: None,
-            _db_strategy_event=lambda event, payload: events.append((event, payload)),
-        )
-
-    decision = LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(), "twap_followed_outcome")
-    # Default is entry-only: a follower signal has no liquidation authority.
-    owner = OutcomeFastFollowLive(strategy_for("0.50"), FastFollowLiveConfig())
-    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
-    assert not owner.on_quote(instrument_id="DOWN.INST", best_bid=Decimal("0.70"), best_ask=Decimal("0.71"), ask_size=Decimal("100"), now_ts=now_ts)
-    # Even explicit future opt-in cannot liquidate without a known, profitable
-    # basis, nor can it override hold-to-redeem.
-    for avg_entry, hold in (("0", False), ("0.72", False), ("0.50", True)):
-        owner = OutcomeFastFollowLive(strategy_for(avg_entry, hold=hold), FastFollowLiveConfig(reversal_exit_enabled=True))
-        owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
-        assert not owner.on_quote(instrument_id="DOWN.INST", best_bid=Decimal("0.70"), best_ask=Decimal("0.71"), ask_size=Decimal("100"), now_ts=now_ts)
     assert not exits
 
 
-def test_live_fast_follow_reversal_never_chases_below_an_earlier_fok_bid():
+def test_entry_only_fast_follow_has_no_reversal_implementation():
+    assert not hasattr(OutcomeFastFollowLive, "_try_reversal_exit")
+
+
+def test_entry_only_fast_follow_never_cancels_an_existing_order_owner():
     now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
-    exits = []
+    submitted, cancelled, events = [], [], []
+    instrument = SimpleNamespace(size_precision=1, price_precision=2, price_increment=Decimal("0.01"))
     strategy = SimpleNamespace(
-        current_market_slug="s", market_buy_count_total_by_slug={},
-        live_inventory_cost={"DOWN.INST": {"qty": "5.5", "avg_entry_price": "0.50"}},
-        maker_exchange_min_shares=Decimal("5"), active_maker_orders={},
-        taker_exit_stop_loss_max_spread_pct=Decimal("0.03"),
-        _side_for_instrument_id=lambda _inst: SimpleNamespace(value="DOWN"),
-        _instrument_key=lambda inst: str(inst),
-        _get_effective_sellable_qty=lambda **_kwargs: Decimal("5.5"),
-        _infer_market_fee_rate_default=lambda: Decimal("0"),
-        _submit_taker_exit_order=lambda **kwargs: exits.append(kwargs) or True,
-        _cancel_maker_order_side=lambda *_args, **_kwargs: None,
-        _db_strategy_event=lambda *_args, **_kwargs: None,
+        current_market_slug="s", current_market_end_timestamp=now_ts + 600,
+        maker_min_minutes_to_close=1, bi_side_min_time_left_sec=60,
+        first_entry_max_time_left_sec=720, market_buy_count_total_by_slug={},
+        live_inventory_cost={}, active_side=SimpleNamespace(value="NONE"), active_side_locked=False,
+        maker_fixed_shares=Decimal("10"), maker_exchange_min_shares=Decimal("5"),
+        maker_high_entry_price_size_adjust_threshold=Decimal("0.70"),
+        maker_high_entry_price_size_adjust_multiplier=Decimal("0.55"), _cached_usdc_balance=Decimal("100"),
+        active_maker_orders={"normal-buy": {"side": "buy", "instrument_id": "UP.INST"}},
+        _twap_reference_degraded=False, _market_strike_is_entry_eligible=lambda _slug: True,
+        cache=SimpleNamespace(instrument=lambda _inst: instrument),
+        _side_for_instrument_id=lambda _inst: SimpleNamespace(value="UP"),
+        _instrument_key=lambda inst: str(inst), _align_price_to_tick=lambda price, *_args: price,
+        _is_dry_run_mode=lambda: False, submit_order=submitted.append,
+        _cancel_maker_order_side=lambda *args, **kwargs: cancelled.append((args, kwargs)),
+        _db_strategy_event=lambda event, payload: events.append((event, payload)),
+        _db_order_event=lambda **_kwargs: None,
     )
-    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig(reversal_exit_enabled=True))
     decision = LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(), "twap_followed_outcome")
+    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
     owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
-    assert owner.on_quote(instrument_id="DOWN.INST", best_bid=Decimal("0.74"), best_ask=Decimal("0.75"), ask_size=Decimal("100"), now_ts=now_ts)
-    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
-    assert not owner.on_quote(instrument_id="DOWN.INST", best_bid=Decimal("0.64"), best_ask=Decimal("0.65"), ask_size=Decimal("100"), now_ts=now_ts)
-    assert len(exits) == 1
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert not submitted
+    assert not cancelled
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" for event, _ in events)

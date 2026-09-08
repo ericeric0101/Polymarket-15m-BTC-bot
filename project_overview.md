@@ -788,15 +788,15 @@ that version rather than mixing v1 observations with calibrated v2 evidence.
 `scripts/outcome_lead_lag_event_report.py` accepts only timely records and
 deduplicates historical candidates to one direction per second. Pre-correction
 event markouts intentionally fail this gate; they remain raw operational
-evidence only and cannot validate sub-second alpha. The system remains exactly
-`off`/`shadow`—no candidate may cancel, modify, or submit an order.
+evidence only and cannot validate sub-second alpha. At that historical v1/v2
+milestone the system remained exactly `off`/`shadow`—no candidate could cancel,
+modify, or submit an order. The later entry-only approval is recorded below.
 
-**D.4.2 Outcome→Chainlink experiment and 2026-09-08 live incident:** The
-dedicated lead/lag runtime supports a `live_fast_follow` experiment under
-feature version `outcome_lead_lag_v3_live`, but the approved production profile
-is now explicitly `shadow` under `outcome_lead_lag_v3_shadow_post_incident`.
-It has no order authority. Outcome remains the leading trigger and the
-market's authoritative Chainlink
+**D.4.2 Outcome→Chainlink entry-only experiment and 2026-09-08 live
+incident:** The approved production profile is explicitly `live_entry_only`
+under feature version `outcome_lead_lag_v4_entry_only`. It grants bounded BUY
+entry authority only; it has no exit, cancel, TP, amendment, or reversal
+authority. Outcome remains the leading trigger and the market's authoritative Chainlink
 60-second TWAP remains the required follower/settlement reference: a one-second
 Outcome move of at least **$5**, an Outcome-minus-TWAP residual of at least
 **$3**, and two consecutive qualifying Outcome ticks arm a signal. A live
@@ -815,7 +815,7 @@ seconds.
 
 Binance, Polymarket BBO and non-TWAP spot references remain journaled for
 research, liquidity checks and counterfactual markouts, but they have **no
-state-transition authority** in the live fast-follow gate. Only
+state-transition authority** in the entry-only gate. Only
 `outcome_btc_mark` can build/arm the signal and only the settlement-authority
 `polymarket_twap` can confirm it. This separation prevents high-frequency
 auxiliary ticks from resetting a valid Outcome→TWAP confirmation window.
@@ -824,19 +824,20 @@ The mapping is mechanical: positive Outcome then positive TWAP buys the
 Polymarket **UP** token; negative Outcome then negative TWAP buys **DOWN**.
 The handoff is strategy-owned: the WebSocket/runtime thread may only queue a
 candidate, while the next native CLOB quote callback performs all final checks
-and owns the order. It retains verified strike, fresh feed, approved Taipei
+and owns the BUY order. It retains verified strike, fresh feed, approved Taipei
 weekday 19:00–07:00 session, minimum-time-to-close, balance, current inventory,
 one-BUY-per-market, locked-opposite-side, and non-empty ask checks. It rejects
-an entry above **0.90**. The normal maker-value path is excluded while a live
-fast-follow candidate or attempted order owns that market, so two BUY owners
-cannot race.
+an entry above **0.90**. The normal maker-value path is excluded while an
+entry-only candidate or attempted order owns that market, so two BUY owners
+cannot race. Conversely, if a normal order already owns that instrument, the
+Outcome candidate is discarded: it must not cancel or modify that order.
 
-The fast-follow BUY deliberately does **not** use the D.4 maker adverse-markout
+The entry-only BUY deliberately does **not** use the D.4 maker adverse-markout
 penalty as an admission gate. This is an isolated taker/momentum policy, not a
 claim that the maker penalty has fallen. The frozen 168-hour
 `$0.02515/share` D.4 calibration remains authoritative for ordinary maker-value
-orders, and every real fast-follow fill still enters trade telemetry for
-1/3/5/10/30-second post-fill analysis. Fast-follow fills must not be relabelled
+orders, and every real entry-only fill still enters trade telemetry for
+1/3/5/10/30/60-second post-fill analysis. Entry-only fills must not be relabelled
 as maker fills or silently enter the maker-only D.4 training set.
 
 Sizing is unchanged from the approved live policy: the base request is exactly
@@ -847,8 +848,8 @@ cannot be exited normally. Entry is a tick-bounded **limit FOK** at no more
 than current ask plus one tick and never above 0.90; therefore it either fills
 the complete 10/5.5 shares inside the price boundary or leaves no partial
 sub-minimum position. Cached collateral must cover the complete bounded
-notional. Any existing BUY owner must finish cancellation before this handoff
-may submit.
+notional. Any existing order owner blocks this handoff; it is never cancelled
+or modified by Outcome.
 
 **Incident record — this is mandatory evidence for every future Outcome
 discussion.** On 2026-09-08, live fast-follow submitted 10 Up shares at a 0.67
@@ -864,16 +865,25 @@ were adverse: 0.765 after 1 second, 0.785 after 3 seconds, and 0.815 after 5
 seconds. This is direct evidence that the initial live reversal rule was not
 validated and must not be treated as a protective exit.
 
-The code now records a fast-follow submission in the same recent-buy recovery
-path as maker submits and the journal recovery query accepts it. A future
-reversal owner is disabled by default and, even after explicit opt-in, must
-refuse an unknown cost basis, any estimated net loss after conservative fees,
-an existing hold-to-redeem or tail-TP policy, and any retry below the first
-submitted reversal bid. A normal hard-stop remains the sole authority for
-loss-taking. Re-enabling `live_fast_follow` requires a separately documented
-OOS counterfactual review covering entry fills, missed acknowledgements,
-reversal FOK rejects, exit markouts and the preserved TP/hold path; it may not
-be enabled merely because the entry signal appears plausible.
+The code records an entry-only submission in the same recent-buy recovery path
+as maker submits and the journal recovery query accepts it. The former Outcome
+reversal implementation and its configuration switch have been removed: no
+environment override can restore a SELL, FOK reversal, cancellation, or
+TP-bypass path. Normal hold-to-redeem, tail TP, hard-stop and settlement
+policies remain the sole exit authorities.
+
+The approval rationale is deliberately narrow. The rebuilt ordinary maker
+journal has **zero** new 10-second maker-BUY fill markouts, so it cannot
+justify replacing the frozen D.4 168-hour penalty of **$0.02515/share**. A
+typical currently blocked maker observation has only $0.05 expected net per
+10 shares; mechanically lowering its penalty enough to pass the $0.001 robust
+minimum would require at most **$0.0049/share**, an unsupported ~80% reduction
+rather than a calibration. By contrast, the post-incident shadow run produced
+102 `follower_confirmed` Outcome→fresh-Chainlink events across 15 markets in
+about 3.5 hours. This verifies the intended two-source trigger frequency, not
+its profitability; live entry remains capped at 10/5.5 shares, one BUY per
+market, six entries and $5 realised-loss cap per Taipei trading night until
+entry-specific OOS evidence is reviewed.
 
 **v1 research-DB retirement (2026-09-04, user-approved):** Before deleting
 `logs/hyperliquid_lead_lag.db`, its final inventory was 10,039 stored five-

@@ -745,7 +745,7 @@ def initialize_strategy_settings(
         )
         candidate_handler = strategy.outcome_lead_lag_shadow.record_candidate
         tick_handler = strategy.outcome_lead_lag_shadow.on_tick
-    elif lead_lag.mode == "live_fast_follow":
+    elif lead_lag.mode == "live_entry_only":
         strategy.outcome_fast_follow_live = OutcomeFastFollowLive(
             strategy,
             FastFollowLiveConfig(
@@ -754,11 +754,10 @@ def initialize_strategy_settings(
                 max_slippage_ticks=lead_lag.live_max_slippage_ticks,
                 max_entries_per_night=lead_lag.live_max_entries_per_night,
                 max_loss_usdc_per_night=lead_lag.live_max_loss_usdc_per_night,
-                reversal_exit_enabled=lead_lag.live_reversal_exit_enabled,
             ),
         )
         candidate_handler = strategy.outcome_fast_follow_live.record_candidate
-    if lead_lag.mode in {"shadow", "live_fast_follow"}:
+    if lead_lag.mode in {"shadow", "live_entry_only"}:
         strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
             config=OutcomeLeadLagStateConfig(
                 feature_version=lead_lag.feature_version, max_source_age_ms=lead_lag.max_source_age_ms,
