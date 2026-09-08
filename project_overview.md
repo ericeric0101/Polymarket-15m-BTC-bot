@@ -802,9 +802,15 @@ Outcome move of at least **$5**, an Outcome-minus-TWAP residual of at least
 candidate exists only if a subsequently received fresh Chainlink TWAP tick
 moves in the same direction by at least **$1** within **5 seconds**. A prior
 TWAP move cannot confirm a later Outcome event; the follower price is frozen
-when the Outcome signal arms. Both references remain subject to the existing
-one-second freshness and cross-connection fail-closed checks. A confirmed
-signal expires after six seconds.
+when the Outcome signal arms. The one-second cross-source freshness check is
+applied when an Outcome tick is scored or arms the signal. Because Outcome
+normally arrives at roughly five-second cadence while Chainlink can update much
+more often, intervening TWAP ticks are fail-closed observations and must not
+clear the verified Outcome debounce or armed state. During the five-second
+armed window, only a newly received post-arm TWAP tick can confirm against the
+frozen baseline; expiry, disconnect/cross-epoch, out-of-order data, or a stale
+Outcome-time pairing clears the state. A confirmed signal expires after six
+seconds.
 
 The mapping is mechanical: positive Outcome then positive TWAP buys the
 Polymarket **UP** token; negative Outcome then negative TWAP buys **DOWN**.

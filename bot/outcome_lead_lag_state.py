@@ -51,6 +51,22 @@ class OutcomeLeadLagState:
         self._armed_follower_price_cents = None
         return LeadLagDecision("unavailable", 0, 0, 0, 0, self.config.feature_version, tick.received_monotonic_ns, reason)
 
+    def _observe_without_reset(self, tick: ReferenceTick, reason: str) -> LeadLagDecision:
+        """Fail closed for an unusable follower tick without erasing an Outcome arm.
+
+        Outcome is deliberately sampled less frequently than Chainlink TWAP.
+        A newer TWAP therefore normally becomes more than ``max_source_age_ms``
+        away from the last Outcome mark before the next Outcome update arrives.
+        That makes the pair unsuitable for forming a *new* Outcome shock, but
+        must not erase the Outcome debounce/armed state.  The next Outcome
+        update gets a fresh pair and is the only place a new shock is scored.
+        """
+        return LeadLagDecision(
+            "observe", 0, 0, 0, self._persistence,
+            self.config.feature_version, tick.received_monotonic_ns, reason,
+            follower_price_cents=tick.price_cents,
+        )
+
     def _update_basis(self, outcome: ReferenceTick, twap: ReferenceTick) -> int | None:
         """Return the robust raw Outcome--TWAP basis after one new Outcome mark.
 
@@ -80,8 +96,6 @@ class OutcomeLeadLagState:
         outcome, twap = self._latest.get("outcome_btc_mark"), self._latest.get("polymarket_twap")
         if outcome is None or twap is None:
             return self._unavailable(tick, "missing_reference")
-        if abs(outcome.received_monotonic_ns - twap.received_monotonic_ns) > self.config.max_source_age_ms * 1_000_000:
-            return self._unavailable(tick, "stale_reference")
         if outcome.connection_epoch != tick.connection_epoch and tick.source == "outcome_btc_mark":
             return self._unavailable(tick, "cross_epoch")
 
@@ -95,6 +109,10 @@ class OutcomeLeadLagState:
                 self._armed_direction = 0
                 self._armed_monotonic_ns = None
                 self._armed_follower_price_cents = None
+            elif elapsed_ms < 0:
+                # A cross-source delivery race must never turn a pre-arm TWAP
+                # observation into confirmation.
+                return self._observe_without_reset(tick, "awaiting_post_outcome_twap")
             elif tick.source == "polymarket_twap" and self._armed_follower_price_cents is not None:
                 follower_move = tick.price_cents - self._armed_follower_price_cents
                 confirms = (
@@ -125,6 +143,16 @@ class OutcomeLeadLagState:
                     tick.received_monotonic_ns, "awaiting_twap_follow_through",
                     follower_price_cents=twap.price_cents,
                 )
+
+        pair_age_ns = abs(outcome.received_monotonic_ns - twap.received_monotonic_ns)
+        if pair_age_ns > self.config.max_source_age_ms * 1_000_000:
+            if tick.source == "polymarket_twap":
+                # Outcome arrives about every five seconds while TWAP is
+                # seconds/sub-seconds.  This TWAP cannot form an Outcome
+                # signal, but clearing persistence here would make the next
+                # qualifying Outcome tick perpetually look like tick one.
+                return self._observe_without_reset(tick, "waiting_for_outcome_refresh")
+            return self._unavailable(tick, "stale_reference")
         raw_residual = outcome.price_cents - twap.price_cents
         baseline = self._update_basis(outcome, twap)
         if baseline is None:

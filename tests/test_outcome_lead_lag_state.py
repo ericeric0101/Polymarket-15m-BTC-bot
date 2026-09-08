@@ -52,12 +52,53 @@ def test_state_requires_twap_to_follow_after_outcome_before_live_confirmation():
     assert confirmed.direction == 1
 
 
+def test_state_preserves_outcome_debounce_across_frequent_twap_ticks():
+    """Outcome is five-second cadence; TWAP ticks between marks must not reset it."""
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=500, residual_cents=300, debounce_ticks=2,
+        baseline_warmup_samples=1, follower_confirm_cents=100,
+        follower_confirm_window_ms=5_000,
+    ))
+    state.apply(tick("polymarket_twap", 7_700_000, 0))
+    state.apply(tick("outcome_btc_mark", 7_700_000, 100))
+    # Establish the one-sample basis before the first shock.
+    state.apply(tick("polymarket_twap", 7_700_000, 4_900))
+    first = state.apply(tick("outcome_btc_mark", 7_700_600, 5_000))
+    assert first.state == "adverse_candidate"
+    # These are individually too far from the last Outcome tick to form a
+    # new pair.  They must remain fail-closed but retain the debounce state.
+    assert state.apply(tick("polymarket_twap", 7_700_000, 6_200)).reason == "waiting_for_outcome_refresh"
+    assert state.apply(tick("polymarket_twap", 7_700_000, 9_800)).reason == "waiting_for_outcome_refresh"
+    second = state.apply(tick("outcome_btc_mark", 7_701_200, 10_000))
+    assert second.state == "adverse_confirmed"
+    # The post-arm TWAP move is allowed to use the frozen, already verified
+    # follower baseline for the short confirmation window.
+    confirmed = state.apply(tick("polymarket_twap", 7_700_100, 10_300))
+    assert confirmed.state == "follower_confirmed"
+
+
+def test_state_expires_armed_signal_before_late_twap_can_confirm():
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=500, residual_cents=300, debounce_ticks=1,
+        baseline_warmup_samples=1, follower_confirm_cents=100,
+        follower_confirm_window_ms=5_000,
+    ))
+    state.apply(tick("polymarket_twap", 7_700_000, 0))
+    state.apply(tick("outcome_btc_mark", 7_700_000, 0))
+    state.apply(tick("polymarket_twap", 7_700_000, 900))
+    assert state.apply(tick("outcome_btc_mark", 7_700_600, 1_100)).state == "adverse_confirmed"
+    late = state.apply(tick("polymarket_twap", 7_700_100, 6_200))
+    assert late.state != "follower_confirmed"
+
+
 def test_state_fails_closed_for_out_of_order_and_stale_sources():
     state = OutcomeLeadLagState()
     state.apply(tick("outcome_btc_mark", 1_000, 1_000))
     assert state.apply(tick("outcome_btc_mark", 1_001, 999)).reason == "out_of_order"
     state.apply(tick("outcome_btc_mark", 1_100, 5_000))
-    assert state.apply(tick("polymarket_twap", 1_100, 1_000)).reason == "stale_reference"
+    # A stale TWAP is ignored fail-closed without destroying valid Outcome
+    # persistence; the next Outcome tick will require a fresh pair.
+    assert state.apply(tick("polymarket_twap", 1_100, 1_000)).reason == "waiting_for_outcome_refresh"
 
 
 def test_runtime_records_only_shadow_candidates_and_handoff_is_disabled():
