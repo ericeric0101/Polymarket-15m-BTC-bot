@@ -40,6 +40,20 @@ def test_journal_recovers_latest_fast_follow_night_risk(tmp_path):
     }
 
 
+def test_journal_recovers_fast_follow_buy_submit_for_ghost_cost_basis(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    instrument_id = "fast-follow-inst"
+    db.log_order_event(
+        "run", "ORDER_FAST_FOLLOW_SUBMIT", side="BUY", price=0.67, qty=10,
+        instrument_id=instrument_id, status="SUBMITTED",
+        payload={"instrument_id": instrument_id},
+    )
+    rows = db.load_recent_buy_submits(instrument_id)
+    assert len(rows) == 1
+    assert rows[0]["price"] == pytest.approx(0.67)
+    assert rows[0]["qty"] == pytest.approx(10)
+
+
 def test_journal_calibrates_maker_buy_adverse_markout_from_observed_fills(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     # Six observed 10-second markouts: four adverse and two favourable.

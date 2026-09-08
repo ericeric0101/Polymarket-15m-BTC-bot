@@ -764,7 +764,7 @@ class TradeJournalDB:
         sql = """
         SELECT ts, client_order_id, price, qty, payload_json
         FROM order_events
-        WHERE event_type = 'ORDER_SUBMIT'
+        WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_FAST_FOLLOW_SUBMIT')
           AND UPPER(COALESCE(side, '')) = 'BUY'
           AND (
               instrument_id = ?

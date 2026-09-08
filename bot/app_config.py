@@ -504,6 +504,7 @@ class OutcomeLeadLagConfig:
     live_max_slippage_ticks: int
     live_max_entries_per_night: int
     live_max_loss_usdc_per_night: Decimal
+    live_reversal_exit_enabled: bool
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live_fast_follow"}:
@@ -1092,5 +1093,6 @@ class AppConfig:
                 live_max_loss_usdc_per_night=max(
                     Decimal("0"), _env_decimal("OUTCOME_FAST_FOLLOW_MAX_LOSS_USDC_PER_NIGHT", "5")
                 ),
+                live_reversal_exit_enabled=_env_bool("OUTCOME_FAST_FOLLOW_REVERSAL_EXIT_ENABLED", False),
             ),
         )

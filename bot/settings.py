@@ -754,6 +754,7 @@ def initialize_strategy_settings(
                 max_slippage_ticks=lead_lag.live_max_slippage_ticks,
                 max_entries_per_night=lead_lag.live_max_entries_per_night,
                 max_loss_usdc_per_night=lead_lag.live_max_loss_usdc_per_night,
+                reversal_exit_enabled=lead_lag.live_reversal_exit_enabled,
             ),
         )
         candidate_handler = strategy.outcome_fast_follow_live.record_candidate

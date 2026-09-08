@@ -791,11 +791,12 @@ event markouts intentionally fail this gate; they remain raw operational
 evidence only and cannot validate sub-second alpha. The system remains exactly
 `off`/`shadow`—no candidate may cancel, modify, or submit an order.
 
-**D.4.2 Outcome→Chainlink live fast-follow policy (approved and implemented
-2026-09-08):** This paragraph supersedes D.4.1's former shadow-only execution
-authority. The dedicated lead/lag runtime now accepts the explicit
-`live_fast_follow` mode under feature version `outcome_lead_lag_v3_live`.
-Outcome remains the leading trigger and the market's authoritative Chainlink
+**D.4.2 Outcome→Chainlink experiment and 2026-09-08 live incident:** The
+dedicated lead/lag runtime supports a `live_fast_follow` experiment under
+feature version `outcome_lead_lag_v3_live`, but the approved production profile
+is now explicitly `shadow` under `outcome_lead_lag_v3_shadow_post_incident`.
+It has no order authority. Outcome remains the leading trigger and the
+market's authoritative Chainlink
 60-second TWAP remains the required follower/settlement reference: a one-second
 Outcome move of at least **$5**, an Outcome-minus-TWAP residual of at least
 **$3**, and two consecutive qualifying Outcome ticks arm a signal. A live
@@ -849,19 +850,30 @@ sub-minimum position. Cached collateral must cover the complete bounded
 notional. Any existing BUY owner must finish cancellation before this handoff
 may submit.
 
-Initial live limits are six attempted fast-follow entries per Taipei night and
-a $5 realized fast-follow loss stop. Their cumulative state is journaled and
-recovered across process/node restarts; there is no
-automatic size increase. If a later Outcome→TWAP confirmation reverses against
-a held token, the owner first waits until an existing TP/SELL is absent after
-its cancellation acknowledgement, verifies sellable account inventory and
-spread, then delegates an exact-quantity, best-bid-bounded **limit FOK** SELL
-through the existing taker-exit owner. This preserves single SELL ownership and
-prevents a partial exit from manufacturing an unsellable residual. Runtime
-audit events are `FAST_FOLLOW_CONFIRMED`, `FAST_FOLLOW_EXPIRED`,
-`ORDER_FAST_FOLLOW_SUBMIT`, `FAST_FOLLOW_REVERSAL_EXIT_SUBMITTED`, and
-`FAST_FOLLOW_ERROR`. The implementation and focused/full regressions completed
-with **332 tests passing** before commit.
+**Incident record — this is mandatory evidence for every future Outcome
+discussion.** On 2026-09-08, live fast-follow submitted 10 Up shares at a 0.67
+limit and filled near 0.66. Its venue fill acknowledgement was missing, so
+ghost inventory reconciliation found the on-chain shares but restored an
+incorrect 0.00 cost basis. The recovery query recognized only `ORDER_SUBMIT`,
+not `ORDER_FAST_FOLLOW_SUBMIT`. A later Down confirmation submitted a 0.74 FOK
+SELL that was rejected, then a second confirmation submitted and filled a 0.64
+FOK SELL. This bypassed `HOLD_TO_REDEEM` and the configured 0.97 tail TP. The
+ledger falsely reported about +$6.38 because of the zero basis; the actual
+10-share trade was approximately 0.66 → 0.64 before fees. Its exit markouts
+were adverse: 0.765 after 1 second, 0.785 after 3 seconds, and 0.815 after 5
+seconds. This is direct evidence that the initial live reversal rule was not
+validated and must not be treated as a protective exit.
+
+The code now records a fast-follow submission in the same recent-buy recovery
+path as maker submits and the journal recovery query accepts it. A future
+reversal owner is disabled by default and, even after explicit opt-in, must
+refuse an unknown cost basis, any estimated net loss after conservative fees,
+an existing hold-to-redeem or tail-TP policy, and any retry below the first
+submitted reversal bid. A normal hard-stop remains the sole authority for
+loss-taking. Re-enabling `live_fast_follow` requires a separately documented
+OOS counterfactual review covering entry fills, missed acknowledgements,
+reversal FOK rejects, exit markouts and the preserved TP/hold path; it may not
+be enabled merely because the entry signal appears plausible.
 
 **v1 research-DB retirement (2026-09-04, user-approved):** Before deleting
 `logs/hyperliquid_lead_lag.db`, its final inventory was 10,039 stored five-

@@ -24,6 +24,9 @@ class FastFollowLiveConfig:
     max_slippage_ticks: int = 1
     max_entries_per_night: int = 6
     max_loss_usdc_per_night: Decimal = Decimal("5")
+    # Outcome lead/lag has no approved authority to liquidate an existing
+    # position by default.  It must be explicitly opted in after OOS review.
+    reversal_exit_enabled: bool = False
 
 
 def _night_key(now_ts: float) -> str | None:
@@ -57,6 +60,7 @@ class OutcomeFastFollowLive:
         self._attempted_slugs: set[str] = set()
         self._pending_order_ids: dict[str, dict] = {}
         self._position_instruments: set[str] = set()
+        self._reversal_price_floor_by_inst: dict[str, Decimal] = {}
         self._night_entries: dict[str, int] = {}
         self._night_realized_pnl: dict[str, Decimal] = {}
         self._loaded_nights: set[str] = set()
@@ -111,6 +115,8 @@ class OutcomeFastFollowLive:
         metadata = self._pending_order_ids.pop(client_order_id, None)
         if metadata is not None and side == "buy":
             self._position_instruments.add(instrument_id)
+        if side == "sell":
+            self._reversal_price_floor_by_inst.pop(self.strategy._instrument_key(instrument_id), None)
         if side == "sell" and instrument_id in self._position_instruments and realized_net_usdc is not None:
             key = _night_key(time.time())
             if key is not None:
@@ -126,12 +132,25 @@ class OutcomeFastFollowLive:
         self, *, candidate, instrument_id, inst_key: str, side: str,
         wanted_side: str, best_bid: Decimal, best_ask: Decimal,
     ) -> bool:
+        if not self.config.reversal_exit_enabled:
+            return False
         if side == wanted_side:
             return False
         state = getattr(self.strategy, "live_inventory_cost", {}).get(inst_key, {})
         held = Decimal(str(state.get("qty", "0")))
         exchange_min = Decimal(str(getattr(self.strategy, "maker_exchange_min_shares", "5")))
         if held < exchange_min or best_bid <= 0:
+            return False
+        # A fast-follow signal must never bypass the established hold/TP owner.
+        # Standard exit logic remains responsible for independently configured
+        # hard invalidation and stop-loss policy.
+        if bool(getattr(self.strategy, "hold_to_redeem_enabled", False)) or bool(
+            getattr(self.strategy, "tail_protect_tp_enabled", False)
+        ):
+            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
+                "slug": candidate.slug, "reason": "existing_hold_or_tp_policy",
+                "best_bid": float(best_bid),
+            })
             return False
         mid = (best_bid + best_ask) / Decimal("2") if best_bid + best_ask > 0 else Decimal("0")
         spread_pct = (best_ask - best_bid) / mid if mid > 0 else Decimal("1")
@@ -152,8 +171,32 @@ class OutcomeFastFollowLive:
         if quantity < exchange_min:
             return False
         avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
-        est_net = (best_bid - avg_entry) * quantity
         fee_rate = Decimal(str(self.strategy._infer_market_fee_rate_default() or "0"))
+        if avg_entry <= 0:
+            # Unknown cost is not a conservatively profitable position.  This
+            # guards missed fill acknowledgements and prevents a ghost balance
+            # from being liquidated as fictional profit.
+            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
+                "slug": candidate.slug, "reason": "unknown_cost_basis",
+                "best_bid": float(best_bid), "quantity": float(quantity),
+            })
+            return False
+        conservative_fee = max(Decimal("0"), best_bid * quantity * fee_rate)
+        est_net = (best_bid - avg_entry) * quantity - conservative_fee
+        if est_net <= 0:
+            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
+                "slug": candidate.slug, "reason": "non_profitable_after_fee",
+                "best_bid": float(best_bid), "avg_entry": float(avg_entry),
+                "estimated_net_usdc": float(est_net),
+            })
+            return False
+        prior_floor = self._reversal_price_floor_by_inst.get(inst_key)
+        if prior_floor is not None and best_bid < prior_floor:
+            self.strategy._db_strategy_event("FAST_FOLLOW_REVERSAL_EXIT_BLOCKED", {
+                "slug": candidate.slug, "reason": "reversal_retry_below_prior_bid",
+                "best_bid": float(best_bid), "prior_bid_floor": float(prior_floor),
+            })
+            return False
         submitted = self.strategy._submit_taker_exit_order(
             instrument_id=instrument_id,
             quantity=quantity,
@@ -171,6 +214,7 @@ class OutcomeFastFollowLive:
             execution_mode="limit_fok",
         )
         if submitted:
+            self._reversal_price_floor_by_inst[inst_key] = best_bid
             with self._lock:
                 if self._pending is candidate:
                     self._pending = None
@@ -295,6 +339,18 @@ class OutcomeFastFollowLive:
         self._night_entries[night] = self._night_entries.get(night, 0) + 1
         self._persist_night(night)
         self._pending_order_ids[str(coid)] = metadata
+        # Record the submission before handing it to the venue, exactly as the
+        # maker path does.  If the venue fills but its fill callback is lost,
+        # ghost reconciliation can restore a real cost basis instead of zero.
+        inst_key = self.strategy._instrument_key(instrument_id)
+        recent_submits = getattr(self.strategy, "recent_buy_submit_by_inst", None)
+        if not isinstance(recent_submits, dict):
+            recent_submits = {}
+            self.strategy.recent_buy_submit_by_inst = recent_submits
+        recent_submits[inst_key] = {
+            "price": limit_price, "quantity": quantity,
+            "created_ts": time.time(), "client_order_id": str(coid),
+        }
         with self._lock:
             if self._pending is candidate:
                 self._pending = None
