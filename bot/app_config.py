@@ -497,12 +497,21 @@ class OutcomeLeadLagConfig:
     markout_max_delay_ms: int
     raw_retention_days: int
     compact_retention_days: int
+    follower_confirm_window_ms: int
+    follower_confirm_cents: int
+    live_signal_ttl_ms: int
+    live_max_entry_price: Decimal
+    live_max_slippage_ticks: int
+    live_max_entries_per_night: int
+    live_max_loss_usdc_per_night: Decimal
 
     def __post_init__(self) -> None:
-        if self.mode not in {"off", "shadow"}:
-            raise ValueError("OUTCOME_LEAD_LAG_MODE must be off or shadow")
+        if self.mode not in {"off", "shadow", "live_fast_follow"}:
+            raise ValueError("OUTCOME_LEAD_LAG_MODE must be off, shadow, or live_fast_follow")
         if self.baseline_warmup_samples > self.baseline_window_samples:
             raise ValueError("OUTCOME_LEAD_LAG_BASELINE_WARMUP_SAMPLES cannot exceed baseline window")
+        if self.live_max_entry_price <= 0 or self.live_max_entry_price > 1:
+            raise ValueError("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE must be in (0, 1]")
 
 
 @dataclass(frozen=True)
@@ -1074,5 +1083,14 @@ class AppConfig:
                 markout_max_delay_ms=max(0, _env_int("OUTCOME_LEAD_LAG_MARKOUT_MAX_DELAY_MS", 1000)),
                 raw_retention_days=max(2, _env_int("OUTCOME_LEAD_LAG_RAW_RETENTION_DAYS", 7)),
                 compact_retention_days=max(7, _env_int("OUTCOME_LEAD_LAG_COMPACT_RETENTION_DAYS", 90)),
+                follower_confirm_window_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_WINDOW_MS", 5000)),
+                follower_confirm_cents=max(1, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_CENTS", 100)),
+                live_signal_ttl_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS", 6000)),
+                live_max_entry_price=_env_decimal("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE", "0.90"),
+                live_max_slippage_ticks=max(0, _env_int("OUTCOME_FAST_FOLLOW_MAX_SLIPPAGE_TICKS", 1)),
+                live_max_entries_per_night=max(1, _env_int("OUTCOME_FAST_FOLLOW_MAX_ENTRIES_PER_NIGHT", 6)),
+                live_max_loss_usdc_per_night=max(
+                    Decimal("0"), _env_decimal("OUTCOME_FAST_FOLLOW_MAX_LOSS_USDC_PER_NIGHT", "5")
+                ),
             ),
         )

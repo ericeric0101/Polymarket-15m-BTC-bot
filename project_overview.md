@@ -791,6 +791,65 @@ event markouts intentionally fail this gate; they remain raw operational
 evidence only and cannot validate sub-second alpha. The system remains exactly
 `off`/`shadow`—no candidate may cancel, modify, or submit an order.
 
+**D.4.2 Outcome→Chainlink live fast-follow policy (approved and implemented
+2026-09-08):** This paragraph supersedes D.4.1's former shadow-only execution
+authority. The dedicated lead/lag runtime now accepts the explicit
+`live_fast_follow` mode under feature version `outcome_lead_lag_v3_live`.
+Outcome remains the leading trigger and the market's authoritative Chainlink
+60-second TWAP remains the required follower/settlement reference: a one-second
+Outcome move of at least **$5**, an Outcome-minus-TWAP residual of at least
+**$3**, and two consecutive qualifying Outcome ticks arm a signal. A live
+candidate exists only if a subsequently received fresh Chainlink TWAP tick
+moves in the same direction by at least **$1** within **5 seconds**. A prior
+TWAP move cannot confirm a later Outcome event; the follower price is frozen
+when the Outcome signal arms. Both references remain subject to the existing
+one-second freshness and cross-connection fail-closed checks. A confirmed
+signal expires after six seconds.
+
+The mapping is mechanical: positive Outcome then positive TWAP buys the
+Polymarket **UP** token; negative Outcome then negative TWAP buys **DOWN**.
+The handoff is strategy-owned: the WebSocket/runtime thread may only queue a
+candidate, while the next native CLOB quote callback performs all final checks
+and owns the order. It retains verified strike, fresh feed, approved Taipei
+weekday 19:00–07:00 session, minimum-time-to-close, balance, current inventory,
+one-BUY-per-market, locked-opposite-side, and non-empty ask checks. It rejects
+an entry above **0.90**. The normal maker-value path is excluded while a live
+fast-follow candidate or attempted order owns that market, so two BUY owners
+cannot race.
+
+The fast-follow BUY deliberately does **not** use the D.4 maker adverse-markout
+penalty as an admission gate. This is an isolated taker/momentum policy, not a
+claim that the maker penalty has fallen. The frozen 168-hour
+`$0.02515/share` D.4 calibration remains authoritative for ordinary maker-value
+orders, and every real fast-follow fill still enters trade telemetry for
+1/3/5/10/30-second post-fill analysis. Fast-follow fills must not be relabelled
+as maker fills or silently enter the maker-only D.4 training set.
+
+Sizing is unchanged from the approved live policy: the base request is exactly
+**10 shares**; when the executable entry price is strictly greater than
+**0.70**, it is exactly **5.5 shares** (`10 × 0.55`). The 5.5-share floor is
+intentional because a position below the five-share exchange SELL minimum
+cannot be exited normally. Entry is a tick-bounded **limit FOK** at no more
+than current ask plus one tick and never above 0.90; therefore it either fills
+the complete 10/5.5 shares inside the price boundary or leaves no partial
+sub-minimum position. Cached collateral must cover the complete bounded
+notional. Any existing BUY owner must finish cancellation before this handoff
+may submit.
+
+Initial live limits are six attempted fast-follow entries per Taipei night and
+a $5 realized fast-follow loss stop. Their cumulative state is journaled and
+recovered across process/node restarts; there is no
+automatic size increase. If a later Outcome→TWAP confirmation reverses against
+a held token, the owner first waits until an existing TP/SELL is absent after
+its cancellation acknowledgement, verifies sellable account inventory and
+spread, then delegates an exact-quantity, best-bid-bounded **limit FOK** SELL
+through the existing taker-exit owner. This preserves single SELL ownership and
+prevents a partial exit from manufacturing an unsellable residual. Runtime
+audit events are `FAST_FOLLOW_CONFIRMED`, `FAST_FOLLOW_EXPIRED`,
+`ORDER_FAST_FOLLOW_SUBMIT`, `FAST_FOLLOW_REVERSAL_EXIT_SUBMITTED`, and
+`FAST_FOLLOW_ERROR`. The implementation and focused/full regressions completed
+with **332 tests passing** before commit.
+
 **v1 research-DB retirement (2026-09-04, user-approved):** Before deleting
 `logs/hyperliquid_lead_lag.db`, its final inventory was 10,039 stored five-
 second snapshots (9,092 quality-gated report rows), 874,215 compact-reference

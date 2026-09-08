@@ -794,7 +794,7 @@ class TakerExitMixin:
 
         qty = Quantity(float(qty_dec), precision=precision)
         coid = ClientOrderId(f"BTC-15M-TAKER-EXIT-{int(time.time() * 1000)}")
-        if execution_mode == "limit_fak":
+        if execution_mode in {"limit_fak", "limit_fok"}:
             price_precision = int(getattr(instrument, "price_precision", 2))
             order = self.order_factory.limit(
                 instrument_id=inst,
@@ -802,10 +802,10 @@ class TakerExitMixin:
                 quantity=qty,
                 price=Price(float(best_bid), precision=price_precision),
                 client_order_id=coid,
-                time_in_force=TimeInForce.IOC,
+                time_in_force=(TimeInForce.FOK if execution_mode == "limit_fok" else TimeInForce.IOC),
             )
             requested_order_kind = "limit"
-            venue_order_type = "FAK"
+            venue_order_type = "FOK" if execution_mode == "limit_fok" else "FAK"
         else:
             order = self.order_factory.market(
                 instrument_id=inst,
@@ -826,7 +826,7 @@ class TakerExitMixin:
             execution_by_id = {}
             self.taker_exit_execution_by_client_order_id = execution_by_id
         execution_by_id[str(coid)] = {
-            "requested_tif": "IOC",
+            "requested_tif": "FOK" if execution_mode == "limit_fok" else "IOC",
             "requested_order_kind": requested_order_kind,
             "venue_order_type": venue_order_type,
         }
@@ -862,7 +862,7 @@ class TakerExitMixin:
                 "fee_rate": float(fee_rate),
                 "fee_rate_decimal": float(fee_rate),
                 "best_bid": float(best_bid),
-                "requested_tif": "IOC",
+                "requested_tif": "FOK" if execution_mode == "limit_fok" else "IOC",
                 "requested_order_kind": requested_order_kind,
                 "venue_order_type": venue_order_type,
                 **(decision_payload or {}),

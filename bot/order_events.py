@@ -138,6 +138,11 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     filled_entry_mode = "value"
     filled_limit_price = Decimal("0")
     maker_matched = False
+    fast_follow_owner = getattr(strategy, "outcome_fast_follow_live", None)
+    fast_follow_metadata = (
+        fast_follow_owner.order_metadata(filled_id)
+        if fast_follow_owner is not None else None
+    )
     pending_fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
     for order_key, state in list(strategy.active_maker_orders.items()):
         side = str(state.get("side", "") or "")
@@ -164,6 +169,14 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             if total_qty <= 0 or accumulated >= total_qty:
                 strategy.active_maker_orders.pop(order_key, None)
             break
+    if fast_follow_metadata is not None:
+        filled_side = "buy"
+        filled_entry_mode = "fast_follow"
+        filled_limit_price = Decimal(str(fast_follow_metadata.get("limit_price", "0")))
+        filled_directional_snapshot = {
+            "entry_mode": "fast_follow",
+            "outcome_fast_follow": fast_follow_metadata,
+        }
     if filled_inst is None:
         filled_inst = getattr(event, "instrument_id", None) or strategy.instrument_id
 
@@ -234,6 +247,13 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                 entry_mode=filled_entry_mode,
                 now_ts=time.time(),
             )
+    if fast_follow_owner is not None and fill_side_norm:
+        fast_follow_owner.on_fill(
+            client_order_id=filled_id,
+            side=fill_side_norm,
+            instrument_id=str(strategy._instrument_key(filled_inst)),
+            realized_net_usdc=realized_net_usdc,
+        )
     telemetry = getattr(strategy, "trade_telemetry", None)
     if telemetry is not None and fill_side_norm and fill_qty_dec > 0:
         try:
@@ -340,7 +360,10 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             },
         )
     strategy._clear_pending_taker_exit_for_order(filled_id)
-    protective_exit_reasons = {"stop_loss", "invalidation_recovery", "offside_near_close"}
+    protective_exit_reasons = {
+        "stop_loss", "invalidation_recovery", "offside_near_close",
+        "outcome_fast_follow_reversal",
+    }
     if taker_exit_reason == "stop_loss" and strategy.stop_loss_reentry_cooldown_sec > 0:
         inst_key = strategy._instrument_key(filled_inst)
         if inst_key:
@@ -522,6 +545,9 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 def handle_order_canceled(strategy: Any, event: Any) -> None:
     """Handle cancel acknowledgements to clear pending-cancel state."""
     canceled_id = str(getattr(event, "client_order_id", "") or "")
+    fast_follow_owner = getattr(strategy, "outcome_fast_follow_live", None)
+    if fast_follow_owner is not None:
+        fast_follow_owner.on_order_terminal(canceled_id)
     cancel_started_ns = getattr(strategy, "_lead_lag_cancel_started_ns_by_order_id", {}).pop(canceled_id, None)
     lead_lag_db = getattr(strategy, "lead_lag_db", None)
     if cancel_started_ns is not None and lead_lag_db is not None:
@@ -614,6 +640,9 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
     logger.error("=" * 80)
 
     denied_id = str(event.client_order_id)
+    fast_follow_owner = getattr(strategy, "outcome_fast_follow_live", None)
+    if fast_follow_owner is not None:
+        fast_follow_owner.on_order_terminal(denied_id)
     taker_exit_reason = getattr(
         strategy,
         "taker_exit_reason_by_client_order_id",

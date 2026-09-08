@@ -1881,6 +1881,19 @@ class IntegratedBTCStrategy(
                     int(self.market_buy_count_by_slug.get(market_buy_budget_key, 0)),
                     int(getattr(self, "market_buy_count_total_by_slug", {}).get(current_slug, 0)),
                 )
+                fast_follow_owner = getattr(self, "outcome_fast_follow_live", None)
+                if (
+                    side == "buy"
+                    and fast_follow_owner is not None
+                    and fast_follow_owner.blocks_normal_buy(current_slug)
+                ):
+                    self._db_order_event(
+                        event_type="ORDER_SKIP_FAST_FOLLOW_OWNERSHIP",
+                        side="BUY", status="SKIPPED",
+                        reason="fast_follow_owns_market_buy",
+                        payload={"slug": current_slug, "instrument_id": str(inst_id)},
+                    )
+                    continue
                 if (
                     side == "buy"
                     and current_slug

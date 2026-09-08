@@ -74,10 +74,13 @@ class OutcomeLeadLagRuntime:
             # A candidate is an edge-triggered research event, not every tick
             # while the same move remains confirmed.  A confirmed reversal is
             # a new event; any non-confirmed state re-arms the next entry.
-            entering_confirmed = decision.state == "adverse_confirmed" and (
-                candidate_scope != self._active_candidate_scope or decision.direction != self._active_candidate_direction
+            is_candidate_state = decision.state in {"adverse_confirmed", "follower_confirmed"}
+            entering_confirmed = is_candidate_state and (
+                candidate_scope != self._active_candidate_scope
+                or decision.direction != self._active_candidate_direction
+                or decision.state == "follower_confirmed"
             )
-            if decision.state != "adverse_confirmed":
+            if decision.state in {"unavailable", "observe"}:
                 self._active_candidate_direction, self._active_candidate_scope = 0, None
             elif entering_confirmed:
                 self._active_candidate_direction, self._active_candidate_scope = decision.direction, candidate_scope

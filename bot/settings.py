@@ -39,6 +39,7 @@ from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver
 from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
+from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastFollowLive
 from bot.outcome_lead_lag_ingress import publish_strategy_tick
 
 
@@ -735,10 +736,28 @@ def initialize_strategy_settings(
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode
     strategy.outcome_lead_lag_runtime = None
+    strategy.outcome_fast_follow_live = None
+    candidate_handler = None
+    tick_handler = None
     if lead_lag.mode == "shadow":
         strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(
             strategy, max_markout_delay_ms=lead_lag.markout_max_delay_ms,
         )
+        candidate_handler = strategy.outcome_lead_lag_shadow.record_candidate
+        tick_handler = strategy.outcome_lead_lag_shadow.on_tick
+    elif lead_lag.mode == "live_fast_follow":
+        strategy.outcome_fast_follow_live = OutcomeFastFollowLive(
+            strategy,
+            FastFollowLiveConfig(
+                signal_ttl_ms=lead_lag.live_signal_ttl_ms,
+                max_entry_price=lead_lag.live_max_entry_price,
+                max_slippage_ticks=lead_lag.live_max_slippage_ticks,
+                max_entries_per_night=lead_lag.live_max_entries_per_night,
+                max_loss_usdc_per_night=lead_lag.live_max_loss_usdc_per_night,
+            ),
+        )
+        candidate_handler = strategy.outcome_fast_follow_live.record_candidate
+    if lead_lag.mode in {"shadow", "live_fast_follow"}:
         strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
             config=OutcomeLeadLagStateConfig(
                 feature_version=lead_lag.feature_version, max_source_age_ms=lead_lag.max_source_age_ms,
@@ -746,10 +765,12 @@ def initialize_strategy_settings(
                 debounce_ticks=lead_lag.debounce_ticks,
                 baseline_window_samples=lead_lag.baseline_window_samples,
                 baseline_warmup_samples=lead_lag.baseline_warmup_samples,
+                follower_confirm_window_ms=lead_lag.follower_confirm_window_ms,
+                follower_confirm_cents=lead_lag.follower_confirm_cents,
             ),
             db=strategy.lead_lag_db,
-            candidate_handler=strategy.outcome_lead_lag_shadow.record_candidate,
-            tick_handler=strategy.outcome_lead_lag_shadow.on_tick,
+            candidate_handler=candidate_handler,
+            tick_handler=tick_handler,
         )
         strategy.outcome_lead_lag_runtime.start()
     strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver(

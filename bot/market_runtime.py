@@ -554,6 +554,23 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                 ask_decimal,
                 quote_received_ts,
             )
+        fast_follow = getattr(strategy, "outcome_fast_follow_live", None)
+        if fast_follow is not None:
+            try:
+                fast_follow.on_quote(
+                    instrument_id=tick.instrument_id,
+                    best_bid=bid_decimal,
+                    best_ask=ask_decimal,
+                    ask_size=ask_size_decimal,
+                    now_ts=quote_received_ts,
+                )
+            except Exception as fast_follow_error:
+                strategy._db_strategy_event("FAST_FOLLOW_ERROR", {
+                    "slug": str(getattr(strategy, "current_market_slug", "") or ""),
+                    "instrument_id": str(tick.instrument_id),
+                    "error": f"{type(fast_follow_error).__name__}: {fast_follow_error}",
+                })
+                logger.error(f"Fast-follow handoff failed: {fast_follow_error}")
         if is_preferred_quote:
             strategy.last_valid_quote_ts = quote_received_ts
             strategy.consecutive_invalid_quote_ticks = 0

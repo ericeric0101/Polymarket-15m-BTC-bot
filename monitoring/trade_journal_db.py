@@ -230,6 +230,31 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load_market_guard_counts failed: {e}")
             return {"buy_count": 0, "protective_exit_count": 0}
 
+    def load_fast_follow_night_risk(self, night_key: str) -> Dict[str, Any]:
+        """Recover cumulative fast-follow limits after a process restart."""
+        if not night_key:
+            return {"attempted_entries": 0, "realized_pnl_usdc": 0.0}
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT payload_json
+                    FROM strategy_events
+                    WHERE event_type='FAST_FOLLOW_RISK_STATE'
+                      AND json_extract(payload_json, '$.night_key')=?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (night_key,),
+                ).fetchone()
+            payload = json.loads(row[0] or "{}") if row else {}
+            return {
+                "attempted_entries": max(0, int(payload.get("attempted_entries") or 0)),
+                "realized_pnl_usdc": float(payload.get("realized_pnl_usdc") or 0.0),
+            }
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_fast_follow_night_risk failed: {e}")
+            return {"attempted_entries": 0, "realized_pnl_usdc": 0.0}
+
     def load_maker_buy_markout_calibration(
         self,
         *,

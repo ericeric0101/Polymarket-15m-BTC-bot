@@ -13,6 +13,8 @@ class OutcomeLeadLagShadow:
         self.max_markout_delay_ms = max(0, int(max_markout_delay_ms))
 
     def record_candidate(self, candidate) -> None:
+        if candidate.decision.state != "adverse_confirmed":
+            return
         held = str(getattr(self.strategy, "active_side", "NONE"))
         direction = int(candidate.decision.direction)
         supports = (held.endswith("UP") and direction > 0) or (held.endswith("DOWN") and direction < 0)

@@ -6,7 +6,10 @@ from typing import Literal
 
 
 ReferenceSource = Literal["outcome_btc_mark", "polymarket_twap", "polymarket_spot", "binance", "polymarket_bbo"]
-LeadLagStateName = Literal["unavailable", "observe", "supports_position", "adverse_candidate", "adverse_confirmed"]
+LeadLagStateName = Literal[
+    "unavailable", "observe", "supports_position", "adverse_candidate",
+    "adverse_confirmed", "follower_wait", "follower_confirmed",
+]
 
 
 @dataclass(frozen=True)

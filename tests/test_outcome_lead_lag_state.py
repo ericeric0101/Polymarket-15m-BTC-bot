@@ -1,10 +1,17 @@
 import time
+from datetime import datetime
+from decimal import Decimal
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_types import ReferenceTick
-from bot.outcome_lead_lag_exit_handoff import handoff_confirmed_candidate
+from bot.outcome_lead_lag_exit_handoff import (
+    FastFollowLiveConfig,
+    OutcomeFastFollowLive,
+    handoff_confirmed_candidate,
+)
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
 from bot.outcome_lead_lag_types import LeadLagCandidate, LeadLagDecision
 
@@ -26,6 +33,23 @@ def test_state_requires_fresh_twap_then_confirms_untranslated_outcome_shock():
     assert first.state == "adverse_candidate"
     assert second.state == "adverse_confirmed"
     assert second.direction == 1
+
+
+def test_state_requires_twap_to_follow_after_outcome_before_live_confirmation():
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=500, residual_cents=300, debounce_ticks=2,
+        baseline_warmup_samples=1, follower_confirm_cents=100,
+        follower_confirm_window_ms=5_000,
+    ))
+    state.apply(tick("polymarket_twap", 7_700_000, 0))
+    state.apply(tick("outcome_btc_mark", 7_700_000, 0))
+    state.apply(tick("polymarket_twap", 7_700_000, 100))
+    state.apply(tick("outcome_btc_mark", 7_700_600, 1_000))
+    assert state.apply(tick("outcome_btc_mark", 7_701_200, 1_100)).state == "adverse_confirmed"
+    assert state.apply(tick("polymarket_twap", 7_700_050, 1_400)).state == "follower_wait"
+    confirmed = state.apply(tick("polymarket_twap", 7_700_100, 1_600))
+    assert confirmed.state == "follower_confirmed"
+    assert confirmed.direction == 1
 
 
 def test_state_fails_closed_for_out_of_order_and_stale_sources():
@@ -117,3 +141,95 @@ def test_shadow_records_actual_markout_timing_and_late_quality_flag():
     assert row["payload"]["observed_elapsed_ms"] == 400
     assert row["payload"]["observation_delay_ms"] == 150
     assert row["payload"]["timely"] is False
+
+
+def _live_harness(*, ask: Decimal):
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    submitted, order_kwargs, events = [], [], []
+
+    class Factory:
+        def limit(self, **kwargs):
+            order_kwargs.append(kwargs)
+            return SimpleNamespace(client_order_id=kwargs["client_order_id"])
+
+    instrument = SimpleNamespace(size_precision=1, price_precision=2, price_increment=Decimal("0.01"))
+    strategy = SimpleNamespace(
+        current_market_slug="s", current_market_end_timestamp=now_ts + 600,
+        maker_min_minutes_to_close=1, bi_side_min_time_left_sec=60,
+        first_entry_max_time_left_sec=720, market_buy_count_total_by_slug={},
+        live_inventory_cost={}, active_side=SimpleNamespace(value="NONE"), active_side_locked=False,
+        maker_fixed_shares=Decimal("10"), maker_exchange_min_shares=Decimal("5"),
+        maker_high_entry_price_size_adjust_threshold=Decimal("0.70"),
+        maker_high_entry_price_size_adjust_multiplier=Decimal("0.55"),
+        _cached_usdc_balance=Decimal("100"), active_maker_orders={}, order_factory=Factory(),
+        _twap_reference_degraded=False,
+        _market_strike_is_entry_eligible=lambda _slug: True,
+        cache=SimpleNamespace(instrument=lambda _inst: instrument),
+        _side_for_instrument_id=lambda _inst: SimpleNamespace(value="UP"),
+        _instrument_key=lambda inst: str(inst),
+        _align_price_to_tick=lambda price, _side, _instrument: price,
+        _is_dry_run_mode=lambda: False,
+        submit_order=submitted.append,
+        _db_strategy_event=lambda event, payload: events.append((event, payload)),
+        _db_order_event=lambda **payload: events.append((payload["event_type"], payload)),
+        _cancel_maker_order_side=lambda *_args, **_kwargs: None,
+    )
+    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=ask - Decimal("0.01"),
+        best_ask=ask, ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    return submitted, order_kwargs, events
+
+
+def test_live_fast_follow_uses_ten_shares_at_or_below_high_price_threshold():
+    submitted, kwargs, _events = _live_harness(ask=Decimal("0.70"))
+    assert len(submitted) == 1
+    assert float(kwargs[0]["quantity"]) == 10.0
+    assert kwargs[0]["time_in_force"].name == "FOK"
+
+
+def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold():
+    submitted, kwargs, events = _live_harness(ask=Decimal("0.71"))
+    assert len(submitted) == 1
+    assert float(kwargs[0]["quantity"]) == 5.5
+    assert any(event == "ORDER_FAST_FOLLOW_SUBMIT" for event, _ in events)
+
+
+def test_live_fast_follow_reversal_uses_exact_quantity_bounded_fok_exit():
+    submitted, _kwargs, _events = _live_harness(ask=Decimal("0.60"))
+    # Recreate a fresh owner because the helper consumed its first candidate.
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    exits = []
+    strategy = SimpleNamespace(
+        current_market_slug="s", market_buy_count_total_by_slug={},
+        live_inventory_cost={"DOWN.INST": {"qty": "5.5", "avg_entry_price": "0.60"}},
+        maker_exchange_min_shares=Decimal("5"), active_maker_orders={},
+        taker_exit_stop_loss_max_spread_pct=Decimal("0.03"),
+        _side_for_instrument_id=lambda _inst: SimpleNamespace(value="DOWN"),
+        _instrument_key=lambda inst: str(inst),
+        _get_effective_sellable_qty=lambda **_kwargs: Decimal("5.5"),
+        _infer_market_fee_rate_default=lambda: Decimal("0"),
+        _submit_taker_exit_order=lambda **kwargs: exits.append(kwargs) or True,
+        _cancel_maker_order_side=lambda *_args, **_kwargs: None,
+        _db_strategy_event=lambda *_args, **_kwargs: None,
+    )
+    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
+    owner._attempted_slugs.add("s")
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
+    assert owner.on_quote(
+        instrument_id="DOWN.INST", best_bid=Decimal("0.59"),
+        best_ask=Decimal("0.60"), ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert exits[0]["quantity"] == Decimal("5.5")
+    assert exits[0]["best_bid"] == Decimal("0.59")
+    assert exits[0]["execution_mode"] == "limit_fok"
