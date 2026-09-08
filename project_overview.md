@@ -812,6 +812,13 @@ frozen baseline; expiry, disconnect/cross-epoch, out-of-order data, or a stale
 Outcome-time pairing clears the state. A confirmed signal expires after six
 seconds.
 
+Binance, Polymarket BBO and non-TWAP spot references remain journaled for
+research, liquidity checks and counterfactual markouts, but they have **no
+state-transition authority** in the live fast-follow gate. Only
+`outcome_btc_mark` can build/arm the signal and only the settlement-authority
+`polymarket_twap` can confirm it. This separation prevents high-frequency
+auxiliary ticks from resetting a valid Outcome→TWAP confirmation window.
+
 The mapping is mechanical: positive Outcome then positive TWAP buys the
 Polymarket **UP** token; negative Outcome then negative TWAP buys **DOWN**.
 The handoff is strategy-owned: the WebSocket/runtime thread may only queue a

@@ -77,6 +77,24 @@ def test_state_preserves_outcome_debounce_across_frequent_twap_ticks():
     assert confirmed.state == "follower_confirmed"
 
 
+def test_state_auxiliary_references_cannot_clear_outcome_debounce_or_arm():
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=500, residual_cents=300, debounce_ticks=2,
+        baseline_warmup_samples=1, follower_confirm_cents=100,
+    ))
+    state.apply(tick("polymarket_twap", 7_700_000, 0))
+    state.apply(tick("outcome_btc_mark", 7_700_000, 100))
+    state.apply(tick("polymarket_twap", 7_700_000, 4_900))
+    assert state.apply(tick("outcome_btc_mark", 7_700_600, 5_000)).state == "adverse_candidate"
+    # These sources remain durable research observations but are not valid
+    # settlement followers and must have no execution-state authority.
+    assert state.apply(tick("binance", 7_700_000, 5_200)).reason == "non_signal_reference"
+    assert state.apply(tick("polymarket_bbo", 7_700_000, 5_300)).reason == "non_signal_reference"
+    state.apply(tick("polymarket_twap", 7_700_000, 9_800))
+    assert state.apply(tick("outcome_btc_mark", 7_701_200, 10_000)).state == "adverse_confirmed"
+    assert state.apply(tick("polymarket_twap", 7_700_100, 10_300)).state == "follower_confirmed"
+
+
 def test_state_expires_armed_signal_before_late_twap_can_confirm():
     state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
         shock_cents=500, residual_cents=300, debounce_ticks=1,

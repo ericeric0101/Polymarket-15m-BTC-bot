@@ -25,6 +25,8 @@ class OutcomeLeadLagStateConfig:
 class OutcomeLeadLagState:
     """Consumes ticks only; it has no strategy, I/O, wall-clock, or order access."""
 
+    _SIGNAL_SOURCES = frozenset({"outcome_btc_mark", "polymarket_twap"})
+
     def __init__(self, config: OutcomeLeadLagStateConfig | None = None) -> None:
         self.config = config or OutcomeLeadLagStateConfig()
         self._latest: dict[str, ReferenceTick] = {}
@@ -88,6 +90,13 @@ class OutcomeLeadLagState:
         return baseline
 
     def apply(self, tick: ReferenceTick) -> LeadLagDecision:
+        # Binance, Polymarket BBO and spot are retained by the runtime for
+        # research and markouts.  They are deliberately not inputs to this
+        # settlement-aware execution state machine: allowing a high-frequency
+        # auxiliary reference to enter the Outcome/TWAP freshness branch would
+        # repeatedly erase an otherwise valid Outcome debounce or arm.
+        if tick.source not in self._SIGNAL_SOURCES:
+            return self._observe_without_reset(tick, "non_signal_reference")
         previous = self._latest.get(tick.source)
         if previous is not None and tick.received_monotonic_ns <= previous.received_monotonic_ns:
             return self._unavailable(tick, "out_of_order")
