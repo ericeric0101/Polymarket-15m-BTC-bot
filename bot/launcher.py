@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 from loguru import logger
-import redis
 
 from alert_watcher import AlertWatcher
 from dashboard_state import DashboardState
@@ -279,18 +278,18 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         return None
 
 
-def run_preflight_checks(simulation: bool) -> bool:
+def run_preflight_checks(simulation: bool) -> Optional[Dict[str, str]]:
     logger.info("Preflight check started.")
 
     auth = resolve_polymarket_auth()
     if not auth:
         logger.error("Polymarket auth resolution failed.")
-        return False
+        return None
 
     slugs = resolve_btc_15m_market_slugs()
     if not slugs:
         logger.error("Preflight failed: no BTC 15-min market slugs resolved")
-        return False
+        return None
     startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
     if startup_verbose:
         logger.info(f"Preflight market slugs: {slugs}")
@@ -298,68 +297,29 @@ def run_preflight_checks(simulation: bool) -> bool:
     primary_slug, instrument_ids = resolve_best_btc_15m_market(slugs)
     if not primary_slug:
         logger.error("Preflight failed: no primary BTC 15-min slug selected")
-        return False
+        return None
     if not instrument_ids:
         logger.error(f"Preflight failed: no instrument IDs resolved for slug {primary_slug}")
-        return False
+        return None
     logger.info(f"Preflight market: primary_slug={primary_slug} instruments={len(instrument_ids)}")
     if startup_verbose:
         logger.info(f"Preflight instrument_ids: {[inst.value for inst in instrument_ids]}")
-
-    redis_client = init_redis()
-    if redis_client:
-        logger.info("Preflight Redis check: OK")
-    else:
-        logger.warning("Preflight Redis check: skipped/unavailable")
 
     mode_text = "SIMULATION" if simulation else "LIVE TRADING"
     logger.info(f"Preflight mode target: {mode_text}")
     logger.info("Polymarket auth check: OK")
     logger.info("PREFLIGHT CHECK PASSED")
-    return True
-
-
-def init_redis():
-    try:
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        redis_password = os.getenv("REDIS_PASSWORD")
-        redis_username = os.getenv("REDIS_USERNAME")
-        redis_client = redis.Redis(
-            host=redis_host,
-            port=int(os.getenv("REDIS_PORT", 6379)),
-            db=int(os.getenv("REDIS_DB", 2)),
-            username=redis_username if redis_username else None,
-            password=redis_password if redis_password else None,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_keepalive=True,
-        )
-        redis_client.ping()
-        if redis_host not in ("localhost", "127.0.0.1") and not redis_password:
-            logger.warning("REDIS_HOST is remote and REDIS_PASSWORD is empty. This is unsafe.")
-        logger.info("Redis connection established")
-        return redis_client
-    except Exception as e:
-        logger.warning(f"Redis connection failed: {e}")
-        logger.warning("Simulation mode will be static (from .env)")
-        return None
+    return auth
 
 
 def run_integrated_bot(
     simulation: bool = True,
     test_mode: bool = True,
     enable_terminal_dashboard: bool = False,
+    auth: Optional[Dict[str, str]] = None,
 ):
     startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
     logger.info("Starting integrated Polymarket BTC 15-min trading bot.")
-
-    redis_client = init_redis()
-    if redis_client:
-        try:
-            redis_client.set("btc_trading:simulation_mode", "1" if simulation else "0")
-            logger.info(f"Initial mode set in Redis: {'SIMULATION' if simulation else 'LIVE'}")
-        except Exception as e:
-            logger.warning(f"Could not set Redis simulation mode: {e}")
 
     auto_rollover_enabled = os.getenv("AUTO_NODE_ROLLOVER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
     # Node rollover is operational recovery, not strategy tuning. Preserve the
@@ -370,7 +330,6 @@ def run_integrated_bot(
     logger.info(
         "Startup config: "
         f"mode={'SIMULATION' if simulation else 'LIVE'} "
-        f"redis={'on' if redis_client else 'off'} "
         f"terminal_dashboard={'on' if enable_terminal_dashboard else 'off'} "
         f"auto_rollover={'on' if auto_rollover_enabled else 'off'}({auto_rollover_sec}s)"
     )
@@ -380,7 +339,7 @@ def run_integrated_bot(
             f"rollover_cooldown={auto_rollover_cooldown_sec}s max_failures={auto_rollover_max_failures}"
         )
 
-    auth = resolve_polymarket_auth()
+    auth = auth or resolve_polymarket_auth()
     if not auth:
         raise RuntimeError("Cannot resolve Polymarket auth (provide PK or full API credentials).")
 
@@ -513,7 +472,6 @@ def run_integrated_bot(
         )
 
         strategy = IntegratedBTCStrategy(
-            redis_client=redis_client,
             test_mode=test_mode,
             selected_slug=primary_slug,
             enable_terminal_dashboard=enable_terminal_dashboard,
@@ -717,7 +675,8 @@ def main():
         mode=compatibility.patch_mode,
     )
 
-    if not run_preflight_checks(simulation=simulation):
+    auth = run_preflight_checks(simulation=simulation)
+    if auth is None:
         print("Preflight check failed. Startup aborted.")
         return
 
@@ -740,6 +699,7 @@ def main():
             simulation=simulation,
             test_mode=test_mode,
             enable_terminal_dashboard=enable_terminal_dashboard,
+            auth=auth,
         )
     finally:
         if live_lock is not None:

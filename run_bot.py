@@ -270,7 +270,6 @@ class IntegratedBTCStrategy(
     Integrated BTC Strategy combining:
     - Nautilus trading framework
     - Our 7-phase system
-    - Redis simulation control
     - Paper trading tracking
     - Auto-reload instruments every 12 minutes
     - Pre-loaded price history for immediate trading
@@ -278,7 +277,6 @@ class IntegratedBTCStrategy(
     
     def __init__(
         self,
-        redis_client=None,
         test_mode=False,
         selected_slug: Optional[str] = None,
         enable_terminal_dashboard: bool = False,
@@ -290,7 +288,6 @@ class IntegratedBTCStrategy(
         
         # Nautilus
         self.instrument_id = None
-        self.redis_client = redis_client
         self.selected_slug = selected_slug
         self.dashboard_state = dashboard_state
         self.telegram_notifier = telegram_notifier

@@ -19,6 +19,7 @@ from bot.adapter_overrides import (
     should_publish_order_book_deltas,
     should_emit_transport_heartbeat,
 )
+import bot.launcher as launcher
 from bot.app_config import AppConfig
 from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.execution_events import is_benign_cancel_reject_reason, reconcile_benign_cancel_reject
@@ -102,6 +103,22 @@ def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
 
     assert isinstance(error, RuntimeError)
     assert _MARKET_DISCOVERY_RETRY_SEC == 15.0
+
+
+def test_preflight_returns_verified_auth_for_node_build_without_redis(monkeypatch):
+    auth = {
+        "private_key": "key", "api_key": "api", "api_secret": "secret",
+        "passphrase": "pass", "funder": "wallet", "signature_type": "0",
+    }
+    monkeypatch.setattr(launcher, "resolve_polymarket_auth", lambda: auth)
+    monkeypatch.setattr(launcher, "resolve_btc_15m_market_slugs", lambda: ["slug"])
+    monkeypatch.setattr(
+        launcher, "resolve_best_btc_15m_market",
+        lambda _slugs: ("slug", [SimpleNamespace(value="up"), SimpleNamespace(value="down")]),
+    )
+
+    assert launcher.run_preflight_checks(simulation=False) == auth
+    assert not hasattr(launcher, "init_redis")
 
 
 def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():

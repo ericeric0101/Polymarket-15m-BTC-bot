@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import List
 
@@ -75,11 +76,12 @@ def apply_compatibility_patches(*, project_root: Path, enabled: bool, mode: str 
         return
 
     manifest = build_patch_manifest(project_root)
-    for spec in manifest:
-        logger.debug(
-            "Compatibility patch manifest: "
-            f"name={spec.name} target={spec.target_family} impl={spec.implementation} intent={spec.intent}"
-        )
+    if os.getenv("COMPATIBILITY_PATCH_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        for spec in manifest:
+            logger.info(
+                "Compatibility patch manifest: "
+                f"name={spec.name} target={spec.target_family} impl={spec.implementation} intent={spec.intent}"
+            )
 
     if normalized_mode == "verify":
         for line in verify_runtime_compatibility_targets(project_root):
@@ -88,4 +90,3 @@ def apply_compatibility_patches(*, project_root: Path, enabled: bool, mode: str 
         return
 
     install_runtime_compatibility_overrides()
-    logger.info(f"Compatibility runtime overrides installed: {len(manifest)} targets")

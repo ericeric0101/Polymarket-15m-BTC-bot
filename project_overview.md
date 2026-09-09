@@ -225,6 +225,11 @@ Deleted `docs/` files and the reason they were not retained:
   `site-packages`. `NAUTILUS_COMPAT_PATCH_MODE` supports `runtime`, `verify`,
   and `off`. Dependency upgrades require a preflight/dry-run plus the focused
   compatibility and full regression tests before live use.
+- Redis is not a runtime dependency: the strategy has no Redis control or
+  monitoring path, so startup neither connects to nor warns about a local Redis
+  server. Preflight-derived Polymarket L2 credentials are passed to node build
+  directly rather than derived a second time. Per-patch startup logs are silent
+  unless `COMPATIBILITY_PATCH_VERBOSE=1`; failures remain visible.
 - `scripts/replay_journal_signals.py` compares recorded historical events; it
   cannot establish future live-fill probability, future fees, or live-exit
   outcomes. Use the same mode/window when comparing a change. D.4 selection is
