@@ -77,6 +77,14 @@ def _install_fresh_main_thread_event_loop() -> None:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def _live_exec_engine_config() -> LiveExecEngineConfig:
+    # Polymarket can report a completed conditional-token fill with a quantity
+    # slightly above the requested token amount. Rejecting that venue-confirmed
+    # event leaves the local ledger at zero while the wallet already holds the
+    # tokens, which can strand a TP.
+    return LiveExecEngineConfig(qsize=6000, allow_overfills=True)
+
+
 def _strategy_requested_rollover(node: Optional[TradingNode]) -> bool:
     """Read strategy rollover state before disposing the trading node."""
     if node is None:
@@ -463,7 +471,7 @@ def run_integrated_bot(
                 log_directory="./logs/nautilus",
             ),
             data_engine=LiveDataEngineConfig(qsize=6000),
-            exec_engine=LiveExecEngineConfig(qsize=6000),
+            exec_engine=_live_exec_engine_config(),
             risk_engine=LiveRiskEngineConfig(
                 bypass=simulation,
             ),

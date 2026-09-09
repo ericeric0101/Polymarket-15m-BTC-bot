@@ -877,6 +877,27 @@ environment override can restore a SELL, FOK reversal, cancellation, or
 TP-bypass path. Normal hold-to-redeem, tail TP, hard-stop and settlement
 policies remain the sole exit authorities.
 
+**2026-09-09 verified-overfill protection repair:** An entry-only DOWN FOK
+requested 10 shares at 0.62, but the Polymarket adapter reported 10.508475
+shares. Nautilus rejected that fill under its default `allow_overfills=False`,
+while the wallet already held the conditional tokens. Ghost reconciliation then
+correctly restored the 10.508475 inventory and submitted a 10.497967-share
+tail TP at **0.97**. The old generic inventory guard immediately treated the
+0.508475 excess above the 10-share BUY cap as a maker kill-switch condition,
+cancelled that TP, and prevented its recreation. This is a protection failure,
+not a pricing signal or a reason to liquidate.
+
+`LiveExecEngineConfig(allow_overfills=True)` now accepts and journals that
+venue-reported fill so local inventory and cost basis update normally. Every
+entry-only excess is durable as `FAST_FOLLOW_OVERFILL_ACCEPTED`. If verified
+inventory exceeds the BUY cap, the bot now enters
+`inventory_overage_sell_only`: it cancels pending **BUY** orders only, blocks
+further entries, and preserves or recreates the normal 0.97 TP / other SELL
+protection. It does not activate the generic kill switch. Status reports this
+state explicitly, and it clears only when inventory is again at or below the
+cap. This rule must remain independent of Outcome direction; it is custody and
+exit-protection handling, not Outcome exit authority.
+
 The approval rationale is deliberately narrow. The rebuilt ordinary maker
 journal has **zero** new 10-second maker-BUY fill markouts, so it cannot
 justify replacing the frozen D.4 168-hour penalty of **$0.02515/share**. A

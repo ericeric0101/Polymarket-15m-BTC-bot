@@ -20,6 +20,33 @@ from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
 
 class QuoteRuntimeMixin:
+    def _inventory_overage_requires_sell_only(self) -> bool:
+        """Block new BUYs on verified inventory overage without cancelling exits."""
+        inventory = abs(Decimal(str(getattr(self, "inventory_delta_shares", "0"))))
+        maximum = Decimal(str(getattr(self, "maker_max_inventory_shares", "0")))
+        overage = maximum > 0 and inventory > maximum
+        active = bool(getattr(self, "_inventory_overage_sell_only", False))
+        if overage and not active:
+            self._inventory_overage_sell_only = True
+            # Cancel only pending BUY exposure. In particular, never cancel a
+            # tail-protect TP SELL merely because a venue fill exceeded its
+            # requested amount.
+            self._cancel_maker_order_side("buy", reason="inventory_overage")
+            self._db_strategy_event("INVENTORY_OVERAGE_SELL_ONLY", {
+                "inventory_shares": float(inventory), "max_inventory_shares": float(maximum),
+            })
+            logger.error(
+                "Inventory exceeds BUY cap; entering sell-only protection "
+                f"(inventory={float(inventory):.6f}, max={float(maximum):.6f})."
+            )
+        elif not overage and active:
+            self._inventory_overage_sell_only = False
+            self._db_strategy_event("INVENTORY_OVERAGE_CLEARED", {
+                "inventory_shares": float(inventory), "max_inventory_shares": float(maximum),
+            })
+            logger.info("Inventory overage cleared; normal BUY eligibility may resume.")
+        return bool(getattr(self, "_inventory_overage_sell_only", False))
+
     @staticmethod
     def _reason_family(reason: str) -> str:
         r = str(reason or "")
@@ -170,7 +197,12 @@ class QuoteRuntimeMixin:
                 regime_guard_active = True
         if self.inventory_delta_shares <= 0 and self._startup_rehydrated_inventory_force_sell_only:
             self._startup_rehydrated_inventory_force_sell_only = False
-        forced_sell_only = balance_forced_sell_only or self._startup_rehydrated_inventory_force_sell_only
+        inventory_overage_sell_only = self._inventory_overage_requires_sell_only()
+        forced_sell_only = (
+            balance_forced_sell_only
+            or self._startup_rehydrated_inventory_force_sell_only
+            or inventory_overage_sell_only
+        )
 
         await self._maybe_taker_exit_positions(time.time(), is_simulation=self._is_dry_run_mode())
         await self._maybe_maker_urgent_exit(time.time())
@@ -206,12 +238,6 @@ class QuoteRuntimeMixin:
                 is_urgent = " (urgent_exit)" if state.get("is_urgent_exit") else ""
                 logger.info(f"Maker order [{side}]{is_urgent} exceeded TTL={ttl}s, cancel and requote.")
                 self._cancel_maker_order_side(order_key, reason="ttl")
-
-        if abs(self.inventory_delta_shares) > self.maker_max_inventory_shares:
-            self._activate_maker_kill_switch(
-                f"Inventory {self.inventory_delta_shares} exceeds max {self.maker_max_inventory_shares}"
-            )
-            return None
 
         # This is diagnostic-only cycle state.  Quote economics receive the
         # correct per-instrument value in ``_evaluate_quote_targets``.

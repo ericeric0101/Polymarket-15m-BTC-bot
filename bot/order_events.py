@@ -182,6 +182,21 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 
     fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
     fill_qty_dec = pending_fill_qty_dec
+    if fast_follow_metadata is not None:
+        requested_qty = Decimal(str(fast_follow_metadata.get("quantity", "0") or "0"))
+        if requested_qty > 0 and fill_qty_dec > requested_qty:
+            strategy._db_strategy_event("FAST_FOLLOW_OVERFILL_ACCEPTED", {
+                "client_order_id": filled_id,
+                "instrument_id": str(filled_inst or ""),
+                "requested_qty": float(requested_qty),
+                "venue_fill_qty": float(fill_qty_dec),
+                "excess_qty": float(fill_qty_dec - requested_qty),
+            })
+            logger.warning(
+                "Accepted venue-reported fast-follow overfill for reconciliation: "
+                f"order={filled_id} requested={float(requested_qty):.6f} "
+                f"filled={float(fill_qty_dec):.6f}"
+            )
     raw_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
     taker_exit_reason = getattr(strategy, "taker_exit_reason_by_client_order_id", {}).get(filled_id)
     taker_exit_execution = getattr(

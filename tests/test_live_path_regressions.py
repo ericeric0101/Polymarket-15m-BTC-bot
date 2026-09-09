@@ -43,10 +43,12 @@ from bot.ops import should_attempt_quote_watchdog_recovery, should_run_quote_wat
 from bot.launcher import (
     MarketDiscoveryUnavailable,
     _MARKET_DISCOVERY_RETRY_SEC,
+    _live_exec_engine_config,
     _strategy_requested_rollover,
     _strategy_rollover_exposure_reasons,
 )
 from bot.pricing_runtime import PricingRuntimeMixin
+from bot.quote_runtime import QuoteRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.price_streams import (
@@ -119,6 +121,35 @@ def test_preflight_returns_verified_auth_for_node_build_without_redis(monkeypatc
 
     assert launcher.run_preflight_checks(simulation=False) == auth
     assert not hasattr(launcher, "init_redis")
+
+
+def test_live_exec_engine_accepts_venue_reported_overfills_for_reconciliation():
+    assert _live_exec_engine_config().allow_overfills is True
+
+
+def test_verified_inventory_overage_is_sell_only_and_preserves_sell_orders():
+    class Host(QuoteRuntimeMixin):
+        def __init__(self):
+            self.inventory_delta_shares = Decimal("10.508475")
+            self.maker_max_inventory_shares = Decimal("10")
+            self._inventory_overage_sell_only = False
+            self.cancel_calls = []
+            self.events = []
+
+        def _cancel_maker_order_side(self, side, *, reason="risk", instrument_id=None):
+            self.cancel_calls.append((side, reason, instrument_id))
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    host = Host()
+    assert host._inventory_overage_requires_sell_only() is True
+    assert host.cancel_calls == [("buy", "inventory_overage", None)]
+    assert host.events[0][0] == "INVENTORY_OVERAGE_SELL_ONLY"
+
+    host.inventory_delta_shares = Decimal("10")
+    assert host._inventory_overage_requires_sell_only() is False
+    assert host.events[-1][0] == "INVENTORY_OVERAGE_CLEARED"
 
 
 def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():

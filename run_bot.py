@@ -1502,6 +1502,7 @@ class IntegratedBTCStrategy(
             self.inventory_delta_shares = Decimal("0")
             self.live_inventory_cost.clear()
             self._startup_rehydrated_inventory_force_sell_only = False
+            self._inventory_overage_sell_only = False
             self.position_manager.clear_all()
         self.market_cycle_realized_net_usdc = Decimal("0")
         bind_market_cycle_state(self, MarketCycleState())
@@ -3735,6 +3736,8 @@ class IntegratedBTCStrategy(
             reasons.append("maker_mode_off")
         if self.maker_kill_switch:
             reasons.append("kill_switch_on")
+        if getattr(self, "_inventory_overage_sell_only", False):
+            reasons.append("inventory_overage_sell_only")
         if now_ts < self.quote_pause_until_ts:
             reasons.append(f"paused_{int(self.quote_pause_until_ts - now_ts)}s")
         if now_ts < self.orderbook_unavailable_until_ts:

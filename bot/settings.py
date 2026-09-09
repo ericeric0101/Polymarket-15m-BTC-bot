@@ -604,6 +604,7 @@ def initialize_strategy_settings(
     strategy.inventory_last_update_ts = 0.0
     strategy.consecutive_denied_orders = 0
     strategy.maker_kill_switch = False
+    strategy._inventory_overage_sell_only = False
     strategy.active_maker_orders = {}
     strategy.current_token_id = None
     strategy.current_market_instruments = []
