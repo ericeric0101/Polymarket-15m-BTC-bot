@@ -908,8 +908,20 @@ rather than a calibration. By contrast, the post-incident shadow run produced
 102 `follower_confirmed` Outcome→fresh-Chainlink events across 15 markets in
 about 3.5 hours. This verifies the intended two-source trigger frequency, not
 its profitability; live entry remains capped at 10/5.5 shares, one BUY per
-market, six entries and $5 realised-loss cap per Taipei trading night until
-entry-specific OOS evidence is reviewed.
+market, ten **filled** entries and $5 realised-loss cap per Taipei trading
+night until entry-specific OOS evidence is reviewed.
+
+**2026-09-10 fast-follow quota accounting repair:** The nightly limit is now
+ten completed Outcome→fresh-Chainlink FOK BUY fills, rather than ten submitted
+orders. A live FOK submission reserves one temporary slot to prevent concurrent
+duplicate entries; a venue rejection, cancellation, or other terminal failure
+releases it immediately. Only a received BUY fill consumes the permanent quota.
+Each blocked confirmed signal records one durable `FAST_FOLLOW_ENTRY_BLOCKED`
+reason, making quota, session, TWAP, strike, price, inventory, and order-owner
+blocks auditable without quote-path log spam. Old risk-state records only
+contained `attempted_entries`; on the one night in which such a record is
+recovered, it is conservatively treated as filled occupancy. New records store
+`filled_entries` and `pending_entries` explicitly.
 
 **v1 research-DB retirement (2026-09-04, user-approved):** Before deleting
 `logs/hyperliquid_lead_lag.db`, its final inventory was 10,039 stored five-

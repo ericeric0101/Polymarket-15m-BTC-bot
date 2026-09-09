@@ -243,21 +243,47 @@ def _live_harness(*, ask: Decimal):
         instrument_id="UP.INST", best_bid=ask - Decimal("0.01"),
         best_ask=ask, ask_size=Decimal("100"), now_ts=now_ts,
     )
-    return submitted, order_kwargs, events
+    return owner, submitted, order_kwargs, events
 
 
 def test_live_fast_follow_uses_ten_shares_at_or_below_high_price_threshold():
-    submitted, kwargs, _events = _live_harness(ask=Decimal("0.70"))
+    _owner, submitted, kwargs, _events = _live_harness(ask=Decimal("0.70"))
     assert len(submitted) == 1
     assert float(kwargs[0]["quantity"]) == 10.0
     assert kwargs[0]["time_in_force"].name == "FOK"
 
 
 def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold():
-    submitted, kwargs, events = _live_harness(ask=Decimal("0.71"))
+    _owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.71"))
     assert len(submitted) == 1
     assert float(kwargs[0]["quantity"]) == 5.5
     assert any(event == "ORDER_FAST_FOLLOW_SUBMIT" for event, _ in events)
+
+
+def test_live_fast_follow_terminal_fok_failure_releases_reservation_without_counting_fill():
+    owner, _submitted, kwargs, _events = _live_harness(ask=Decimal("0.60"))
+    coid = str(kwargs[0]["client_order_id"])
+    night = "2026-09-08"
+    assert owner._night_filled_entries[night] == 0
+    assert coid in owner._night_pending_entry_ids[night]
+
+    owner.on_order_terminal(coid)
+
+    assert owner._night_filled_entries[night] == 0
+    assert coid not in owner._night_pending_entry_ids[night]
+
+
+def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
+    owner, _submitted, kwargs, _events = _live_harness(ask=Decimal("0.60"))
+    coid = str(kwargs[0]["client_order_id"])
+    night = "2026-09-08"
+
+    owner.on_fill(client_order_id=coid, side="buy", instrument_id="UP.INST")
+    # Duplicate callbacks must not double-count a single FOK order.
+    owner.on_fill(client_order_id=coid, side="buy", instrument_id="UP.INST")
+
+    assert owner._night_filled_entries[night] == 1
+    assert not owner._night_pending_entry_ids[night]
 
 
 def test_entry_only_fast_follow_never_sells_an_opposite_existing_position():

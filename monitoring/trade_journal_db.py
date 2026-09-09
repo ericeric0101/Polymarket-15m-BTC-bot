@@ -231,9 +231,17 @@ class TradeJournalDB:
             return {"buy_count": 0, "protective_exit_count": 0}
 
     def load_fast_follow_night_risk(self, night_key: str) -> Dict[str, Any]:
-        """Recover cumulative fast-follow limits after a process restart."""
+        """Recover filled-entry limits after a process restart.
+
+        Older risk snapshots recorded submissions only. Their count is
+        returned separately to support a conservative one-night migration.
+        """
         if not night_key:
-            return {"attempted_entries": 0, "realized_pnl_usdc": 0.0}
+            return {
+                "filled_entries": 0, "pending_entries": 0,
+                "legacy_attempted_entries": 0, "attempted_entries": 0,
+                "realized_pnl_usdc": 0.0,
+            }
         try:
             with self._connect() as conn:
                 row = conn.execute(
@@ -247,13 +255,26 @@ class TradeJournalDB:
                     (night_key,),
                 ).fetchone()
             payload = json.loads(row[0] or "{}") if row else {}
+            has_filled_entries = "filled_entries" in payload
+            filled_entries = max(0, int(payload.get("filled_entries") or 0)) if has_filled_entries else 0
+            legacy_attempted_entries = (
+                0 if has_filled_entries else max(0, int(payload.get("attempted_entries") or 0))
+            )
             return {
-                "attempted_entries": max(0, int(payload.get("attempted_entries") or 0)),
+                "filled_entries": filled_entries,
+                "pending_entries": max(0, int(payload.get("pending_entries") or 0)),
+                "legacy_attempted_entries": legacy_attempted_entries,
+                # Retained for callers which only render the old field.
+                "attempted_entries": filled_entries,
                 "realized_pnl_usdc": float(payload.get("realized_pnl_usdc") or 0.0),
             }
         except Exception as e:
             logger.debug(f"TradeJournalDB load_fast_follow_night_risk failed: {e}")
-            return {"attempted_entries": 0, "realized_pnl_usdc": 0.0}
+            return {
+                "filled_entries": 0, "pending_entries": 0,
+                "legacy_attempted_entries": 0, "attempted_entries": 0,
+                "realized_pnl_usdc": 0.0,
+            }
 
     def load_maker_buy_markout_calibration(
         self,

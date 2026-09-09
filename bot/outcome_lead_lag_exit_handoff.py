@@ -22,7 +22,7 @@ class FastFollowLiveConfig:
     signal_ttl_ms: int = 6_000
     max_entry_price: Decimal = Decimal("0.90")
     max_slippage_ticks: int = 1
-    max_entries_per_night: int = 6
+    max_entries_per_night: int = 10
     max_loss_usdc_per_night: Decimal = Decimal("5")
 
 
@@ -57,19 +57,31 @@ class OutcomeFastFollowLive:
         self._attempted_slugs: set[str] = set()
         self._pending_order_ids: dict[str, dict] = {}
         self._position_instruments: set[str] = set()
-        self._night_entries: dict[str, int] = {}
+        # A venue submission is not a trade. Keep completed entry fills
+        # separate from short-lived FOK reservations so a reject/cancel cannot
+        # exhaust the nightly risk budget.
+        self._night_filled_entries: dict[str, int] = {}
+        self._night_pending_entry_ids: dict[str, set[str]] = {}
         self._night_realized_pnl: dict[str, Decimal] = {}
         self._loaded_nights: set[str] = set()
+        self._blocked_candidate_reasons: set[tuple[int, str]] = set()
 
     def _ensure_night_loaded(self, night: str) -> None:
         if night in self._loaded_nights:
             return
         loader = getattr(getattr(self.strategy, "trade_db", None), "load_fast_follow_night_risk", None)
         recovered = loader(night) if loader is not None else {}
-        self._night_entries[night] = max(
-            self._night_entries.get(night, 0),
-            int(recovered.get("attempted_entries") or 0),
+        # Old journals counted submissions, not fills. They cannot reliably
+        # distinguish rejected FOKs, so use them conservatively only while
+        # bridging an already-started legacy night.
+        recovered_filled = recovered.get("filled_entries")
+        if recovered_filled is None:
+            recovered_filled = recovered.get("legacy_attempted_entries", recovered.get("attempted_entries", 0))
+        self._night_filled_entries[night] = max(
+            self._night_filled_entries.get(night, 0),
+            int(recovered_filled or 0),
         )
+        self._night_pending_entry_ids.setdefault(night, set())
         self._night_realized_pnl[night] = min(
             self._night_realized_pnl.get(night, Decimal("0")),
             Decimal(str(recovered.get("realized_pnl_usdc") or "0")),
@@ -79,8 +91,24 @@ class OutcomeFastFollowLive:
     def _persist_night(self, night: str) -> None:
         self.strategy._db_strategy_event("FAST_FOLLOW_RISK_STATE", {
             "night_key": night,
-            "attempted_entries": self._night_entries.get(night, 0),
+            # Compatibility alias: it now represents completed fills.
+            "filled_entries": self._night_filled_entries.get(night, 0),
+            "pending_entries": len(self._night_pending_entry_ids.get(night, set())),
+            "attempted_entries": self._night_filled_entries.get(night, 0),
             "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
+        })
+
+    def _record_blocked(self, candidate, reason: str, **payload) -> None:
+        """Record one decision diagnostic without quote-path event spam."""
+        key = (int(candidate.created_epoch_ns), reason)
+        if key in self._blocked_candidate_reasons:
+            return
+        self._blocked_candidate_reasons.add(key)
+        self.strategy._db_strategy_event("FAST_FOLLOW_ENTRY_BLOCKED", {
+            "slug": candidate.slug,
+            "reason": reason,
+            "direction": candidate.decision.direction,
+            **payload,
         })
 
     def record_candidate(self, candidate) -> None:
@@ -100,7 +128,13 @@ class OutcomeFastFollowLive:
         return self._pending_order_ids.get(client_order_id)
 
     def on_order_terminal(self, client_order_id: str) -> None:
-        self._pending_order_ids.pop(client_order_id, None)
+        metadata = self._pending_order_ids.pop(client_order_id, None)
+        if metadata is None:
+            return
+        night = metadata.get("night_key")
+        if night:
+            self._night_pending_entry_ids.setdefault(night, set()).discard(client_order_id)
+            self._persist_night(night)
 
     def blocks_normal_buy(self, slug: str) -> bool:
         with self._lock:
@@ -111,6 +145,12 @@ class OutcomeFastFollowLive:
         metadata = self._pending_order_ids.pop(client_order_id, None)
         if metadata is not None and side == "buy":
             self._position_instruments.add(instrument_id)
+            night = metadata.get("night_key")
+            if night:
+                self._ensure_night_loaded(night)
+                self._night_pending_entry_ids.setdefault(night, set()).discard(client_order_id)
+                self._night_filled_entries[night] = self._night_filled_entries.get(night, 0) + 1
+                self._persist_night(night)
         if side == "sell" and instrument_id in self._position_instruments and realized_net_usdc is not None:
             key = _night_key(time.time())
             if key is not None:
@@ -144,23 +184,36 @@ class OutcomeFastFollowLive:
         # TP, or otherwise alters an existing position.  The normal strategy
         # remains the sole owner of every exit path.
         if slug in self._attempted_slugs or int(getattr(self.strategy, "market_buy_count_total_by_slug", {}).get(slug, 0)) > 0:
+            self._record_blocked(candidate, "market_already_owned")
             return False
         night = _night_key(now_ts)
         if night is None:
+            self._record_blocked(candidate, "outside_taipei_weeknight_session")
             return False
         self._ensure_night_loaded(night)
-        if self._night_entries.get(night, 0) >= self.config.max_entries_per_night:
+        filled_entries = self._night_filled_entries.get(night, 0)
+        pending_entries = len(self._night_pending_entry_ids.get(night, set()))
+        if filled_entries + pending_entries >= self.config.max_entries_per_night:
+            self._record_blocked(
+                candidate, "nightly_filled_entry_limit", filled_entries=filled_entries,
+                pending_entries=pending_entries, max_entries=self.config.max_entries_per_night,
+            )
             return False
         if self._night_realized_pnl.get(night, Decimal("0")) <= -self.config.max_loss_usdc_per_night:
+            self._record_blocked(candidate, "nightly_realized_loss_limit")
             return False
         if side != wanted_side or best_ask <= 0 or best_ask > self.config.max_entry_price:
+            self._record_blocked(candidate, "side_or_price_ineligible", observed_side=side, best_ask=float(best_ask))
             return False
         if ask_size is not None and ask_size <= 0:
+            self._record_blocked(candidate, "no_ask_depth")
             return False
         if bool(getattr(self.strategy, "_twap_reference_degraded", True)):
+            self._record_blocked(candidate, "twap_reference_degraded")
             return False
         strike_eligible = getattr(self.strategy, "_market_strike_is_entry_eligible", None)
         if strike_eligible is None or not strike_eligible(slug):
+            self._record_blocked(candidate, "strike_not_verified")
             return False
         end_ts = getattr(self.strategy, "current_market_end_timestamp", None)
         min_time_left = max(
@@ -169,28 +222,32 @@ class OutcomeFastFollowLive:
         )
         time_left = end_ts - now_ts if end_ts is not None else None
         if time_left is None or time_left < min_time_left:
+            self._record_blocked(candidate, "too_close_to_market_end", time_left=time_left)
             return False
         max_time_left = float(getattr(self.strategy, "first_entry_max_time_left_sec", 0.0) or 0.0)
         if max_time_left > 0 and time_left > max_time_left:
+            self._record_blocked(candidate, "too_early_in_market", time_left=time_left)
             return False
         active = getattr(getattr(self.strategy, "active_side", None), "value", "NONE")
         if bool(getattr(self.strategy, "active_side_locked", False)) and active not in {"NONE", wanted_side}:
+            self._record_blocked(candidate, "locked_side_invalidated", active_side=active)
             return False
         held = Decimal(str(getattr(self.strategy, "live_inventory_cost", {}).get(inst_key, {}).get("qty", "0")))
         if held > 0:
+            self._record_blocked(candidate, "existing_inventory", held=float(held))
             return False
 
         instrument = self.strategy.cache.instrument(instrument_id)
         if instrument is None:
+            self._record_blocked(candidate, "instrument_missing")
             return False
         for state in getattr(self.strategy, "active_maker_orders", {}).values():
             if self.strategy._instrument_key(state.get("instrument_id")) != inst_key:
                 continue
-            self.strategy._db_strategy_event("FAST_FOLLOW_ENTRY_BLOCKED", {
-                "slug": slug, "reason": "existing_order_owner",
-                "instrument_id": inst_key,
-                "order_side": str(state.get("side", "")).lower(),
-            })
+            self._record_blocked(
+                candidate, "existing_order_owner", instrument_id=inst_key,
+                order_side=str(state.get("side", "")).lower(),
+            )
             return False
         base_shares = Decimal(str(getattr(self.strategy, "maker_fixed_shares", "10")))
         high_threshold = Decimal(str(getattr(self.strategy, "maker_high_entry_price_size_adjust_threshold", "0.70")))
@@ -198,6 +255,7 @@ class OutcomeFastFollowLive:
         quantity = base_shares * multiplier if best_ask > high_threshold else base_shares
         exchange_min = Decimal(str(getattr(self.strategy, "maker_exchange_min_shares", "5")))
         if quantity < exchange_min:
+            self._record_blocked(candidate, "quantity_below_exchange_min", quantity=float(quantity))
             return False
         precision = int(getattr(instrument, "size_precision", 6))
         quantum = Decimal(str(10 ** (-precision)))
@@ -209,6 +267,7 @@ class OutcomeFastFollowLive:
         )
         balance = getattr(self.strategy, "_cached_usdc_balance", None)
         if balance is None or Decimal(str(balance)) < limit_price * quantity:
+            self._record_blocked(candidate, "insufficient_usdc_balance")
             return False
 
         coid = ClientOrderId(f"BTC-15M-FAST-FOLLOW-BUY-{int(now_ts * 1000)}")
@@ -226,12 +285,12 @@ class OutcomeFastFollowLive:
             "wanted_side": wanted_side, "signal_age_ms": age_ms,
             "best_bid": float(best_bid), "best_ask": float(best_ask),
             "limit_price": float(limit_price), "quantity": float(quantity),
-            "requested_tif": "FOK", "execution_penalty_bypassed": True,
+            "requested_tif": "FOK", "execution_penalty_bypassed": True, "night_key": night,
         }
         self._attempted_slugs.add(slug)
-        self._night_entries[night] = self._night_entries.get(night, 0) + 1
-        self._persist_night(night)
         self._pending_order_ids[str(coid)] = metadata
+        self._night_pending_entry_ids.setdefault(night, set()).add(str(coid))
+        self._persist_night(night)
         # Record the submission before handing it to the venue, exactly as the
         # maker path does.  If the venue fills but its fill callback is lost,
         # ghost reconciliation can restore a real cost basis instead of zero.
