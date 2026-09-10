@@ -3780,6 +3780,20 @@ class IntegratedBTCStrategy(
         ref_age = float(selected_ref_age) if selected_ref_age is not None else -1.0
         binance_spot_txt = f"{float(self._binance_ws_price):.2f}" if self._binance_ws_price is not None else "None"
         binance_age = max(0.0, now_ts - float(self._binance_ws_price_ts or 0.0)) if self._binance_ws_price_ts > 0 else -1.0
+        fast_follow_status = ""
+        fast_follow_owner = getattr(self, "outcome_fast_follow_live", None)
+        if fast_follow_owner is not None:
+            try:
+                fast_follow_risk = fast_follow_owner.night_risk_snapshot(now_ts)
+                night_key = fast_follow_risk["night_key"] or "off_session"
+                fast_follow_status = (
+                    " "
+                    f"fast_follow={fast_follow_risk['filled_entries']}/{fast_follow_risk['max_entries']} "
+                    f"pending={fast_follow_risk['pending_entries']} "
+                    f"night={night_key}"
+                )
+            except Exception as fast_follow_status_error:
+                logger.debug(f"Fast-follow status snapshot skipped: {fast_follow_status_error}")
 
         logger.info(
             "STATUS "
@@ -3798,6 +3812,7 @@ class IntegratedBTCStrategy(
             f"stale_for={stale_for:.1f}s invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
+            f"{fast_follow_status}"
             f"{self._format_time_left()}"
         )
         if "active_side_none" in reasons and self.bi_side_enabled:

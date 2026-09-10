@@ -934,6 +934,12 @@ every entry and refuses to submit while any other-market SELL remains in a
 pending-cancel state. This prevents the unsafe sequence observed on 2026-09-10:
 stale old SELL → global kill → Outcome BUY → no current-token TP refresh.
 
+**Fast-follow quota visibility:** Every periodic `STATUS` line now includes
+`fast_follow=<filled>/<max> pending=<n> night=<Taipei-night-key>`. `filled`
+counts only venue-confirmed BUY fills; `pending` is a temporarily reserved FOK
+slot and does not consume the permanent quota unless it fills. The same fields
+are retained in `FAST_FOLLOW_RISK_STATE` for historical audit.
+
 **2026-09-10 cancel lifecycle repair:** A verified new-market strike lock is
 not an order failure. The repeated `Cancelled maker order [sell]` messages seen
 immediately after a rollover were caused by phase/quote loops reissuing cancel

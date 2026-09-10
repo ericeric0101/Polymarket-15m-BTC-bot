@@ -284,6 +284,15 @@ def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
 
     assert owner._night_filled_entries[night] == 1
     assert not owner._night_pending_entry_ids[night]
+    assert owner.night_risk_snapshot(
+        datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    ) == {
+        "night_key": night,
+        "filled_entries": 1,
+        "pending_entries": 0,
+        "max_entries": 10,
+        "realized_pnl_usdc": 0.0,
+    }
 
 
 def test_live_fast_follow_never_buys_when_global_maker_kill_switch_is_on():

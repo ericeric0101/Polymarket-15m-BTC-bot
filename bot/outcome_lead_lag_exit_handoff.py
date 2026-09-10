@@ -98,6 +98,27 @@ class OutcomeFastFollowLive:
             "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
         })
 
+    def night_risk_snapshot(self, now_ts: float | None = None) -> dict[str, int | str | float | None]:
+        """Return the live quota state for status output and diagnostics."""
+        now = time.time() if now_ts is None else float(now_ts)
+        night = _night_key(now)
+        if night is None:
+            return {
+                "night_key": None,
+                "filled_entries": 0,
+                "pending_entries": 0,
+                "max_entries": self.config.max_entries_per_night,
+                "realized_pnl_usdc": 0.0,
+            }
+        self._ensure_night_loaded(night)
+        return {
+            "night_key": night,
+            "filled_entries": self._night_filled_entries.get(night, 0),
+            "pending_entries": len(self._night_pending_entry_ids.get(night, set())),
+            "max_entries": self.config.max_entries_per_night,
+            "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
+        }
+
     def _record_blocked(self, candidate, reason: str, **payload) -> None:
         """Record one decision diagnostic without quote-path event spam."""
         key = (int(candidate.created_epoch_ns), reason)
