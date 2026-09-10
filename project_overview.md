@@ -923,6 +923,17 @@ contained `attempted_entries`; on the one night in which such a record is
 recovered, it is conservatively treated as filled occupancy. New records store
 `filled_entries` and `pending_entries` explicitly.
 
+**2026-09-10 stale-cancel containment repair:** An old-market SELL whose
+cancel ACK cannot be observed must not stop the new market. After the explicit
+ACK timeout, a `pending_cancel` order is compared with the newly selected UP /
+DOWN token pair. If it belongs to neither token, it is retired locally as
+`ORDER_CANCEL_PRIOR_MARKET_RETIRED` with an audit record instead of escalating
+to the global maker kill switch. Current-market cancel uncertainty remains
+fail-closed. Outcome fast-follow also now checks `maker_kill_switch` before
+every entry and refuses to submit while any other-market SELL remains in a
+pending-cancel state. This prevents the unsafe sequence observed on 2026-09-10:
+stale old SELL → global kill → Outcome BUY → no current-token TP refresh.
+
 **2026-09-10 cancel lifecycle repair:** A verified new-market strike lock is
 not an order failure. The repeated `Cancelled maker order [sell]` messages seen
 immediately after a rollover were caused by phase/quote loops reissuing cancel

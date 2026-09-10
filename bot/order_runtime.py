@@ -155,6 +155,21 @@ class OrderRuntimeMixin:
             return True
         return (now_ts - created_ts) >= self.maker_order_ttl_sec
 
+    def _is_prior_market_order(self: OrderRuntimeHost, state: dict[str, Any]) -> bool:
+        """Whether an order belongs to a market no longer selected by strategy.
+
+        This is intentionally about market identity, not merely local ledger
+        quantity.  A completed 15-minute market can leave a late/noisy CLOB
+        cancel acknowledgement behind; it must not kill trading in the next
+        market once its token is no longer part of the selected pair.
+        """
+        market_instruments = getattr(self, "current_market_instruments", None)
+        if not market_instruments:
+            return False
+        current_keys = {str(item) for item in market_instruments if item is not None}
+        order_instrument = str(state.get("instrument_id", "") or "")
+        return bool(order_instrument and current_keys and order_instrument not in current_keys)
+
     def _cleanup_stale_pending_cancels(self, now_ts: float) -> None:
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
@@ -166,6 +181,24 @@ class OrderRuntimeMixin:
             if (now_ts - last_cancel_ts) >= self.maker_cancel_ack_timeout_sec:
                 order = state.get("order")
                 coid = str(order.client_order_id) if order else "unknown"
+                if self._is_prior_market_order(state):
+                    # The order's market has already rolled over.  Keep a
+                    # durable audit record, but do not let a missing old-market
+                    # cancel ACK trip the global kill switch for the new pair.
+                    logger.warning(
+                        f"Retiring unresolved prior-market cancel [{side}] {coid}; "
+                        "new-market quoting remains independently protected."
+                    )
+                    self._db_order_event(
+                        event_type="ORDER_CANCEL_PRIOR_MARKET_RETIRED",
+                        client_order_id=coid,
+                        side=side.upper(),
+                        status="CANCELED_STALE_MARKET",
+                        reason="prior_market_cancel_ack_unavailable",
+                        payload={"instrument_id": str(state.get("instrument_id", "") or "")},
+                    )
+                    self.active_maker_orders.pop(order_key, None)
+                    continue
                 is_open = self._is_order_still_open_in_cache(coid)
                 retries = int(state.get("cancel_retries", 0))
                 if is_open is False:

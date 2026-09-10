@@ -286,6 +286,28 @@ def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
     assert not owner._night_pending_entry_ids[night]
 
 
+def test_live_fast_follow_never_buys_when_global_maker_kill_switch_is_on():
+    owner, submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"))
+    # The first harness signal was submitted; construct a fresh market signal
+    # so this assertion tests the global safety gate rather than one-buy-per-market.
+    owner.strategy.current_market_slug = "next"
+    owner.strategy.maker_kill_switch = True
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 1
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "maker_kill_switch_on"
+               for event, payload in events)
+
+
 def test_entry_only_fast_follow_never_sells_an_opposite_existing_position():
     now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
     exits = []

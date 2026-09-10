@@ -299,6 +299,24 @@ def test_pending_cancel_is_not_reissued_by_repeated_quote_or_phase_loops(tmp_pat
     assert host.active_maker_orders["sell:inst-up"]["pending_cancel"] is True
 
 
+def test_unresolved_prior_market_cancel_is_retired_without_killing_new_market(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _DryOrderHost(db)
+    host.current_market_instruments = ["new-up", "new-down"]
+    host.active_maker_orders["sell:old-up"] = {
+        "order": SimpleNamespace(client_order_id="old-sell", status="ACCEPTED"),
+        "side": "sell",
+        "instrument_id": "old-up",
+        "pending_cancel": True,
+        "last_cancel_ts": time.time() - host.maker_cancel_ack_timeout_sec - 1,
+    }
+
+    host._cleanup_stale_pending_cancels(time.time())
+
+    assert not host.active_maker_orders
+    assert _event_count(db, "ORDER_CANCEL_PRIOR_MARKET_RETIRED") == 1
+
+
 def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     first_host = _ShadowHost(db)

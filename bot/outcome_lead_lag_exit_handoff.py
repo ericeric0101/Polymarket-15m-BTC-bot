@@ -183,6 +183,9 @@ class OutcomeFastFollowLive:
         # Entry-only authority: an opposite-side signal never sells, cancels
         # TP, or otherwise alters an existing position.  The normal strategy
         # remains the sole owner of every exit path.
+        if bool(getattr(self.strategy, "maker_kill_switch", False)):
+            self._record_blocked(candidate, "maker_kill_switch_on")
+            return False
         if slug in self._attempted_slugs or int(getattr(self.strategy, "market_buy_count_total_by_slug", {}).get(slug, 0)) > 0:
             self._record_blocked(candidate, "market_already_owned")
             return False
@@ -242,6 +245,18 @@ class OutcomeFastFollowLive:
             self._record_blocked(candidate, "instrument_missing")
             return False
         for state in getattr(self.strategy, "active_maker_orders", {}).values():
+            state_side = str(state.get("side", "") or "").lower()
+            state_inst_key = self.strategy._instrument_key(state.get("instrument_id"))
+            if (
+                state_side == "sell"
+                and state_inst_key != inst_key
+                and bool(state.get("pending_cancel", False))
+            ):
+                self._record_blocked(
+                    candidate, "unresolved_other_market_sell",
+                    instrument_id=state_inst_key,
+                )
+                return False
             if self.strategy._instrument_key(state.get("instrument_id")) != inst_key:
                 continue
             self._record_blocked(
