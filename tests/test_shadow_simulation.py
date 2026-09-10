@@ -278,6 +278,27 @@ def test_dry_run_submit_uses_active_order_lifecycle_and_local_cancel(tmp_path):
     assert _event_count(db, "SHADOW_SIM_ENTRY_CANCELLED") == 1
 
 
+def test_pending_cancel_is_not_reissued_by_repeated_quote_or_phase_loops(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _DryOrderHost(db)
+    host._is_dry_run_mode = lambda: False
+    cancels = []
+    order = SimpleNamespace(client_order_id="sell-1", status="ACCEPTED")
+    host.cancel_order = lambda submitted: cancels.append(submitted)
+    host.active_maker_orders["sell:inst-up"] = {
+        "order": order,
+        "side": "sell",
+        "instrument_id": "inst-up",
+        "quantity": Decimal("5.5"),
+    }
+
+    host._cancel_maker_order_key("sell:inst-up", reason="rollover")
+    host._cancel_maker_order_key("sell:inst-up", reason="waiting_loop")
+
+    assert cancels == [order]
+    assert host.active_maker_orders["sell:inst-up"]["pending_cancel"] is True
+
+
 def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     first_host = _ShadowHost(db)

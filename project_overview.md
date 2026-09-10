@@ -923,6 +923,15 @@ contained `attempted_entries`; on the one night in which such a record is
 recovered, it is conservatively treated as filled occupancy. New records store
 `filled_entries` and `pending_entries` explicitly.
 
+**2026-09-10 cancel lifecycle repair:** A verified new-market strike lock is
+not an order failure. The repeated `Cancelled maker order [sell]` messages seen
+immediately after a rollover were caused by phase/quote loops reissuing cancel
+requests for an order already marked `pending_cancel`. Once a cancel is sent,
+only the ACK-timeout reconciliation path may retry it after checking whether
+the order remains open; all ordinary callers now return without another venue
+request. This prevents cancel storms and preserves a single auditable path for
+SELL protection until its cancellation is acknowledged or reconciled.
+
 **v1 research-DB retirement (2026-09-04, user-approved):** Before deleting
 `logs/hyperliquid_lead_lag.db`, its final inventory was 10,039 stored five-
 second snapshots (9,092 quality-gated report rows), 874,215 compact-reference

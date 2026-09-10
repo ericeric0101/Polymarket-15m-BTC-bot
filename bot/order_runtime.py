@@ -112,10 +112,13 @@ class OrderRuntimeMixin:
             )
             return
         if state.get("pending_cancel"):
-            last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
-            if last_cancel_ts > 0 and (now_ts - last_cancel_ts) < self.maker_cancel_cooldown_sec:
-                logger.debug(f"Skip duplicate cancel [{side}] within cooldown")
-                return
+            # A cancel request is already in flight.  Market phase, rollover,
+            # and no-target quote loops may all ask to cancel the same order;
+            # re-sending from those paths every cooldown interval creates an
+            # API/log storm and races the venue acknowledgement.  The sole
+            # retry authority is _cleanup_stale_pending_cancels(), after its
+            # explicit ACK timeout and open-order reconciliation.
+            return
         if order is None:
             state["pending_cancel"] = True
             state["last_cancel_ts"] = now_ts
