@@ -37,7 +37,7 @@ def test_journal_recovers_latest_fast_follow_night_risk(tmp_path):
     })
     assert db.load_fast_follow_night_risk("2026-09-08") == {
         "filled_entries": 0, "pending_entries": 0, "legacy_attempted_entries": 3,
-        "attempted_entries": 0, "realized_pnl_usdc": -2.0,
+        "attempted_entries": 0, "open_position_instruments": [], "realized_pnl_usdc": -2.0,
     }
 
 
@@ -45,11 +45,11 @@ def test_journal_recovers_new_fast_follow_filled_and_pending_risk(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     db.log_strategy_event("run", "FAST_FOLLOW_RISK_STATE", {
         "night_key": "2026-09-08", "filled_entries": 4, "pending_entries": 1,
-        "attempted_entries": 4, "realized_pnl_usdc": -1.25,
+        "attempted_entries": 4, "open_position_instruments": ["up-inst"], "realized_pnl_usdc": -1.25,
     })
     assert db.load_fast_follow_night_risk("2026-09-08") == {
         "filled_entries": 4, "pending_entries": 1, "legacy_attempted_entries": 0,
-        "attempted_entries": 4, "realized_pnl_usdc": -1.25,
+        "attempted_entries": 4, "open_position_instruments": ["up-inst"], "realized_pnl_usdc": -1.25,
     }
 
 

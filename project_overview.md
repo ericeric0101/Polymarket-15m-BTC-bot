@@ -940,6 +940,19 @@ counts only venue-confirmed BUY fills; `pending` is a temporarily reserved FOK
 slot and does not consume the permanent quota unless it fills. The same fields
 are retained in `FAST_FOLLOW_RISK_STATE` for historical audit.
 
+**2026-09-11 fast-follow execution/accounting repair and controlled scale-up:**
+Polymarket validates market-BUY maker amount to two decimals and taker amount
+to four. Fast-follow now rounds quantity *down* onto the joint venue grid; it
+never increases size and rejects a candidate if the safe grid quantity would
+fall below five sellable shares. This prevents `invalid amounts` rejections
+such as a $0.75 price times 5.5 shares producing a $4.125 maker amount. Risk
+state now persists `open_position_instruments`, so a restarted process restores
+fast-follow SELL ownership and credits the eventual realised PnL to the same
+Taipei-night loss budget. With these two repairs, the fast-follow cap is
+increased from 10 to **15 completed BUY fills** per Taipei night. The 10/5.5
+share sizing, one BUY per market, $0.90 entry-price ceiling, FOK behavior, and
+$5 realised-loss cap are unchanged.
+
 **2026-09-10 cancel lifecycle repair:** A verified new-market strike lock is
 not an order failure. The repeated `Cancelled maker order [sell]` messages seen
 immediately after a rollover were caused by phase/quote loops reissuing cancel

@@ -10,6 +10,7 @@ from bot.outcome_lead_lag_types import ReferenceTick
 from bot.outcome_lead_lag_exit_handoff import (
     FastFollowLiveConfig,
     OutcomeFastFollowLive,
+    _venue_compatible_fast_follow_quantity,
     handoff_confirmed_candidate,
 )
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
@@ -290,9 +291,54 @@ def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
         "night_key": night,
         "filled_entries": 1,
         "pending_entries": 0,
-        "max_entries": 10,
+        "max_entries": 15,
         "realized_pnl_usdc": 0.0,
     }
+
+
+def test_fast_follow_quantity_uses_venue_maker_amount_grid_without_increasing_size():
+    # 0.75 * 5.5 = 4.125, which Polymarket rejects because maker amount has
+    # three decimals. The nearest safe quantity below the requested size is 5.48.
+    quantity, step = _venue_compatible_fast_follow_quantity(Decimal("5.5"), Decimal("0.75"))
+    assert step == Decimal("0.04")
+    assert quantity == Decimal("5.4800")
+    assert quantity * Decimal("0.75") == Decimal("4.110000")
+
+
+def test_fast_follow_quantity_keeps_valid_quantity_when_maker_amount_is_already_cents_aligned():
+    quantity, step = _venue_compatible_fast_follow_quantity(Decimal("5.5"), Decimal("0.72"))
+    assert step == Decimal("0.1250")
+    assert quantity == Decimal("5.5000")
+
+
+def test_fast_follow_restores_open_position_ownership_and_credits_sell_after_restart():
+    events = []
+    strategy = SimpleNamespace(
+        trade_db=SimpleNamespace(load_fast_follow_night_risk=lambda _night: {
+            "filled_entries": 3,
+            "pending_entries": 0,
+            "realized_pnl_usdc": Decimal("-0.5"),
+            "open_position_instruments": ["UP.INST"],
+        }),
+        live_inventory_cost={"UP.INST": {"qty": "0"}},
+        maker_exchange_min_shares=Decimal("5"),
+        _db_strategy_event=lambda event, payload: events.append((event, payload)),
+    )
+    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
+    owner._ensure_night_loaded("2026-09-08")
+
+    owner.on_fill(
+        client_order_id="restored-sell", side="sell", instrument_id="UP.INST",
+        realized_net_usdc=Decimal("1.25"),
+    )
+
+    snapshot = owner.night_risk_snapshot(
+        datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    )
+    assert snapshot["filled_entries"] == 3
+    assert snapshot["realized_pnl_usdc"] == 0.75
+    assert "UP.INST" not in owner._position_instruments
+    assert any(event == "FAST_FOLLOW_RISK_STATE" for event, _payload in events)
 
 
 def test_live_fast_follow_never_buys_when_global_maker_kill_switch_is_on():

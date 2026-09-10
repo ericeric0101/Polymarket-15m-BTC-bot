@@ -1088,7 +1088,7 @@ class AppConfig:
                 live_signal_ttl_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS", 6000)),
                 live_max_entry_price=_env_decimal("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE", "0.90"),
                 live_max_slippage_ticks=max(0, _env_int("OUTCOME_FAST_FOLLOW_MAX_SLIPPAGE_TICKS", 1)),
-                live_max_entries_per_night=max(1, _env_int("OUTCOME_FAST_FOLLOW_MAX_ENTRIES_PER_NIGHT", 10)),
+                live_max_entries_per_night=max(1, _env_int("OUTCOME_FAST_FOLLOW_MAX_ENTRIES_PER_NIGHT", 15)),
                 live_max_loss_usdc_per_night=max(
                     Decimal("0"), _env_decimal("OUTCOME_FAST_FOLLOW_MAX_LOSS_USDC_PER_NIGHT", "5")
                 ),

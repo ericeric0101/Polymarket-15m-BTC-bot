@@ -240,6 +240,7 @@ class TradeJournalDB:
             return {
                 "filled_entries": 0, "pending_entries": 0,
                 "legacy_attempted_entries": 0, "attempted_entries": 0,
+                "open_position_instruments": [],
                 "realized_pnl_usdc": 0.0,
             }
         try:
@@ -266,6 +267,10 @@ class TradeJournalDB:
                 "legacy_attempted_entries": legacy_attempted_entries,
                 # Retained for callers which only render the old field.
                 "attempted_entries": filled_entries,
+                "open_position_instruments": [
+                    str(item) for item in (payload.get("open_position_instruments") or [])
+                    if str(item or "")
+                ],
                 "realized_pnl_usdc": float(payload.get("realized_pnl_usdc") or 0.0),
             }
         except Exception as e:
@@ -273,6 +278,7 @@ class TradeJournalDB:
             return {
                 "filled_entries": 0, "pending_entries": 0,
                 "legacy_attempted_entries": 0, "attempted_entries": 0,
+                "open_position_instruments": [],
                 "realized_pnl_usdc": 0.0,
             }
 

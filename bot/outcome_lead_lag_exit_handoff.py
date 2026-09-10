@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_FLOOR
+from math import gcd
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -22,7 +23,7 @@ class FastFollowLiveConfig:
     signal_ttl_ms: int = 6_000
     max_entry_price: Decimal = Decimal("0.90")
     max_slippage_ticks: int = 1
-    max_entries_per_night: int = 10
+    max_entries_per_night: int = 15
     max_loss_usdc_per_night: Decimal = Decimal("5")
 
 
@@ -46,6 +47,29 @@ def _instrument_tick(instrument) -> Decimal:
     return Decimal(str(10 ** (-int(getattr(instrument, "price_precision", 2)))))
 
 
+def _venue_compatible_fast_follow_quantity(quantity: Decimal, limit_price: Decimal) -> tuple[Decimal, Decimal]:
+    """Round down to CLOB's maker/taker amount-accuracy grid.
+
+    Polymarket market BUYs require maker amount (price × shares) to have at
+    most two decimals and taker amount to have at most four.  Instrument size
+    precision can be six, so blindly using it creates invalid amounts such as
+    0.75 × 5.5 = 4.125.  Return (safe_qty, grid_step) without increasing risk.
+    """
+    quantity = max(Decimal("0"), Decimal(str(quantity)))
+    limit_price = max(Decimal("0"), Decimal(str(limit_price)))
+    if quantity <= 0 or limit_price <= 0:
+        return Decimal("0"), Decimal("0")
+    taker_scale = 4
+    maker_scale = 2
+    price_scale = max(0, -limit_price.as_tuple().exponent)
+    price_integer = int((limit_price * (Decimal(10) ** price_scale)).to_integral_value())
+    denominator = 10 ** max(0, price_scale + taker_scale - maker_scale)
+    unit_step = denominator // gcd(abs(price_integer), denominator)
+    grid_step = Decimal(unit_step).scaleb(-taker_scale)
+    safe_qty = (quantity / grid_step).to_integral_value(rounding=ROUND_FLOOR) * grid_step
+    return safe_qty.quantize(Decimal("0.0001"), rounding=ROUND_FLOOR), grid_step
+
+
 class OutcomeFastFollowLive:
     """Queue a confirmed signal off-thread; submit only on a quote callback."""
 
@@ -63,6 +87,7 @@ class OutcomeFastFollowLive:
         self._night_filled_entries: dict[str, int] = {}
         self._night_pending_entry_ids: dict[str, set[str]] = {}
         self._night_realized_pnl: dict[str, Decimal] = {}
+        self._position_night_by_instrument: dict[str, str] = {}
         self._loaded_nights: set[str] = set()
         self._blocked_candidate_reasons: set[tuple[int, str]] = set()
 
@@ -82,6 +107,13 @@ class OutcomeFastFollowLive:
             int(recovered_filled or 0),
         )
         self._night_pending_entry_ids.setdefault(night, set())
+        restored_positions = recovered.get("open_position_instruments") or []
+        if isinstance(restored_positions, (list, tuple, set)):
+            for instrument_id in restored_positions:
+                instrument_key = str(instrument_id or "")
+                if instrument_key:
+                    self._position_instruments.add(instrument_key)
+                    self._position_night_by_instrument[instrument_key] = night
         self._night_realized_pnl[night] = min(
             self._night_realized_pnl.get(night, Decimal("0")),
             Decimal(str(recovered.get("realized_pnl_usdc") or "0")),
@@ -95,6 +127,11 @@ class OutcomeFastFollowLive:
             "filled_entries": self._night_filled_entries.get(night, 0),
             "pending_entries": len(self._night_pending_entry_ids.get(night, set())),
             "attempted_entries": self._night_filled_entries.get(night, 0),
+            "open_position_instruments": sorted(
+                instrument_id
+                for instrument_id, position_night in self._position_night_by_instrument.items()
+                if position_night == night
+            ),
             "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
         })
 
@@ -169,11 +206,12 @@ class OutcomeFastFollowLive:
             night = metadata.get("night_key")
             if night:
                 self._ensure_night_loaded(night)
+                self._position_night_by_instrument[instrument_id] = night
                 self._night_pending_entry_ids.setdefault(night, set()).discard(client_order_id)
                 self._night_filled_entries[night] = self._night_filled_entries.get(night, 0) + 1
                 self._persist_night(night)
         if side == "sell" and instrument_id in self._position_instruments and realized_net_usdc is not None:
-            key = _night_key(time.time())
+            key = self._position_night_by_instrument.get(instrument_id) or _night_key(time.time())
             if key is not None:
                 self._ensure_night_loaded(key)
                 self._night_realized_pnl[key] = self._night_realized_pnl.get(key, Decimal("0")) + Decimal(str(realized_net_usdc))
@@ -182,6 +220,9 @@ class OutcomeFastFollowLive:
             exchange_min = Decimal(str(getattr(self.strategy, "maker_exchange_min_shares", "5")))
             if Decimal(str(state.get("qty", "0"))) < exchange_min:
                 self._position_instruments.discard(instrument_id)
+                self._position_night_by_instrument.pop(instrument_id, None)
+                if key is not None:
+                    self._persist_night(key)
 
     def on_quote(self, *, instrument_id, best_bid: Decimal, best_ask: Decimal, ask_size: Decimal | None, now_ts: float) -> bool:
         with self._lock:
@@ -293,14 +334,21 @@ class OutcomeFastFollowLive:
         if quantity < exchange_min:
             self._record_blocked(candidate, "quantity_below_exchange_min", quantity=float(quantity))
             return False
-        precision = int(getattr(instrument, "size_precision", 6))
-        quantum = Decimal(str(10 ** (-precision)))
-        quantity = quantity.quantize(quantum, rounding=ROUND_FLOOR)
         tick = max(Decimal("0.001"), _instrument_tick(instrument))
         limit_price = self.strategy._align_price_to_tick(
             min(self.config.max_entry_price, best_ask + tick * self.config.max_slippage_ticks),
             "buy", instrument,
         )
+        requested_quantity = quantity
+        quantity, venue_quantity_step = _venue_compatible_fast_follow_quantity(quantity, limit_price)
+        if quantity < exchange_min:
+            self._record_blocked(
+                candidate, "venue_amount_grid_below_exchange_min",
+                requested_quantity=float(requested_quantity),
+                venue_quantity_step=float(venue_quantity_step),
+            )
+            return False
+        precision = min(4, int(getattr(instrument, "size_precision", 6)))
         balance = getattr(self.strategy, "_cached_usdc_balance", None)
         if balance is None or Decimal(str(balance)) < limit_price * quantity:
             self._record_blocked(candidate, "insufficient_usdc_balance")
@@ -321,6 +369,8 @@ class OutcomeFastFollowLive:
             "wanted_side": wanted_side, "signal_age_ms": age_ms,
             "best_bid": float(best_bid), "best_ask": float(best_ask),
             "limit_price": float(limit_price), "quantity": float(quantity),
+            "requested_quantity": float(requested_quantity),
+            "venue_quantity_step": float(venue_quantity_step),
             "requested_tif": "FOK", "execution_penalty_bypassed": True, "night_key": night,
         }
         self._attempted_slugs.add(slug)
