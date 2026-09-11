@@ -377,8 +377,9 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     strategy._clear_pending_taker_exit_for_order(filled_id)
     protective_exit_reasons = {
         "stop_loss", "invalidation_recovery", "offside_near_close",
+        "endgame_twap_stop_loss",
     }
-    if taker_exit_reason == "stop_loss" and strategy.stop_loss_reentry_cooldown_sec > 0:
+    if taker_exit_reason in {"stop_loss", "endgame_twap_stop_loss"} and strategy.stop_loss_reentry_cooldown_sec > 0:
         inst_key = strategy._instrument_key(filled_inst)
         if inst_key:
             pause_until = time.time() + float(strategy.stop_loss_reentry_cooldown_sec)

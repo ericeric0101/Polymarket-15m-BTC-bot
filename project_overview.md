@@ -577,6 +577,27 @@ or stale data interval Outcome remains unavailable and cannot create a
 fast-follow entry; Chainlink/Polymarket trading continues under its independent
 controls. There is no REST or testnet fallback.
 
+**Approved live endgame Chainlink-TWAP protective exit (2026-09-11):** The
+settled-market study uses 134 independent BTC 15-minute markets with a fresh
+TWAP observation captured at or just before T-120 seconds. The then-current
+TWAP side matched final settlement in 129/134 cases (96.3%); when its distance
+from the verified opening strike was at least $10, it matched 121/124 (97.6%).
+Accordingly, `ENDGAME_TWAP_EXIT_ENABLED=1` is a live, **exit-only** rule with
+defaults `MAX_TIME_LEFT_SEC=120`, `MIN_DISTANCE_USD=10`, and
+`MAX_AGE_SEC=5`. When a confirmed held UP/DOWN token is on the opposite side
+of a fresh `polymarket_chainlink_twap_*` observation from the verified
+market-scoped strike, it immediately submits the existing single-owner taker
+SELL path. The rule bypasses normal stop-loss confirmation, hold-band,
+spread, cooldown, and final-tail suppression gates so those generic controls
+cannot delay a settlement-source-specific circuit breaker. It still requires
+real tracked inventory at or above the venue minimum and never opens, flips,
+or increases a position. It journals trigger/block/submit/fill/reject events
+under `endgame_twap_stop_loss`, applies the usual per-market protective-exit
+and re-entry safeguards after a fill, and remains fail-closed for stale TWAP
+or unverified strike. The 3.7% observed exceptions mean this is a risk
+control, not an assertion of certain settlement; all subsequent outcomes must
+be reviewed as a frozen out-of-sample cohort.
+
 **Proposed D.4.1 — event-driven Outcome-mark protective-exit research
 (2026-09-03; not live authority):** The initial 10.95-hour collection supports
 a narrower hypothesis: a fresh Outcome `allMids["BTC"]` move has more

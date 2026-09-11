@@ -17,6 +17,7 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
 from bot.enums import ActiveSide
+from bot.endgame_twap_exit import evaluate_endgame_twap_exit
 from bot.exit_audit import build_invalidation_exit_audit
 from bot.recovery_exit_ladder import select_recovery_exit_action
 from bot.models import (
@@ -51,6 +52,10 @@ class TakerExitHost(Protocol):
     market_strike_cache_by_slug: dict[str, Any]
     maker_reduce_only_no_new_sell_last_sec: int
     taker_exit_disable_stop_loss_last_sec: int
+    endgame_twap_exit_enabled: bool
+    endgame_twap_exit_max_time_left_sec: int
+    endgame_twap_exit_min_distance_usd: Decimal
+    endgame_twap_exit_max_age_sec: float
     market_phase: Any
     active_side: Any
     side_decision_score: Decimal
@@ -133,6 +138,10 @@ class TakerExitMixin:
             and time_left_sec <= float(self.taker_exit_disable_stop_loss_last_sec)
         )
         target_instruments = list(self._maker_quote_instruments())
+        endgame_window_active = bool(getattr(self, "endgame_twap_exit_enabled", False)) and (
+            time_left_sec is not None
+            and 0.0 <= time_left_sec <= float(getattr(self, "endgame_twap_exit_max_time_left_sec", 0))
+        )
         seen_instruments = {self._instrument_key(inst_id) for inst_id in target_instruments}
         # Critical: active_side can flip away from the actual held instrument.
         # When that happens we still need to evaluate exits on the off-side inventory,
@@ -155,7 +164,7 @@ class TakerExitMixin:
             inst_key = self._instrument_key(inst_id)
             if not inst_key:
                 continue
-            if self.taker_exit_eval_interval_sec > 0:
+            if self.taker_exit_eval_interval_sec > 0 and not endgame_window_active:
                 last_eval_ts = float(self.taker_exit_last_eval_ts_by_inst.get(inst_key, 0.0))
                 if now_ts - last_eval_ts < float(self.taker_exit_eval_interval_sec):
                     continue
@@ -181,6 +190,73 @@ class TakerExitMixin:
                 continue
             best_bid, best_ask = quote
             if best_bid <= 0:
+                continue
+
+            # Run the settlement-specific circuit breaker before fair pricing,
+            # dynamic-fee I/O, the normal evaluation interval, or any generic
+            # stop-loss gate. In the final 120 seconds those costs are latency
+            # we do not need in order to decide a Chainlink-TWAP disagreement.
+            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            strike = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+            reference_spot = getattr(self, "latest_external_spot", None)
+            reference_source = str(getattr(self, "latest_external_spot_source", "") or "")
+            reference_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+            held_side = self._side_for_instrument_id(inst_id).value
+            strike_verified = False
+            if hasattr(self, "_market_strike_is_entry_eligible"):
+                try:
+                    strike_verified = bool(self._market_strike_is_entry_eligible(str(self.current_market_slug or "")))
+                except Exception:
+                    strike_verified = False
+            endgame_decision = evaluate_endgame_twap_exit(
+                enabled=bool(getattr(self, "endgame_twap_exit_enabled", False)),
+                time_left_sec=time_left_sec,
+                max_time_left_sec=float(getattr(self, "endgame_twap_exit_max_time_left_sec", 0)),
+                twap_price=Decimal(str(reference_spot)) if reference_spot is not None else None,
+                twap_source=reference_source,
+                twap_age_sec=(now_ts - reference_ts) if reference_ts > 0 else None,
+                max_twap_age_sec=float(getattr(self, "endgame_twap_exit_max_age_sec", 5.0)),
+                strike=Decimal(str(strike)) if strike is not None else None,
+                strike_verified=strike_verified,
+                held_side=held_side,
+                min_distance_usd=Decimal(str(getattr(self, "endgame_twap_exit_min_distance_usd", Decimal("10")))),
+            )
+            if endgame_decision.eligible:
+                estimated_net = (best_bid - avg_entry) * qty
+                decision_payload = {
+                    "slug": str(self.current_market_slug or ""),
+                    "decision_type": "ENDGAME_TWAP_TAKER_STOP_LOSS",
+                    "decision_reason": endgame_decision.reason,
+                    "time_left_sec": time_left_sec,
+                    "held_side": held_side,
+                    "twap_price": float(Decimal(str(reference_spot))),
+                    "strike": float(Decimal(str(strike))),
+                    "twap_minus_strike": float(endgame_decision.twap_minus_strike or Decimal("0")),
+                    "twap_age_sec": (now_ts - reference_ts) if reference_ts > 0 else None,
+                    "twap_source": reference_source,
+                    "strike_verified": True,
+                    "best_bid": float(best_bid),
+                    "best_ask": float(best_ask),
+                    "qty": float(qty),
+                }
+                self._db_strategy_event("ENDGAME_TWAP_EXIT_TRIGGERED", decision_payload)
+                if qty + Decimal("0.000001") < self.maker_exchange_min_shares:
+                    self._db_strategy_event(
+                        "ENDGAME_TWAP_EXIT_BLOCKED",
+                        {**decision_payload, "block_reason": "inventory_below_minimum"},
+                    )
+                    continue
+                ok = self._submit_taker_exit_order(
+                    instrument_id=inst_id,
+                    quantity=qty,
+                    reason="endgame_twap_stop_loss",
+                    est_net_if_exit=estimated_net,
+                    best_bid=best_bid,
+                    fee_rate=self._infer_market_fee_rate_default(),
+                    decision_payload=decision_payload,
+                )
+                if ok:
+                    self.last_taker_exit_ts_by_inst[inst_key] = now_ts
                 continue
             spread = max(Decimal("0"), best_ask - best_bid)
             mid = (best_bid + best_ask) / Decimal("2") if (best_bid + best_ask) > 0 else Decimal("0")
@@ -234,6 +310,7 @@ class TakerExitMixin:
             )
             opened_ts = float(state.get("opened_ts", 0.0))
             hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
+
             invalidation_recovery_candidate = (
                 hold_to_redeem
                 and invalidation_recovery_enabled

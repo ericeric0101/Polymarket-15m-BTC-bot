@@ -356,6 +356,10 @@ def initialize_strategy_settings(
     strategy.exit_hold_band_min_score_abs = config.exit.exit_hold_band_min_score_abs
     strategy.exit_hold_band_release_min_roi = config.exit.exit_hold_band_release_min_roi
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
+    strategy.endgame_twap_exit_enabled = config.exit.endgame_twap_exit_enabled
+    strategy.endgame_twap_exit_max_time_left_sec = config.exit.endgame_twap_exit_max_time_left_sec
+    strategy.endgame_twap_exit_min_distance_usd = config.exit.endgame_twap_exit_min_distance_usd
+    strategy.endgame_twap_exit_max_age_sec = config.exit.endgame_twap_exit_max_age_sec
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
     strategy.maker_recycle_locked_side_min_fair_edge_ps = config.exit.maker_recycle_locked_side_min_fair_edge_ps
     strategy.maker_signal_flip_cooldown_cycles = config.exit.maker_signal_flip_cooldown_cycles

@@ -382,6 +382,10 @@ class ExitConfig:
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
     maker_signal_flip_cooldown_cycles: int
+    endgame_twap_exit_enabled: bool
+    endgame_twap_exit_max_time_left_sec: int
+    endgame_twap_exit_min_distance_usd: Decimal
+    endgame_twap_exit_max_age_sec: float
     absolute_max_loss_enabled: bool = True
     absolute_max_loss_usdc: Decimal = Decimal("1.50")
     absolute_max_loss_min_hold_sec: int = 60
@@ -413,6 +417,12 @@ class ExitConfig:
             raise ValueError("RECOVERY_EXIT_PASSIVE_TTL_SEC must be >= 1")
         if self.recovery_exit_passive_min_time_left_sec < 0:
             raise ValueError("RECOVERY_EXIT_PASSIVE_MIN_TIME_LEFT_SEC must be >= 0")
+        if self.endgame_twap_exit_max_time_left_sec < 0:
+            raise ValueError("ENDGAME_TWAP_EXIT_MAX_TIME_LEFT_SEC must be >= 0")
+        if self.endgame_twap_exit_min_distance_usd <= 0:
+            raise ValueError("ENDGAME_TWAP_EXIT_MIN_DISTANCE_USD must be > 0")
+        if self.endgame_twap_exit_max_age_sec <= 0:
+            raise ValueError("ENDGAME_TWAP_EXIT_MAX_AGE_SEC must be > 0")
 
 
 @dataclass(frozen=True)
@@ -986,6 +996,16 @@ class AppConfig:
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
                 maker_signal_flip_cooldown_cycles=max(1, _env_int("MAKER_SIGNAL_FLIP_COOLDOWN_CYCLES", 2)),
+                endgame_twap_exit_enabled=_env_bool_inverted("ENDGAME_TWAP_EXIT_ENABLED", True),
+                endgame_twap_exit_max_time_left_sec=max(
+                    0, _env_int("ENDGAME_TWAP_EXIT_MAX_TIME_LEFT_SEC", 120),
+                ),
+                endgame_twap_exit_min_distance_usd=_env_decimal(
+                    "ENDGAME_TWAP_EXIT_MIN_DISTANCE_USD", "10",
+                ),
+                endgame_twap_exit_max_age_sec=max(
+                    0.1, _env_float("ENDGAME_TWAP_EXIT_MAX_AGE_SEC", 5.0),
+                ),
                 absolute_max_loss_enabled=_env_bool_inverted("ABSOLUTE_MAX_LOSS_ENABLED", True),
                 absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "1.50"),
                 absolute_max_loss_min_hold_sec=max(0, _env_int("ABSOLUTE_MAX_LOSS_MIN_HOLD_SEC", 60)),
