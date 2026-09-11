@@ -561,6 +561,22 @@ slug and Outcome id, preserving zero/non-following observations and excluding
 stale or gapped price pairs. This is collection and research only: it has no
 wallet, order, stop-loss, confidence, `robust_net`, or entry-gate connection.
 
+**Outcome WebSocket reliability guard (2026-09-11):** Hyperliquid may close
+mainnet WebSocket sessions and requires clients to reconnect gracefully. The
+observer keeps the official JSON application heartbeat and native WebSocket
+ping, but a TCP connection alone is not health: a reconnect is only considered
+ready after a valid `allMids["BTC"]` message. Reconnect backoff is exponential
+and bounded (1/2/4/8/16/30 seconds plus small jitter) and is reset only after
+30 seconds of continuously connected, valid data—not merely after a handshake.
+The observer writes low-frequency connect, subscribe, stable and disconnect
+lifecycle events into the trade journal, while five-second research snapshots
+also retain connection attempts, consecutive disconnects, last error, retry
+delay and receive/data ages. `STATUS` exposes `outcome_ws=up|down`, readiness,
+mid age and consecutive disconnect count. During a disconnect, silent stall,
+or stale data interval Outcome remains unavailable and cannot create a
+fast-follow entry; Chainlink/Polymarket trading continues under its independent
+controls. There is no REST or testnet fallback.
+
 **Proposed D.4.1 — event-driven Outcome-mark protective-exit research
 (2026-09-03; not live authority):** The initial 10.95-hour collection supports
 a narrower hypothesis: a fresh Outcome `allMids["BTC"]` move has more

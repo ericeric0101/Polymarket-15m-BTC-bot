@@ -9,7 +9,7 @@ import threading
 import time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from loguru import logger
 import websockets
@@ -19,6 +19,9 @@ HYPERLIQUID_MAINNET_WS_URL = "wss://api.hyperliquid.xyz/ws"
 MAX_STREAM_AGE_SEC = 5.0
 APPLICATION_HEARTBEAT_INTERVAL_SEC = 20.0
 APPLICATION_PONG_TIMEOUT_SEC = 45.0
+WS_OPEN_TIMEOUT_SEC = 10.0
+STABLE_STREAM_RESET_SEC = 30.0
+MAX_RECONNECT_DELAY_SEC = 30.0
 DEFAULT_AUTHORITY_PATH = "/Users/cheng-kaihuang/hyperliquid_prediction_bot/logs/outcome_market_authority.json"
 
 
@@ -42,10 +45,28 @@ def _book_top(book: Any) -> tuple[Optional[float], Optional[float], Optional[flo
         return None, None, None, None
 
 
+def reconnect_delay_sec(attempt: int) -> float:
+    """Bound reconnects so a bad endpoint cannot create a connection storm."""
+    return min(MAX_RECONNECT_DELAY_SEC, float(2 ** min(max(0, int(attempt) - 1), 5)))
+
+
+def stream_is_stable_for_backoff_reset(*, connected_ts: float, now_ts: float, stream_ready: bool) -> bool:
+    """A handshake is insufficient: require a sustained valid market stream."""
+    return bool(stream_ready) and now_ts - float(connected_ts) >= STABLE_STREAM_RESET_SEC
+
+
 class HyperliquidOutcomeObserver:
     """Observe one configured daily market; never make a network REST request."""
 
-    def __init__(self, *, market_id: Optional[int] = None, ws_url: Optional[str] = None, authority_path: Optional[str] = None, tick_listener=None) -> None:
+    def __init__(
+        self,
+        *,
+        market_id: Optional[int] = None,
+        ws_url: Optional[str] = None,
+        authority_path: Optional[str] = None,
+        tick_listener: Optional[Callable[[float, int], None]] = None,
+        lifecycle_listener: Optional[Callable[[str, dict[str, Any]], None]] = None,
+    ) -> None:
         self.market_id = int(market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID", "1313"))
         self.ws_url = os.getenv("HYPERLIQUID_OUTCOME_WS_URL") or ws_url or HYPERLIQUID_MAINNET_WS_URL
         self.authority_path = authority_path or os.getenv("HYPERLIQUID_OUTCOME_AUTHORITY_PATH", DEFAULT_AUTHORITY_PATH)
@@ -55,6 +76,7 @@ class HyperliquidOutcomeObserver:
         self._pending_market_id: Optional[int] = None
         self._last_error_log_ts = 0.0
         self._tick_listener = tick_listener
+        self._lifecycle_listener = lifecycle_listener
         self._set_market(self.market_id, reason="not_connected")
 
     def _set_market(self, market_id: int, *, reason: str) -> None:
@@ -65,6 +87,9 @@ class HyperliquidOutcomeObserver:
                 "available": False, "analysis_available": False, "stream_connected": False,
                 "source": "hyperliquid_outcome_mainnet_ws", "market_id": self.market_id,
                 "side0_coin": side0, "side1_coin": side1, "reason": reason,
+                "stream_ready": False, "connection_attempt_count": 0,
+                "disconnect_count": 0, "consecutive_disconnects": 0,
+                "reconnect_delay_sec": None,
             }
 
     def start(self) -> None:
@@ -93,6 +118,10 @@ class HyperliquidOutcomeObserver:
         result["mids_age_sec"] = max(0.0, now_ts - mids_ts) if mids_ts else None
         result["side0_book_age_sec"] = max(0.0, now_ts - side0_book_ts) if side0_book_ts else None
         result["side1_book_age_sec"] = max(0.0, now_ts - side1_book_ts) if side1_book_ts else None
+        last_message_ts = float(result.get("last_message_ts", 0.0) or 0.0)
+        last_valid_data_ts = float(result.get("last_valid_data_ts", 0.0) or 0.0)
+        result["last_message_age_sec"] = max(0.0, now_ts - last_message_ts) if last_message_ts else None
+        result["last_valid_data_age_sec"] = max(0.0, now_ts - last_valid_data_ts) if last_valid_data_ts else None
         fresh_mids = result["mids_age_sec"] is not None and result["mids_age_sec"] <= MAX_STREAM_AGE_SEC
         fresh_books = all(age is not None and age <= MAX_STREAM_AGE_SEC for age in (result["side0_book_age_sec"], result["side1_book_age_sec"]))
         connected = bool(result.get("stream_connected"))
@@ -108,6 +137,16 @@ class HyperliquidOutcomeObserver:
     def _merge(self, **changes: Any) -> None:
         with self._lock:
             self._snapshot = {**self._snapshot, **changes}
+
+    def _emit_lifecycle(self, event: str, **details: Any) -> None:
+        """Best-effort, low-frequency audit hook; never block or kill the feed."""
+        if self._lifecycle_listener is None:
+            return
+        payload = {"observed_ts": time.time(), "market_id": self.market_id, **details}
+        try:
+            self._lifecycle_listener(event, payload)
+        except Exception:
+            pass
 
     def _authority_market_id(self) -> Optional[int]:
         """Read the other bot's atomically published current 1d market."""
@@ -148,6 +187,7 @@ class HyperliquidOutcomeObserver:
 
     def _on_message(self, payload: dict[str, Any]) -> None:
         channel, data, now_ts = payload.get("channel"), payload.get("data"), time.time()
+        self._merge(last_message_ts=now_ts)
         if channel == "pong":
             self._merge(last_app_pong_ts=now_ts)
             return
@@ -161,6 +201,8 @@ class HyperliquidOutcomeObserver:
                     mids_received_ts=now_ts, side0_all_mid=_number(mids.get(side0_coin)),
                     side1_all_mid=_number(mids.get(side1_coin)), btc_mark=btc_mark,
                 )
+                if btc_mark is not None:
+                    self._merge(last_valid_data_ts=now_ts, stream_ready=True, reason=None)
                 if btc_mark is not None and self._tick_listener is not None:
                     try:
                         self._tick_listener(btc_mark, self.market_id)
@@ -184,18 +226,33 @@ class HyperliquidOutcomeObserver:
     async def _serve(self) -> None:
         reconnect_attempt = 0
         while not self._stop.is_set():
+            connected_ts = 0.0
             try:
                 with self._lock:
                     side0_coin, side1_coin = self._snapshot["side0_coin"], self._snapshot["side1_coin"]
-                async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10) as ws:
+                    connection_attempt_count = int(self._snapshot.get("connection_attempt_count", 0)) + 1
+                self._merge(
+                    connection_attempt_count=connection_attempt_count,
+                    stream_ready=False,
+                    reason="connecting",
+                )
+                self._emit_lifecycle("connect_attempt", attempt=connection_attempt_count)
+                async with websockets.connect(
+                    self.ws_url,
+                    open_timeout=WS_OPEN_TIMEOUT_SEC,
+                    ping_interval=20,
+                    ping_timeout=10,
+                ) as ws:
                     connected_ts = time.time()
                     self._merge(
                         stream_connected=True, connected_ts=connected_ts, reason=None,
-                        last_app_ping_ts=None, last_app_pong_ts=None,
+                        last_app_ping_ts=None, last_app_pong_ts=None, reconnect_delay_sec=None,
                     )
-                    reconnect_attempt = 0
+                    self._emit_lifecycle("connected", attempt=connection_attempt_count)
                     for subscription in ({"type": "allMids"}, {"type": "l2Book", "coin": side0_coin}, {"type": "l2Book", "coin": side1_coin}):
                         await ws.send(json.dumps({"method": "subscribe", "subscription": subscription}))
+                    self._emit_lifecycle("subscribed", side0_coin=side0_coin, side1_coin=side1_coin)
+                    stable_reset = False
                     while not self._stop.is_set():
                         if self._maybe_roll_market():
                             await ws.close()
@@ -216,12 +273,45 @@ class HyperliquidOutcomeObserver:
                         parsed = json.loads(raw)
                         if isinstance(parsed, dict):
                             self._on_message(parsed)
+                        snapshot = self.snapshot()
+                        if not stable_reset and stream_is_stable_for_backoff_reset(
+                            connected_ts=connected_ts,
+                            now_ts=time.time(),
+                            stream_ready=bool(snapshot.get("stream_ready")),
+                        ):
+                            reconnect_attempt = 0
+                            stable_reset = True
+                            self._merge(consecutive_disconnects=0, reconnect_delay_sec=None)
+                            self._emit_lifecycle("stable", connected_for_sec=time.time() - connected_ts)
             except Exception as exc:
                 now_ts = time.time()
-                self._merge(stream_connected=False, disconnected_ts=now_ts, reason=type(exc).__name__)
+                with self._lock:
+                    disconnect_count = int(self._snapshot.get("disconnect_count", 0)) + 1
+                    consecutive_disconnects = int(self._snapshot.get("consecutive_disconnects", 0)) + 1
+                self._merge(
+                    stream_connected=False,
+                    stream_ready=False,
+                    disconnected_ts=now_ts,
+                    reason=type(exc).__name__,
+                    last_disconnect_error=type(exc).__name__,
+                    last_disconnect_detail=str(exc)[:300],
+                    last_connected_duration_sec=(now_ts - connected_ts) if connected_ts else None,
+                    disconnect_count=disconnect_count,
+                    consecutive_disconnects=consecutive_disconnects,
+                )
                 if now_ts - self._last_error_log_ts >= 60.0:
                     logger.warning(f"Hyperliquid Outcome WebSocket unavailable: {type(exc).__name__}: {exc}")
                     self._last_error_log_ts = now_ts
+                if self._stop.is_set():
+                    break
                 reconnect_attempt += 1
-                delay = min(30.0, float(2 ** min(reconnect_attempt - 1, 5)))
+                delay = reconnect_delay_sec(reconnect_attempt)
+                self._merge(reconnect_delay_sec=delay)
+                self._emit_lifecycle(
+                    "disconnected",
+                    error_type=type(exc).__name__,
+                    error_detail=str(exc)[:300],
+                    consecutive_disconnects=consecutive_disconnects,
+                    retry_delay_sec=delay,
+                )
                 await asyncio.sleep(delay + random.uniform(0.0, min(0.5, delay * 0.1)))

@@ -1,7 +1,12 @@
 import json
 import time
 
-from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver, outcome_coins
+from bot.hyperliquid_outcome_observer import (
+    HyperliquidOutcomeObserver,
+    reconnect_delay_sec,
+    stream_is_stable_for_backoff_reset,
+    outcome_coins,
+)
 from scripts.hyperliquid_outcome_lead_lag_report import build_report
 
 
@@ -53,6 +58,33 @@ def test_application_pong_is_tracked_but_not_treated_as_market_freshness():
 
     assert snapshot["last_app_pong_ts"] > 0
     assert snapshot["available"] is False
+
+
+def test_valid_btc_message_marks_stream_ready_and_exposes_health_ages():
+    observer = HyperliquidOutcomeObserver(market_id=1313)
+    observer._merge(stream_connected=True)
+    observer._on_message({"channel": "allMids", "data": {"mids": {"BTC": "77500"}}})
+
+    snapshot = observer.snapshot()
+    assert snapshot["stream_ready"] is True
+    assert snapshot["last_message_age_sec"] is not None
+    assert snapshot["last_valid_data_age_sec"] is not None
+
+
+def test_reconnect_backoff_is_bounded_and_grows_after_unstable_connections():
+    assert reconnect_delay_sec(1) == 1.0
+    assert reconnect_delay_sec(2) == 2.0
+    assert reconnect_delay_sec(6) == 30.0
+    assert reconnect_delay_sec(100) == 30.0
+    assert not stream_is_stable_for_backoff_reset(
+        connected_ts=100.0, now_ts=131.0, stream_ready=False,
+    )
+    assert not stream_is_stable_for_backoff_reset(
+        connected_ts=100.0, now_ts=129.9, stream_ready=True,
+    )
+    assert stream_is_stable_for_backoff_reset(
+        connected_ts=100.0, now_ts=130.0, stream_ready=True,
+    )
 
 
 def test_recent_daily_selection_from_other_bot_is_rollover_authority(tmp_path):

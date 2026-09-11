@@ -3795,6 +3795,23 @@ class IntegratedBTCStrategy(
             except Exception as fast_follow_status_error:
                 logger.debug(f"Fast-follow status snapshot skipped: {fast_follow_status_error}")
 
+        outcome_ws_status = ""
+        outcome_observer = getattr(self, "hyperliquid_outcome_observer", None)
+        if outcome_observer is not None:
+            try:
+                outcome_health = outcome_observer.snapshot()
+                mids_age = outcome_health.get("mids_age_sec")
+                mids_age_txt = f"{float(mids_age):.1f}s" if mids_age is not None else "n/a"
+                outcome_ws_status = (
+                    " "
+                    f"outcome_ws={'up' if outcome_health.get('stream_connected') else 'down'}"
+                    f"/{'ready' if outcome_health.get('stream_ready') else 'waiting'} "
+                    f"outcome_mids_age={mids_age_txt} "
+                    f"outcome_disc={int(outcome_health.get('consecutive_disconnects') or 0)}"
+                )
+            except Exception as outcome_status_error:
+                logger.debug(f"Outcome WebSocket status snapshot skipped: {outcome_status_error}")
+
         logger.info(
             "STATUS "
             f"tradable={tradable} reason={reason_txt} "
@@ -3813,6 +3830,7 @@ class IntegratedBTCStrategy(
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
             f"{fast_follow_status}"
+            f"{outcome_ws_status}"
             f"{self._format_time_left()}"
         )
         if "active_side_none" in reasons and self.bi_side_enabled:

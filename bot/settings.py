@@ -776,6 +776,10 @@ def initialize_strategy_settings(
         strategy.outcome_lead_lag_runtime.start()
     strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver(
         tick_listener=(lambda price, _market_id: publish_strategy_tick(strategy, source="outcome_btc_mark", price=price)) if strategy.outcome_lead_lag_runtime is not None else None,
+        lifecycle_listener=lambda event, payload: strategy._db_strategy_event(
+            f"HYPERLIQUID_OUTCOME_OBSERVER_{event.upper()}",
+            {"read_only": True, **payload},
+        ),
     )
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0
