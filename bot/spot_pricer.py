@@ -131,13 +131,28 @@ class SpotPricerMixin:
                     mode = f"TWAP {twap_window}s" if use_twap else "spot"
                     logger.info(f"✓ Polymarket Chainlink WS connected ({mode})")
                     ws.send(_json.dumps(subscribe_payload))
+                    connected_monotonic = time.monotonic()
+                    connection_epoch = int(
+                        getattr(self, "_polymarket_chainlink_twap_connection_epoch", 0)
+                    ) + 1
+                    self._polymarket_chainlink_twap_connection_epoch = connection_epoch
+                    self._polymarket_chainlink_twap_connection_monotonic = connected_monotonic
+                    self._polymarket_chainlink_twap_pending_recovery = True
                     last_application_ping_monotonic = 0.0
-                    last_valid_twap_monotonic = time.monotonic()
+                    last_valid_twap_monotonic = connected_monotonic
                     self._db_strategy_event(
                         "POLYMARKET_TWAP_WS_CONNECTED",
                         {
                             "mode": mode,
+                            "connection_epoch": connection_epoch,
                             "reconnect_count": self._polymarket_chainlink_twap_reconnect_count,
+                            "previous_disconnect_age_sec": (
+                                max(0.0, connected_monotonic - float(
+                                    getattr(self, "_polymarket_chainlink_twap_last_disconnect_monotonic", 0.0) or 0.0
+                                ))
+                                if float(getattr(self, "_polymarket_chainlink_twap_last_disconnect_monotonic", 0.0) or 0.0) > 0
+                                else None
+                            ),
                             "silence_reconnect_sec": float(
                                 getattr(self, "polymarket_chainlink_twap_silence_reconnect_sec", 15.0)
                             ),
@@ -202,7 +217,8 @@ class SpotPricerMixin:
                             )
                             publish_strategy_tick(self, source="polymarket_spot", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if self._is_twap_spot_source(tick.source):
-                            last_valid_twap_monotonic = time.monotonic()
+                            tick_monotonic = time.monotonic()
+                            last_valid_twap_monotonic = tick_monotonic
                             self._polymarket_chainlink_twap_price = tick.price
                             # Preserve receipt and source clocks separately.
                             # RTDS documents payload.timestamp as Chainlink's
@@ -212,12 +228,54 @@ class SpotPricerMixin:
                             self._polymarket_chainlink_twap_observation_ts = chainlink_observation_ts(tick)
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
                             publish_strategy_tick(self, source="polymarket_twap", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
+                            if bool(getattr(self, "_polymarket_chainlink_twap_pending_recovery", False)):
+                                disconnected_at = float(
+                                    getattr(self, "_polymarket_chainlink_twap_last_disconnect_monotonic", 0.0) or 0.0
+                                )
+                                self._polymarket_chainlink_twap_pending_recovery = False
+                                self._db_strategy_event(
+                                    "POLYMARKET_TWAP_WS_RECOVERED",
+                                    {
+                                        "connection_epoch": connection_epoch,
+                                        "reconnect_count": self._polymarket_chainlink_twap_reconnect_count,
+                                        "first_valid_twap_after_connect_sec": max(0.0, tick_monotonic - connected_monotonic),
+                                        "feed_unavailable_sec": (
+                                            max(0.0, tick_monotonic - disconnected_at)
+                                            if disconnected_at > 0 else None
+                                        ),
+                                        "twap_source": tick.source,
+                                        "source_event_ts_ms": tick.updated_at_ms,
+                                    },
+                                )
                         if not self._is_twap_spot_source(tick.source):
                             self._record_polymarket_chainlink_observation(
                                 tick.price,
                                 tick.received_at_ts,
                             )
             except Exception as exc:
+                disconnected_monotonic = time.monotonic()
+                connected_monotonic = float(
+                    getattr(self, "_polymarket_chainlink_twap_connection_monotonic", 0.0) or 0.0
+                )
+                last_valid_twap_monotonic = float(locals().get("last_valid_twap_monotonic", 0.0) or 0.0)
+                self._polymarket_chainlink_twap_last_disconnect_monotonic = disconnected_monotonic
+                self._db_strategy_event(
+                    "POLYMARKET_TWAP_WS_DISCONNECTED",
+                    {
+                        "connection_epoch": int(getattr(self, "_polymarket_chainlink_twap_connection_epoch", 0)),
+                        "error_type": type(exc).__name__,
+                        "error_detail": str(exc)[:300],
+                        "connected_duration_sec": (
+                            max(0.0, disconnected_monotonic - connected_monotonic)
+                            if connected_monotonic > 0 else None
+                        ),
+                        "last_valid_twap_age_sec": (
+                            max(0.0, disconnected_monotonic - last_valid_twap_monotonic)
+                            if last_valid_twap_monotonic > 0 else None
+                        ),
+                        "will_retry_after_sec": reconnect_delay,
+                    },
+                )
                 logger.debug(
                     f"Polymarket Chainlink WS error: {exc}; reconnect in {reconnect_delay:.0f}s"
                 )

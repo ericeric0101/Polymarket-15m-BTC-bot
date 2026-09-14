@@ -180,7 +180,7 @@ The misleading comments that need correction rather than code removal are:
 
 | Class | Scripts |
 |---|---|
-| Supported operational/manual | `inspect_env_contract.py`, `migrate_env_to_profile.py`, `check_allowance.py`, `check_positions_and_redeem.py`, `replay_journal_signals.py`, `pnl_attribution_report.py`, `execution_path_penalty_report.py`, `invalidation_counterfactual_report.py`, `verify_exit_order_semantics.py`, `execution_penalty_report.py`, `twap_fair_calibration_report.py`, `fair_edge_bucket_shadow_report.py`, `executable_fair_edge_report.py`, `backfill_redeem_activity.py`. Evidence: README/current docs or current audit docs refer to them. |
+| Supported operational/manual | `inspect_env_contract.py`, `migrate_env_to_profile.py`, `check_allowance.py`, `check_positions_and_redeem.py`, `replay_journal_signals.py`, `pnl_attribution_report.py`, `execution_path_penalty_report.py`, `fast_follow_execution_report.py`, `feed_health_report.py`, `archive_lead_lag_research.py`, `invalidation_counterfactual_report.py`, `verify_exit_order_semantics.py`, `execution_penalty_report.py`, `twap_fair_calibration_report.py`, `fair_edge_bucket_shadow_report.py`, `executable_fair_edge_report.py`, `backfill_redeem_activity.py`. Evidence: README/current docs or current audit docs refer to them. |
 | Research, no CI/manual invocation | `calibration_shadow_report.py`, `pure_signal_probe.py`, `shadow_*_report.py`, `pure_probe_report.py`, `score_momentum_report.py`, `recent_buy_fill_report.py`, `realized_edge_report.py`, `pnl_reconcile_report.py`, `mirrored_down_report.py`, `hourly_attribution_report.py`, `edge_attribution_report.py`, `econ_gate_report.py`, `compare_polymarket_chainlink_vs_binance.py`, `build_smart_money_wallets.py`, `trade_db_report.py`, `live_dashboard.py`. | 
 | Historical / likely obsolete research | `outcome_analysis.py`, `penalty_simulation.py`. |
 
@@ -625,6 +625,43 @@ changing an entry threshold or the approved D.4 penalty.
    maker-BUY D.4 168-hour `$0.02515/share` penalty. Any future replacement
    needs path-matched, independent OOS evidence and an explicit documented
    selection decision.
+
+**Fast-follow execution, feed-health, and research-retention safeguards
+(2026-09-14):** Three follow-up changes address operational evidence gaps;
+they do not lower any maker penalty or grant Outcome exit authority.
+
+4. Fast-follow remains a FOK BUY-only path, but it now subscribes to each
+   current Polymarket token's native L2 deltas and requires a locally fresh
+   book. Before submission, visible asks at or below the actual FOK limit must
+   cover `quantity × OUTCOME_FAST_FOLLOW_L2_DEPTH_BUFFER` (default **1.20**);
+   the default maximum L2 age is **1 second**. Missing, stale, or insufficient
+   L2 fails closed before an exchange request. The exchange FOK is still the
+   final protection because depth can disappear after the local snapshot. The
+   order payload retains the L2 estimate, requested/rounded quantity, limit,
+   and submit timestamps. `scripts/fast_follow_execution_report.py` separates
+   FOK-unfilled and amount-precision rejections from fills, including
+   submit-to-outcome latency, fill price versus limit, and quantity. The
+   pre-change journal baseline was 32 submissions: 16 fills, 8 FOK-unfilled
+   rejects, and 4 amount-precision rejects; these cohorts must remain separate
+   when evaluating the new precheck.
+5. Chainlink TWAP is the settlement authority and therefore receives the
+   primary feed-health instrumentation. Every silent stall records its observed
+   duration; every socket disconnect records connected duration, last-valid
+   tick age, error and planned retry; a reconnect is only marked recovered on
+   its first valid TWAP tick, with both connection-to-first-tick and total
+   feed-unavailable durations. `scripts/feed_health_report.py` summarizes
+   these metrics alongside Outcome disconnect error/backoff distributions.
+   Outcome remains an auxiliary research/limited-entry input and cannot
+   compensate for stale or unavailable Chainlink TWAP.
+6. `scripts/archive_lead_lag_research.py` now implements retention as a manual
+   two-stage operation. Its default is preview-only. With explicit `--apply`,
+   it exports each closed UTC-day raw partition (`snapshots`, `reference_1s`,
+   decisions and latency spans) to verified gzip JSONL, records a checksum and
+   manifest, then prunes only the verified source partition. It never accesses
+   `logs/trade_journal.db`, never deletes lead/lag markouts, and never runs
+   `VACUUM`; thus D.4 fills, settlement, 168-hour markouts, and aggregate
+   evidence remain available. Default raw retention is seven days; archives
+   remain reproducible evidence rather than discarded history.
 
 **Proposed D.4.1 — event-driven Outcome-mark protective-exit research
 (2026-09-03; not live authority):** The initial 10.95-hour collection supports

@@ -514,6 +514,8 @@ class OutcomeLeadLagConfig:
     live_max_slippage_ticks: int
     live_max_entries_per_night: int
     live_max_loss_usdc_per_night: Decimal
+    live_l2_depth_buffer: Decimal
+    live_l2_max_age_sec: float
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live_entry_only"}:
@@ -522,6 +524,10 @@ class OutcomeLeadLagConfig:
             raise ValueError("OUTCOME_LEAD_LAG_BASELINE_WARMUP_SAMPLES cannot exceed baseline window")
         if self.live_max_entry_price <= 0 or self.live_max_entry_price > 1:
             raise ValueError("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE must be in (0, 1]")
+        if self.live_l2_depth_buffer < 1:
+            raise ValueError("OUTCOME_FAST_FOLLOW_L2_DEPTH_BUFFER must be >= 1")
+        if self.live_l2_max_age_sec <= 0:
+            raise ValueError("OUTCOME_FAST_FOLLOW_L2_MAX_AGE_SEC must be positive")
 
 
 @dataclass(frozen=True)
@@ -1111,6 +1117,12 @@ class AppConfig:
                 live_max_entries_per_night=max(1, _env_int("OUTCOME_FAST_FOLLOW_MAX_ENTRIES_PER_NIGHT", 15)),
                 live_max_loss_usdc_per_night=max(
                     Decimal("0"), _env_decimal("OUTCOME_FAST_FOLLOW_MAX_LOSS_USDC_PER_NIGHT", "5")
+                ),
+                live_l2_depth_buffer=max(
+                    Decimal("1"), _env_decimal("OUTCOME_FAST_FOLLOW_L2_DEPTH_BUFFER", "1.20")
+                ),
+                live_l2_max_age_sec=max(
+                    0.05, _env_float("OUTCOME_FAST_FOLLOW_L2_MAX_AGE_SEC", 1.0)
                 ),
             ),
         )

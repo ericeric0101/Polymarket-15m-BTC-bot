@@ -219,7 +219,7 @@ def mark_quote_subscription_pending(
 
 
 def refresh_quote_tick_subscriptions(strategy: Any) -> None:
-    """Replace subscriptions instead of relying on an idempotent subscribe after a feed stall."""
+    """Replace quote and L2 subscriptions after a feed stall."""
     instrument_ids = list(getattr(strategy, "current_market_instruments", []) or [])
     mark_quote_subscription_pending(strategy, instrument_ids, clear_cached_quotes=True)
     for inst_id in instrument_ids:
@@ -231,6 +231,30 @@ def refresh_quote_tick_subscriptions(strategy: Any) -> None:
             strategy.subscribe_quote_ticks(inst_id)
         except Exception as exc:
             logger.warning(f"Quote resubscribe failed for {inst_id}: {exc}")
+        try:
+            strategy.unsubscribe_order_book_deltas(inst_id)
+        except Exception as exc:
+            logger.debug(f"L2 unsubscribe skipped for {inst_id}: {exc}")
+        try:
+            strategy.subscribe_order_book_deltas(inst_id)
+        except Exception as exc:
+            logger.warning(f"L2 resubscribe failed for {inst_id}: {exc}")
+
+
+def handle_order_book_deltas(strategy: Any, deltas: Any) -> None:
+    """Stamp fresh native L2 delivery for fast-follow's FOK precheck.
+
+    The DataEngine/cache owns book reconstruction. This callback intentionally
+    performs no pricing, database I/O, or order action.
+    """
+    instrument_id = getattr(deltas, "instrument_id", None)
+    if instrument_id is None:
+        return
+    updates = getattr(strategy, "fast_follow_l2_update_ts_by_inst", None)
+    if not isinstance(updates, dict):
+        updates = {}
+        strategy.fast_follow_l2_update_ts_by_inst = updates
+    updates[str(instrument_id)] = time.time()
 
 
 def find_btc_instrument(strategy: Any) -> bool:
@@ -375,6 +399,10 @@ def find_btc_instrument(strategy: Any) -> bool:
         )
     for inst_id in strategy.current_market_instruments:
         strategy.subscribe_quote_ticks(inst_id)
+        try:
+            strategy.subscribe_order_book_deltas(inst_id)
+        except Exception as exc:
+            logger.warning(f"L2 subscribe failed for {inst_id}: {exc}")
     return True
 
 

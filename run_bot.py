@@ -112,6 +112,7 @@ from bot.market_runtime import (
     align_price_to_tick,
     find_btc_instrument,
     handle_generic_event,
+    handle_order_book_deltas,
     handle_quote_tick,
     handle_stop,
     maker_quote_sync,
@@ -3915,6 +3916,9 @@ class IntegratedBTCStrategy(
                         
     def on_quote_tick(self, tick: QuoteTick):
         handle_quote_tick(self, tick)
+
+    def on_order_book_deltas(self, deltas):
+        handle_order_book_deltas(self, deltas)
 
     def _maker_quote_sync(self, bid_price: float, ask_price: float) -> None:
         maker_quote_sync(self, bid_price, ask_price)

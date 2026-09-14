@@ -707,6 +707,11 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_ws_thread = None
     strategy._polymarket_chainlink_twap_silent_stall_count = 0
     strategy._polymarket_chainlink_twap_reconnect_count = 0
+    strategy._polymarket_chainlink_twap_last_disconnect_monotonic = 0.0
+    strategy._polymarket_chainlink_twap_connection_monotonic = 0.0
+    strategy._polymarket_chainlink_twap_pending_recovery = False
+    strategy._polymarket_chainlink_twap_connection_epoch = 0
+    strategy.fast_follow_l2_update_ts_by_inst = {}
     strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd
     strategy.active_side_lock_score_abs = Decimal("0")
     from bot.signal_engine import SignalEngine, SignalEngineConfig
@@ -759,6 +764,8 @@ def initialize_strategy_settings(
                 max_slippage_ticks=lead_lag.live_max_slippage_ticks,
                 max_entries_per_night=lead_lag.live_max_entries_per_night,
                 max_loss_usdc_per_night=lead_lag.live_max_loss_usdc_per_night,
+                l2_depth_buffer=lead_lag.live_l2_depth_buffer,
+                l2_max_age_sec=lead_lag.live_l2_max_age_sec,
             ),
         )
         candidate_handler = strategy.outcome_fast_follow_live.record_candidate

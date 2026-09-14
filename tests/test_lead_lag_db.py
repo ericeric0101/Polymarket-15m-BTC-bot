@@ -1,7 +1,9 @@
 import json
 import sqlite3
+import time
 
 from monitoring.lead_lag_db import LeadLagDB
+from scripts.archive_lead_lag_research import apply_retention
 from scripts.hyperliquid_outcome_lead_lag_report import load_snapshots
 from scripts.outcome_lead_lag_event_report import load_quality_gated_markouts, summarize
 
@@ -97,3 +99,34 @@ def test_event_report_excludes_late_markouts_and_deduplicates_candidate_second(t
     rows = load_quality_gated_markouts(str(db_path))
     assert len(rows) == 1
     assert summarize(rows)["250"]["direction_hit_rate"] == 1.0
+
+
+def test_manual_retention_archives_only_expired_raw_partitions_and_keeps_markouts(tmp_path):
+    db_path = tmp_path / "lead_lag.db"
+    archive_dir = tmp_path / "archive"
+    db = LeadLagDB(str(db_path))
+    old_ns = int((time.time() - 10 * 86_400) * 1_000_000_000)
+    fresh_ns = int(time.time() * 1_000_000_000)
+    db.enqueue_reference_1s(
+        run_id="r", slug="old", market_id=1, bucket_epoch_ms=old_ns // 1_000_000,
+        source="outcome_btc_mark", price_cents=7_700_000, received_epoch_ns=old_ns,
+    )
+    db.enqueue_reference_1s(
+        run_id="r", slug="new", market_id=1, bucket_epoch_ms=fresh_ns // 1_000_000,
+        source="outcome_btc_mark", price_cents=7_700_000, received_epoch_ns=fresh_ns,
+    )
+    db.enqueue_markout(
+        run_id="r", slug="old", market_id=1, candidate_epoch_ns=old_ns,
+        horizon_ms=60_000, observed_epoch_ns=old_ns + 60_000_000_000, payload={"timely": True},
+    )
+    db.stop()
+
+    archived = apply_retention(str(db_path), str(archive_dir), raw_retention_days=7)
+
+    assert archived and archived[0][0] == "reference_1s"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM reference_1s").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM lead_lag_markouts").fetchone()[0] == 1
+        manifest = conn.execute("SELECT archive_path, row_count FROM lead_lag_archive_manifest").fetchone()
+    assert manifest[1] == 1
+    assert (archive_dir / f"reference_1s-{time.strftime('%Y-%m-%d', time.gmtime(old_ns / 1_000_000_000))}.jsonl.gz").exists()

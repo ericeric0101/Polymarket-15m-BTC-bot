@@ -11,6 +11,7 @@ from bot.outcome_lead_lag_exit_handoff import (
     FastFollowLiveConfig,
     OutcomeFastFollowLive,
     _venue_compatible_fast_follow_quantity,
+    fast_follow_l2_precheck,
     handoff_confirmed_candidate,
 )
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
@@ -213,6 +214,21 @@ def _live_harness(*, ask: Decimal):
             return SimpleNamespace(client_order_id=kwargs["client_order_id"])
 
     instrument = SimpleNamespace(size_precision=1, price_precision=2, price_increment=Decimal("0.01"))
+
+    class Level:
+        def __init__(self, price, size):
+            self.price = price
+            self._size = size
+
+        def size(self):
+            return self._size
+
+    class Book:
+        def asks(self):
+            # 20 shares remain visible through the one-tick FOK limit.
+            return [Level(ask, Decimal("20"))]
+
+    book = Book()
     strategy = SimpleNamespace(
         current_market_slug="s", current_market_end_timestamp=now_ts + 600,
         maker_min_minutes_to_close=1, bi_side_min_time_left_sec=60,
@@ -224,7 +240,8 @@ def _live_harness(*, ask: Decimal):
         _cached_usdc_balance=Decimal("100"), active_maker_orders={}, order_factory=Factory(),
         _twap_reference_degraded=False,
         _market_strike_is_entry_eligible=lambda _slug: True,
-        cache=SimpleNamespace(instrument=lambda _inst: instrument),
+        cache=SimpleNamespace(instrument=lambda _inst: instrument, order_book=lambda _inst: book),
+        fast_follow_l2_update_ts_by_inst={"UP.INST": now_ts},
         _side_for_instrument_id=lambda _inst: SimpleNamespace(value="UP"),
         _instrument_key=lambda inst: str(inst),
         _align_price_to_tick=lambda price, _side, _instrument: price,
@@ -259,6 +276,26 @@ def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold()
     assert len(submitted) == 1
     assert float(kwargs[0]["quantity"]) == 5.5
     assert any(event == "ORDER_FAST_FOLLOW_SUBMIT" for event, _ in events)
+
+
+def test_fast_follow_l2_precheck_requires_full_fill_and_buffer():
+    ok, estimate = fast_follow_l2_precheck(
+        asks=[(Decimal("0.60"), Decimal("10"))],
+        quantity=Decimal("10"),
+        limit_price=Decimal("0.61"),
+        depth_buffer=Decimal("1.20"),
+    )
+    assert not ok
+    assert estimate.filled_quantity == Decimal("10")
+
+    ok, estimate = fast_follow_l2_precheck(
+        asks=[(Decimal("0.60"), Decimal("12.1"))],
+        quantity=Decimal("10"),
+        limit_price=Decimal("0.61"),
+        depth_buffer=Decimal("1.20"),
+    )
+    assert ok
+    assert estimate.visible_depth == Decimal("12.1")
 
 
 def test_live_fast_follow_terminal_fok_failure_releases_reservation_without_counting_fill():

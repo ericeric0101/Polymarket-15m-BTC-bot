@@ -14,6 +14,8 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.depth_risk import ExecutionEstimate, estimate_taker_execution
+
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 
@@ -25,6 +27,8 @@ class FastFollowLiveConfig:
     max_slippage_ticks: int = 1
     max_entries_per_night: int = 15
     max_loss_usdc_per_night: Decimal = Decimal("5")
+    l2_depth_buffer: Decimal = Decimal("1.20")
+    l2_max_age_sec: float = 1.0
 
 
 def _night_key(now_ts: float) -> str | None:
@@ -68,6 +72,54 @@ def _venue_compatible_fast_follow_quantity(quantity: Decimal, limit_price: Decim
     grid_step = Decimal(unit_step).scaleb(-taker_scale)
     safe_qty = (quantity / grid_step).to_integral_value(rounding=ROUND_FLOOR) * grid_step
     return safe_qty.quantize(Decimal("0.0001"), rounding=ROUND_FLOOR), grid_step
+
+
+def _book_asks(book) -> list[tuple[Decimal, Decimal]]:
+    """Convert the cached Nautilus L2 book to immutable price/size levels."""
+    levels: list[tuple[Decimal, Decimal]] = []
+    if book is None:
+        return levels
+    try:
+        raw_levels = book.asks()
+    except Exception:
+        return levels
+    for level in raw_levels:
+        try:
+            raw_price = level.price
+            price = raw_price.as_decimal() if hasattr(raw_price, "as_decimal") else Decimal(str(raw_price))
+            raw_size = level.size()
+            size = raw_size.as_decimal() if hasattr(raw_size, "as_decimal") else Decimal(str(raw_size))
+        except Exception:
+            continue
+        if price > 0 and size > 0:
+            levels.append((price, size))
+    return levels
+
+
+def fast_follow_l2_precheck(
+    *,
+    asks: list[tuple[Decimal, Decimal]],
+    quantity: Decimal,
+    limit_price: Decimal,
+    depth_buffer: Decimal,
+) -> tuple[bool, ExecutionEstimate]:
+    """Require full visible FOK capacity plus a conservative depth buffer.
+
+    This is deliberately only an admission check: the live book can change
+    after the snapshot, so the FOK order remains the venue-side final guard.
+    """
+    requested = max(Decimal("0"), Decimal(str(quantity)))
+    estimate = estimate_taker_execution(
+        side="buy", requested_quantity=requested,
+        levels=asks, price_boundary=Decimal(str(limit_price)),
+    )
+    required_visible = requested * max(Decimal("1"), Decimal(str(depth_buffer)))
+    return (
+        requested > 0
+        and estimate.filled_quantity >= requested
+        and estimate.visible_depth >= required_visible,
+        estimate,
+    )
 
 
 class OutcomeFastFollowLive:
@@ -354,6 +406,42 @@ class OutcomeFastFollowLive:
             self._record_blocked(candidate, "insufficient_usdc_balance")
             return False
 
+        l2_update_ts = float(
+            getattr(self.strategy, "fast_follow_l2_update_ts_by_inst", {}).get(inst_key, 0.0) or 0.0
+        )
+        l2_age_sec = max(0.0, now_ts - l2_update_ts) if l2_update_ts > 0 else None
+        book = None
+        try:
+            book = self.strategy.cache.order_book(instrument_id)
+        except Exception:
+            book = None
+        asks = _book_asks(book)
+        if l2_age_sec is None or l2_age_sec > self.config.l2_max_age_sec or not asks:
+            self._record_blocked(
+                candidate,
+                "l2_book_unavailable_or_stale",
+                l2_age_sec=l2_age_sec,
+                l2_max_age_sec=self.config.l2_max_age_sec,
+                l2_level_count=len(asks),
+            )
+            return False
+        l2_ok, l2_estimate = fast_follow_l2_precheck(
+            asks=asks,
+            quantity=quantity,
+            limit_price=limit_price,
+            depth_buffer=self.config.l2_depth_buffer,
+        )
+        l2_payload = {
+            **l2_estimate.as_payload(),
+            "l2_age_sec": l2_age_sec,
+            "l2_level_count": len(asks),
+            "l2_depth_buffer": float(self.config.l2_depth_buffer),
+            "required_visible_depth": float(quantity * self.config.l2_depth_buffer),
+        }
+        if not l2_ok:
+            self._record_blocked(candidate, "l2_fok_depth_insufficient", **l2_payload)
+            return False
+
         coid = ClientOrderId(f"BTC-15M-FAST-FOLLOW-BUY-{int(now_ts * 1000)}")
         order = self.strategy.order_factory.limit(
             instrument_id=instrument_id,
@@ -371,7 +459,9 @@ class OutcomeFastFollowLive:
             "limit_price": float(limit_price), "quantity": float(quantity),
             "requested_quantity": float(requested_quantity),
             "venue_quantity_step": float(venue_quantity_step),
+            "l2_precheck": l2_payload,
             "requested_tif": "FOK", "execution_penalty_bypassed": True, "night_key": night,
+            "submit_epoch_ns": time.time_ns(), "submit_monotonic_ns": time.perf_counter_ns(),
         }
         self._attempted_slugs.add(slug)
         self._pending_order_ids[str(coid)] = metadata
