@@ -222,6 +222,21 @@ class TakerExitMixin:
                 min_distance_usd=Decimal(str(getattr(self, "endgame_twap_exit_min_distance_usd", Decimal("10")))),
             )
             if endgame_decision.eligible:
+                opened_ts = float(state.get("opened_ts", 0.0) or 0.0)
+                position_epoch = (
+                    f"{self.current_market_slug or ''}|{inst_key}|{opened_ts:.6f}|"
+                    f"{float(avg_entry):.8f}"
+                )
+                endgame_states = getattr(self, "endgame_twap_exit_state_by_epoch", None)
+                if not isinstance(endgame_states, dict):
+                    endgame_states = {}
+                    self.endgame_twap_exit_state_by_epoch = endgame_states
+                prior_state = str(endgame_states.get(position_epoch) or "")
+                # A submitted taker request owns the epoch. A sub-minimum
+                # residual cannot be sold on this venue, so record that fact
+                # once rather than writing a row for every final-tail quote.
+                if prior_state in {"submitted", "blocked_inventory_below_minimum"}:
+                    continue
                 estimated_net = (best_bid - avg_entry) * qty
                 decision_payload = {
                     "slug": str(self.current_market_slug or ""),
@@ -238,9 +253,11 @@ class TakerExitMixin:
                     "best_bid": float(best_bid),
                     "best_ask": float(best_ask),
                     "qty": float(qty),
+                    "position_epoch": position_epoch,
                 }
                 self._db_strategy_event("ENDGAME_TWAP_EXIT_TRIGGERED", decision_payload)
                 if qty + Decimal("0.000001") < self.maker_exchange_min_shares:
+                    endgame_states[position_epoch] = "blocked_inventory_below_minimum"
                     self._db_strategy_event(
                         "ENDGAME_TWAP_EXIT_BLOCKED",
                         {**decision_payload, "block_reason": "inventory_below_minimum"},
@@ -257,6 +274,9 @@ class TakerExitMixin:
                 )
                 if ok:
                     self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+                    endgame_states[position_epoch] = "submitted"
+                else:
+                    endgame_states[position_epoch] = "submit_not_accepted"
                 continue
             spread = max(Decimal("0"), best_ask - best_bid)
             mid = (best_bid + best_ask) / Decimal("2") if (best_bid + best_ask) > 0 else Decimal("0")

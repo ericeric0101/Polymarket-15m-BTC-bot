@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from monitoring.pnl_attribution import load_market_pnl_attribution
+from monitoring.pnl_attribution import load_market_pnl_attribution, load_market_pnl_attributions
 
 
 def _event(conn, table, event_type, payload, **columns):
@@ -93,3 +93,28 @@ def test_pnl_attribution_does_not_treat_position_shares_as_redeem_cash(tmp_path)
     assert result["redeem_value_source"] == "settlement_estimate"
     assert result["redeem_value_usdc"] == 0.0
     assert result["computed_pnl_usdc"] == -7.0
+
+
+def test_pnl_attribution_marks_unmatched_sell_as_pre_journal_inventory(tmp_path):
+    db = tmp_path / "journal.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE order_events (id INTEGER PRIMARY KEY, ts TEXT, run_id TEXT, event_type TEXT,
+          client_order_id TEXT, side TEXT, price REAL, qty REAL, payload_json TEXT);
+        CREATE TABLE strategy_events (id INTEGER PRIMARY KEY, ts TEXT, run_id TEXT, event_type TEXT,
+          payload_json TEXT);
+        """
+    )
+    slug = "btc-updown-15m-prejournal"
+    _event(conn, "order_events", "ORDER_FILLED", {"slug": slug}, client_order_id="old-sell", side="SELL", price=0.97, qty=10)
+    _event(conn, "strategy_events", "MARKET_CYCLE_PNL", {"slug": slug, "cycle_combined_pnl_usdc": 9.7})
+    conn.commit()
+    conn.close()
+
+    result = load_market_pnl_attributions(db)[slug]
+
+    assert result["computed_pnl_usdc"] == pytest.approx(9.7)
+    assert result["accounting_status"] == "pre_journal_inventory"
+    assert result["attributable_pnl_usdc"] is None
+    assert result["reconciliation_adjustment_usdc"] is None

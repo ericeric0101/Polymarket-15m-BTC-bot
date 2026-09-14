@@ -42,6 +42,7 @@ class MarketCycleState:
     maker_signal_flip_hits_by_inst: dict[str, int] = field(default_factory=dict)
     side_invalidation_hits_by_slug: dict[str, int] = field(default_factory=dict)
     side_invalidation_confirmed_by_slug: dict[str, bool] = field(default_factory=dict)
+    endgame_twap_exit_state_by_epoch: dict[str, str] = field(default_factory=dict)
     strike_pending_log_state_by_slug: dict[str, str] = field(default_factory=dict)
     baseline_metrics: dict[str, Any] = field(default_factory=dict)
 
@@ -82,5 +83,6 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy._maker_signal_flip_hits = state.maker_signal_flip_hits_by_inst
     strategy._side_invalidation_hits_by_slug = state.side_invalidation_hits_by_slug
     strategy._side_invalidation_confirmed_by_slug = state.side_invalidation_confirmed_by_slug
+    strategy.endgame_twap_exit_state_by_epoch = state.endgame_twap_exit_state_by_epoch
     strategy._strike_pending_log_state_by_slug = state.strike_pending_log_state_by_slug
     strategy._baseline_metrics = state.baseline_metrics

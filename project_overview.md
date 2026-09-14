@@ -180,7 +180,7 @@ The misleading comments that need correction rather than code removal are:
 
 | Class | Scripts |
 |---|---|
-| Supported operational/manual | `inspect_env_contract.py`, `migrate_env_to_profile.py`, `check_allowance.py`, `check_positions_and_redeem.py`, `replay_journal_signals.py`, `pnl_attribution_report.py`, `invalidation_counterfactual_report.py`, `verify_exit_order_semantics.py`, `execution_penalty_report.py`, `twap_fair_calibration_report.py`, `fair_edge_bucket_shadow_report.py`, `executable_fair_edge_report.py`, `backfill_redeem_activity.py`. Evidence: README/current docs or current audit docs refer to them. |
+| Supported operational/manual | `inspect_env_contract.py`, `migrate_env_to_profile.py`, `check_allowance.py`, `check_positions_and_redeem.py`, `replay_journal_signals.py`, `pnl_attribution_report.py`, `execution_path_penalty_report.py`, `invalidation_counterfactual_report.py`, `verify_exit_order_semantics.py`, `execution_penalty_report.py`, `twap_fair_calibration_report.py`, `fair_edge_bucket_shadow_report.py`, `executable_fair_edge_report.py`, `backfill_redeem_activity.py`. Evidence: README/current docs or current audit docs refer to them. |
 | Research, no CI/manual invocation | `calibration_shadow_report.py`, `pure_signal_probe.py`, `shadow_*_report.py`, `pure_probe_report.py`, `score_momentum_report.py`, `recent_buy_fill_report.py`, `realized_edge_report.py`, `pnl_reconcile_report.py`, `mirrored_down_report.py`, `hourly_attribution_report.py`, `edge_attribution_report.py`, `econ_gate_report.py`, `compare_polymarket_chainlink_vs_binance.py`, `build_smart_money_wallets.py`, `trade_db_report.py`, `live_dashboard.py`. | 
 | Historical / likely obsolete research | `outcome_analysis.py`, `penalty_simulation.py`. |
 
@@ -597,6 +597,34 @@ and re-entry safeguards after a fill, and remains fail-closed for stale TWAP
 or unverified strike. The 3.7% observed exceptions mean this is a risk
 control, not an assertion of certain settlement; all subsequent outcomes must
 be reviewed as a frozen out-of-sample cohort.
+
+**PnL attribution, endgame-event, and execution-path safeguards (2026-09-14):**
+Three operational corrections make post-trade evidence auditable without
+changing an entry threshold or the approved D.4 penalty.
+
+1. `monitoring.pnl_attribution.load_market_pnl_attributions` reads the journal
+   in bounded set-based passes and classifies every market as `complete`,
+   `pre_journal_inventory`, or `no_tracked_entry`. A sale/redemption with no
+   journaled BUY is retained as cash evidence but is never counted as
+   attributable bot PnL. `scripts/pnl_attribution_report.py` prints
+   independently derived fill/redemption PnL beside `MARKET_CYCLE_PNL` and its
+   reconciliation delta. A material delta is an audit item, not permission to
+   substitute whichever number looks better.
+2. The endgame TWAP exit is idempotent per position epoch
+   `(slug, instrument, opened_ts, average_entry)`. Once it has submitted a
+   taker request, it does not emit another trigger for the same held position.
+   A residual below the exchange minimum likewise produces one explicit
+   `inventory_below_minimum` block rather than final-tail journal spam. This
+   does not change the earlier fail-closed freshness/verified-strike checks.
+3. `scripts/execution_path_penalty_report.py --horizon-sec 10` now separates
+   observed markouts into `maker_buy`, `fast_follow_fok_buy`, `taker_exit_sell`
+   and other paths, and into 5.5-share, 10-share, and other size buckets. It
+   reports signed mean, raw adverse mean, winsorized adverse mean, p90 adverse
+   value, and independent market count. These small, mixed-path samples are
+   diagnostic only: no output may automatically replace the frozen weekday
+   maker-BUY D.4 168-hour `$0.02515/share` penalty. Any future replacement
+   needs path-matched, independent OOS evidence and an explicit documented
+   selection decision.
 
 **Proposed D.4.1 — event-driven Outcome-mark protective-exit research
 (2026-09-03; not live authority):** The initial 10.95-hour collection supports

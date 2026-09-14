@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from monitoring.pnl_attribution import load_market_pnl_attribution
+from monitoring.pnl_attribution import load_market_pnl_attributions
 
 
 def main() -> int:
@@ -49,18 +49,40 @@ def main() -> int:
     if not slugs:
         print("No settled markets found.")
         return 0
-    print("slug buy maker_sell taker_sell redeem computed reported reconciliation_delta")
+    ledger = load_market_pnl_attributions(db_path, set(slugs))
+    # MARKET_CYCLE_PNL is also written for idle cycles.  Keep the operational
+    # report focused on markets with cash or a journaled fill; explicitly
+    # requested slugs remain visible for diagnosis.
+    if not args.slug:
+        slugs = [
+            slug for slug in slugs
+            if (item := ledger.get(slug, {})).get("fill_count", 0)
+            or abs(float(item.get("redeem_value_usdc", 0.0))) > 0
+        ]
+    if not slugs:
+        print("No markets with journaled fills or redemption cash found.")
+        return 0
+    print("slug status buy maker_sell taker_sell redeem attributable computed reported reconciliation_delta")
+    attributable_total = 0.0
+    pre_journal_count = 0
     for slug in slugs:
-        item = load_market_pnl_attribution(db_path, slug)
+        item = ledger.get(slug, {})
         reported = item["reported_cycle_pnl_usdc"]
         delta = item["reconciliation_adjustment_usdc"]
+        attributable = item.get("attributable_pnl_usdc")
+        if attributable is not None:
+            attributable_total += float(attributable)
+        if item.get("accounting_status") == "pre_journal_inventory":
+            pre_journal_count += 1
         print(
-            f"{slug} {item['buy_notional_usdc']:+.4f} "
+            f"{slug} {item.get('accounting_status', 'unknown')} {item['buy_notional_usdc']:+.4f} "
             f"{item['maker_sell_proceeds_usdc']:+.4f} {item['taker_exit_proceeds_usdc']:+.4f} "
-            f"{item['redeem_value_usdc']:+.4f} {item['computed_pnl_usdc']:+.4f} "
+            f"{item['redeem_value_usdc']:+.4f} "
+            f"{'n/a' if attributable is None else f'{attributable:+.4f}'} {item['computed_pnl_usdc']:+.4f} "
             f"{'n/a' if reported is None else f'{reported:+.4f}'} "
             f"{'n/a' if delta is None else f'{delta:+.4f}'}"
         )
+    print(f"attributable_total_usdc={attributable_total:+.4f} pre_journal_inventory_markets={pre_journal_count}")
     return 0
 
 

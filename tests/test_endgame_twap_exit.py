@@ -101,8 +101,9 @@ class _EndgameHost(TakerExitMixin):
 def test_endgame_twap_exit_bypasses_normal_eval_interval_and_submits_taker_sell():
     host = _EndgameHost()
     asyncio.run(host._maybe_taker_exit_positions(time.time(), is_simulation=False))
+    asyncio.run(host._maybe_taker_exit_positions(time.time(), is_simulation=False))
 
     assert len(host.submissions) == 1
     assert host.submissions[0]["reason"] == "endgame_twap_stop_loss"
     assert host.submissions[0]["quantity"] == Decimal("10")
-    assert any(event == "ENDGAME_TWAP_EXIT_TRIGGERED" for event, _ in host.events)
+    assert [event for event, _ in host.events].count("ENDGAME_TWAP_EXIT_TRIGGERED") == 1
