@@ -1183,6 +1183,21 @@ change.
   It resumes the normal operational refresh once exit protection is gone. This
   is a fixed safety invariant rather than another `.env` knob;
   regression coverage is in `tests/test_live_path_regressions.py`.
+  **Zero-inventory pending-SELL cancel retirement (2026-09-19):** a venue or
+  cache visibility gap can leave a cancel-requested SELL in local tracking
+  after the strategy's confirmed fill ledger has reached zero. Previously its
+  seventh unknown reconciliation response activated the global maker kill
+  switch; launcher rollover then also treated that same stale tracker as live
+  exit protection and deferred indefinitely. Once bounded reconciliation has
+  been exhausted, the runtime now retires only a pending-cancel **SELL** whose
+  instrument has exactly zero confirmed local inventory, recording
+  `ORDER_CANCEL_ZERO_INVENTORY_RETIRED`. This is not a claim that the venue
+  acknowledged the cancellation, nor a generic stale-order bypass: BUYs,
+  non-pending orders, unavailable inventory authority, and every positive
+  confirmed inventory quantity retain the original fail-safe kill-switch path.
+  The local tracker is therefore prevented from wedging the next market while
+  genuine conditional-token exit protection remains non-negotiable. Regression
+  coverage is in `tests/test_shadow_simulation.py`.
   **Gamma publication-gap recovery (2026-08-28):** during an automatic node
   refresh, Gamma can temporarily return deterministic BTC 15-minute slug
   candidates without serving the corresponding event/token IDs. Previously

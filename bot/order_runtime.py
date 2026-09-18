@@ -19,6 +19,7 @@ class OrderRuntimeHost(Protocol):
     cache: Any
 
     def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id: Optional[Any] = None) -> Decimal: ...
     def _activate_maker_kill_switch(self, reason: str) -> None: ...
     def cancel_order(self, order: Any) -> None: ...
     def _db_order_event(self, **kwargs: Any) -> None: ...
@@ -170,6 +171,30 @@ class OrderRuntimeMixin:
         order_instrument = str(state.get("instrument_id", "") or "")
         return bool(order_instrument and current_keys and order_instrument not in current_keys)
 
+    def _is_zero_inventory_pending_sell(self: OrderRuntimeHost, state: dict[str, Any]) -> bool:
+        """Whether an unresolved pending SELL is provably not protecting bot inventory.
+
+        This is intentionally narrower than a generic stale-order escape hatch.
+        The internal fill ledger is the strategy's confirmed inventory authority
+        for SELL submission; when it says zero, a previously requested cancel
+        cannot be preserving this strategy's conditional-token position.  We
+        may retire the *local tracker* after bounded reconciliation failures,
+        but never make this exception for a BUY, a non-pending order, missing
+        inventory authority, or any positive confirmed quantity.
+        """
+        if str(state.get("side", "") or "").lower() != "sell":
+            return False
+        if not bool(state.get("pending_cancel", False)):
+            return False
+        getter = getattr(self, "_get_confirmed_inventory_qty_for_instrument", None)
+        if not callable(getter):
+            return False
+        try:
+            confirmed_qty = Decimal(str(getter(state.get("instrument_id")) or "0"))
+        except Exception:
+            return False
+        return confirmed_qty <= Decimal("0.000001")
+
     def _cleanup_stale_pending_cancels(self, now_ts: float) -> None:
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
@@ -216,6 +241,30 @@ class OrderRuntimeMixin:
                     unknown_retries = int(state.get("reconcile_unknown_retries", 0)) + 1
                     state["reconcile_unknown_retries"] = unknown_retries
                     if unknown_retries > self.maker_cancel_max_retries * 2:
+                        if self._is_zero_inventory_pending_sell(state):
+                            # A stale local SELL tracker must not permanently
+                            # freeze a later market when the fill ledger proves
+                            # that it protects no bot inventory.  This does not
+                            # assert that the venue processed the cancellation;
+                            # it records an explicit unresolved-order audit
+                            # event and isolates the old local state instead.
+                            logger.warning(
+                                f"Retiring unresolved zero-inventory SELL cancel [{side}] {coid}; "
+                                "no local conditional-token inventory remains."
+                            )
+                            self._db_order_event(
+                                event_type="ORDER_CANCEL_ZERO_INVENTORY_RETIRED",
+                                client_order_id=coid,
+                                side=side.upper(),
+                                status="CANCELED_UNVERIFIED_ZERO_INVENTORY",
+                                reason="max_unknown_retries_confirmed_inventory_zero",
+                                payload={
+                                    "unknown_count": unknown_retries,
+                                    "instrument_id": str(state.get("instrument_id", "") or ""),
+                                },
+                            )
+                            self.active_maker_orders.pop(order_key, None)
+                            continue
                         logger.error(f"Cancel reconcile unknown for [{side}] {coid} exceeded max retries. Triggering Maker Kill Switch.")
                         self._db_order_event(
                             event_type="ORDER_CANCEL_RECONCILE_UNKNOWN_KILL",

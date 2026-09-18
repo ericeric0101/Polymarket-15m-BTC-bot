@@ -97,6 +97,9 @@ class _DryOrderHost(_ShadowHost, OrderRuntimeMixin):
     def _project_inventory_after_fill(self, side, qty, instrument_id=None):
         return self.inventory_delta_shares + qty if side == "buy" else self.inventory_delta_shares - qty
 
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id=None):
+        return Decimal("0")
+
     def _extract_token_id_from_instrument(self, _instrument_id):
         return "token"
 
@@ -315,6 +318,30 @@ def test_unresolved_prior_market_cancel_is_retired_without_killing_new_market(tm
 
     assert not host.active_maker_orders
     assert _event_count(db, "ORDER_CANCEL_PRIOR_MARKET_RETIRED") == 1
+
+
+def test_unresolved_zero_inventory_sell_cancel_is_retired_without_kill_switch(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _DryOrderHost(db)
+    host.active_maker_orders["sell:inst-up"] = {
+        "order": SimpleNamespace(client_order_id="orphaned-sell", status="ACCEPTED"),
+        "side": "sell",
+        "instrument_id": "inst-up",
+        "pending_cancel": True,
+        "last_cancel_ts": time.time() - host.maker_cancel_ack_timeout_sec - 1,
+    }
+
+    # A cache without open-order visibility returns ``None``.  The stale SELL
+    # reaches the same bounded unknown-retry threshold from the live incident.
+    for _ in range((host.maker_cancel_max_retries * 2) + 1):
+        host._cleanup_stale_pending_cancels(time.time())
+        state = host.active_maker_orders.get("sell:inst-up")
+        if state is not None:
+            state["last_cancel_ts"] = time.time() - host.maker_cancel_ack_timeout_sec - 1
+
+    assert not host.active_maker_orders
+    assert not getattr(host, "maker_kill_switch", False)
+    assert _event_count(db, "ORDER_CANCEL_ZERO_INVENTORY_RETIRED") == 1
 
 
 def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_path):
