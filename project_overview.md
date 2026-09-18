@@ -46,6 +46,34 @@ flowchart LR
 | Spot and TWAP | `bot.price_streams.extract_*_tick`, `bot.market_runtime.handle_quote_tick`, `bot.spot_pricer._fetch_external_spot_price`, and `bot.market_data.record_external_spot_observation`. BTC 15-minute reference is Polymarket RTDS relayed Chainlink BTC/USD **60-second TWAP**. The direct RTDS client sends its required text `PING` every five seconds. Trading freshness uses Chainlink `payload.timestamp` / observation time; local receipt time is retained only as transport-lag telemetry. A missing, future, or stale source observation degrades rather than being accepted because it was received recently. | `POLYMARKET_CHAINLINK_TWAP_*`, `REQUIRE_TWAP_REFERENCE_SPOT`, `TWAP_DEGRADED_BLOCK_NEW_ENTRIES`, `EXTERNAL_SPOT_*`, `QUOTE_STALE_SEC`, `QUOTE_RESUBSCRIBE_GRACE_SEC`, `QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC`. |
 | Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`. |
 
+### Polymarket Data API v2 read-plane contract (2026-09-18)
+
+Polymarket's Data API consumers use the official v2 root
+`https://data-api.polymarket.com/v2`.  v2 response pages are read only through
+`bot.polymarket_data_api`: records must be in the `data` envelope and any
+continuation uses the opaque `pagination.next_cursor` while preserving the
+original filters.  Code must not reintroduce v1 bare-list parsing or numerical
+`offset` pagination.
+
+- `bot.smart_money.SmartMoneyTracker` uses `/trades` and `/positions` with the
+  v2 `condition` filter and snake_case request/response fields.  It remains a
+  smart-money confirmation/shadow input, never an order-transport dependency.
+- `scripts/build_smart_money_wallets.py` uses cursor-paged `/trades` and the
+  v2 flat `/positions` records.  `scripts/check_positions_and_redeem.py` uses
+  cursor-paged v2 positions for operator reporting/redeem selection, and
+  `scripts/backfill_redeem_activity.py` uses v2 `/activity` to reconcile
+  recorded redemption cash.  The on-chain redeem transaction itself is
+  unchanged.
+- Gamma remains the market-discovery API and is allowed to retain its own
+  documented field casing.  Legacy camelCase keys remain only when reading
+  historical journal payloads written before this migration; no live Data API
+  request may use them.
+- This is strictly a **read-plane performance and schema migration**.  It
+  does not replace CLOB market data, the order submission adapter, or the
+  settlement authority: fresh Polymarket RTDS-relayed Chainlink BTC/USD
+  60-second TWAP remains the required reference for live BTC 15-minute entry
+  and endgame decisions.
+
 ### 2. Fair probability and direction
 
 | Stage | Runtime implementation and I/O | Governing keys |

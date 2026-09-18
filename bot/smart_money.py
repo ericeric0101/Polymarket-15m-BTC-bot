@@ -13,6 +13,8 @@ from typing import Any, Optional
 import httpx
 from loguru import logger
 
+from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_rows
+
 
 _CONDITION_RE = re.compile(r"^(0x[a-fA-F0-9]{64})-([0-9]+)\.POLYMARKET$")
 
@@ -49,7 +51,7 @@ def _norm_direction(value: Any) -> str:
 class SmartMoneyConfig:
     enabled: bool = False
     shadow_enabled: bool = True
-    data_api_base_url: str = "https://data-api.polymarket.com"
+    data_api_base_url: str = DATA_API_V2_BASE_URL
     poll_interval_sec: float = 3.0
     request_timeout_sec: float = 2.5
     trades_limit: int = 250
@@ -527,26 +529,22 @@ class SmartMoneyTracker:
         token_map: dict[str, str],
     ) -> list[_TradeEvent]:
         params: dict[str, Any] = {
-            "market": condition_id,
+            "condition": condition_id,
             "side": "BUY",
-            "takerOnly": "false",
-            "limit": max(1, min(10000, int(self.config.trades_limit))),
+            "taker_only": "false",
+            "limit": max(1, min(1000, int(self.config.trades_limit))),
         }
         if self.config.min_cash_filter > 0:
-            params["filterType"] = "CASH"
-            params["filterAmount"] = self.config.min_cash_filter
+            params["filter_type"] = "CASH"
+            params["filter_amount"] = self.config.min_cash_filter
         response = client.get("/trades", params=params)
         response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            return []
+        rows = v2_rows(response.json())
         out: list[_TradeEvent] = []
         seen: set[tuple[str, str, int]] = set()
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
+        for item in rows:
             direction = _norm_direction(item.get("outcome"))
-            asset = str(item.get("asset") or "")
+            asset = str(item.get("token_id") or "")
             if not direction and asset:
                 direction = token_map.get(asset, "")
             if direction not in {"UP", "DOWN"}:
@@ -555,8 +553,8 @@ class SmartMoneyTracker:
             size = _as_float(item.get("size"))
             usdc_size = price * size
             ts = int(_as_float(item.get("timestamp"), 0.0))
-            tx = str(item.get("transactionHash") or "")
-            wallet = str(item.get("proxyWallet") or "").lower()
+            tx = str(item.get("transaction_hash") or "")
+            wallet = str(item.get("proxy_wallet") or "").lower()
             key = (wallet, tx, ts)
             if key in seen:
                 continue
@@ -578,38 +576,26 @@ class SmartMoneyTracker:
 
     def _fetch_hedgers(self, *, client: httpx.Client, condition_id: str) -> set[str]:
         response = client.get(
-            "/v1/market-positions",
+            "/positions",
             params={
-                "market": condition_id,
+                "condition": condition_id,
                 "status": "OPEN",
-                "sortBy": "TOTAL_PNL",
-                "sortDirection": "DESC",
-                "limit": max(1, min(500, int(self.config.position_limit))),
+                "limit": max(1, min(1000, int(self.config.position_limit))),
             },
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = v2_rows(response.json())
         by_wallet: dict[str, dict[str, float]] = defaultdict(lambda: {"UP": 0.0, "DOWN": 0.0})
-        if not isinstance(payload, list):
-            return set()
-        for token_group in payload:
-            if not isinstance(token_group, dict):
+        for pos in payload:
+            wallet = str(pos.get("proxy_wallet") or "").lower()
+            direction = _norm_direction(pos.get("outcome"))
+            if not wallet or direction not in {"UP", "DOWN"}:
                 continue
-            positions = token_group.get("positions")
-            if not isinstance(positions, list):
-                continue
-            for pos in positions:
-                if not isinstance(pos, dict):
-                    continue
-                wallet = str(pos.get("proxyWallet") or "").lower()
-                direction = _norm_direction(pos.get("outcome"))
-                if not wallet or direction not in {"UP", "DOWN"}:
-                    continue
-                current_value = _as_float(pos.get("currentValue"))
-                size = _as_float(pos.get("size"))
-                curr_price = _as_float(pos.get("currPrice"))
-                exposure = current_value if current_value > 0 else size * curr_price
-                by_wallet[wallet][direction] += max(0.0, exposure)
+            current_value = _as_float(pos.get("current_value"))
+            size = _as_float(pos.get("current_size"))
+            avg_price = _as_float(pos.get("avg_price"))
+            exposure = current_value if current_value > 0 else size * avg_price
+            by_wallet[wallet][direction] += max(0.0, exposure)
         hedgers: set[str] = set()
         for wallet, sides in by_wallet.items():
             up = sides["UP"]

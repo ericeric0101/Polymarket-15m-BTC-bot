@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,14 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DATA_API = "https://data-api.polymarket.com"
+from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_rows
+
+
+DATA_API = DATA_API_V2_BASE_URL
 
 
 def _json_loads(raw: str | None) -> dict[str, Any]:
@@ -40,31 +47,30 @@ def _fetch_redeem_activity(user: str, *, limit: int) -> list[dict[str, Any]]:
         "user": user,
         "limit": min(max(limit, 1), 500),
         "type": "REDEEM",
-        "sortBy": "TIMESTAMP",
-        "sortDirection": "DESC",
+        "sort_by": "TIMESTAMP",
+        "sort_direction": "DESC",
     }
     response = requests.get(f"{DATA_API}/activity", params=params, timeout=20)
     response.raise_for_status()
-    data = response.json()
-    return data if isinstance(data, list) else []
+    return v2_rows(response.json())
 
 
 def _activity_indexes(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
     by_tx: dict[str, dict[str, Any]] = {}
     by_slug_condition: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        tx = _norm_tx(row.get("transactionHash"))
+        tx = _norm_tx(row.get("transaction_hash"))
         if tx:
             by_tx[tx] = row
         slug = str(row.get("slug") or row.get("eventSlug") or "")
-        condition_id = str(row.get("conditionId") or "").lower()
+        condition_id = str(row.get("condition_id") or "").lower()
         if slug and condition_id:
             by_slug_condition[(slug, condition_id)] = row
     return by_tx, by_slug_condition
 
 
 def _activity_amount(row: dict[str, Any]) -> float:
-    value = row.get("usdcSize")
+    value = row.get("usdc_size")
     if value is None:
         value = row.get("size")
     try:
@@ -168,10 +174,10 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
             payload["redeem_activity_timestamp"] = activity.get("timestamp")
             payload["redeem_activity_source"] = "polymarket_data_api_activity"
             payload["redeem_activity_reconciled_at"] = reconciled_at
-            if activity.get("transactionHash"):
-                payload["redeem_activity_tx_hash"] = activity.get("transactionHash")
-            if activity.get("conditionId"):
-                payload["redeem_activity_condition_id"] = activity.get("conditionId")
+            if activity.get("transaction_hash"):
+                payload["redeem_activity_tx_hash"] = activity.get("transaction_hash")
+            if activity.get("condition_id"):
+                payload["redeem_activity_condition_id"] = activity.get("condition_id")
             if activity.get("slug"):
                 payload["slug"] = activity.get("slug")
                 payload["market_slug"] = activity.get("slug")

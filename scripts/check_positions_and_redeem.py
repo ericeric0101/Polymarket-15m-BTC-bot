@@ -3,7 +3,7 @@
 Check Polymarket positions by user address and optionally redeem resolved winners.
 
 Official references:
-- Data API /positions (user, redeemable): https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user
+- Data API v2 /positions (user, redeemable): https://docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market
 - CTF redeemPositions: https://docs.polymarket.com/trading/ctf/redeem
 
 Examples:
@@ -37,8 +37,9 @@ from bot.collateral_tokens import (
     USDCE_ADDRESS,
     get_ctf_collateral,
 )
+from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_next_cursor, v2_rows
 
-DATA_API = "https://data-api.polymarket.com"
+DATA_API = DATA_API_V2_BASE_URL
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 CTF_REDEEM_ABI = [
@@ -220,16 +221,26 @@ def _address_from_private_key(private_key: str) -> str:
 def _fetch_positions(user: str, redeemable: bool | None = None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {
         "user": user,
-        "sizeThreshold": 0,
-        "limit": 500,
-        "offset": 0,
+        "limit": 1000,
+        "status": "OPEN",
     }
-    if redeemable is not None:
-        params["redeemable"] = str(redeemable).lower()
-    r = requests.get(f"{DATA_API}/positions", params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    return data if isinstance(data, list) else []
+    # v2 documents status as the server-side way to select redeemable rows.
+    # Do not rely on the old v1 ``redeemable`` request flag.
+    if redeemable is True:
+        params["status"] = "REDEEMABLE"
+    rows: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        request_params = dict(params)
+        if cursor:
+            request_params["cursor"] = cursor
+        r = requests.get(f"{DATA_API}/positions", params=request_params, timeout=20)
+        r.raise_for_status()
+        payload = r.json()
+        rows.extend(v2_rows(payload))
+        cursor = v2_next_cursor(payload)
+        if not cursor:
+            return rows
 
 
 def _slug_match(rec: dict[str, Any], slug_filter: str | None) -> bool:
@@ -250,7 +261,7 @@ def _print_user_report(user: str, positions: list[dict[str, Any]], slug_filter: 
     # Group by condition to avoid noisy duplicate lines.
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for p in subset:
-        grouped[str(p.get("conditionId") or "")].append(p)
+        grouped[str(p.get("condition_id") or "")].append(p)
 
     for condition_id, rows in grouped.items():
         rows = [r for r in rows if condition_id]
@@ -259,7 +270,7 @@ def _print_user_report(user: str, positions: list[dict[str, Any]], slug_filter: 
         title = str(rows[0].get("title") or "")
         slug = str(rows[0].get("slug") or "")
         redeemable = any(bool(r.get("redeemable")) for r in rows)
-        total_size = sum(float(r.get("size") or 0) for r in rows)
+        total_size = sum(float(r.get("current_size") or 0) for r in rows)
         outcomes = ", ".join(sorted({str(r.get("outcome") or "") for r in rows}))
         print(
             f"- condition={condition_id} redeemable={redeemable} size={total_size:.6f} "
@@ -681,10 +692,10 @@ def main() -> int:
             continue
         if not bool(p.get("redeemable")):
             continue
-        cid = str(p.get("conditionId") or "")
+        cid = str(p.get("condition_id") or "")
         if not cid:
             continue
-        redeemable_condition_sizes[cid] += float(p.get("size") or 0.0)
+        redeemable_condition_sizes[cid] += float(p.get("current_size") or 0.0)
         if cid not in seen:
             seen.add(cid)
             redeemable_conditions.append(cid)
