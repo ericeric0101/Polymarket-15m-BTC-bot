@@ -119,7 +119,7 @@ class TradeJournalDB:
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
-    def _backup_after_write(self) -> None:
+    def _backup_after_write(self) -> bool:
         """Snapshot through SQLite's backup API, then atomically publish it."""
         backup = Path(self.backup_path)
         temporary = backup.with_name(f".{backup.name}.tmp")
@@ -128,12 +128,14 @@ class TradeJournalDB:
             with self._connect() as source, sqlite3.connect(str(temporary)) as destination:
                 source.backup(destination)
             os.replace(temporary, backup)
+            return True
         except Exception as e:
             try:
                 temporary.unlink(missing_ok=True)
             except Exception:
                 pass
             logger.error(f"TradeJournalDB backup failed after write: {e}")
+            return False
 
     def _schedule_backup(self) -> None:
         """Coalesce snapshots off the order/fill callback hot path."""
@@ -141,14 +143,19 @@ class TradeJournalDB:
             self._backup_dirty = True
         self._backup_wakeup.set()
 
-    def flush_backup(self) -> None:
+    def flush_backup(self) -> bool:
         """Synchronously publish one snapshot; intended for shutdown/tests."""
         with self._backup_lock:
             if not self._backup_dirty:
-                return
+                return True
             self._backup_dirty = False
-        self._backup_after_write()
+        success = self._backup_after_write()
+        if not success:
+            with self._backup_lock:
+                self._backup_dirty = True
+            return False
         self._last_backup_monotonic = time.monotonic()
+        return True
 
     def _backup_worker(self) -> None:
         while not self._backup_stop.is_set():
@@ -923,7 +930,7 @@ class TradeJournalDB:
         sql = """
         SELECT ts, client_order_id, price, qty, payload_json
         FROM order_events
-        WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_FAST_FOLLOW_SUBMIT')
+        WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT')
           AND UPPER(COALESCE(side, '')) = 'BUY'
           AND (
               instrument_id = ?

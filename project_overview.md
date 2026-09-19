@@ -62,6 +62,17 @@
   trade journal worker, which synchronously flushes the final dirty journal
   snapshot. Runtime journal fail-closed applies only to new maker/fast-follow
   BUYs: SELL, stop-loss, and emergency-exit authority remains available.
+- Fast-follow records a durable `ORDER_FAST_FOLLOW_INTENT` after risk-state
+  reservation and before the FOK reaches the venue. Intent is crash-recovery
+  evidence, not venue acceptance or a fill: it cannot create inventory, quota,
+  market-buy counts, or PnL. If external inventory is later confirmed while
+  fill/submission records are absent, recovery may use its price as a
+  conservative cost-basis fallback. Intent-write failure blocks the FOK and
+  rolls its in-memory reservation back.
+- Runtime health must be an explicit `{"ready": true}` result; malformed or
+  unreadable values fail closed for new BUYs. Failed backup snapshots keep the
+  journal dirty for retry and log the fault, but do not alone disable trading
+  while primary journal writes remain healthy.
 - `absolute_max_loss_breaker` takes priority over the normal spread guard and
   fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
   existing order and submits the protective exit immediately.

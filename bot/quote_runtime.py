@@ -198,7 +198,13 @@ class QuoteRuntimeMixin:
         if self.inventory_delta_shares <= 0 and self._startup_rehydrated_inventory_force_sell_only:
             self._startup_rehydrated_inventory_force_sell_only = False
         inventory_overage_sell_only = self._inventory_overage_requires_sell_only()
-        journal_runtime_ready = getattr(getattr(self, "trade_db", None), "runtime_health", lambda: {"ready": True})().get("ready", True)
+        try:
+            journal = getattr(self, "trade_db", None)
+            runtime_health = getattr(journal, "runtime_health", None)
+            health = runtime_health() if callable(runtime_health) else None
+            journal_runtime_ready = isinstance(health, dict) and health.get("ready") is True
+        except Exception:
+            journal_runtime_ready = False
         journal_forced_sell_only = not bool(getattr(self, "trade_db_buy_ready", True)) or not journal_runtime_ready
         if journal_forced_sell_only and time.time() - getattr(self, "_last_trade_db_warn_ts", 0) >= 60:
             logger.error(

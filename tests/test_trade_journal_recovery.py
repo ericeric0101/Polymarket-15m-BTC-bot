@@ -124,6 +124,27 @@ def test_production_shutdown_flushes_final_trade_journal_backup(monkeypatch, tmp
         assert conn.execute("SELECT ended_at FROM strategy_runs WHERE run_id='run'").fetchone()[0] is not None
 
 
+def test_failed_backup_stays_dirty_and_retries_without_marking_journal_unhealthy(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db", backup_interval_sec=3600)
+    db._last_backup_monotonic = time.monotonic()
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    attempts = []
+
+    def backup_once():
+        attempts.append(True)
+        return len(attempts) > 1
+
+    monkeypatch.setattr(db, "_backup_after_write", backup_once)
+    db.flush_backup()
+    assert db._backup_dirty is True
+    assert db.runtime_health()["ready"] is True
+
+    db.flush_backup()
+    assert db._backup_dirty is False
+    assert len(attempts) == 2
+    db.stop()
+
+
 def test_night_risk_query_error_returns_none_instead_of_zero_risk(monkeypatch, tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))

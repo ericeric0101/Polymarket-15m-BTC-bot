@@ -4,6 +4,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_types import ReferenceTick
@@ -531,6 +533,86 @@ def test_live_fast_follow_aborts_and_rolls_back_when_risk_state_persistence_fail
     assert owner._night_filled_entries["2026-09-08"] == 0
     assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "risk_state_persist_failed"
                for event, payload in events)
+
+
+def test_live_fast_follow_intent_persist_failure_aborts_and_rolls_back_before_submit():
+    owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.60"))
+    owner.on_order_terminal(str(kwargs[0]["client_order_id"]))
+    health = {"ready": True, "reason": "ready"}
+
+    def order_event(**payload):
+        events.append((payload["event_type"], payload))
+        if payload["event_type"] == "ORDER_FAST_FOLLOW_INTENT":
+            health.update(ready=False, reason="write_failed")
+
+    owner.strategy._db_order_event = order_event
+    owner.strategy.trade_db = SimpleNamespace(
+        runtime_health=lambda: dict(health),
+        load_fast_follow_night_risk=lambda _night: {},
+    )
+    owner.strategy.current_market_slug = "next"
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 1
+    assert not owner._pending_order_ids
+    assert not owner._night_pending_entry_ids["2026-09-08"]
+    assert "next" not in owner._attempted_slugs
+    assert owner._night_filled_entries["2026-09-08"] == 0
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "fast_follow_intent_persist_failed"
+               for event, payload in events)
+
+
+def test_live_fast_follow_durably_records_intent_before_venue_submit():
+    owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.60"))
+    owner.on_order_terminal(str(kwargs[0]["client_order_id"]))
+    sequence = []
+    owner.strategy._db_strategy_event = lambda event, payload: (sequence.append(event), events.append((event, payload)))
+    owner.strategy._db_order_event = lambda **payload: (sequence.append(payload["event_type"]), events.append((payload["event_type"], payload)))
+    owner.strategy.submit_order = lambda order: (sequence.append("submit_order"), submitted.append(order))
+    owner.strategy.current_market_slug = "next"
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert sequence.index("FAST_FOLLOW_RISK_STATE") < sequence.index("ORDER_FAST_FOLLOW_INTENT")
+    assert sequence.index("ORDER_FAST_FOLLOW_INTENT") < sequence.index("submit_order")
+    assert sequence.index("submit_order") < sequence.index("ORDER_FAST_FOLLOW_SUBMIT")
+
+
+@pytest.mark.parametrize("health", [None, {}, [], {"reason": "ready_missing"}])
+def test_live_fast_follow_malformed_runtime_health_fails_closed(health):
+    strategy = SimpleNamespace(
+        trade_db=SimpleNamespace(runtime_health=lambda: health),
+        trade_db_buy_ready=True,
+    )
+    owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
+
+    assert owner._runtime_journal_ready() is False
+    assert strategy.trade_db_buy_ready is False
+
+
+def test_live_fast_follow_accepts_explicit_ready_runtime_health():
+    strategy = SimpleNamespace(
+        trade_db=SimpleNamespace(runtime_health=lambda: {"ready": True, "reason": "ready"}),
+        trade_db_buy_ready=True,
+    )
+    assert OutcomeFastFollowLive(strategy, FastFollowLiveConfig())._runtime_journal_ready() is True
 
 
 def test_live_fast_follow_applies_execution_penalty_check_by_default_when_bypass_is_disabled():

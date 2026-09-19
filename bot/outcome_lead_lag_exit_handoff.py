@@ -192,7 +192,9 @@ class OutcomeFastFollowLive:
             if not callable(runtime_health):
                 raise RuntimeError("trade journal runtime health is unavailable")
             health = runtime_health()
-            ready = bool(health.get("ready", True))
+            if not isinstance(health, dict) or health.get("ready") is not True:
+                raise RuntimeError("trade journal runtime health is malformed or not ready")
+            ready = True
         except Exception as e:
             ready = False
             health = {"reason": "runtime_health_read_failed", "error": str(e)}
@@ -548,6 +550,7 @@ class OutcomeFastFollowLive:
             "venue_quantity_step": float(venue_quantity_step),
             "l2_precheck": l2_payload,
             "requested_tif": "FOK", "execution_penalty_bypassed": execution_penalty_bypassed, "night_key": night,
+            "instrument_id": str(instrument_id),
             "submit_epoch_ns": time.time_ns(), "submit_monotonic_ns": time.perf_counter_ns(),
         }
         self._attempted_slugs.add(slug)
@@ -557,9 +560,25 @@ class OutcomeFastFollowLive:
             self._rollback_unsubmitted_entry_reservation(slug=slug, night=night, client_order_id=str(coid))
             self._record_blocked(candidate, "risk_state_persist_failed")
             return False
-        # Record the submission before handing it to the venue, exactly as the
-        # maker path does.  If the venue fills but its fill callback is lost,
-        # ghost reconciliation can restore a real cost basis instead of zero.
+        # This is an intent, not venue acceptance.  It closes the crash window
+        # between a durable risk reservation and the FOK reaching the venue.
+        try:
+            self.strategy._db_order_event(
+                event_type="ORDER_FAST_FOLLOW_INTENT", client_order_id=str(coid), side="BUY",
+                price=float(limit_price), qty=float(quantity), status="INTENT",
+                reason="outcome_then_twap_confirmed", instrument_id=str(instrument_id), payload=metadata,
+            )
+        except Exception as e:
+            self.strategy.trade_db_buy_ready = False
+            self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"
+            logger.error(f"Fast-follow intent persistence failed; blocking BUY: {e}")
+        if not self._runtime_journal_ready():
+            self._rollback_unsubmitted_entry_reservation(slug=slug, night=night, client_order_id=str(coid))
+            self._record_blocked(candidate, "fast_follow_intent_persist_failed")
+            return False
+        # Keep local recent-submit state before handing the FOK to the venue.
+        # The durable intent above is the crash-recovery evidence if the venue
+        # fills but its callback and later submission event are both lost.
         inst_key = self.strategy._instrument_key(instrument_id)
         recent_submits = getattr(self.strategy, "recent_buy_submit_by_inst", None)
         if not isinstance(recent_submits, dict):

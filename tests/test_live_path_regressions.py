@@ -1344,6 +1344,65 @@ def test_startup_rehydrate_recovers_cost_basis_from_recent_buy_submit(tmp_path):
     assert state["avg_entry_price"] == Decimal("0.64")
 
 
+def test_startup_rehydrate_uses_fast_follow_intent_only_for_confirmed_external_inventory(tmp_path):
+    class IntentFallbackStrategy(StrategyRecoveryMixin):
+        def __init__(self, confirmed_qty):
+            self.trade_db = TradeJournalDB(str(tmp_path / f"journal-{confirmed_qty}.db"))
+            self.live_inventory_cost = {}
+            self._inventory_delta_shares = Decimal("0")
+            self.current_market_instruments = ["fast-follow-inst"]
+            self.instrument_id = "fast-follow-inst"
+            self.current_market_slug = "btc-updown-15m-test"
+            self._startup_rehydrated_inventory_force_sell_only = False
+            self.confirmed_qty = Decimal(str(confirmed_qty))
+            self.events = []
+
+        @property
+        def inventory_delta_shares(self):
+            return self._inventory_delta_shares
+
+        @inventory_delta_shares.setter
+        def inventory_delta_shares(self, value):
+            self._inventory_delta_shares = Decimal(str(value))
+
+        def _normalize_instrument_id(self, instrument_id):
+            return instrument_id
+
+        def _instrument_key(self, instrument_id):
+            return str(instrument_id)
+
+        def _normalize_side_text(self, side):
+            return str(side or "").upper()
+
+        def _get_sellable_qty_for_current_instrument(self, instrument_id=None):
+            return self.confirmed_qty
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    confirmed = IntentFallbackStrategy("5")
+    confirmed.trade_db.log_order_event(
+        run_id="test", event_type="ORDER_FAST_FOLLOW_INTENT", side="BUY",
+        price=0.61, qty=10, status="INTENT", instrument_id="fast-follow-inst",
+        payload={"instrument_id": "fast-follow-inst", "night_key": "2026-09-08"},
+    )
+    confirmed._rehydrate_inventory_state_on_startup()
+    state = confirmed.live_inventory_cost["fast-follow-inst"]
+    assert state["qty"] == Decimal("5")
+    assert state["avg_entry_price"] == Decimal("0.61")
+    assert state.get("cost_basis_status") != "unknown"
+
+    no_inventory = IntentFallbackStrategy("0")
+    no_inventory.trade_db.log_order_event(
+        run_id="test", event_type="ORDER_FAST_FOLLOW_INTENT", side="BUY",
+        price=0.61, qty=10, status="INTENT", instrument_id="fast-follow-inst",
+        payload={"instrument_id": "fast-follow-inst"},
+    )
+    no_inventory._rehydrate_inventory_state_on_startup()
+    assert no_inventory.live_inventory_cost == {}
+    assert no_inventory.inventory_delta_shares == Decimal("0")
+
+
 def test_market_selection_honors_preferred_current_slug_even_if_cache_closed_flag_is_stale():
     now_ts = int(time.time())
     current_start = now_ts - 20
