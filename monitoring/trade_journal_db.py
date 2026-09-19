@@ -7,6 +7,8 @@ import json
 import math
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -72,23 +74,44 @@ class TradeJournalDB:
     SCHEMA_VERSION = 1
     _REQUIRED_COLUMNS = {
         "strategy_runs": {"run_id", "started_at", "mode", "test_mode", "maker_mode"},
-        "order_events": {"id", "ts", "run_id", "event_type", "side", "price", "qty", "payload_json"},
+        "order_events": {
+            "id", "ts", "run_id", "event_type", "client_order_id", "venue_order_id", "side",
+            "price", "qty", "status", "reason", "instrument_id", "token_id", "fee_rate_bps",
+            "expected_net_usdc", "commission_usdc", "payload_json",
+        },
         "strategy_events": {"id", "ts", "run_id", "event_type", "payload_json"},
     }
 
-    def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None) -> None:
+    def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
+                 backup_interval_sec: float = 30.0) -> None:
         self.db_path = str(Path(db_path))
         default_backup = Path(self.db_path).parent.parent / "backups" / Path(self.db_path).name
         self.backup_path = str(Path(backup_path)) if backup_path else str(default_backup)
         self._existed_at_startup = Path(self.db_path).is_file()
         self._schema_init_error: Optional[str] = None
+        self._runtime_health: Dict[str, Any] = {"ready": True, "reason": "ready"}
+        self._backup_interval_sec = max(1.0, float(backup_interval_sec))
+        self._backup_dirty = False
+        self._last_backup_monotonic = 0.0
+        self._backup_lock = threading.Lock()
+        self._backup_wakeup = threading.Event()
+        self._backup_stop = threading.Event()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
         self._startup_health = self._assess_startup_health()
+        self._backup_thread = threading.Thread(target=self._backup_worker, daemon=True, name="trade-journal-backup")
+        self._backup_thread.start()
 
     def startup_health(self) -> Dict[str, Any]:
         """Return the immutable-at-startup journal gate used for new BUYs."""
         return dict(self._startup_health)
+
+    def runtime_health(self) -> Dict[str, Any]:
+        return dict(self._runtime_health)
+
+    def _mark_runtime_failure(self, reason: str, error: Exception) -> None:
+        self._runtime_health = {"ready": False, "reason": reason, "error": str(error)}
+        logger.error(f"Trade journal runtime failure; new BUYs must be blocked: {error}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -111,6 +134,41 @@ class TradeJournalDB:
             except Exception:
                 pass
             logger.error(f"TradeJournalDB backup failed after write: {e}")
+
+    def _schedule_backup(self) -> None:
+        """Coalesce snapshots off the order/fill callback hot path."""
+        with self._backup_lock:
+            self._backup_dirty = True
+        self._backup_wakeup.set()
+
+    def flush_backup(self) -> None:
+        """Synchronously publish one snapshot; intended for shutdown/tests."""
+        with self._backup_lock:
+            if not self._backup_dirty:
+                return
+            self._backup_dirty = False
+        self._backup_after_write()
+        self._last_backup_monotonic = time.monotonic()
+
+    def _backup_worker(self) -> None:
+        while not self._backup_stop.is_set():
+            self._backup_wakeup.wait(timeout=1.0)
+            self._backup_wakeup.clear()
+            with self._backup_lock:
+                dirty = self._backup_dirty
+            if not dirty:
+                continue
+            elapsed = time.monotonic() - self._last_backup_monotonic
+            if elapsed < self._backup_interval_sec:
+                self._backup_stop.wait(self._backup_interval_sec - elapsed)
+            if not self._backup_stop.is_set():
+                self.flush_backup()
+
+    def stop(self) -> None:
+        self._backup_stop.set()
+        self._backup_wakeup.set()
+        self._backup_thread.join(timeout=2.0)
+        self.flush_backup()
 
     def _init_schema(self) -> None:
         ddl = """
@@ -304,7 +362,7 @@ class TradeJournalDB:
             logger.error(f"TradeJournalDB load_market_guard_counts failed; BUYs must remain blocked: {e}")
             return None
 
-    def load_fast_follow_night_risk(self, night_key: str) -> Dict[str, Any]:
+    def load_fast_follow_night_risk(self, night_key: str) -> Optional[Dict[str, Any]]:
         """Recover filled-entry limits after a process restart.
 
         Older risk snapshots recorded submissions only. Their count is
@@ -348,13 +406,8 @@ class TradeJournalDB:
                 "realized_pnl_usdc": float(payload.get("realized_pnl_usdc") or 0.0),
             }
         except Exception as e:
-            logger.debug(f"TradeJournalDB load_fast_follow_night_risk failed: {e}")
-            return {
-                "filled_entries": 0, "pending_entries": 0,
-                "legacy_attempted_entries": 0, "attempted_entries": 0,
-                "open_position_instruments": [],
-                "realized_pnl_usdc": 0.0,
-            }
+            logger.error(f"TradeJournalDB load_fast_follow_night_risk failed; fast-follow BUYs blocked: {e}")
+            return None
 
     def load_maker_buy_markout_calibration(
         self,
@@ -805,8 +858,9 @@ class TradeJournalDB:
                     ),
                 )
                 conn.commit()
-            self._backup_after_write()
+            self._schedule_backup()
         except Exception as e:
+            self._mark_runtime_failure("write_failed", e)
             logger.debug(f"TradeJournalDB log_strategy_event failed: {e}")
 
     def log_order_event(
@@ -857,8 +911,9 @@ class TradeJournalDB:
                     ),
                 )
                 conn.commit()
-            self._backup_after_write()
+            self._schedule_backup()
         except Exception as e:
+            self._mark_runtime_failure("write_failed", e)
             logger.debug(f"TradeJournalDB log_order_event failed: {e}")
 
     def load_recent_buy_submits(self, instrument_id: str, limit: int = 20) -> list[Dict[str, Any]]:

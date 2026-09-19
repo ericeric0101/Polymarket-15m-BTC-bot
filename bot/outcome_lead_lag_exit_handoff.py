@@ -29,6 +29,7 @@ class FastFollowLiveConfig:
     max_loss_usdc_per_night: Decimal = Decimal("5")
     l2_depth_buffer: Decimal = Decimal("1.20")
     l2_max_age_sec: float = 1.0
+    failed_entry_cooldown_sec: float = 10.0
 
 
 def _night_key(now_ts: float) -> str | None:
@@ -131,6 +132,7 @@ class OutcomeFastFollowLive:
         self._lock = threading.Lock()
         self._pending = None
         self._attempted_slugs: set[str] = set()
+        self._failed_slug_cooldown_until: dict[str, float] = {}
         self._pending_order_ids: dict[str, dict] = {}
         self._position_instruments: set[str] = set()
         # A venue submission is not a trade. Keep completed entry fills
@@ -146,6 +148,10 @@ class OutcomeFastFollowLive:
     def _ensure_night_loaded(self, night: str) -> bool:
         if night in self._loaded_nights:
             return True
+        if not bool(getattr(getattr(self.strategy, "trade_db", None), "runtime_health", lambda: {"ready": True})().get("ready", True)):
+            self.strategy.trade_db_buy_ready = False
+            self.strategy.trade_db_health_reason = "trade_journal_runtime_failure"
+            return False
         if not bool(getattr(self.strategy, "trade_db_buy_ready", True)):
             return False
         loader = getattr(getattr(self.strategy, "trade_db", None), "load_fast_follow_night_risk", None)
@@ -257,11 +263,19 @@ class OutcomeFastFollowLive:
         if night:
             self._night_pending_entry_ids.setdefault(night, set()).discard(client_order_id)
             self._persist_night(night)
+        slug = str(metadata.get("slug") or "")
+        if slug:
+            self._attempted_slugs.discard(slug)
+            self._failed_slug_cooldown_until[slug] = time.time() + self.config.failed_entry_cooldown_sec
 
     def blocks_normal_buy(self, slug: str) -> bool:
         with self._lock:
             pending_slug = getattr(self._pending, "slug", None)
-        return slug in self._attempted_slugs or pending_slug == slug
+        return (
+            slug in self._attempted_slugs
+            or pending_slug == slug
+            or time.time() < self._failed_slug_cooldown_until.get(slug, 0.0)
+        )
 
     def on_fill(self, *, client_order_id: str, side: str, instrument_id: str, realized_net_usdc=None) -> None:
         metadata = self._pending_order_ids.pop(client_order_id, None)
@@ -318,6 +332,9 @@ class OutcomeFastFollowLive:
             return False
         if slug in self._attempted_slugs or int(getattr(self.strategy, "market_buy_count_total_by_slug", {}).get(slug, 0)) > 0:
             self._record_blocked(candidate, "market_already_owned")
+            return False
+        if time.time() < self._failed_slug_cooldown_until.get(slug, 0.0):
+            self._record_blocked(candidate, "failed_fast_follow_cooldown")
             return False
         night = _night_key(now_ts)
         if night is None:

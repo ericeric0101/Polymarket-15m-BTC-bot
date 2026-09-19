@@ -906,6 +906,7 @@ class TakerExitMixin:
             )
             requested_order_kind = "limit"
             venue_order_type = "FOK" if execution_mode == "limit_fok" else "FAK"
+            requested_tif = "FOK" if execution_mode == "limit_fok" else "IOC"
         else:
             order = self.order_factory.market(
                 instrument_id=inst,
@@ -917,6 +918,7 @@ class TakerExitMixin:
             )
             requested_order_kind = "market"
             venue_order_type = "FOK"
+            requested_tif = "IOC"
         self.submit_order(order)
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
@@ -926,7 +928,7 @@ class TakerExitMixin:
             execution_by_id = {}
             self.taker_exit_execution_by_client_order_id = execution_by_id
         execution_by_id[str(coid)] = {
-            "requested_tif": "FOK" if execution_mode == "limit_fok" else "IOC",
+            "requested_tif": requested_tif,
             "requested_order_kind": requested_order_kind,
             "venue_order_type": venue_order_type,
         }
@@ -976,7 +978,7 @@ class TakerExitMixin:
                 "client_order_id": str(coid),
                 "exit_reason": reason,
                 "outcome": "submitted",
-                "requested_tif": "IOC",
+                "requested_tif": requested_tif,
                 "requested_order_kind": requested_order_kind,
                 "venue_order_type": venue_order_type,
                 "best_bid": float(best_bid),

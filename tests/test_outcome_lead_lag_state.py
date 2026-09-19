@@ -350,6 +350,9 @@ def test_live_fast_follow_terminal_fok_failure_releases_reservation_without_coun
 
     assert owner._night_filled_entries[night] == 0
     assert coid not in owner._night_pending_entry_ids[night]
+    assert owner.blocks_normal_buy("s") is True
+    owner._failed_slug_cooldown_until["s"] = 0
+    assert owner.blocks_normal_buy("s") is False
 
 
 def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():

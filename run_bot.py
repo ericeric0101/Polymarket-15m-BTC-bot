@@ -283,6 +283,10 @@ class IntegratedBTCStrategy(
         if not callable(probability_for_outcome) or side not in {"up", "down"}:
             logger.error("Fast-follow economics unavailable: no current directional forecast")
             return False
+        forecast_age_sec = time.time() - float(getattr(forecast, "created_ts", 0.0) or 0.0)
+        if forecast_age_sec < 0 or forecast_age_sec > float(getattr(self, "fast_follow_max_forecast_age_sec", 2.0)):
+            logger.error(f"Fast-follow economics unavailable: stale forecast age={forecast_age_sec:.3f}s")
+            return False
         try:
             result = evaluate_fast_follow_economics(
                 fair_price=Decimal(str(probability_for_outcome(side))),

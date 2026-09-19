@@ -58,10 +58,36 @@ def test_order_event_write_creates_atomic_journal_backup(tmp_path):
     db = TradeJournalDB(path, backup_path=backup_path)
 
     _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    db.flush_backup()
 
     assert backup_path.is_file()
     with sqlite3.connect(backup_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM order_events").fetchone()[0] == 1
+
+
+def test_night_risk_query_error_returns_none_instead_of_zero_risk(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+
+    assert db.load_fast_follow_night_risk("2026-09-08") is None
+
+
+def test_critical_runtime_write_failure_marks_journal_not_buy_ready(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")))
+
+    db.log_order_event(run_id="r", event_type="ORDER_FILLED")
+
+    assert db.runtime_health()["ready"] is False
+    assert db.runtime_health()["reason"] == "write_failed"
+
+
+def test_schema_missing_critical_recovery_column_is_not_buy_ready(tmp_path):
+    path = tmp_path / "partial-journal.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE order_events (id INTEGER, ts TEXT, run_id TEXT, event_type TEXT, side TEXT, price REAL, qty REAL, payload_json TEXT)")
+
+    assert TradeJournalDB(path).startup_health()["reason"] in {"schema_invalid", "schema_init_failed"}
 
 
 class _RecoveryStrategy(StrategyDBRuntimeMixin):

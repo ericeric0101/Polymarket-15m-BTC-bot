@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
+import time
 
 from execution.maker_engine import MakerEngine
 
@@ -33,6 +34,7 @@ class ForecastState:
     standard_up_probability: Decimal
     twap_average_up_probability: Optional[Decimal]
     settlement_model: str
+    created_ts: float = 0.0
 
     @property
     def selected_up_probability(self) -> Decimal:
@@ -76,6 +78,7 @@ class ForecastState:
             "standard_up_probability": self.standard_up_probability,
             "twap_average_up_probability": self.twap_average_up_probability,
             "settlement_model": self.settlement_model,
+            "created_ts": self.created_ts,
         }
 
 
@@ -179,4 +182,5 @@ def build_forecast_state(
         standard_up_probability=standard_up_probability,
         twap_average_up_probability=twap_average_up_probability,
         settlement_model=settlement_model,
+        created_ts=time.time(),
     )

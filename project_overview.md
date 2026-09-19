@@ -28,8 +28,9 @@
   request a FOK BUY, subject to all guards below.
 - The canonical trade journal path is `data/trading/trade_journal.db`; research
   lead/lag and wallet-label databases use `data/research/` and `data/reference/`.
-  Successful strategy/order event writes atomically snapshot the trade journal
-  to `data/backups/trade_journal.db`.
+  Successful strategy/order event writes mark a coalesced background snapshot
+  dirty; it atomically publishes `data/backups/trade_journal.db` without
+  placing a full SQLite backup on the trading callback path.
 - Startup health validates journal existence at process start, required schema
   columns/version and non-empty recovery history. Missing, empty, unreadable or
   incompatible journals fail closed: normal maker and Outcome fast-follow BUYs
@@ -47,6 +48,11 @@
   earlier bypass was added without an enduring economic rationale, so default
   behavior requires a strategy execution-penalty check; an unavailable or
   failing check rejects the fast-follow BUY.
+- A runtime journal write failure immediately marks the journal unhealthy and
+  prevents new BUYs while preserving SELL/stop-loss authority. Fast-follow also
+  requires its cached forecast to be no older than two seconds. A terminal FOK
+  failure releases market ownership after a short cooldown instead of blocking
+  every remaining entry opportunity for that market.
 - `absolute_max_loss_breaker` takes priority over the normal spread guard and
   fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
   existing order and submits the protective exit immediately.

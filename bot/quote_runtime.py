@@ -198,7 +198,8 @@ class QuoteRuntimeMixin:
         if self.inventory_delta_shares <= 0 and self._startup_rehydrated_inventory_force_sell_only:
             self._startup_rehydrated_inventory_force_sell_only = False
         inventory_overage_sell_only = self._inventory_overage_requires_sell_only()
-        journal_forced_sell_only = not bool(getattr(self, "trade_db_buy_ready", True))
+        journal_runtime_ready = getattr(getattr(self, "trade_db", None), "runtime_health", lambda: {"ready": True})().get("ready", True)
+        journal_forced_sell_only = not bool(getattr(self, "trade_db_buy_ready", True)) or not journal_runtime_ready
         if journal_forced_sell_only and time.time() - getattr(self, "_last_trade_db_warn_ts", 0) >= 60:
             logger.error(
                 "Trade journal recovery health is not ready; running SELL-only and blocking maker BUYs: "
