@@ -156,6 +156,7 @@ from bot.models import DecisionPhase, ExitDecisionType, MarketSnapshot, Position
 from bot.quoting import (
     apply_quote_plan_guards,
 )
+from bot.fast_follow_economics import evaluate_fast_follow_economics
 from bot.quote_service import (
     apply_entry_quality_quote_placement,
     parse_quote_plan,
@@ -267,6 +268,38 @@ class IntegratedBTCStrategy(
     StrategyLifecycleMixin,
     Strategy,
 ):
+    def fast_follow_execution_penalty_allows(self, *, candidate, instrument_id, limit_price, quantity) -> bool:
+        """Apply the canonical cached forecast and empirical penalty to a FOK BUY.
+
+        The quote callback is synchronous, so it deliberately consumes only
+        the current forecast produced by the normal quote cycle; it never
+        issues price or fee I/O while deciding whether to send an order.
+        """
+        forecast = getattr(self, "last_forecast_state", None)
+        side = getattr(self._side_for_instrument_id(instrument_id), "value", "NONE").lower()
+        probability_for_outcome = getattr(forecast, "probability_for_outcome", None)
+        penalty = getattr(getattr(self, "maker_engine", None), "config", None)
+        adverse_markout = getattr(penalty, "maker_execution_empirical_adverse_markout_per_share", None)
+        if not callable(probability_for_outcome) or side not in {"up", "down"}:
+            logger.error("Fast-follow economics unavailable: no current directional forecast")
+            return False
+        try:
+            result = evaluate_fast_follow_economics(
+                fair_price=Decimal(str(probability_for_outcome(side))),
+                limit_price=Decimal(str(limit_price)), quantity=Decimal(str(quantity)),
+                adverse_markout_per_share=(Decimal(str(adverse_markout)) if adverse_markout is not None else None),
+                min_expected_net_usdc=Decimal(str(self.maker_min_expected_net_usdc)),
+            )
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            logger.error(f"Fast-follow economics evaluation failed: {exc}")
+            return False
+        self._last_fast_follow_economics = result
+        if not result.allowed:
+            logger.warning(
+                "Fast-follow BUY blocked by economics: "
+                f"reason={result.reason} net={float(result.expected_net_usdc):+.6f}"
+            )
+        return result.allowed
     """
     Integrated BTC Strategy combining:
     - Nautilus trading framework
