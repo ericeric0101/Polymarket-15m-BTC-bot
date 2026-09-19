@@ -141,16 +141,22 @@ DASHBOARD_THEME=light ./.venv/bin/python dashboard.py
 ./.venv/bin/python scripts/replay_journal_signals.py --hours 168
 
 # D.4 markout/regime evidence. It does not change live policy.
-./.venv/bin/python scripts/market_regime_report.py --db logs/trade_journal.db --min-samples 30
+./.venv/bin/python scripts/market_regime_report.py --db data/trading/trade_journal.db --min-samples 30
 
 # Regression suite.
 ./.venv/bin/python -m pytest -q
 ```
 
-`logs/trade_journal.db` is the canonical local strategy/order/fill/settlement
-record. Only real maker-BUY fills count toward D.4 execution-cost selection;
+`data/trading/trade_journal.db` is the canonical local strategy/order/fill/settlement
+record; `data/backups/trade_journal.db` is its atomic local snapshot. A missing,
+empty, unreadable, or incompatible journal starts the bot in SELL-only mode.
+Only real maker-BUY fills count toward D.4 execution-cost selection;
 dry-run shadow fills are useful diagnostics but do not replace live-fill
 evidence.
+
+Outcome lead/lag is currently configured as `OUTCOME_LEAD_LAG_MODE=live_entry_only`.
+Fast-follow entries require a healthy journal, fresh post-reconnect data, and the
+normal execution-penalty check; bypass is disabled by default.
 
 The Telegram controller is optional and requires both `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_OWNER_CHAT_ID`. Notification delivery is asynchronous and serialized

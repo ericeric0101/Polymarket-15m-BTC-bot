@@ -1235,6 +1235,19 @@ def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
     assert strategy.strategy_events[0][0] == "STARTUP_INVENTORY_REHYDRATED"
 
 
+def test_startup_rehydrate_without_journal_cost_basis_marks_cost_unknown_and_sell_only():
+    strategy = DummyStrategyForRehydrate()
+    strategy._rebuild_inventory_state_from_db = lambda *_args, **_kwargs: None
+
+    IntegratedBTCStrategy._rehydrate_inventory_state_on_startup(strategy)
+
+    state = strategy.live_inventory_cost["inst-up"]
+    assert strategy._startup_rehydrated_inventory_force_sell_only is True
+    assert state["avg_entry_price"] == Decimal("0")
+    assert state["cost_basis_status"] == "unknown"
+    assert strategy.strategy_events[0][1]["legs"][0]["cost_basis_status"] == "unknown"
+
+
 def test_startup_rehydrate_recovers_cost_basis_from_recent_buy_submit(tmp_path):
     class SubmitFallbackStrategy(StrategyRecoveryMixin):
         def __init__(self) -> None:

@@ -7,9 +7,13 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from decimal import Decimal
+from types import SimpleNamespace
+import asyncio
 from bot.exit_engine import ExitPolicyEngine, ExitEngineConfig, ExitDecisionType
 from bot.models import MarketSnapshot, PositionState, SignalDecision
 from execution.exit_policy import ExitStage
+from bot.enums import ActiveSide
+from bot.taker_exit import TakerExitMixin
 
 
 def _make_config(**overrides):
@@ -134,6 +138,74 @@ def test_exact_gap_scenario_fires_breaker():
     print(f"  net_if_exit={result.net_if_exit:.4f}")
     print(f"  metadata: absolute_max_loss_usdc={result.metadata['absolute_max_loss_usdc']}, "
           f"best_bid={result.metadata['best_bid']}")
+
+
+class _BreakerExitHost(TakerExitMixin):
+    def __init__(self):
+        now = 10_000.0
+        self.taker_exit_enabled = True
+        self.hold_to_redeem_enabled = False
+        self.taker_exit_only_after_invalidation = False
+        self.taker_exit_cooldown_sec = 0
+        self.taker_exit_eval_interval_sec = 0
+        self.taker_exit_last_eval_ts_by_inst = {}
+        self.taker_exit_reject_cooldown_until_by_inst = {}
+        self.taker_exit_tail_attempted_by_inst = {}
+        self.pending_taker_exit_by_inst = {}
+        self.last_taker_exit_ts_by_inst = {}
+        self.taker_exit_stop_loss_hits_by_inst = {}
+        self._stop_loss_execution_priority_by_inst = {}
+        self.current_market_end_timestamp = now + 300
+        self.current_market_slug = "breaker-test"
+        self.market_strike_cache_by_slug = {}
+        self.maker_reduce_only_no_new_sell_last_sec = 0
+        self.taker_exit_disable_stop_loss_last_sec = 0
+        self.endgame_twap_exit_enabled = False
+        self.live_inventory_cost = {"up": {"qty": Decimal("5.3"), "avg_entry_price": Decimal("0.69"), "opened_ts": now - 90}}
+        self.active_maker_orders = {"sell:up": {"created_ts": now - 1, "pending_cancel": False}}
+        self.maker_exchange_min_shares = Decimal("5")
+        self.taker_exit_slippage_buffer_pct = Decimal("0.002")
+        self.taker_exit_stop_loss_max_spread_pct = Decimal("0.03")
+        self.taker_exit_stop_loss_confirmations = 2
+        self.taker_exit_stop_loss_usdc = Decimal("0.50")
+        self.taker_exit_wait_for_sell_quote_sec = 20
+        self.taker_exit_max_hold_near_close_sec = 0
+        self.maker_high_cost_exit_cooldown_enabled = False
+        self.high_cost_exit_cooldown_until_by_inst = {}
+        self.market_phase = "ACTIVE"
+        self.active_side = ActiveSide.UP
+        self.side_decision_score = Decimal("0.30")
+        self.active_side_locked = True
+        self.side_decision_reason = "healthy"
+        self.maker_profit_run_peak_bid_by_inst = {}
+        self.maker_profit_run_peak_fair_by_inst = {}
+        self.exit_policy = SimpleNamespace(stage=lambda _time_left: ExitStage.PASSIVE)
+        self.exit_policy_engine = ExitPolicyEngine(_make_config())
+        self.submissions = []
+
+    def _maker_quote_instruments(self): return ["up"]
+    def _instrument_key(self, inst): return str(inst)
+    def _order_key_for(self, side, inst): return f"{side}:{inst}"
+    def _normalize_instrument_id(self, inst): return inst
+    def _get_quote_for_instrument(self, _inst): return Decimal("0.41"), Decimal("0.45")
+    def _side_for_instrument_id(self, _inst): return ActiveSide.UP
+    def _instrument_for_side(self, side): return "up" if side == ActiveSide.UP else None
+    def _extract_token_id_from_instrument(self, _inst): return None
+    async def _get_dynamic_fee_rate(self, **_kwargs): return Decimal("0")
+    def _infer_market_fee_rate_default(self): return Decimal("0")
+    def _is_emergency_exit_window(self, _time_left): return False
+    def _get_effective_sellable_qty(self, **_kwargs): return Decimal("5.3")
+    def _submit_taker_exit_order(self, **kwargs): self.submissions.append(kwargs); return True
+
+
+def test_absolute_breaker_bypasses_wide_spread_and_fresh_existing_sell():
+    host = _BreakerExitHost()
+
+    asyncio.run(host._maybe_taker_exit_positions(10_000.0, is_simulation=False))
+
+    assert len(host.submissions) == 1
+    assert host.submissions[0]["reason"] == "stop_loss"
+    assert host.submissions[0]["decision_payload"]["decision_reason"] == "absolute_max_loss_breaker"
 
 
 # =========================================================================

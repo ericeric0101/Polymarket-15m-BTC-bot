@@ -9,6 +9,11 @@ from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 
 
 class StrategyDBRuntimeMixin:
+    def _block_new_buys_for_trade_db(self, reason: str) -> None:
+        self.trade_db_buy_ready = False
+        self.trade_db_health_reason = str(reason)
+        logger.error(f"Trade journal is not safe for restart recovery; blocking new BUYs: reason={reason}")
+
     def _apply_empirical_execution_penalty_calibration(self) -> None:
         """Replace synthetic entry stress with observed maker BUY adverse markouts."""
         engine = getattr(self, "maker_engine", None)
@@ -125,8 +130,15 @@ class StrategyDBRuntimeMixin:
     def _restore_market_risk_guards_from_trade_db_on_startup(self) -> None:
         if not self.trade_db or not self.current_market_slug:
             return
+        health = getattr(self.trade_db, "startup_health", lambda: {"ready": True})()
+        if not health.get("ready", False):
+            self._block_new_buys_for_trade_db(str(health.get("reason") or "startup_healthcheck_failed"))
+            return
         slug = str(self.current_market_slug)
         counts = self.trade_db.load_market_guard_counts(slug)
+        if counts is None:
+            self._block_new_buys_for_trade_db("risk_guard_query_failed")
+            return
         buy_count = int(counts.get("buy_count", 0))
         protective_exit_count = int(counts.get("protective_exit_count", 0))
         if buy_count <= 0 and protective_exit_count <= 0:

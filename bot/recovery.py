@@ -212,6 +212,7 @@ class StrategyRecoveryMixin:
                     "avg_entry_price": Decimal("0"),
                     "entry_fee_remaining": Decimal("0"),
                     "opened_ts": time.time(),
+                    "cost_basis_status": "unknown",
                 }
                 logger.warning(
                     f"Inventory rehydrate fallback: restored qty without cost basis "
@@ -224,6 +225,7 @@ class StrategyRecoveryMixin:
                     "instrument_id": self._instrument_key(inst),
                     "qty": float(Decimal(str(state.get("qty", "0")))),
                     "avg_entry_price": float(Decimal(str(state.get("avg_entry_price", "0")))),
+                    "cost_basis_status": str(state.get("cost_basis_status") or "recovered"),
                 }
             )
 

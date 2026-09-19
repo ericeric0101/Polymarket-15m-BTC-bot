@@ -785,12 +785,14 @@ class TakerExitMixin:
             self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
             self._stop_loss_execution_priority_by_inst[inst_key] = True
             trigger = "offside_near_close" if force_offside_near_close else "stop_loss"
+            absolute_max_loss_breaker = exit_decision.reason == "absolute_max_loss_breaker"
 
             # Avoid paying taker costs into a wide spread unless it's an emergency path.
             if (
                 trigger == "stop_loss"
                 and spread_pct > self.taker_exit_stop_loss_max_spread_pct
                 and not in_reduce_only_tail
+                and not absolute_max_loss_breaker
             ):
                 self._log_taker_exit_skip_throttled(
                     inst_key=inst_key,
@@ -813,6 +815,7 @@ class TakerExitMixin:
                     and not pending_cancel
                     and created_ts > 0
                     and (now_ts - created_ts) < float(self.taker_exit_wait_for_sell_quote_sec)
+                    and not absolute_max_loss_breaker
                 ):
                     self._log_taker_exit_skip_throttled(
                         inst_key=inst_key,

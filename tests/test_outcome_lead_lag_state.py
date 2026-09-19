@@ -42,6 +42,7 @@ def test_state_requires_twap_to_follow_after_outcome_before_live_confirmation():
         shock_cents=500, residual_cents=300, debounce_ticks=2,
         baseline_warmup_samples=1, follower_confirm_cents=100,
         follower_confirm_window_ms=5_000,
+        max_outcome_return_interval_ms=6_000,
     ))
     state.apply(tick("polymarket_twap", 7_700_000, 0))
     state.apply(tick("outcome_btc_mark", 7_700_000, 0))
@@ -59,19 +60,20 @@ def test_state_preserves_outcome_debounce_across_frequent_twap_ticks():
     state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
         shock_cents=500, residual_cents=300, debounce_ticks=2,
         baseline_warmup_samples=1, follower_confirm_cents=100,
+        max_outcome_return_interval_ms=6_000,
         follower_confirm_window_ms=5_000,
     ))
     state.apply(tick("polymarket_twap", 7_700_000, 0))
     state.apply(tick("outcome_btc_mark", 7_700_000, 100))
     # Establish the one-sample basis before the first shock.
     state.apply(tick("polymarket_twap", 7_700_000, 4_900))
-    first = state.apply(tick("outcome_btc_mark", 7_700_600, 5_000))
+    first = state.apply(tick("outcome_btc_mark", 7_703_000, 5_000))
     assert first.state == "adverse_candidate"
     # These are individually too far from the last Outcome tick to form a
     # new pair.  They must remain fail-closed but retain the debounce state.
     assert state.apply(tick("polymarket_twap", 7_700_000, 6_200)).reason == "waiting_for_outcome_refresh"
     assert state.apply(tick("polymarket_twap", 7_700_000, 9_800)).reason == "waiting_for_outcome_refresh"
-    second = state.apply(tick("outcome_btc_mark", 7_701_200, 10_000))
+    second = state.apply(tick("outcome_btc_mark", 7_706_000, 10_000))
     assert second.state == "adverse_confirmed"
     # The post-arm TWAP move is allowed to use the frozen, already verified
     # follower baseline for the short confirmation window.
@@ -83,17 +85,18 @@ def test_state_auxiliary_references_cannot_clear_outcome_debounce_or_arm():
     state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
         shock_cents=500, residual_cents=300, debounce_ticks=2,
         baseline_warmup_samples=1, follower_confirm_cents=100,
+        max_outcome_return_interval_ms=6_000,
     ))
     state.apply(tick("polymarket_twap", 7_700_000, 0))
     state.apply(tick("outcome_btc_mark", 7_700_000, 100))
     state.apply(tick("polymarket_twap", 7_700_000, 4_900))
-    assert state.apply(tick("outcome_btc_mark", 7_700_600, 5_000)).state == "adverse_candidate"
+    assert state.apply(tick("outcome_btc_mark", 7_703_000, 5_000)).state == "adverse_candidate"
     # These sources remain durable research observations but are not valid
     # settlement followers and must have no execution-state authority.
     assert state.apply(tick("binance", 7_700_000, 5_200)).reason == "non_signal_reference"
     assert state.apply(tick("polymarket_bbo", 7_700_000, 5_300)).reason == "non_signal_reference"
     state.apply(tick("polymarket_twap", 7_700_000, 9_800))
-    assert state.apply(tick("outcome_btc_mark", 7_701_200, 10_000)).state == "adverse_confirmed"
+    assert state.apply(tick("outcome_btc_mark", 7_706_000, 10_000)).state == "adverse_confirmed"
     assert state.apply(tick("polymarket_twap", 7_700_100, 10_300)).state == "follower_confirmed"
 
 
@@ -111,6 +114,23 @@ def test_state_expires_armed_signal_before_late_twap_can_confirm():
     assert late.state != "follower_confirmed"
 
 
+def test_state_does_not_arm_fast_follow_when_outcome_return_interval_exceeds_limit():
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=500, residual_cents=300, debounce_ticks=1,
+        baseline_warmup_samples=1, max_outcome_return_interval_ms=2_000,
+    ))
+    state.apply(tick("polymarket_twap", 7_700_000, 0))
+    state.apply(tick("outcome_btc_mark", 7_700_000, 0))
+    state.apply(tick("polymarket_twap", 7_700_000, 4_900))
+
+    delayed = state.apply(tick("outcome_btc_mark", 7_700_600, 5_000))
+
+    assert delayed.state == "observe"
+    assert delayed.reason == "low_confidence_outcome_interval"
+    assert delayed.outcome_interval_ms == 5_000
+    assert not state.apply(tick("polymarket_twap", 7_700_100, 5_100)).state == "follower_confirmed"
+
+
 def test_state_fails_closed_for_out_of_order_and_stale_sources():
     state = OutcomeLeadLagState()
     state.apply(tick("outcome_btc_mark", 1_000, 1_000))
@@ -119,6 +139,25 @@ def test_state_fails_closed_for_out_of_order_and_stale_sources():
     # A stale TWAP is ignored fail-closed without destroying valid Outcome
     # persistence; the next Outcome tick will require a fresh pair.
     assert state.apply(tick("polymarket_twap", 1_100, 1_000)).reason == "waiting_for_outcome_refresh"
+
+
+def test_state_requires_new_warmup_after_outcome_connection_epoch_changes():
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=100, residual_cents=100, debounce_ticks=1, baseline_warmup_samples=1,
+    ))
+    state.apply(tick("polymarket_twap", 1_000, 0))
+    state.apply(tick("outcome_btc_mark", 1_000, 0))
+    state.apply(tick("polymarket_twap", 1_000, 900))
+    state.apply(tick("outcome_btc_mark", 1_200, 1_000))
+
+    reconnected = state.apply(ReferenceTick(
+        source="outcome_btc_mark", price_cents=1_400,
+        received_epoch_ns=1_100_000_000, received_monotonic_ns=1_100_000_000,
+        connection_epoch=1,
+    ))
+
+    assert reconnected.state == "unavailable"
+    assert reconnected.reason == "cross_epoch"
 
 
 def test_runtime_records_only_shadow_candidates_and_handoff_is_disabled():
@@ -238,6 +277,8 @@ def _live_harness(*, ask: Decimal):
         maker_high_entry_price_size_adjust_threshold=Decimal("0.70"),
         maker_high_entry_price_size_adjust_multiplier=Decimal("0.55"),
         _cached_usdc_balance=Decimal("100"), active_maker_orders={}, order_factory=Factory(),
+        trade_db_buy_ready=True,
+        outcome_bypass_execution_penalty=True,
         _twap_reference_degraded=False,
         _market_strike_is_entry_eligible=lambda _slug: True,
         cache=SimpleNamespace(instrument=lambda _inst: instrument, order_book=lambda _inst: book),
@@ -398,6 +439,49 @@ def test_live_fast_follow_never_buys_when_global_maker_kill_switch_is_on():
     assert len(submitted) == 1
     assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "maker_kill_switch_on"
                for event, payload in events)
+
+
+def test_live_fast_follow_never_buys_when_trade_journal_is_not_ready():
+    owner, submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"))
+    owner.strategy.current_market_slug = "next"
+    owner.strategy.trade_db_buy_ready = False
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 1
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "trade_journal_unhealthy"
+               for event, payload in events)
+
+
+def test_live_fast_follow_applies_execution_penalty_check_by_default_when_bypass_is_disabled():
+    owner, submitted, kwargs, _events = _live_harness(ask=Decimal("0.60"))
+    owner.strategy.current_market_slug = "next"
+    owner.strategy.outcome_bypass_execution_penalty = False
+    checks = []
+    owner.strategy.fast_follow_execution_penalty_allows = lambda **payload: checks.append(payload) or True
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 2
+    assert checks and checks[0]["limit_price"] == Decimal("0.61")
+    assert kwargs[-1]["time_in_force"].name == "FOK"
+    assert owner.order_metadata(str(kwargs[-1]["client_order_id"]))["execution_penalty_bypassed"] is False
 
 
 def test_entry_only_fast_follow_never_sells_an_opposite_existing_position():

@@ -21,6 +21,36 @@
   recommendations.  Their reachability or operational use cannot be proven
   from static source/CI inspection alone.
 
+## Current resilience controls (implemented 2026-09-19)
+
+- `OUTCOME_LEAD_LAG_MODE=live_entry_only` is the active profile behavior. It is
+  no longer documentation-only observability: an Outcome/TWAP confirmation can
+  request a FOK BUY, subject to all guards below.
+- The canonical trade journal path is `data/trading/trade_journal.db`; research
+  lead/lag and wallet-label databases use `data/research/` and `data/reference/`.
+  Successful strategy/order event writes atomically snapshot the trade journal
+  to `data/backups/trade_journal.db`.
+- Startup health validates journal existence at process start, required schema
+  columns/version and non-empty recovery history. Missing, empty, unreadable or
+  incompatible journals fail closed: normal maker and Outcome fast-follow BUYs
+  are blocked while exits remain available. A recovered on-chain position with
+  no cost basis is explicitly labelled `cost_basis_status=unknown` and starts
+  SELL-only.
+- Outcome returns are normalized by their actual elapsed interval. The current
+  provisional limit is 2 seconds (`OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS`);
+  a longer interval is low-confidence and cannot arm fast-follow. The interval
+  is logged/persisted for future calibration. This threshold is a safe default,
+  not yet a cadence-validated production parameter.
+- An Outcome reconnect carries a new connection epoch. Cross-epoch state is
+  discarded and must warm up again before it can create a candidate.
+- `OUTCOME_BYPASS_EXECUTION_PENALTY` defaults to `false`. Git history showed the
+  earlier bypass was added without an enduring economic rationale, so default
+  behavior requires a strategy execution-penalty check; an unavailable or
+  failing check rejects the fast-follow BUY.
+- `absolute_max_loss_breaker` takes priority over the normal spread guard and
+  fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
+  existing order and submits the protective exit immediately.
+
 ## 1. End-to-end trading lifecycle
 
 ### Control flow
@@ -586,8 +616,10 @@ BBO and the Polymarket UP mid remain raw diagnostic fields only; they are not
 the lead/lag outcome and their incompatible strikes/horizons must never be
 treated as comparable probabilities. It groups by strategy run, Polymarket
 slug and Outcome id, preserving zero/non-following observations and excluding
-stale or gapped price pairs. This is collection and research only: it has no
-wallet, order, stop-loss, confidence, `robust_net`, or entry-gate connection.
+stale or gapped price pairs. This historical observability description is
+superseded by **Current resilience controls (implemented 2026-09-19)** above:
+the configured `live_entry_only` path may request an entry only after its
+separate journal, timing, reconnect, L2 and economics guards pass.
 
 **Outcome WebSocket reliability guard (2026-09-11):** Hyperliquid may close
 mainnet WebSocket sessions and requires clients to reconnect gracefully. The

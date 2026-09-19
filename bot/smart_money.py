@@ -69,7 +69,7 @@ class SmartMoneyConfig:
     bot_size_cv_threshold: float = 0.05
     min_wallet_trades: int = 3
     directional_min_cash: float = 20.0
-    wallet_db_path: str = "./logs/smart_money_wallets.db"
+    wallet_db_path: str = "./data/reference/smart_money_wallets.db"
     wallet_label_cache_ttl_sec: float = 60.0
     weight_smart: float = 2.0
     weight_directional: float = 1.0

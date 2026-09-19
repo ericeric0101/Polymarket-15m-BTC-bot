@@ -1,6 +1,7 @@
 from decimal import Decimal
 from types import SimpleNamespace
 from datetime import datetime, timezone
+import sqlite3
 
 import bot.db_runtime as db_runtime
 from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
@@ -19,6 +20,48 @@ def _fill(db, *, slug, order_id, side, price, qty, fee=0.0):
         qty=qty,
         payload={"slug": slug, "effective_fee_usdc": fee},
     )
+
+
+def test_missing_journal_created_at_startup_is_not_buy_ready(tmp_path):
+    db = TradeJournalDB(tmp_path / "missing-journal.db")
+
+    health = db.startup_health()
+
+    assert health["ready"] is False
+    assert health["reason"] == "missing_at_startup"
+
+
+def test_existing_empty_journal_is_not_buy_ready(tmp_path):
+    path = tmp_path / "empty-journal.db"
+    TradeJournalDB(path)
+
+    health = TradeJournalDB(path).startup_health()
+
+    assert health["ready"] is False
+    assert health["reason"] == "empty_journal"
+
+
+def test_legacy_journal_schema_is_not_buy_ready(tmp_path):
+    path = tmp_path / "legacy-journal.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE strategy_runs (run_id TEXT PRIMARY KEY)")
+
+    health = TradeJournalDB(path).startup_health()
+
+    assert health["ready"] is False
+    assert health["reason"] == "schema_invalid"
+
+
+def test_order_event_write_creates_atomic_journal_backup(tmp_path):
+    path = tmp_path / "trading" / "trade_journal.db"
+    backup_path = tmp_path / "backups" / "trade_journal.db"
+    db = TradeJournalDB(path, backup_path=backup_path)
+
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM order_events").fetchone()[0] == 1
 
 
 class _RecoveryStrategy(StrategyDBRuntimeMixin):

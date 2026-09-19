@@ -64,7 +64,7 @@ class HyperliquidOutcomeObserver:
         market_id: Optional[int] = None,
         ws_url: Optional[str] = None,
         authority_path: Optional[str] = None,
-        tick_listener: Optional[Callable[[float, int], None]] = None,
+        tick_listener: Optional[Callable[[float, int, int], None]] = None,
         lifecycle_listener: Optional[Callable[[str, dict[str, Any]], None]] = None,
     ) -> None:
         self.market_id = int(market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID", "1313"))
@@ -87,7 +87,7 @@ class HyperliquidOutcomeObserver:
                 "available": False, "analysis_available": False, "stream_connected": False,
                 "source": "hyperliquid_outcome_mainnet_ws", "market_id": self.market_id,
                 "side0_coin": side0, "side1_coin": side1, "reason": reason,
-                "stream_ready": False, "connection_attempt_count": 0,
+                "stream_ready": False, "connection_attempt_count": 0, "connection_epoch": 0,
                 "disconnect_count": 0, "consecutive_disconnects": 0,
                 "reconnect_delay_sec": None,
             }
@@ -205,7 +205,7 @@ class HyperliquidOutcomeObserver:
                     self._merge(last_valid_data_ts=now_ts, stream_ready=True, reason=None)
                 if btc_mark is not None and self._tick_listener is not None:
                     try:
-                        self._tick_listener(btc_mark, self.market_id)
+                        self._tick_listener(btc_mark, self.market_id, int(self._snapshot.get("connection_epoch", 0)))
                     except Exception:
                         pass
         elif channel == "l2Book" and isinstance(data, dict):
@@ -244,9 +244,12 @@ class HyperliquidOutcomeObserver:
                     ping_timeout=10,
                 ) as ws:
                     connected_ts = time.time()
+                    with self._lock:
+                        connection_epoch = int(self._snapshot.get("connection_epoch", 0)) + 1
                     self._merge(
                         stream_connected=True, connected_ts=connected_ts, reason=None,
                         last_app_ping_ts=None, last_app_pong_ts=None, reconnect_delay_sec=None,
+                        connection_epoch=connection_epoch,
                     )
                     self._emit_lifecycle("connected", attempt=connection_attempt_count)
                     for subscription in ({"type": "allMids"}, {"type": "l2Book", "coin": side0_coin}, {"type": "l2Book", "coin": side1_coin}):

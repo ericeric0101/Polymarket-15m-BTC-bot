@@ -143,11 +143,18 @@ class OutcomeFastFollowLive:
         self._loaded_nights: set[str] = set()
         self._blocked_candidate_reasons: set[tuple[int, str]] = set()
 
-    def _ensure_night_loaded(self, night: str) -> None:
+    def _ensure_night_loaded(self, night: str) -> bool:
         if night in self._loaded_nights:
-            return
+            return True
+        if not bool(getattr(self.strategy, "trade_db_buy_ready", True)):
+            return False
         loader = getattr(getattr(self.strategy, "trade_db", None), "load_fast_follow_night_risk", None)
         recovered = loader(night) if loader is not None else {}
+        if recovered is None:
+            self.strategy.trade_db_buy_ready = False
+            self.strategy.trade_db_health_reason = "night_risk_query_failed"
+            logger.error("Trade journal night-risk lookup failed; blocking fast-follow BUYs")
+            return False
         # Old journals counted submissions, not fills. They cannot reliably
         # distinguish rejected FOKs, so use them conservatively only while
         # bridging an already-started legacy night.
@@ -171,6 +178,7 @@ class OutcomeFastFollowLive:
             Decimal(str(recovered.get("realized_pnl_usdc") or "0")),
         )
         self._loaded_nights.add(night)
+        return True
 
     def _persist_night(self, night: str) -> None:
         self.strategy._db_strategy_event("FAST_FOLLOW_RISK_STATE", {
@@ -199,7 +207,11 @@ class OutcomeFastFollowLive:
                 "max_entries": self.config.max_entries_per_night,
                 "realized_pnl_usdc": 0.0,
             }
-        self._ensure_night_loaded(night)
+        if not self._ensure_night_loaded(night):
+            return {
+                "night_key": night, "filled_entries": 0, "pending_entries": 0,
+                "max_entries": self.config.max_entries_per_night, "realized_pnl_usdc": 0.0,
+            }
         return {
             "night_key": night,
             "filled_entries": self._night_filled_entries.get(night, 0),
@@ -300,6 +312,10 @@ class OutcomeFastFollowLive:
         if bool(getattr(self.strategy, "maker_kill_switch", False)):
             self._record_blocked(candidate, "maker_kill_switch_on")
             return False
+        if not bool(getattr(self.strategy, "trade_db_buy_ready", True)):
+            self._record_blocked(candidate, "trade_journal_unhealthy",
+                                 reason_detail=str(getattr(self.strategy, "trade_db_health_reason", "unknown")))
+            return False
         if slug in self._attempted_slugs or int(getattr(self.strategy, "market_buy_count_total_by_slug", {}).get(slug, 0)) > 0:
             self._record_blocked(candidate, "market_already_owned")
             return False
@@ -307,7 +323,9 @@ class OutcomeFastFollowLive:
         if night is None:
             self._record_blocked(candidate, "outside_taipei_weeknight_session")
             return False
-        self._ensure_night_loaded(night)
+        if not self._ensure_night_loaded(night):
+            self._record_blocked(candidate, "trade_journal_unhealthy", reason_detail="night_risk_query_failed")
+            return False
         filled_entries = self._night_filled_entries.get(night, 0)
         pending_entries = len(self._night_pending_entry_ids.get(night, set()))
         if filled_entries + pending_entries >= self.config.max_entries_per_night:
@@ -442,6 +460,24 @@ class OutcomeFastFollowLive:
             self._record_blocked(candidate, "l2_fok_depth_insufficient", **l2_payload)
             return False
 
+        execution_penalty_bypassed = bool(
+            getattr(self.strategy, "outcome_bypass_execution_penalty", False)
+        )
+        if not execution_penalty_bypassed:
+            check = getattr(self.strategy, "fast_follow_execution_penalty_allows", None)
+            allowed = False
+            if callable(check):
+                try:
+                    allowed = bool(check(
+                        candidate=candidate, instrument_id=instrument_id,
+                        limit_price=limit_price, quantity=quantity,
+                    ))
+                except Exception as e:
+                    logger.error(f"Outcome execution-penalty check failed; blocking BUY: {e}")
+            if not allowed:
+                self._record_blocked(candidate, "execution_penalty_check_failed")
+                return False
+
         coid = ClientOrderId(f"BTC-15M-FAST-FOLLOW-BUY-{int(now_ts * 1000)}")
         order = self.strategy.order_factory.limit(
             instrument_id=instrument_id,
@@ -460,7 +496,7 @@ class OutcomeFastFollowLive:
             "requested_quantity": float(requested_quantity),
             "venue_quantity_step": float(venue_quantity_step),
             "l2_precheck": l2_payload,
-            "requested_tif": "FOK", "execution_penalty_bypassed": True, "night_key": night,
+            "requested_tif": "FOK", "execution_penalty_bypassed": execution_penalty_bypassed, "night_key": night,
             "submit_epoch_ns": time.time_ns(), "submit_monotonic_ns": time.perf_counter_ns(),
         }
         self._attempted_slugs.add(slug)

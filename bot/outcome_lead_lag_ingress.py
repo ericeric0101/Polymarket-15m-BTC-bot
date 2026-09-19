@@ -7,7 +7,7 @@ from decimal import Decimal
 from bot.outcome_lead_lag_types import ReferenceTick
 
 
-def publish_strategy_tick(strategy, *, source: str, price, source_event_ts_ms: int | None = None, bid=None, ask=None, bid_size=None, ask_size=None) -> None:
+def publish_strategy_tick(strategy, *, source: str, price, source_event_ts_ms: int | None = None, bid=None, ask=None, bid_size=None, ask_size=None, connection_epoch: int = 0) -> None:
     runtime = getattr(strategy, "outcome_lead_lag_runtime", None)
     if runtime is None:
         return
@@ -23,6 +23,7 @@ def publish_strategy_tick(strategy, *, source: str, price, source_event_ts_ms: i
             source_event_ts_ms=source_event_ts_ms, run_id=str(getattr(strategy, "run_id", "")),
             slug=str(getattr(strategy, "current_market_slug", "") or ""),
             market_id=(getattr(observer, "market_id", None) if source == "outcome_btc_mark" else None),
+            connection_epoch=int(connection_epoch),
             bid_cents=cents(bid), ask_cents=cents(ask), bid_size_e6=scale(bid_size), ask_size_e6=scale(ask_size),
         ))
     except (ArithmeticError, TypeError, ValueError):

@@ -509,6 +509,8 @@ class OutcomeLeadLagConfig:
     compact_retention_days: int
     follower_confirm_window_ms: int
     follower_confirm_cents: int
+    max_outcome_return_interval_ms: int
+    bypass_execution_penalty: bool
     live_signal_ttl_ms: int
     live_max_entry_price: Decimal
     live_max_slippage_ticks: int
@@ -718,7 +720,7 @@ class AppConfig:
                 ),
                 smart_money_wallet_db_path=_env_str(
                     "SMART_MONEY_WALLET_DB_PATH",
-                    "./logs/smart_money_wallets.db",
+                    "./data/reference/smart_money_wallets.db",
                 ),
                 smart_money_wallet_label_cache_ttl_sec=max(
                     1.0,
@@ -1081,7 +1083,7 @@ class AppConfig:
                 sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 10.0)),
                 sell_balance_retry_pause_sec=max(1.0, _env_float("SELL_BALANCE_RETRY_PAUSE_SEC", 3.0)),
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
-                trade_db_path=_env_str("TRADE_DB_PATH", "./logs/trade_journal.db"),
+                trade_db_path=_env_str("TRADE_DB_PATH", "./data/trading/trade_journal.db"),
                 shadow_simulation_enabled=_env_bool_inverted("SHADOW_SIMULATION_ENABLED", True),
                 fair_edge_bucket_shadow_enabled=_env_bool_inverted("FAIR_EDGE_BUCKET_SHADOW_ENABLED", True),
                 shadow_simulation_fill_timeout_sec=max(
@@ -1111,6 +1113,10 @@ class AppConfig:
                 compact_retention_days=max(7, _env_int("OUTCOME_LEAD_LAG_COMPACT_RETENTION_DAYS", 90)),
                 follower_confirm_window_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_WINDOW_MS", 5000)),
                 follower_confirm_cents=max(1, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_CENTS", 100)),
+                max_outcome_return_interval_ms=max(
+                    250, _env_int("OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS", 2000)
+                ),
+                bypass_execution_penalty=_env_bool("OUTCOME_BYPASS_EXECUTION_PENALTY", False),
                 live_signal_ttl_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS", 6000)),
                 live_max_entry_price=_env_decimal("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE", "0.90"),
                 live_max_slippage_ticks=max(0, _env_int("OUTCOME_FAST_FOLLOW_MAX_SLIPPAGE_TICKS", 1)),

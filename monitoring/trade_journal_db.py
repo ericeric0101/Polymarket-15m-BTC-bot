@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -68,16 +69,48 @@ class TradeJournalDB:
     - Never raises to strategy path; logs and continues
     """
 
-    def __init__(self, db_path: str = "./logs/trade_journal.db") -> None:
+    SCHEMA_VERSION = 1
+    _REQUIRED_COLUMNS = {
+        "strategy_runs": {"run_id", "started_at", "mode", "test_mode", "maker_mode"},
+        "order_events": {"id", "ts", "run_id", "event_type", "side", "price", "qty", "payload_json"},
+        "strategy_events": {"id", "ts", "run_id", "event_type", "payload_json"},
+    }
+
+    def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None) -> None:
         self.db_path = str(Path(db_path))
+        default_backup = Path(self.db_path).parent.parent / "backups" / Path(self.db_path).name
+        self.backup_path = str(Path(backup_path)) if backup_path else str(default_backup)
+        self._existed_at_startup = Path(self.db_path).is_file()
+        self._schema_init_error: Optional[str] = None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+        self._startup_health = self._assess_startup_health()
+
+    def startup_health(self) -> Dict[str, Any]:
+        """Return the immutable-at-startup journal gate used for new BUYs."""
+        return dict(self._startup_health)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
+
+    def _backup_after_write(self) -> None:
+        """Snapshot through SQLite's backup API, then atomically publish it."""
+        backup = Path(self.backup_path)
+        temporary = backup.with_name(f".{backup.name}.tmp")
+        try:
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            with self._connect() as source, sqlite3.connect(str(temporary)) as destination:
+                source.backup(destination)
+            os.replace(temporary, backup)
+        except Exception as e:
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
+            logger.error(f"TradeJournalDB backup failed after write: {e}")
 
     def _init_schema(self) -> None:
         ddl = """
@@ -126,13 +159,54 @@ class TradeJournalDB:
 
         CREATE INDEX IF NOT EXISTS idx_strategy_events_run_ts ON strategy_events(run_id, ts);
         CREATE INDEX IF NOT EXISTS idx_strategy_events_type_id ON strategy_events(event_type, id);
+
+        CREATE TABLE IF NOT EXISTS journal_schema (
+            version INTEGER NOT NULL
+        );
         """
         try:
             with self._connect() as conn:
                 conn.executescript(ddl)
+                version = conn.execute("SELECT version FROM journal_schema LIMIT 1").fetchone()
+                if version is None:
+                    conn.execute("INSERT INTO journal_schema(version) VALUES (?)", (self.SCHEMA_VERSION,))
                 conn.commit()
         except Exception as e:
+            self._schema_init_error = str(e)
             logger.warning(f"TradeJournalDB schema init failed: {e}")
+
+    def _assess_startup_health(self) -> Dict[str, Any]:
+        """Fail closed when a restart cannot safely restore trading risk state."""
+        if not self._existed_at_startup:
+            return {"ready": False, "reason": "missing_at_startup"}
+        if self._schema_init_error:
+            return {"ready": False, "reason": "schema_init_failed", "error": self._schema_init_error}
+        try:
+            with self._connect() as conn:
+                tables = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                for table, required in self._REQUIRED_COLUMNS.items():
+                    if table not in tables:
+                        return {"ready": False, "reason": "schema_invalid", "table": table}
+                    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                    if not required.issubset(columns):
+                        return {"ready": False, "reason": "schema_invalid", "table": table}
+                row = conn.execute("SELECT version FROM journal_schema LIMIT 1").fetchone()
+                if row is None or int(row[0]) != self.SCHEMA_VERSION:
+                    return {"ready": False, "reason": "schema_invalid", "table": "journal_schema"}
+                event_count = sum(
+                    int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    for table in self._REQUIRED_COLUMNS
+                )
+                if event_count <= 0:
+                    return {"ready": False, "reason": "empty_journal"}
+        except Exception as e:
+            logger.error(f"Trade journal startup healthcheck failed; BUYs blocked: {e}")
+            return {"ready": False, "reason": "read_failed", "error": str(e)}
+        return {"ready": True, "reason": "ready", "event_count": event_count}
 
     def log_run_start(
         self,
@@ -191,7 +265,7 @@ class TradeJournalDB:
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_stop failed: {e}")
 
-    def load_market_guard_counts(self, slug: str) -> Dict[str, int]:
+    def load_market_guard_counts(self, slug: str) -> Optional[Dict[str, int]]:
         """Recover per-market risk limits after a process or node restart."""
         slug = str(slug or "")
         if not slug:
@@ -227,8 +301,8 @@ class TradeJournalDB:
                 "protective_exit_count": int(exit_row[0] or 0),
             }
         except Exception as e:
-            logger.debug(f"TradeJournalDB load_market_guard_counts failed: {e}")
-            return {"buy_count": 0, "protective_exit_count": 0}
+            logger.error(f"TradeJournalDB load_market_guard_counts failed; BUYs must remain blocked: {e}")
+            return None
 
     def load_fast_follow_night_risk(self, night_key: str) -> Dict[str, Any]:
         """Recover filled-entry limits after a process restart.
@@ -731,6 +805,7 @@ class TradeJournalDB:
                     ),
                 )
                 conn.commit()
+            self._backup_after_write()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_strategy_event failed: {e}")
 
@@ -782,6 +857,7 @@ class TradeJournalDB:
                     ),
                 )
                 conn.commit()
+            self._backup_after_write()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_order_event failed: {e}")
 

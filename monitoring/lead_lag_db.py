@@ -15,7 +15,7 @@ class LeadLagDB:
     # Cross-market references have no Outcome market id, so persist a stable
     # sentinel instead of NULL to make one-second upserts real.
     GLOBAL_MARKET_ID = -1
-    def __init__(self, db_path: str = "logs/hyperliquid_lead_lag.db") -> None:
+    def __init__(self, db_path: str = "data/research/hyperliquid_lead_lag.db") -> None:
         self.db_path = str(Path(db_path))
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._queue: queue.Queue[tuple[str, str, int | None, int, dict[str, Any]]] = queue.Queue(maxsize=20_000)

@@ -731,6 +731,17 @@ def initialize_strategy_settings(
     strategy.trade_db = TradeJournalDB(
         db_path=config.operations.trade_db_path,
     ) if strategy.trade_db_enabled else None
+    strategy.trade_db_health = (
+        strategy.trade_db.startup_health() if strategy.trade_db is not None
+        else {"ready": False, "reason": "trade_journal_disabled"}
+    )
+    strategy.trade_db_buy_ready = bool(strategy.trade_db_health.get("ready", False))
+    strategy.trade_db_health_reason = str(strategy.trade_db_health.get("reason") or "")
+    if not strategy.trade_db_buy_ready:
+        logger.error(
+            "Trade journal startup healthcheck is not ready; blocking all new BUYs: "
+            f"reason={strategy.trade_db_health_reason}"
+        )
     strategy.shadow_simulation_enabled = config.operations.shadow_simulation_enabled
     strategy.fair_edge_bucket_shadow_enabled = config.operations.fair_edge_bucket_shadow_enabled
     strategy.shadow_simulation_fill_timeout_sec = config.operations.shadow_simulation_fill_timeout_sec
@@ -745,6 +756,7 @@ def initialize_strategy_settings(
     strategy.lead_lag_db = LeadLagDB()
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode
+    strategy.outcome_bypass_execution_penalty = lead_lag.bypass_execution_penalty
     strategy.outcome_lead_lag_runtime = None
     strategy.outcome_fast_follow_live = None
     candidate_handler = None
@@ -779,6 +791,7 @@ def initialize_strategy_settings(
                 baseline_warmup_samples=lead_lag.baseline_warmup_samples,
                 follower_confirm_window_ms=lead_lag.follower_confirm_window_ms,
                 follower_confirm_cents=lead_lag.follower_confirm_cents,
+                max_outcome_return_interval_ms=lead_lag.max_outcome_return_interval_ms,
             ),
             db=strategy.lead_lag_db,
             candidate_handler=candidate_handler,
@@ -786,7 +799,9 @@ def initialize_strategy_settings(
         )
         strategy.outcome_lead_lag_runtime.start()
     strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver(
-        tick_listener=(lambda price, _market_id: publish_strategy_tick(strategy, source="outcome_btc_mark", price=price)) if strategy.outcome_lead_lag_runtime is not None else None,
+        tick_listener=(lambda price, _market_id, epoch: publish_strategy_tick(
+            strategy, source="outcome_btc_mark", price=price, connection_epoch=epoch,
+        )) if strategy.outcome_lead_lag_runtime is not None else None,
         lifecycle_listener=lambda event, payload: strategy._db_strategy_event(
             f"HYPERLIQUID_OUTCOME_OBSERVER_{event.upper()}",
             {"read_only": True, **payload},

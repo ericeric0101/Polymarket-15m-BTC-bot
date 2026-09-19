@@ -47,6 +47,10 @@ class LeadLagDecision:
     raw_residual_cents: int = 0
     baseline_cents: int | None = None
     follower_price_cents: int | None = None
+    # Actual elapsed time of the Outcome return used for the shock score.
+    # The value is persisted with the decision so live cadence can be audited.
+    outcome_interval_ms: int | None = None
+    low_confidence: bool = False
 
 
 @dataclass(frozen=True)

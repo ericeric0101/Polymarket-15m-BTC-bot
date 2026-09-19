@@ -71,6 +71,18 @@ def test_valid_btc_message_marks_stream_ready_and_exposes_health_ages():
     assert snapshot["last_valid_data_age_sec"] is not None
 
 
+def test_observer_tags_btc_ticks_with_the_current_connection_epoch():
+    ticks = []
+    observer = HyperliquidOutcomeObserver(
+        market_id=1313, tick_listener=lambda price, market_id, epoch: ticks.append((price, market_id, epoch)),
+    )
+    observer._merge(stream_connected=True, connection_epoch=7)
+
+    observer._on_message({"channel": "allMids", "data": {"mids": {"BTC": "77500"}}})
+
+    assert ticks == [(77500.0, 1313, 7)]
+
+
 def test_reconnect_backoff_is_bounded_and_grows_after_unstable_connections():
     assert reconnect_delay_sec(1) == 1.0
     assert reconnect_delay_sec(2) == 2.0

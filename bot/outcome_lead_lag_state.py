@@ -5,6 +5,8 @@ from collections import defaultdict, deque
 from statistics import median
 from dataclasses import dataclass
 
+from loguru import logger
+
 from bot.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
 
 
@@ -20,6 +22,7 @@ class OutcomeLeadLagStateConfig:
     baseline_warmup_samples: int = 30
     follower_confirm_window_ms: int = 5_000
     follower_confirm_cents: int = 100
+    max_outcome_return_interval_ms: int = 2_000
 
 
 class OutcomeLeadLagState:
@@ -39,11 +42,17 @@ class OutcomeLeadLagState:
         self._armed_monotonic_ns: int | None = None
         self._armed_follower_price_cents: int | None = None
 
-    def _return_for_window(self, source: str, tick: ReferenceTick, window_ms: int) -> int | None:
+    def _return_for_window(self, source: str, tick: ReferenceTick, window_ms: int) -> tuple[int | None, int | None]:
         history = self._history[source]
         target_ns = tick.received_monotonic_ns - window_ms * 1_000_000
         prior = next((item for item in reversed(history) if item.received_monotonic_ns <= target_ns), None)
-        return None if prior is None else tick.price_cents - prior.price_cents
+        if prior is None:
+            return None, None
+        elapsed_ms = max(1, (tick.received_monotonic_ns - prior.received_monotonic_ns) // 1_000_000)
+        # Normalize the observed movement to the requested window.  A sparse
+        # tick cannot silently be treated as a one-second return.
+        normalized_return = int(round((tick.price_cents - prior.price_cents) * window_ms / elapsed_ms))
+        return normalized_return, int(elapsed_ms)
 
     def _unavailable(self, tick: ReferenceTick, reason: str) -> LeadLagDecision:
         self._persistence = 0
@@ -100,14 +109,23 @@ class OutcomeLeadLagState:
         previous = self._latest.get(tick.source)
         if previous is not None and tick.received_monotonic_ns <= previous.received_monotonic_ns:
             return self._unavailable(tick, "out_of_order")
+        if (
+            tick.source == "outcome_btc_mark"
+            and previous is not None
+            and tick.connection_epoch != previous.connection_epoch
+        ):
+            # A new observer connection must not bridge an old Outcome mark
+            # into a fresh shock. Clear the return history and require a new
+            # post-reconnect warm-up pair.
+            self._history[tick.source].clear()
+            self._latest[tick.source] = tick
+            self._history[tick.source].append(tick)
+            return self._unavailable(tick, "cross_epoch")
         self._latest[tick.source] = tick
         self._history[tick.source].append(tick)
         outcome, twap = self._latest.get("outcome_btc_mark"), self._latest.get("polymarket_twap")
         if outcome is None or twap is None:
             return self._unavailable(tick, "missing_reference")
-        if outcome.connection_epoch != tick.connection_epoch and tick.source == "outcome_btc_mark":
-            return self._unavailable(tick, "cross_epoch")
-
         # A live fast-follow signal is complete only after the authoritative
         # Chainlink TWAP moves in the same direction after the Outcome shock.
         # Freeze the follower level when the shock is armed so an older TWAP
@@ -169,20 +187,35 @@ class OutcomeLeadLagState:
                                    tick.received_monotonic_ns, "basis_warmup",
                                    raw_residual_cents=raw_residual,
                                    follower_price_cents=twap.price_cents)
-        outcome_return = self._return_for_window("outcome_btc_mark", outcome, 1_000)
-        window_returns = tuple((window, self._return_for_window("outcome_btc_mark", outcome, window)) for window in self.config.windows_ms)
+        outcome_return, outcome_interval_ms = self._return_for_window("outcome_btc_mark", outcome, 1_000)
+        window_returns = tuple(
+            (window, self._return_for_window("outcome_btc_mark", outcome, window)[0])
+            for window in self.config.windows_ms
+        )
         residual = raw_residual - baseline
         if outcome_return is None:
             return LeadLagDecision("observe", 0, 0, residual, 0, self.config.feature_version,
                                    tick.received_monotonic_ns, "insufficient_history", window_returns,
                                    raw_residual, baseline, twap.price_cents)
+        logger.info(
+            "Outcome return interval observed: "
+            f"elapsed_ms={outcome_interval_ms} normalized_return_cents={outcome_return}"
+        )
+        if outcome_interval_ms is None or outcome_interval_ms > self.config.max_outcome_return_interval_ms:
+            self._persistence, self._last_direction = 0, 0
+            return LeadLagDecision(
+                "observe", 0, outcome_return, residual, 0,
+                self.config.feature_version, tick.received_monotonic_ns,
+                "low_confidence_outcome_interval", window_returns, raw_residual,
+                baseline, twap.price_cents, outcome_interval_ms, True,
+            )
         direction = 1 if outcome_return > 0 else -1 if outcome_return < 0 else 0
         if tick.source != "outcome_btc_mark":
             return LeadLagDecision(
                 "observe", direction, outcome_return, residual, self._persistence,
                 self.config.feature_version, tick.received_monotonic_ns,
                 "waiting_for_outcome_shock", window_returns, raw_residual,
-                baseline, twap.price_cents,
+                baseline, twap.price_cents, outcome_interval_ms,
             )
         qualifying = direction and abs(outcome_return) >= self.config.shock_cents and abs(residual) >= self.config.residual_cents and (residual > 0) == (direction > 0)
         if not qualifying:
@@ -190,7 +223,7 @@ class OutcomeLeadLagState:
             return LeadLagDecision("observe", direction, outcome_return, residual, 0,
                                    self.config.feature_version, tick.received_monotonic_ns,
                                    "no_untranslated_shock", window_returns, raw_residual,
-                                   baseline, twap.price_cents)
+                                   baseline, twap.price_cents, outcome_interval_ms)
         self._persistence = self._persistence + 1 if direction == self._last_direction else 1
         self._last_direction = direction
         state = "adverse_confirmed" if self._persistence >= self.config.debounce_ticks else "adverse_candidate"
@@ -201,4 +234,4 @@ class OutcomeLeadLagState:
         return LeadLagDecision(state, direction, outcome_return, residual, self._persistence,
                                self.config.feature_version, tick.received_monotonic_ns,
                                "outcome_shock_untranslated", window_returns, raw_residual,
-                               baseline, twap.price_cents)
+                               baseline, twap.price_cents, outcome_interval_ms)
