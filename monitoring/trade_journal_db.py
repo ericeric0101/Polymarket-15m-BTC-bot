@@ -320,6 +320,7 @@ class TradeJournalDB:
                     (_utc_now_iso(), _json_dumps(merged_notes), run_id),
                 )
                 conn.commit()
+            self._schedule_backup()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_stop failed: {e}")
 

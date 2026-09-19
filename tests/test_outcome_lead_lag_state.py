@@ -278,6 +278,10 @@ def _live_harness(*, ask: Decimal):
         maker_high_entry_price_size_adjust_multiplier=Decimal("0.55"),
         _cached_usdc_balance=Decimal("100"), active_maker_orders={}, order_factory=Factory(),
         trade_db_buy_ready=True,
+        trade_db=SimpleNamespace(
+            runtime_health=lambda: {"ready": True, "reason": "ready"},
+            load_fast_follow_night_risk=lambda _night: {},
+        ),
         outcome_bypass_execution_penalty=True,
         _twap_reference_degraded=False,
         _market_strike_is_entry_eligible=lambda _slug: True,
@@ -395,12 +399,15 @@ def test_fast_follow_quantity_keeps_valid_quantity_when_maker_amount_is_already_
 def test_fast_follow_restores_open_position_ownership_and_credits_sell_after_restart():
     events = []
     strategy = SimpleNamespace(
-        trade_db=SimpleNamespace(load_fast_follow_night_risk=lambda _night: {
-            "filled_entries": 3,
-            "pending_entries": 0,
-            "realized_pnl_usdc": Decimal("-0.5"),
-            "open_position_instruments": ["UP.INST"],
-        }),
+        trade_db=SimpleNamespace(
+            runtime_health=lambda: {"ready": True, "reason": "ready"},
+            load_fast_follow_night_risk=lambda _night: {
+                "filled_entries": 3,
+                "pending_entries": 0,
+                "realized_pnl_usdc": Decimal("-0.5"),
+                "open_position_instruments": ["UP.INST"],
+            },
+        ),
         live_inventory_cost={"UP.INST": {"qty": "0"}},
         maker_exchange_min_shares=Decimal("5"),
         _db_strategy_event=lambda event, payload: events.append((event, payload)),
@@ -461,6 +468,68 @@ def test_live_fast_follow_never_buys_when_trade_journal_is_not_ready():
     )
     assert len(submitted) == 1
     assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "trade_journal_unhealthy"
+               for event, payload in events)
+
+
+def test_live_fast_follow_cached_night_does_not_bypass_runtime_journal_failure():
+    owner, submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"))
+    night = "2026-09-08"
+    assert night in owner._loaded_nights
+    owner.strategy.current_market_slug = "next"
+    owner.strategy.trade_db = SimpleNamespace(
+        runtime_health=lambda: {"ready": False, "reason": "write_failed"},
+        load_fast_follow_night_risk=lambda _night: {},
+    )
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 1
+    assert owner.strategy.trade_db_buy_ready is False
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "trade_journal_unhealthy"
+               for event, payload in events)
+
+
+def test_live_fast_follow_aborts_and_rolls_back_when_risk_state_persistence_fails():
+    owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.60"))
+    owner.on_order_terminal(str(kwargs[0]["client_order_id"]))
+    health = {"ready": True, "reason": "ready"}
+
+    def persist_event(event, payload):
+        events.append((event, payload))
+        if event == "FAST_FOLLOW_RISK_STATE":
+            health.update(ready=False, reason="write_failed")
+
+    owner.strategy._db_strategy_event = persist_event
+    owner.strategy.trade_db = SimpleNamespace(
+        runtime_health=lambda: dict(health),
+        load_fast_follow_night_risk=lambda _night: {},
+    )
+    owner.strategy.current_market_slug = "next"
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 1
+    assert not owner._pending_order_ids
+    assert not owner._night_pending_entry_ids["2026-09-08"]
+    assert "next" not in owner._attempted_slugs
+    assert owner._night_filled_entries["2026-09-08"] == 0
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "risk_state_persist_failed"
                for event, payload in events)
 
 

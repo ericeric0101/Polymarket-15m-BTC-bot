@@ -743,6 +743,12 @@ def handle_stop(strategy: Any) -> None:
         final_inventory_shares=strategy.inventory_delta_shares,
         market_cycle_realized_net_usdc=strategy.market_cycle_realized_net_usdc,
     )
+    trade_db = getattr(strategy, "trade_db", None)
+    if trade_db is not None:
+        try:
+            trade_db.stop()
+        except Exception:
+            logger.debug("Failed to flush trade journal backup during shutdown", exc_info=True)
 
     if strategy.terminal_dashboard:
         try:

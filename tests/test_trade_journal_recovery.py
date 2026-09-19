@@ -2,8 +2,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 from datetime import datetime, timezone
 import sqlite3
+import time
 
 import bot.db_runtime as db_runtime
+import bot.market_runtime as market_runtime
 from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 
 from bot.db_runtime import StrategyDBRuntimeMixin
@@ -63,6 +65,63 @@ def test_order_event_write_creates_atomic_journal_backup(tmp_path):
     assert backup_path.is_file()
     with sqlite3.connect(backup_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM order_events").fetchone()[0] == 1
+
+
+def test_stop_flushes_last_dirty_journal_backup(tmp_path):
+    path = tmp_path / "trading" / "trade_journal.db"
+    backup_path = tmp_path / "backups" / "trade_journal.db"
+    db = TradeJournalDB(path, backup_path=backup_path, backup_interval_sec=3600)
+
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+
+    assert db._backup_dirty is True
+    db.stop()
+
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as conn:
+        assert conn.execute("SELECT client_order_id FROM order_events").fetchone()[0] == "buy-1"
+
+
+def test_production_shutdown_flushes_final_trade_journal_backup(monkeypatch, tmp_path):
+    path = tmp_path / "trading" / "trade_journal.db"
+    backup_path = tmp_path / "backups" / "trade_journal.db"
+    db = TradeJournalDB(path, backup_path=backup_path, backup_interval_sec=3600)
+    db._last_backup_monotonic = time.monotonic()
+    db.log_run_start("run", "TEST", True, True)
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    assert db._backup_dirty is True
+
+    monkeypatch.setattr(market_runtime, "stop_event_threads", lambda **_kwargs: None)
+    strategy = SimpleNamespace(
+        _stopping=False,
+        hyperliquid_outcome_observer=None,
+        outcome_lead_lag_runtime=None,
+        lead_lag_db=None,
+        _lifecycle_stop_event=None, _reload_stop_event=None, _quote_watchdog_stop_event=None,
+        _redeem_stop_event=None, _balance_stop_event=None, _binance_ws_stop_event=None,
+        _polymarket_chainlink_ws_stop_event=None, _terminal_dashboard_stop_event=None,
+        _lifecycle_thread=None, _reload_thread=None, _quote_watchdog_thread=None,
+        _redeem_thread=None, _balance_thread=None, _binance_ws_thread=None,
+        _polymarket_chainlink_ws_thread=None, _terminal_dashboard_thread=None,
+        smart_money_tracker=None,
+        _cancel_active_maker_orders=lambda: None,
+        rebate_reporter=SimpleNamespace(flush_daily_report=lambda: None),
+        _db_strategy_event=lambda event, payload: db.log_strategy_event("run", event, payload),
+        _is_dry_run_mode=lambda: True,
+        inventory_delta_shares=Decimal("0"), active_side=SimpleNamespace(value="NONE"),
+        trade_db=db, run_id="run", test_mode=True, maker_mode=True, instrument_id=None,
+        selected_slug=None, market_cycle_realized_net_usdc=Decimal("0"), terminal_dashboard=None,
+    )
+
+    market_runtime.handle_stop(strategy)
+
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as conn:
+        assert conn.execute("SELECT client_order_id FROM order_events").fetchone()[0] == "buy-1"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_events WHERE event_type='STRATEGY_STOP'"
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT ended_at FROM strategy_runs WHERE run_id='run'").fetchone()[0] is not None
 
 
 def test_night_risk_query_error_returns_none_instead_of_zero_risk(monkeypatch, tmp_path):

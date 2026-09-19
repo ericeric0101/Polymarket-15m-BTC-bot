@@ -146,12 +146,10 @@ class OutcomeFastFollowLive:
         self._blocked_candidate_reasons: set[tuple[int, str]] = set()
 
     def _ensure_night_loaded(self, night: str) -> bool:
+        if not self._runtime_journal_ready():
+            return False
         if night in self._loaded_nights:
             return True
-        if not bool(getattr(getattr(self.strategy, "trade_db", None), "runtime_health", lambda: {"ready": True})().get("ready", True)):
-            self.strategy.trade_db_buy_ready = False
-            self.strategy.trade_db_health_reason = "trade_journal_runtime_failure"
-            return False
         if not bool(getattr(self.strategy, "trade_db_buy_ready", True)):
             return False
         loader = getattr(getattr(self.strategy, "trade_db", None), "load_fast_follow_night_risk", None)
@@ -186,20 +184,52 @@ class OutcomeFastFollowLive:
         self._loaded_nights.add(night)
         return True
 
-    def _persist_night(self, night: str) -> None:
-        self.strategy._db_strategy_event("FAST_FOLLOW_RISK_STATE", {
-            "night_key": night,
-            # Compatibility alias: it now represents completed fills.
-            "filled_entries": self._night_filled_entries.get(night, 0),
-            "pending_entries": len(self._night_pending_entry_ids.get(night, set())),
-            "attempted_entries": self._night_filled_entries.get(night, 0),
-            "open_position_instruments": sorted(
-                instrument_id
-                for instrument_id, position_night in self._position_night_by_instrument.items()
-                if position_night == night
-            ),
-            "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
-        })
+    def _runtime_journal_ready(self) -> bool:
+        """Fail closed if journal health cannot be read or is no longer ready."""
+        try:
+            journal = getattr(self.strategy, "trade_db", None)
+            runtime_health = getattr(journal, "runtime_health", None)
+            if not callable(runtime_health):
+                raise RuntimeError("trade journal runtime health is unavailable")
+            health = runtime_health()
+            ready = bool(health.get("ready", True))
+        except Exception as e:
+            ready = False
+            health = {"reason": "runtime_health_read_failed", "error": str(e)}
+        if not ready:
+            self.strategy.trade_db_buy_ready = False
+            self.strategy.trade_db_health_reason = str(health.get("reason", "trade_journal_runtime_failure"))
+        return ready
+
+    def _persist_night(self, night: str) -> bool:
+        """Persist reservations before an entry; a failure must block the FOK."""
+        if not self._runtime_journal_ready():
+            return False
+        try:
+            self.strategy._db_strategy_event("FAST_FOLLOW_RISK_STATE", {
+                "night_key": night,
+                # Compatibility alias: it now represents completed fills.
+                "filled_entries": self._night_filled_entries.get(night, 0),
+                "pending_entries": len(self._night_pending_entry_ids.get(night, set())),
+                "attempted_entries": self._night_filled_entries.get(night, 0),
+                "open_position_instruments": sorted(
+                    instrument_id
+                    for instrument_id, position_night in self._position_night_by_instrument.items()
+                    if position_night == night
+                ),
+                "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
+            })
+        except Exception as e:
+            self.strategy.trade_db_buy_ready = False
+            self.strategy.trade_db_health_reason = "risk_state_persist_failed"
+            logger.error(f"Fast-follow risk-state persistence failed; blocking BUY: {e}")
+            return False
+        return self._runtime_journal_ready()
+
+    def _rollback_unsubmitted_entry_reservation(self, *, slug: str, night: str, client_order_id: str) -> None:
+        self._pending_order_ids.pop(client_order_id, None)
+        self._night_pending_entry_ids.setdefault(night, set()).discard(client_order_id)
+        self._attempted_slugs.discard(slug)
 
     def night_risk_snapshot(self, now_ts: float | None = None) -> dict[str, int | str | float | None]:
         """Return the live quota state for status output and diagnostics."""
@@ -325,6 +355,10 @@ class OutcomeFastFollowLive:
         # remains the sole owner of every exit path.
         if bool(getattr(self.strategy, "maker_kill_switch", False)):
             self._record_blocked(candidate, "maker_kill_switch_on")
+            return False
+        if not self._runtime_journal_ready():
+            self._record_blocked(candidate, "trade_journal_unhealthy",
+                                 reason_detail=str(getattr(self.strategy, "trade_db_health_reason", "unknown")))
             return False
         if not bool(getattr(self.strategy, "trade_db_buy_ready", True)):
             self._record_blocked(candidate, "trade_journal_unhealthy",
@@ -519,7 +553,10 @@ class OutcomeFastFollowLive:
         self._attempted_slugs.add(slug)
         self._pending_order_ids[str(coid)] = metadata
         self._night_pending_entry_ids.setdefault(night, set()).add(str(coid))
-        self._persist_night(night)
+        if not self._persist_night(night):
+            self._rollback_unsubmitted_entry_reservation(slug=slug, night=night, client_order_id=str(coid))
+            self._record_blocked(candidate, "risk_state_persist_failed")
+            return False
         # Record the submission before handing it to the venue, exactly as the
         # maker path does.  If the venue fills but its fill callback is lost,
         # ghost reconciliation can restore a real cost basis instead of zero.

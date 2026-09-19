@@ -152,6 +152,73 @@ def test_verified_inventory_overage_is_sell_only_and_preserves_sell_orders():
     assert host.events[-1][0] == "INVENTORY_OVERAGE_CLEARED"
 
 
+def test_runtime_journal_failure_blocks_normal_buy_but_runs_protective_exits():
+    exits = []
+
+    class Host(QuoteRuntimeMixin):
+        def __init__(self):
+            self.maker_kill_switch = False
+            self.quote_pause_until_ts = 0.0
+            self.bi_side_enabled = False
+            self.inventory_delta_shares = Decimal("5")
+            self.regime_guard_enabled = False
+            self._startup_rehydrated_inventory_force_sell_only = False
+            self.trade_db_buy_ready = True
+            self.trade_db_health_reason = "ready"
+            self.trade_db = SimpleNamespace(runtime_health=lambda: {"ready": False, "reason": "write_failed"})
+            self._last_trade_db_warn_ts = 0.0
+            self.last_quote_update_ts = 0.0
+            self.quote_refresh_sec = 0.0
+            self.active_maker_orders = {}
+            self.maker_order_ttl_sec = 30.0
+            self.maker_loss_sell_reprice_min_interval_sec = 30.0
+            self.instrument_id = "UP.INST"
+            self.maker_vol_warmup_quotes = 0
+            self.requote_bucket_last_refill = 0.0
+            self.requote_bucket_tokens = 0.0
+            self.maker_requote_max_per_sec = 1.0
+            self.current_market_end_timestamp = None
+
+        def _update_market_phase(self):
+            return MarketPhase.ACTIVE
+
+        async def _maybe_finalize_side_decision(self, *_args):
+            return None
+
+        def _inventory_overage_requires_sell_only(self):
+            return False
+
+        def _is_dry_run_mode(self):
+            return True
+
+        async def _maybe_taker_exit_positions(self, *_args, **_kwargs):
+            exits.append("taker")
+
+        async def _maybe_maker_urgent_exit(self, *_args, **_kwargs):
+            exits.append("urgent")
+
+        def _maybe_auto_tune(self, *_args):
+            return None
+
+        def _cleanup_stale_pending_cancels(self, *_args):
+            return None
+
+        def _compute_recent_volatility(self, *_args):
+            return Decimal("0")
+
+        def _momentum_history_for_instrument(self, *_args):
+            return []
+
+        def _maker_quote_instruments(self):
+            return ["UP.INST"]
+
+    context = asyncio.run(Host()._prepare_quote_cycle())
+
+    assert context is not None
+    assert context["forced_sell_only"] is True
+    assert exits == ["taker", "urgent"]
+
+
 def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
     changes = [
         SimpleNamespace(asset_id="up", price="0.50"),

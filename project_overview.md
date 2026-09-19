@@ -53,6 +53,15 @@
   requires its cached forecast to be no older than two seconds. A terminal FOK
   failure releases market ownership after a short cooldown instead of blocking
   every remaining entry opportunity for that market.
+- Runtime journal health is checked again before every fast-follow entry,
+  including reuse of an already-loaded Taipei-night risk cache; a cached night
+  can never bypass the BUY gate. The pending fast-follow reservation must be
+  persisted successfully and leave the journal healthy before its FOK is sent.
+  A persistence failure rolls back the unsubmitted reservation and ownership.
+- Normal shutdown records `STRATEGY_STOP` and run-stop state before stopping the
+  trade journal worker, which synchronously flushes the final dirty journal
+  snapshot. Runtime journal fail-closed applies only to new maker/fast-follow
+  BUYs: SELL, stop-loss, and emergency-exit authority remains available.
 - `absolute_max_loss_breaker` takes priority over the normal spread guard and
   fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
   existing order and submits the protective exit immediately.
