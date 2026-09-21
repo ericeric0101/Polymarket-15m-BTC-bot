@@ -204,9 +204,9 @@ class StrategyDBRuntimeMixin:
                 **reconciled,
             },
         )
-    def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> bool:
         if not self.trade_db:
-            return
+            return False
         payload_out: Dict[str, Any] = dict(payload or {})
         if self.current_market_slug and "slug" not in payload_out:
             payload_out["slug"] = self.current_market_slug
@@ -219,11 +219,11 @@ class StrategyDBRuntimeMixin:
             and (not payload_slug or payload_slug == str(self.current_market_slug or ""))
         ):
             payload_out["instrument_id"] = str(self.instrument_id)
-        self.trade_db.log_strategy_event(
+        return bool(self.trade_db.log_strategy_event(
             run_id=self.run_id,
             event_type=event_type,
             payload=payload_out,
-        )
+        ))
 
     def _db_order_event(
         self,
@@ -238,23 +238,25 @@ class StrategyDBRuntimeMixin:
         commission_usdc: Optional[float] = None,
         expected_net_usdc: Optional[float] = None,
         payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        instrument_id: Optional[str] = None,
+    ) -> bool:
         if not self.trade_db:
-            return
+            return False
         payload_out: Dict[str, Any] = dict(payload or {})
         if self.current_market_slug and "slug" not in payload_out:
             payload_out["slug"] = self.current_market_slug
         if self.current_market_slug and "market_slug" not in payload_out:
             payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
-            payload_out["instrument_id"] = str(self.instrument_id)
+        event_instrument_id = str(instrument_id or self.instrument_id or "")
+        if event_instrument_id and "instrument_id" not in payload_out:
+            payload_out["instrument_id"] = event_instrument_id
 
         side_out = side
         if side_out:
             side_norm = self._normalize_side_text(side_out)
             if side_norm:
                 side_out = side_norm.upper()
-        self.trade_db.log_order_event(
+        return bool(self.trade_db.log_order_event(
             run_id=self.run_id,
             event_type=event_type,
             client_order_id=client_order_id,
@@ -264,13 +266,13 @@ class StrategyDBRuntimeMixin:
             qty=qty,
             status=status,
             reason=reason,
-            instrument_id=str(self.instrument_id) if self.instrument_id else None,
+            instrument_id=event_instrument_id or None,
             token_id=self.current_token_id,
             fee_rate_bps=self.last_observed_fee_rate_bps,
             expected_net_usdc=expected_net_usdc,
             commission_usdc=commission_usdc,
             payload=payload_out,
-        )
+        ))
 
     def _db_buy_path_diagnostic(
         self,

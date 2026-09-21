@@ -76,10 +76,15 @@
   while primary journal writes remain healthy.
 - `allMids` BTC observations are historically about five seconds apart and are
   accepted by the current provisional six-second fast-follow interval limit.
-  The live profile now enables a research-only Hyperliquid BTC BBO/L2Book
-  cadence probe. Those observations are persisted separately for comparison,
-  but have no state-machine, candidate, or order authority. The six-second
-  setting remains provisional pending measured higher-frequency-channel evidence.
+  A research-only Hyperliquid BTC BBO/L2Book cadence probe is available but
+  disabled in the live profile until it completes a resource soak test. Its
+  observations have no state-machine, candidate, or order authority. The
+  six-second setting remains provisional pending measured higher-frequency-
+  channel evidence.
+- Runtime journal fail-closed applies to writes needed for exposure/risk
+  recovery (including fills, submissions, fast-follow intent and night-risk
+  state). A failed shadow or diagnostic write is logged but does not by itself
+  disable new BUYs; critical failures retain the event type and SQLite error.
 - `absolute_max_loss_breaker` takes priority over the normal spread guard and
   fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
   existing order and submits the protective exit immediately.

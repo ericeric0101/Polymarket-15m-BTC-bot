@@ -208,7 +208,7 @@ class OutcomeFastFollowLive:
         if not self._runtime_journal_ready():
             return False
         try:
-            self.strategy._db_strategy_event("FAST_FOLLOW_RISK_STATE", {
+            persisted = self.strategy._db_strategy_event("FAST_FOLLOW_RISK_STATE", {
                 "night_key": night,
                 # Compatibility alias: it now represents completed fills.
                 "filled_entries": self._night_filled_entries.get(night, 0),
@@ -221,6 +221,8 @@ class OutcomeFastFollowLive:
                 ),
                 "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
             })
+            if persisted is False:
+                return False
         except Exception as e:
             self.strategy.trade_db_buy_ready = False
             self.strategy.trade_db_health_reason = "risk_state_persist_failed"
@@ -563,11 +565,14 @@ class OutcomeFastFollowLive:
         # This is an intent, not venue acceptance.  It closes the crash window
         # between a durable risk reservation and the FOK reaching the venue.
         try:
-            self.strategy._db_order_event(
+            persisted = self.strategy._db_order_event(
                 event_type="ORDER_FAST_FOLLOW_INTENT", client_order_id=str(coid), side="BUY",
                 price=float(limit_price), qty=float(quantity), status="INTENT",
                 reason="outcome_then_twap_confirmed", instrument_id=str(instrument_id), payload=metadata,
             )
+            if persisted is False:
+                self.strategy.trade_db_buy_ready = False
+                self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"
         except Exception as e:
             self.strategy.trade_db_buy_ready = False
             self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"

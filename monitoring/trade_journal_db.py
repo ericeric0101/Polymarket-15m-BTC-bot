@@ -81,6 +81,17 @@ class TradeJournalDB:
         },
         "strategy_events": {"id", "ts", "run_id", "event_type", "payload_json"},
     }
+    # These writes are required to reconstruct live exposure or prevent a
+    # duplicate entry after a restart.  Diagnostic/shadow writes must not turn
+    # a healthy primary journal into a permanent BUY circuit-breaker.
+    _CRITICAL_ORDER_EVENTS = {
+        "ORDER_SUBMIT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_FAST_FOLLOW_SUBMIT",
+        "ORDER_FILLED", "ORDER_CANCELLED", "ORDER_REJECTED",
+    }
+    _CRITICAL_STRATEGY_EVENTS = {
+        "FAST_FOLLOW_RISK_STATE", "MARKET_BUY_COUNT_UPDATED",
+        "MARKET_STOP_LOSS_COUNT_UPDATED",
+    }
 
     def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
                  backup_interval_sec: float = 30.0) -> None:
@@ -92,8 +103,11 @@ class TradeJournalDB:
         self._runtime_health: Dict[str, Any] = {"ready": True, "reason": "ready"}
         self._backup_interval_sec = max(1.0, float(backup_interval_sec))
         self._backup_dirty = False
-        self._last_backup_monotonic = 0.0
+        # Coalesce the initial burst of startup telemetry too; a caller can
+        # still force a synchronous snapshot via stop()/flush_backup().
+        self._last_backup_monotonic = time.monotonic()
         self._backup_lock = threading.Lock()
+        self._backup_flush_lock = threading.Lock()
         self._backup_wakeup = threading.Event()
         self._backup_stop = threading.Event()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -109,9 +123,17 @@ class TradeJournalDB:
     def runtime_health(self) -> Dict[str, Any]:
         return dict(self._runtime_health)
 
-    def _mark_runtime_failure(self, reason: str, error: Exception) -> None:
-        self._runtime_health = {"ready": False, "reason": reason, "error": str(error)}
-        logger.error(f"Trade journal runtime failure; new BUYs must be blocked: {error}")
+    def _mark_runtime_failure(self, reason: str, error: Exception, *, event_type: str = "") -> None:
+        self._runtime_health = {
+            "ready": False,
+            "reason": reason,
+            "error": str(error),
+            "event_type": str(event_type),
+        }
+        logger.error(
+            "Trade journal critical runtime failure; new BUYs must be blocked: "
+            f"event_type={event_type} error={error}"
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -145,17 +167,20 @@ class TradeJournalDB:
 
     def flush_backup(self) -> bool:
         """Synchronously publish one snapshot; intended for shutdown/tests."""
-        with self._backup_lock:
-            if not self._backup_dirty:
-                return True
-            self._backup_dirty = False
-        success = self._backup_after_write()
-        if not success:
+        # A caller at shutdown must not observe a clean dirty flag while the
+        # background worker is still publishing the same snapshot.
+        with self._backup_flush_lock:
             with self._backup_lock:
-                self._backup_dirty = True
-            return False
-        self._last_backup_monotonic = time.monotonic()
-        return True
+                if not self._backup_dirty:
+                    return True
+                self._backup_dirty = False
+            success = self._backup_after_write()
+            if not success:
+                with self._backup_lock:
+                    self._backup_dirty = True
+                return False
+            self._last_backup_monotonic = time.monotonic()
+            return True
 
     def _backup_worker(self) -> None:
         while not self._backup_stop.is_set():
@@ -852,24 +877,31 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load_fair_edge_bucket_shadow_simulations failed: {e}")
             return []
 
-    def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> bool:
         sql = "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)"
+        conn: Optional[sqlite3.Connection] = None
         try:
-            with self._connect() as conn:
-                conn.execute(
-                    sql,
-                    (
-                        _utc_now_iso(),
-                        run_id,
-                        event_type,
-                        _json_dumps(payload or {}),
-                    ),
-                )
-                conn.commit()
+            conn = self._connect()
+            conn.execute(
+                sql,
+                (
+                    _utc_now_iso(),
+                    run_id,
+                    event_type,
+                    _json_dumps(payload or {}),
+                ),
+            )
+            conn.commit()
             self._schedule_backup()
+            return True
         except Exception as e:
-            self._mark_runtime_failure("write_failed", e)
+            if event_type in self._CRITICAL_STRATEGY_EVENTS:
+                self._mark_runtime_failure("write_failed", e, event_type=event_type)
             logger.debug(f"TradeJournalDB log_strategy_event failed: {e}")
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def log_order_event(
         self,
@@ -888,41 +920,48 @@ class TradeJournalDB:
         expected_net_usdc: Optional[float] = None,
         commission_usdc: Optional[float] = None,
         payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         sql = """
         INSERT INTO order_events (
             ts, run_id, event_type, client_order_id, venue_order_id, side, price, qty, status, reason,
             instrument_id, token_id, fee_rate_bps, expected_net_usdc, commission_usdc, payload_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+        conn: Optional[sqlite3.Connection] = None
         try:
-            with self._connect() as conn:
-                conn.execute(
-                    sql,
-                    (
-                        _utc_now_iso(),
-                        run_id,
-                        event_type,
-                        client_order_id,
-                        venue_order_id,
-                        side,
-                        price,
-                        qty,
-                        status,
-                        reason,
-                        instrument_id,
-                        token_id,
-                        fee_rate_bps,
-                        expected_net_usdc,
-                        commission_usdc,
-                        _json_dumps(payload or {}),
-                    ),
-                )
-                conn.commit()
+            conn = self._connect()
+            conn.execute(
+                sql,
+                (
+                    _utc_now_iso(),
+                    run_id,
+                    event_type,
+                    client_order_id,
+                    venue_order_id,
+                    side,
+                    price,
+                    qty,
+                    status,
+                    reason,
+                    instrument_id,
+                    token_id,
+                    fee_rate_bps,
+                    expected_net_usdc,
+                    commission_usdc,
+                    _json_dumps(payload or {}),
+                ),
+            )
+            conn.commit()
             self._schedule_backup()
+            return True
         except Exception as e:
-            self._mark_runtime_failure("write_failed", e)
+            if event_type in self._CRITICAL_ORDER_EVENTS:
+                self._mark_runtime_failure("write_failed", e, event_type=event_type)
             logger.debug(f"TradeJournalDB log_order_event failed: {e}")
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def load_recent_buy_submits(self, instrument_id: str, limit: int = 20) -> list[Dict[str, Any]]:
         if not instrument_id:

@@ -156,10 +156,45 @@ def test_critical_runtime_write_failure_marks_journal_not_buy_ready(monkeypatch,
     db = TradeJournalDB(tmp_path / "journal.db")
     monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")))
 
-    db.log_order_event(run_id="r", event_type="ORDER_FILLED")
+    assert db.log_order_event(run_id="r", event_type="ORDER_FILLED") is False
 
     assert db.runtime_health()["ready"] is False
     assert db.runtime_health()["reason"] == "write_failed"
+    assert db.runtime_health()["event_type"] == "ORDER_FILLED"
+    assert "disk full" in db.runtime_health()["error"]
+
+
+def test_noncritical_runtime_write_failure_keeps_buy_health_ready(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+
+    assert db.log_order_event(run_id="r", event_type="ENTRY_EDGE_OBSERVATION") is False
+
+    assert db.runtime_health()["ready"] is True
+
+
+def test_strategy_order_event_accepts_explicit_instrument_id(tmp_path):
+    class Strategy(StrategyDBRuntimeMixin):
+        def _normalize_side_text(self, side):
+            return str(side).lower()
+
+    captured = []
+    strategy = Strategy()
+    strategy.trade_db = SimpleNamespace(
+        log_order_event=lambda **kwargs: captured.append(kwargs) or True,
+    )
+    strategy.run_id = "run"
+    strategy.current_market_slug = "slug"
+    strategy.instrument_id = "DEFAULT.INST"
+    strategy.current_token_id = None
+    strategy.last_observed_fee_rate_bps = None
+
+    assert strategy._db_order_event(
+        event_type="ORDER_FAST_FOLLOW_INTENT",
+        side="BUY",
+        instrument_id="FAST_FOLLOW.INST",
+    ) is True
+    assert captured[0]["instrument_id"] == "FAST_FOLLOW.INST"
 
 
 def test_schema_missing_critical_recovery_column_is_not_buy_ready(tmp_path):

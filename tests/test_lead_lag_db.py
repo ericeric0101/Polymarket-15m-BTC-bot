@@ -86,6 +86,34 @@ def test_reference_compaction_uses_global_market_sentinel_for_null_market_id(tmp
     assert rows == [(LeadLagDB.GLOBAL_MARKET_ID, 7_700_100)]
 
 
+def test_writer_explicitly_closes_each_batch_connection(tmp_path, monkeypatch):
+    db = LeadLagDB(str(tmp_path / "lead_lag.db"))
+    db.stop()
+    closed = []
+
+    class Connection:
+        def execute(self, *_args):
+            return None
+
+        def executemany(self, *_args):
+            return None
+
+        def commit(self):
+            return None
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(db, "_connect", Connection)
+    db.enqueue_reference_1s(
+        run_id="r", slug="s", market_id=None, bucket_epoch_ms=1_000,
+        source="hyperliquid_btc_bbo", price_cents=7_700_000, received_epoch_ns=1_000_000_000,
+    )
+    db._writer()
+
+    assert closed == [True]
+
+
 def test_event_report_excludes_late_markouts_and_deduplicates_candidate_second(tmp_path):
     db_path = tmp_path / "lead_lag.db"
     db = LeadLagDB(str(db_path))

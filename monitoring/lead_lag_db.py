@@ -31,7 +31,8 @@ class LeadLagDB:
         return conn
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
+        conn = self._connect()
+        try:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +74,8 @@ class LeadLagDB:
                 CREATE INDEX IF NOT EXISTS idx_lead_lag_decision_time
                   ON lead_lag_decisions(decision_epoch_ns);
             """)
+        finally:
+            conn.close()
 
     def enqueue_snapshot(self, *, run_id: str, polymarket_slug: str, hyperliquid_market_id: int | None, observed_ts: float, payload: dict[str, Any]) -> None:
         row = (str(run_id), str(polymarket_slug), hyperliquid_market_id, int(float(observed_ts) * 1000), dict(payload))
@@ -114,26 +117,30 @@ class LeadLagDB:
                     rows.append(self._queue.get_nowait())
                 except queue.Empty:
                     break
+            conn = None
             try:
-                with self._connect() as conn:
-                    snapshots = [row for row in rows if isinstance(row, tuple) and len(row) == 5]
-                    if snapshots:
-                        conn.executemany(
+                conn = self._connect()
+                snapshots = [row for row in rows if isinstance(row, tuple) and len(row) == 5]
+                if snapshots:
+                    conn.executemany(
                         "INSERT INTO snapshots (run_id, polymarket_slug, hyperliquid_market_id, observed_ts_ms, payload_json) VALUES (?, ?, ?, ?, ?)",
                         [(run_id, slug, market_id, ts_ms, json.dumps(payload, ensure_ascii=False)) for run_id, slug, market_id, ts_ms, payload in snapshots],
-                        )
-                    for kind, row in (item for item in rows if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)):
-                        if kind == "reference":
-                            conn.execute("INSERT OR REPLACE INTO reference_1s VALUES (?, ?, ?, ?, ?, ?, ?)", row)
-                        elif kind == "decision":
-                            conn.execute("INSERT INTO lead_lag_decisions (run_id, slug, market_id, decision_epoch_ns, payload_json) VALUES (?, ?, ?, ?, ?)", (*row[:4], json.dumps(row[4], ensure_ascii=False)))
-                        elif kind == "latency":
-                            conn.execute("INSERT INTO latency_spans (run_id, client_order_id, name, started_monotonic_ns, ended_monotonic_ns, elapsed_ns, created_epoch_ns) VALUES (?, ?, ?, ?, ?, ?, ?)", (*row[:5], max(0, row[4] - row[3]), row[5]))
-                        elif kind == "markout":
-                            conn.execute("INSERT OR IGNORE INTO lead_lag_markouts (run_id, slug, market_id, candidate_epoch_ns, horizon_ms, observed_epoch_ns, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)", (*row[:6], json.dumps(row[6], ensure_ascii=False)))
-                    conn.commit()
+                    )
+                for kind, row in (item for item in rows if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)):
+                    if kind == "reference":
+                        conn.execute("INSERT OR REPLACE INTO reference_1s VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+                    elif kind == "decision":
+                        conn.execute("INSERT INTO lead_lag_decisions (run_id, slug, market_id, decision_epoch_ns, payload_json) VALUES (?, ?, ?, ?, ?)", (*row[:4], json.dumps(row[4], ensure_ascii=False)))
+                    elif kind == "latency":
+                        conn.execute("INSERT INTO latency_spans (run_id, client_order_id, name, started_monotonic_ns, ended_monotonic_ns, elapsed_ns, created_epoch_ns) VALUES (?, ?, ?, ?, ?, ?, ?)", (*row[:5], max(0, row[4] - row[3]), row[5]))
+                    elif kind == "markout":
+                        conn.execute("INSERT OR IGNORE INTO lead_lag_markouts (run_id, slug, market_id, candidate_epoch_ns, horizon_ms, observed_epoch_ns, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)", (*row[:6], json.dumps(row[6], ensure_ascii=False)))
+                conn.commit()
             except Exception:
                 pass
+            finally:
+                if conn is not None:
+                    conn.close()
 
     def stop(self) -> None:
         self._stop.set()
