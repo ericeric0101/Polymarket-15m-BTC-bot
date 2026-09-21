@@ -279,7 +279,7 @@ def test_shadow_records_actual_markout_timing_and_late_quality_flag():
     assert row["payload"]["timely"] is False
 
 
-def _live_harness(*, ask: Decimal):
+def _live_harness(*, ask: Decimal, submit_automatically: bool = True):
     now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
     submitted, order_kwargs, events = [], [], []
 
@@ -337,11 +337,12 @@ def _live_harness(*, ask: Decimal):
         "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
         "twap_followed_outcome", follower_price_cents=7_700_100,
     )
-    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
-    assert owner.on_quote(
-        instrument_id="UP.INST", best_bid=ask - Decimal("0.01"),
-        best_ask=ask, ask_size=Decimal("100"), now_ts=now_ts,
-    )
+    if submit_automatically:
+        owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
+        assert owner.on_quote(
+            instrument_id="UP.INST", best_bid=ask - Decimal("0.01"),
+            best_ask=ask, ask_size=Decimal("100"), now_ts=now_ts,
+        )
     return owner, submitted, order_kwargs, events
 
 
@@ -390,8 +391,35 @@ def test_live_fast_follow_terminal_fok_failure_releases_reservation_without_coun
 
     assert owner._night_filled_entries[night] == 0
     assert coid not in owner._night_pending_entry_ids[night]
-    assert owner.blocks_normal_buy("s") is True
-    owner._failed_slug_cooldown_until["s"] = 0
+
+
+def test_fast_follow_signal_pending_does_not_claim_normal_maker_ownership():
+    owner, _submitted, _kwargs, _events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    owner.record_candidate(LeadLagCandidate(
+        LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(), "twap_followed_outcome"),
+        "r", "s", 1, time.time_ns(),
+    ))
+
+    assert owner.blocks_normal_buy("s") is False
+
+
+def test_fast_follow_submit_exception_rolls_back_local_reservation():
+    owner, _submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    owner.strategy.submit_order = lambda _order: (_ for _ in ()).throw(RuntimeError("venue unavailable"))
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(), "twap_followed_outcome",
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is False
+    assert owner._pending_order_ids == {}
+    assert owner._night_pending_entry_ids["2026-09-08"] == set()
+    assert "s" not in owner._attempted_slugs
+    assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "fast_follow_submit_exception" for event, payload in events)
     assert owner.blocks_normal_buy("s") is False
 
 
@@ -528,7 +556,7 @@ def test_live_fast_follow_cached_night_does_not_bypass_runtime_journal_failure()
         ask_size=Decimal("100"), now_ts=now_ts,
     )
     assert len(submitted) == 1
-    assert owner.strategy.trade_db_buy_ready is False
+    assert owner.strategy.trade_db_buy_ready is True
     assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "trade_journal_unhealthy"
                for event, payload in events)
 
@@ -638,7 +666,8 @@ def test_live_fast_follow_malformed_runtime_health_fails_closed(health):
     owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
 
     assert owner._runtime_journal_ready() is False
-    assert strategy.trade_db_buy_ready is False
+    assert strategy.trade_db_buy_ready is True
+    assert strategy.trade_db_health_reason == "runtime_health_read_failed"
 
 
 def test_live_fast_follow_accepts_explicit_ready_runtime_health():

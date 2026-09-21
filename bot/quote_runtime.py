@@ -198,14 +198,11 @@ class QuoteRuntimeMixin:
         if self.inventory_delta_shares <= 0 and self._startup_rehydrated_inventory_force_sell_only:
             self._startup_rehydrated_inventory_force_sell_only = False
         inventory_overage_sell_only = self._inventory_overage_requires_sell_only()
-        try:
-            journal = getattr(self, "trade_db", None)
-            runtime_health = getattr(journal, "runtime_health", None)
-            health = runtime_health() if callable(runtime_health) else None
-            journal_runtime_ready = isinstance(health, dict) and health.get("ready") is True
-        except Exception:
-            journal_runtime_ready = False
-        journal_forced_sell_only = not bool(getattr(self, "trade_db_buy_ready", True)) or not journal_runtime_ready
+        # Startup ambiguity is a market-wide recovery risk. A later transient
+        # journal fault is not: each BUY path owns the durable write it needs,
+        # so it can reject that one order and retry after the journal probe
+        # recovers without disabling unrelated maker opportunities.
+        journal_forced_sell_only = not bool(getattr(self, "trade_db_buy_ready", True))
         if journal_forced_sell_only and time.time() - getattr(self, "_last_trade_db_warn_ts", 0) >= 60:
             logger.error(
                 "Trade journal recovery health is not ready; running SELL-only and blocking maker BUYs: "

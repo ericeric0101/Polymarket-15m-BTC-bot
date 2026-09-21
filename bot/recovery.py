@@ -138,7 +138,10 @@ class StrategyRecoveryMixin:
                 """
                 SELECT ts, price, qty, payload_json
                 FROM order_events
-                WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT')
+                WHERE event_type IN (
+                    'ORDER_SUBMIT', 'ORDER_MAKER_INTENT',
+                    'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT'
+                )
                   AND UPPER(COALESCE(side, ''))='BUY'
                   AND ts >= ?
                   AND (

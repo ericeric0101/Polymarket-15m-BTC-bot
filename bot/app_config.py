@@ -520,6 +520,7 @@ class OutcomeLeadLagConfig:
     live_l2_depth_buffer: Decimal
     live_l2_max_age_sec: float
     live_max_forecast_age_sec: float
+    live_execution_penalty_per_share: Decimal
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live_entry_only"}:
@@ -538,6 +539,8 @@ class OutcomeLeadLagConfig:
             raise ValueError(
                 "OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC cannot exceed OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS"
             )
+        if self.live_execution_penalty_per_share < 0:
+            raise ValueError("OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_PER_SHARE must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -1141,6 +1144,10 @@ class AppConfig:
                 ),
                 live_max_forecast_age_sec=max(
                     0.05, _env_float("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", 5.0)
+                ),
+                live_execution_penalty_per_share=max(
+                    Decimal("0"),
+                    _env_decimal("OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_PER_SHARE", "0.02515"),
                 ),
             ),
         )

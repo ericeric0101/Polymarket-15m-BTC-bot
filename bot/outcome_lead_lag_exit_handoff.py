@@ -155,7 +155,6 @@ class OutcomeFastFollowLive:
         loader = getattr(getattr(self.strategy, "trade_db", None), "load_fast_follow_night_risk", None)
         recovered = loader(night) if loader is not None else {}
         if recovered is None:
-            self.strategy.trade_db_buy_ready = False
             self.strategy.trade_db_health_reason = "night_risk_query_failed"
             logger.error("Trade journal night-risk lookup failed; blocking fast-follow BUYs")
             return False
@@ -199,7 +198,6 @@ class OutcomeFastFollowLive:
             ready = False
             health = {"reason": "runtime_health_read_failed", "error": str(e)}
         if not ready:
-            self.strategy.trade_db_buy_ready = False
             self.strategy.trade_db_health_reason = str(health.get("reason", "trade_journal_runtime_failure"))
         return ready
 
@@ -224,7 +222,6 @@ class OutcomeFastFollowLive:
             if persisted is False:
                 return False
         except Exception as e:
-            self.strategy.trade_db_buy_ready = False
             self.strategy.trade_db_health_reason = "risk_state_persist_failed"
             logger.error(f"Fast-follow risk-state persistence failed; blocking BUY: {e}")
             return False
@@ -234,6 +231,11 @@ class OutcomeFastFollowLive:
         self._pending_order_ids.pop(client_order_id, None)
         self._night_pending_entry_ids.setdefault(night, set()).discard(client_order_id)
         self._attempted_slugs.discard(slug)
+        recent = getattr(self.strategy, "recent_buy_submit_by_inst", None)
+        if isinstance(recent, dict):
+            for instrument_key, state in tuple(recent.items()):
+                if str((state or {}).get("client_order_id") or "") == client_order_id:
+                    recent.pop(instrument_key, None)
 
     def night_risk_snapshot(self, now_ts: float | None = None) -> dict[str, int | str | float | None]:
         """Return the live quota state for status output and diagnostics."""
@@ -303,13 +305,10 @@ class OutcomeFastFollowLive:
             self._failed_slug_cooldown_until[slug] = time.time() + self.config.failed_entry_cooldown_sec
 
     def blocks_normal_buy(self, slug: str) -> bool:
-        with self._lock:
-            pending_slug = getattr(self._pending, "slug", None)
-        return (
-            slug in self._attempted_slugs
-            or pending_slug == slug
-            or time.time() < self._failed_slug_cooldown_until.get(slug, 0.0)
-        )
+        # A signal, an eligibility rejection, and a rejected FOK have not
+        # created exposure. The normal maker owns its independent path until a
+        # fast-follow reservation has become a durable venue intent.
+        return slug in self._attempted_slugs
 
     def on_fill(self, *, client_order_id: str, side: str, instrument_id: str, realized_net_usdc=None) -> None:
         metadata = self._pending_order_ids.pop(client_order_id, None)
@@ -531,10 +530,17 @@ class OutcomeFastFollowLive:
                     logger.error(f"Outcome execution-penalty check failed; blocking BUY: {e}")
             if not allowed:
                 economics = getattr(self.strategy, "_last_fast_follow_economics_context", {})
+                economics = economics if isinstance(economics, dict) else {}
+                detail_reason = str(economics.get("economics_reason") or "")
+                blocked_reason = (
+                    "fast_follow_forecast_stale" if detail_reason == "stale_forecast"
+                    else "fast_follow_economics_rejected" if detail_reason
+                    else "fast_follow_economics_unavailable"
+                )
                 self._record_blocked(
                     candidate,
-                    "execution_penalty_check_failed",
-                    **(economics if isinstance(economics, dict) else {}),
+                    blocked_reason,
+                    **economics,
                 )
                 return False
 
@@ -576,10 +582,8 @@ class OutcomeFastFollowLive:
                 reason="outcome_then_twap_confirmed", instrument_id=str(instrument_id), payload=metadata,
             )
             if persisted is False:
-                self.strategy.trade_db_buy_ready = False
                 self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"
         except Exception as e:
-            self.strategy.trade_db_buy_ready = False
             self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"
             logger.error(f"Fast-follow intent persistence failed; blocking BUY: {e}")
         if not self._runtime_journal_ready():
@@ -604,7 +608,19 @@ class OutcomeFastFollowLive:
         if self.strategy._is_dry_run_mode():
             event_type = "ORDER_DRY_RUN_SUBMITTED"
         else:
-            self.strategy.submit_order(order)
+            try:
+                self.strategy.submit_order(order)
+            except Exception as exc:
+                self._rollback_unsubmitted_entry_reservation(
+                    slug=slug, night=night, client_order_id=str(coid),
+                )
+                self._record_blocked(
+                    candidate,
+                    "fast_follow_submit_exception",
+                    error_type=type(exc).__name__,
+                )
+                logger.error(f"Fast-follow FOK submission raised; reservation released: {exc}")
+                return False
             event_type = "ORDER_FAST_FOLLOW_SUBMIT"
         self.strategy._db_order_event(
             event_type=event_type, client_order_id=str(coid), side="BUY",

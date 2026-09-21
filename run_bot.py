@@ -275,12 +275,18 @@ class IntegratedBTCStrategy(
         the current forecast produced by the normal quote cycle; it never
         issues price or fee I/O while deciding whether to send an order.
         """
-        forecast = getattr(self, "last_forecast_state", None)
+        forecast = None
+        current_forecast = getattr(self, "_build_fast_follow_forecast_state", None)
+        if callable(current_forecast):
+            try:
+                forecast = current_forecast(instrument_id=instrument_id, market_mid=Decimal(str(limit_price)))
+            except Exception as exc:
+                logger.warning(f"Fast-follow current forecast unavailable; using cached forecast if fresh: {exc}")
+        forecast = forecast or getattr(self, "last_forecast_state", None)
         self._last_fast_follow_economics_context = {}
         side = getattr(self._side_for_instrument_id(instrument_id), "value", "NONE").lower()
         probability_for_outcome = getattr(forecast, "probability_for_outcome", None)
-        penalty = getattr(getattr(self, "maker_engine", None), "config", None)
-        adverse_markout = getattr(penalty, "maker_execution_empirical_adverse_markout_per_share", None)
+        adverse_markout = getattr(self, "fast_follow_execution_penalty_per_share", None)
         if not callable(probability_for_outcome) or side not in {"up", "down"}:
             logger.error("Fast-follow economics unavailable: no current directional forecast")
             return False
@@ -318,6 +324,7 @@ class IntegratedBTCStrategy(
             "resolution_ev_usdc": float(result.resolution_ev_usdc),
             "taker_fee_usdc": float(result.taker_fee_usdc),
             "execution_penalty_usdc": float(result.execution_penalty_usdc),
+            "execution_penalty_source": "configured_fast_follow_fallback",
             "expected_net_usdc": float(result.expected_net_usdc),
             "min_expected_net_usdc": float(self.maker_min_expected_net_usdc),
         }

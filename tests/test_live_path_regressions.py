@@ -113,6 +113,7 @@ def test_fast_follow_economics_uses_configured_forecast_freshness(monkeypatch):
             config=SimpleNamespace(maker_execution_empirical_adverse_markout_per_share=Decimal("0.01")),
         ),
         maker_min_expected_net_usdc=Decimal("0.001"),
+        fast_follow_execution_penalty_per_share=Decimal("0.01"),
         fast_follow_max_forecast_age_sec=5.0,
         _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="UP"),
     )
@@ -186,7 +187,7 @@ def test_verified_inventory_overage_is_sell_only_and_preserves_sell_orders():
     assert host.events[-1][0] == "INVENTORY_OVERAGE_CLEARED"
 
 
-def test_runtime_journal_failure_blocks_normal_buy_but_runs_protective_exits():
+def test_runtime_journal_failure_does_not_disable_normal_maker_cycle_or_protective_exits():
     exits = []
 
     class Host(QuoteRuntimeMixin):
@@ -249,7 +250,7 @@ def test_runtime_journal_failure_blocks_normal_buy_but_runs_protective_exits():
     context = asyncio.run(Host()._prepare_quote_cycle())
 
     assert context is not None
-    assert context["forced_sell_only"] is True
+    assert context["forced_sell_only"] is False
     assert exits == ["taker", "urgent"]
 
 
@@ -3581,7 +3582,37 @@ def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
     assert strategy.submitted_orders, "expected submit_order to be called"
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
     assert submitted_qty == Decimal("5.400000")
+    assert any(event["event_type"] == "ORDER_MAKER_INTENT" for event in strategy.order_events)
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "value"
+
+
+def test_maker_buy_does_not_reach_venue_when_durable_intent_fails():
+    desired_entry = build_desired_quote_entry(
+        order_key="buy:inst-up", side="buy", inst_id="inst-up",
+        quote_data=(Decimal("0.64"), SimpleNamespace(
+            expected_net_usdc=Decimal("0.007"), expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"), fee_equivalent_usdc=Decimal("0"),
+        ), True, Decimal("0.007"), Decimal("0.030"), Decimal("0.010"), Decimal("0.054"),
+        Decimal("0.6244"), Decimal("0"), Decimal("0")),
+        side_disable_reason_by_side={"buy": "econ_gate"}, reduce_only_reason=None,
+        reduce_only_tail_sell_block=False, reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False, min_expected_net_usdc=Decimal("0.001"), now_ts=0.0,
+        sell_pause_until=0.0, is_dry_run_mode=False, sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5.0"), avg_entry=Decimal("0"), emergency_window=False,
+        high_cost_exit_cooldown_enabled=False, high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0, maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+    )
+    strategy = DummyTrendSubmitStrategy()
+    original_event = strategy._db_order_event
+    strategy._db_order_event = lambda **payload: False if payload["event_type"] == "ORDER_MAKER_INTENT" else original_event(**payload)
+
+    submit_maker_quote(
+        strategy, instrument_id="inst-up", side="buy", limit_price=Decimal("0.64"),
+        econ=desired_entry["econ"], directional_snapshot=build_directional_snapshot(desired_entry),
+    )
+
+    assert strategy.submitted_orders == []
 
 
 def test_crossing_tail_protect_tp_uses_bounded_taker_exit_not_post_only_maker_order():

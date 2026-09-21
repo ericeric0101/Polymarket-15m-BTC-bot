@@ -493,6 +493,26 @@ def submit_maker_quote(
     if order is None:
         return
 
+    # The normal maker path needs the same bounded crash evidence as FOK:
+    # persist intent before a venue request, but never treat intent as a fill.
+    # A transient journal failure rejects only this BUY; the journal health
+    # probe can restore later opportunities without touching SELL authority.
+    if side == "buy":
+        intent_persisted = strategy._db_order_event(
+            event_type="ORDER_MAKER_INTENT",
+            client_order_id=str(order_id),
+            side="BUY",
+            price=float(limit_price),
+            qty=token_qty,
+            status="INTENT",
+            reason="maker_quote_intent",
+            expected_net_usdc=float(econ.expected_net_usdc),
+            payload={"maker": True, "submitted_instrument_id": str(instrument_id)},
+        )
+        if intent_persisted is False:
+            logger.warning("Maker BUY blocked: durable journal intent could not be persisted")
+            return
+
     submit_started_ns = time.perf_counter_ns()
     strategy.submit_order(order)
     lead_lag_db = getattr(strategy, "lead_lag_db", None)

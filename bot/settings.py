@@ -759,6 +759,7 @@ def initialize_strategy_settings(
     strategy.outcome_high_frequency_shadow_enabled = lead_lag.high_frequency_shadow_enabled
     strategy.outcome_bypass_execution_penalty = lead_lag.bypass_execution_penalty
     strategy.fast_follow_max_forecast_age_sec = lead_lag.live_max_forecast_age_sec
+    strategy.fast_follow_execution_penalty_per_share = lead_lag.live_execution_penalty_per_share
     strategy.outcome_lead_lag_runtime = None
     strategy.outcome_fast_follow_live = None
     candidate_handler = None

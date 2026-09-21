@@ -24,23 +24,43 @@ def _fill(db, *, slug, order_id, side, price, qty, fee=0.0):
     )
 
 
-def test_missing_journal_created_at_startup_is_not_buy_ready(tmp_path):
+def test_fresh_journal_created_at_startup_is_buy_ready(tmp_path):
     db = TradeJournalDB(tmp_path / "missing-journal.db")
 
     health = db.startup_health()
 
-    assert health["ready"] is False
-    assert health["reason"] == "missing_at_startup"
+    assert health["ready"] is True
+    assert health["reason"] == "fresh_initialized"
+    db.stop()
 
 
-def test_existing_empty_journal_is_not_buy_ready(tmp_path):
+def test_existing_empty_journal_without_recovery_evidence_is_buy_ready(tmp_path):
     path = tmp_path / "empty-journal.db"
-    TradeJournalDB(path)
+    first = TradeJournalDB(path)
+    first.stop()
 
-    health = TradeJournalDB(path).startup_health()
+    second = TradeJournalDB(path)
+    health = second.startup_health()
 
-    assert health["ready"] is False
-    assert health["reason"] == "empty_journal"
+    assert health["ready"] is True
+    assert health["reason"] == "empty_journal_no_recovery_evidence"
+    second.stop()
+
+
+def test_missing_new_path_migrates_healthy_legacy_journal_atomically(tmp_path):
+    legacy = tmp_path / "logs" / "trade_journal.db"
+    target = tmp_path / "data" / "trading" / "trade_journal.db"
+    source = TradeJournalDB(legacy)
+    _fill(source, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    source.stop()
+
+    db = TradeJournalDB(target, legacy_db_path=legacy)
+
+    assert db.startup_health()["ready"] is True
+    assert db.startup_health()["reason"] == "migrated_legacy_journal"
+    assert target.is_file()
+    assert db.load_market_guard_counts("btc-updown-test")["buy_count"] == 1
+    db.stop()
 
 
 def test_legacy_journal_schema_is_not_buy_ready(tmp_path):
@@ -162,6 +182,24 @@ def test_critical_runtime_write_failure_marks_journal_not_buy_ready(monkeypatch,
     assert db.runtime_health()["reason"] == "write_failed"
     assert db.runtime_health()["event_type"] == "ORDER_FILLED"
     assert "disk full" in db.runtime_health()["error"]
+
+
+def test_transient_critical_write_failure_recovers_after_a_successful_probe(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    original_connect = db._connect
+    attempts = []
+
+    def fail_once():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_connect()
+
+    monkeypatch.setattr(db, "_connect", fail_once)
+    assert db.log_order_event(run_id="r", event_type="ORDER_FILLED") is False
+    assert db.runtime_health()["state"] == "HEALTHY"
+    assert db.runtime_health()["ready"] is True
+    db.stop()
 
 
 def test_noncritical_runtime_write_failure_keeps_buy_health_ready(monkeypatch, tmp_path):

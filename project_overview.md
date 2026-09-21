@@ -31,12 +31,14 @@
   Successful strategy/order event writes mark a coalesced background snapshot
   dirty; it atomically publishes `data/backups/trade_journal.db` without
   placing a full SQLite backup on the trading callback path.
-- Startup health validates journal existence at process start, required schema
-  columns/version and non-empty recovery history. Missing, empty, unreadable or
-  incompatible journals fail closed: normal maker and Outcome fast-follow BUYs
-  are blocked while exits remain available. A recovered on-chain position with
-  no cost basis is explicitly labelled `cost_basis_status=unknown` and starts
-  SELL-only.
+- Startup health validates schema/version and readability. When the configured
+  `data/trading/trade_journal.db` is absent, a healthy historical
+  `logs/trade_journal.db` is copied through SQLite's backup API and atomically
+  published before startup continues. A genuinely fresh, empty journal is
+  BUY-ready; independent venue inventory recovery still starts SELL-only when
+  it finds real exposure without a cost basis. Unreadable, incompatible, or
+  failed-migration journals remain fail-closed for BUY while exits remain
+  available.
 - Outcome returns are normalized by their actual elapsed interval. The current
   provisional limit is 6 seconds (`OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS`),
   matching the observed approximately five-second Outcome `allMids` cadence;
@@ -49,16 +51,19 @@
   earlier bypass was added without an enduring economic rationale, so default
   behavior requires a strategy execution-penalty check; an unavailable or
   failing check rejects the fast-follow BUY.
-- A runtime journal write failure immediately marks the journal unhealthy and
-  prevents new BUYs while preserving SELL/stop-loss authority. Fast-follow
-  requires its cached normal-quote forecast to be no older than the independent
-  `OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC` limit (currently 5 seconds, below
-  its 6-second signal TTL). This matches the observed normal quote-cycle cadence
-  without allowing an expired Outcome signal to reuse a forecast. Economics
-  rejections persist fair price, FOK limit, quantity, resolution EV, taker fee,
-  markout penalty, and expected net for calibration. A terminal FOK failure
-  releases market ownership after a short cooldown instead of blocking every
-  remaining entry opportunity for that market.
+- A critical runtime journal write enters recoverable `DEGRADED` health. The
+  BUY requiring that durable write is rejected, then later writes can resume
+  after a successful SQLite probe; repeated or unrecoverable faults become
+  `FAILED`. Diagnostic persistence never gates trading. Normal maker BUY uses
+  a durable `ORDER_MAKER_INTENT` before venue submission; fast-follow does the
+  equivalent with `ORDER_FAST_FOLLOW_INTENT`. Fast-follow builds a current
+  shared forecast directly from the fresh in-memory Chainlink/TWAP cache rather
+  than waiting on a prior maker cycle. Its fallback penalty is the explicitly
+  separate `OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_PER_SHARE`, not the maker-fill
+  markout estimator. Economics rejections persist fair price, FOK limit,
+  quantity, resolution EV, taker fee, markout penalty, and expected net for
+  calibration. A terminal FOK failure or eligibility rejection releases
+  fast-follow ownership; neither suppresses an independent normal maker BUY.
 - Runtime journal health is checked again before every fast-follow entry,
   including reuse of an already-loaded Taipei-night risk cache; a cached night
   can never bypass the BUY gate. The pending fast-follow reservation must be

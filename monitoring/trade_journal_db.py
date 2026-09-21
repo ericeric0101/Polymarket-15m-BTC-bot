@@ -85,8 +85,10 @@ class TradeJournalDB:
     # duplicate entry after a restart.  Diagnostic/shadow writes must not turn
     # a healthy primary journal into a permanent BUY circuit-breaker.
     _CRITICAL_ORDER_EVENTS = {
-        "ORDER_SUBMIT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_FAST_FOLLOW_SUBMIT",
-        "ORDER_FILLED", "ORDER_CANCELLED", "ORDER_REJECTED",
+        # These are the only order writes that create or confirm exposure.
+        # A terminal status is useful evidence, but a prior intent/submit plus
+        # external inventory recovery remains conservative if it cannot persist.
+        "ORDER_SUBMIT", "ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_FILLED",
     }
     _CRITICAL_STRATEGY_EVENTS = {
         "FAST_FOLLOW_RISK_STATE", "MARKET_BUY_COUNT_UPDATED",
@@ -94,13 +96,31 @@ class TradeJournalDB:
     }
 
     def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
-                 backup_interval_sec: float = 30.0) -> None:
+                 backup_interval_sec: float = 30.0, legacy_db_path: Optional[str | Path] = None) -> None:
         self.db_path = str(Path(db_path))
+        target = Path(self.db_path)
+        self._migration_error: Optional[str] = None
+        self._startup_origin = "existing" if target.is_file() else "fresh"
+        if not target.is_file():
+            legacy = Path(legacy_db_path) if legacy_db_path is not None else self._default_legacy_path(target)
+            if legacy is not None and legacy.is_file() and legacy.resolve() != target.resolve():
+                try:
+                    self._migrate_legacy_journal(legacy, target)
+                    self._startup_origin = "migrated"
+                    logger.warning(f"Migrated historical trade journal: source={legacy} target={target}")
+                except Exception as exc:
+                    self._migration_error = str(exc)
+                    self._startup_origin = "migration_failed"
+                    logger.error(f"Trade journal migration failed: source={legacy} target={target} error={exc}")
         default_backup = Path(self.db_path).parent.parent / "backups" / Path(self.db_path).name
         self.backup_path = str(Path(backup_path)) if backup_path else str(default_backup)
         self._existed_at_startup = Path(self.db_path).is_file()
         self._schema_init_error: Optional[str] = None
-        self._runtime_health: Dict[str, Any] = {"ready": True, "reason": "ready"}
+        self._runtime_health: Dict[str, Any] = {
+            "ready": True, "state": "HEALTHY", "reason": "ready", "consecutive_failures": 0,
+        }
+        self._health_lock = threading.Lock()
+        self._last_health_probe_monotonic = 0.0
         self._backup_interval_sec = max(1.0, float(backup_interval_sec))
         self._backup_dirty = False
         # Coalesce the initial burst of startup telemetry too; a caller can
@@ -116,24 +136,80 @@ class TradeJournalDB:
         self._backup_thread = threading.Thread(target=self._backup_worker, daemon=True, name="trade-journal-backup")
         self._backup_thread.start()
 
+    @staticmethod
+    def _default_legacy_path(target: Path) -> Optional[Path]:
+        """Find the pre-migration journal only for the standard data/trading layout."""
+        if target.parent.name == "trading" and target.parent.parent.name == "data":
+            return target.parent.parent.parent / "logs" / "trade_journal.db"
+        return None
+
+    @staticmethod
+    def _migrate_legacy_journal(source: Path, target: Path) -> None:
+        """Copy an SQLite journal through its backup API and atomically publish it."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.migrating")
+        try:
+            with sqlite3.connect(str(source)) as source_conn, sqlite3.connect(str(temporary)) as destination_conn:
+                source_conn.backup(destination_conn)
+            os.replace(temporary, target)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
     def startup_health(self) -> Dict[str, Any]:
         """Return the immutable-at-startup journal gate used for new BUYs."""
         return dict(self._startup_health)
 
     def runtime_health(self) -> Dict[str, Any]:
-        return dict(self._runtime_health)
+        with self._health_lock:
+            state = str(self._runtime_health.get("state") or "HEALTHY")
+        if state in {"DEGRADED", "FAILED"}:
+            self._probe_runtime_health()
+        with self._health_lock:
+            return dict(self._runtime_health)
 
     def _mark_runtime_failure(self, reason: str, error: Exception, *, event_type: str = "") -> None:
-        self._runtime_health = {
-            "ready": False,
-            "reason": reason,
-            "error": str(error),
-            "event_type": str(event_type),
-        }
+        error_text = str(error)
+        lowered = error_text.lower()
+        unrecoverable = any(token in lowered for token in (
+            "malformed", "not a database", "database disk image is malformed", "schema", "readonly",
+        ))
+        with self._health_lock:
+            failures = int(self._runtime_health.get("consecutive_failures", 0)) + 1
+            state = "FAILED" if unrecoverable or failures >= 3 else "DEGRADED"
+            self._runtime_health = {
+                "ready": False,
+                "state": state,
+                "reason": "journal_unrecoverable" if unrecoverable else reason,
+                "error": error_text,
+                "event_type": str(event_type),
+                "consecutive_failures": failures,
+            }
         logger.error(
             "Trade journal critical runtime failure; new BUYs must be blocked: "
             f"event_type={event_type} error={error}"
         )
+
+    def _probe_runtime_health(self) -> None:
+        """Recover automatically only after an actual SQLite read succeeds."""
+        now = time.monotonic()
+        with self._health_lock:
+            if now - self._last_health_probe_monotonic < 0.05:
+                return
+            self._last_health_probe_monotonic = now
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("SELECT 1").fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return
+        with self._health_lock:
+            self._runtime_health = {
+                "ready": True, "state": "HEALTHY", "reason": "recovered", "consecutive_failures": 0,
+            }
+        logger.warning("Trade journal runtime health recovered after a successful probe")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -267,8 +343,8 @@ class TradeJournalDB:
 
     def _assess_startup_health(self) -> Dict[str, Any]:
         """Fail closed when a restart cannot safely restore trading risk state."""
-        if not self._existed_at_startup:
-            return {"ready": False, "reason": "missing_at_startup"}
+        if self._migration_error:
+            return {"ready": False, "reason": "legacy_migration_failed", "error": self._migration_error}
         if self._schema_init_error:
             return {"ready": False, "reason": "schema_init_failed", "error": self._schema_init_error}
         try:
@@ -292,11 +368,19 @@ class TradeJournalDB:
                     for table in self._REQUIRED_COLUMNS
                 )
                 if event_count <= 0:
-                    return {"ready": False, "reason": "empty_journal"}
+                    # An empty journal is safe only as an absence of *journal*
+                    # evidence. Startup inventory recovery remains authoritative
+                    # and will force SELL-only if the venue reports exposure.
+                    reason = (
+                        "fresh_initialized" if self._startup_origin == "fresh"
+                        else "empty_journal_no_recovery_evidence"
+                    )
+                    return {"ready": True, "reason": reason, "event_count": 0}
         except Exception as e:
             logger.error(f"Trade journal startup healthcheck failed; BUYs blocked: {e}")
             return {"ready": False, "reason": "read_failed", "error": str(e)}
-        return {"ready": True, "reason": "ready", "event_count": event_count}
+        reason = "migrated_legacy_journal" if self._startup_origin == "migrated" else "ready"
+        return {"ready": True, "reason": reason, "event_count": event_count}
 
     def log_run_start(
         self,
@@ -969,7 +1053,10 @@ class TradeJournalDB:
         sql = """
         SELECT ts, client_order_id, price, qty, payload_json
         FROM order_events
-        WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT')
+        WHERE event_type IN (
+            'ORDER_SUBMIT', 'ORDER_MAKER_INTENT',
+            'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT'
+        )
           AND UPPER(COALESCE(side, '')) = 'BUY'
           AND (
               instrument_id = ?
