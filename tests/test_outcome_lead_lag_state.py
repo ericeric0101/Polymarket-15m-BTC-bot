@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
+from bot.outcome_lead_lag_ingress import record_hyperliquid_btc_probe
 from bot.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_types import ReferenceTick
 from bot.outcome_lead_lag_exit_handoff import (
@@ -133,6 +134,21 @@ def test_state_does_not_arm_fast_follow_when_outcome_return_interval_exceeds_lim
     assert not state.apply(tick("polymarket_twap", 7_700_100, 5_100)).state == "follower_confirmed"
 
 
+def test_state_default_interval_limit_accepts_observed_five_second_outcome_cadence():
+    state = OutcomeLeadLagState(OutcomeLeadLagStateConfig(
+        shock_cents=100, residual_cents=300, debounce_ticks=1,
+        baseline_warmup_samples=1,
+    ))
+    state.apply(tick("polymarket_twap", 7_700_000, 0))
+    state.apply(tick("outcome_btc_mark", 7_700_000, 0))
+    state.apply(tick("polymarket_twap", 7_700_000, 4_900))
+
+    decision = state.apply(tick("outcome_btc_mark", 7_700_600, 5_000))
+
+    assert decision.state == "adverse_confirmed"
+    assert decision.outcome_interval_ms == 5_000
+
+
 def test_state_fails_closed_for_out_of_order_and_stale_sources():
     state = OutcomeLeadLagState()
     state.apply(tick("outcome_btc_mark", 1_000, 1_000))
@@ -180,6 +196,24 @@ def test_runtime_records_only_shadow_candidates_and_handoff_is_disabled():
     assert candidates
     assert any(kind == "decision" for kind, _ in db.rows)
     assert handoff_confirmed_candidate(object()) is False
+
+
+def test_hyperliquid_btc_probe_is_persisted_without_publishing_a_signal_tick():
+    class DB:
+        def __init__(self): self.rows = []
+        def enqueue_reference_1s(self, **kwargs): self.rows.append(kwargs)
+
+    strategy = SimpleNamespace(
+        lead_lag_db=DB(), run_id="run", current_market_slug="slug",
+    )
+    record_hyperliquid_btc_probe(
+        strategy, source="hyperliquid_btc_bbo", price=Decimal("77500"),
+        source_event_ts_ms=123, bid=Decimal("77499"), ask=Decimal("77501"), connection_epoch=2,
+    )
+
+    assert strategy.lead_lag_db.rows[0]["source"] == "hyperliquid_btc_bbo"
+    assert strategy.lead_lag_db.rows[0]["market_id"] is None
+    assert strategy.lead_lag_db.rows[0]["price_cents"] == 7_750_000
 
 
 def test_state_calibrates_static_cross_venue_basis_before_scoring_shock():

@@ -5,8 +5,6 @@ from collections import defaultdict, deque
 from statistics import median
 from dataclasses import dataclass
 
-from loguru import logger
-
 from bot.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
 
 
@@ -22,7 +20,7 @@ class OutcomeLeadLagStateConfig:
     baseline_warmup_samples: int = 30
     follower_confirm_window_ms: int = 5_000
     follower_confirm_cents: int = 100
-    max_outcome_return_interval_ms: int = 2_000
+    max_outcome_return_interval_ms: int = 6_000
 
 
 class OutcomeLeadLagState:
@@ -197,10 +195,6 @@ class OutcomeLeadLagState:
             return LeadLagDecision("observe", 0, 0, residual, 0, self.config.feature_version,
                                    tick.received_monotonic_ns, "insufficient_history", window_returns,
                                    raw_residual, baseline, twap.price_cents)
-        logger.info(
-            "Outcome return interval observed: "
-            f"elapsed_ms={outcome_interval_ms} normalized_return_cents={outcome_return}"
-        )
         if outcome_interval_ms is None or outcome_interval_ms > self.config.max_outcome_return_interval_ms:
             self._persistence, self._last_direction = 0, 0
             return LeadLagDecision(

@@ -38,10 +38,11 @@
   no cost basis is explicitly labelled `cost_basis_status=unknown` and starts
   SELL-only.
 - Outcome returns are normalized by their actual elapsed interval. The current
-  provisional limit is 2 seconds (`OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS`);
+  provisional limit is 6 seconds (`OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS`),
+  matching the observed approximately five-second Outcome `allMids` cadence;
   a longer interval is low-confidence and cannot arm fast-follow. The interval
-  is logged/persisted for future calibration. This threshold is a safe default,
-  not yet a cadence-validated production parameter.
+  is persisted for future calibration. This is a provisional operational limit
+  and should be revisited with the higher-frequency channel evidence.
 - An Outcome reconnect carries a new connection epoch. Cross-epoch state is
   discarded and must warm up again before it can create a candidate.
 - `OUTCOME_BYPASS_EXECUTION_PENALTY` defaults to `false`. Git history showed the
@@ -73,6 +74,12 @@
   unreadable values fail closed for new BUYs. Failed backup snapshots keep the
   journal dirty for retry and log the fault, but do not alone disable trading
   while primary journal writes remain healthy.
+- `allMids` BTC observations are historically about five seconds apart and are
+  accepted by the current provisional six-second fast-follow interval limit.
+  The live profile now enables a research-only Hyperliquid BTC BBO/L2Book
+  cadence probe. Those observations are persisted separately for comparison,
+  but have no state-machine, candidate, or order authority. The six-second
+  setting remains provisional pending measured higher-frequency-channel evidence.
 - `absolute_max_loss_breaker` takes priority over the normal spread guard and
   fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
   existing order and submits the protective exit immediately.

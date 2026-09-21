@@ -40,7 +40,7 @@ from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
 from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastFollowLive
-from bot.outcome_lead_lag_ingress import publish_strategy_tick
+from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
 
 
 def initialize_strategy_settings(
@@ -756,6 +756,7 @@ def initialize_strategy_settings(
     strategy.lead_lag_db = LeadLagDB()
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode
+    strategy.outcome_high_frequency_shadow_enabled = lead_lag.high_frequency_shadow_enabled
     strategy.outcome_bypass_execution_penalty = lead_lag.bypass_execution_penalty
     strategy.outcome_lead_lag_runtime = None
     strategy.outcome_fast_follow_live = None
@@ -802,6 +803,10 @@ def initialize_strategy_settings(
         tick_listener=(lambda price, _market_id, epoch: publish_strategy_tick(
             strategy, source="outcome_btc_mark", price=price, connection_epoch=epoch,
         )) if strategy.outcome_lead_lag_runtime is not None else None,
+        probe_listener=(lambda source, price, event_ts_ms, bid, ask, epoch: record_hyperliquid_btc_probe(
+            strategy, source=source, price=price, source_event_ts_ms=event_ts_ms,
+            bid=bid, ask=ask, connection_epoch=epoch,
+        )) if lead_lag.high_frequency_shadow_enabled else None,
         lifecycle_listener=lambda event, payload: strategy._db_strategy_event(
             f"HYPERLIQUID_OUTCOME_OBSERVER_{event.upper()}",
             {"read_only": True, **payload},

@@ -83,6 +83,34 @@ def test_observer_tags_btc_ticks_with_the_current_connection_epoch():
     assert ticks == [(77500.0, 1313, 7)]
 
 
+def test_observer_emits_btc_bbo_and_l2book_to_shadow_probe_only():
+    probes, signal_ticks = [], []
+    observer = HyperliquidOutcomeObserver(
+        market_id=1313,
+        tick_listener=lambda *args: signal_ticks.append(args),
+        probe_listener=lambda source, price, event_ts_ms, bid, ask, epoch: probes.append(
+            (source, price, event_ts_ms, bid, ask, epoch)
+        ),
+    )
+    observer._merge(stream_connected=True, connection_epoch=4)
+
+    observer._on_message({"channel": "bbo", "data": {
+        "coin": "BTC", "time": 123, "bbo": [{"px": "77499", "sz": "2"}, {"px": "77501", "sz": "3"}],
+    }})
+    observer._on_message({"channel": "l2Book", "data": {
+        "coin": "BTC", "time": 124, "levels": [[{"px": "77500", "sz": "4"}], [{"px": "77502", "sz": "5"}]],
+    }})
+
+    assert probes == [
+        ("hyperliquid_btc_bbo", 77500.0, 123, 77499.0, 77501.0, 4),
+        ("hyperliquid_btc_l2book", 77501.0, 124, 77500.0, 77502.0, 4),
+    ]
+    assert signal_ticks == []
+    snapshot = observer.snapshot()
+    assert snapshot["btc_bbo_mid"] == 77500.0
+    assert snapshot["btc_l2book_mid"] == 77501.0
+
+
 def test_reconnect_backoff_is_bounded_and_grows_after_unstable_connections():
     assert reconnect_delay_sec(1) == 1.0
     assert reconnect_delay_sec(2) == 2.0

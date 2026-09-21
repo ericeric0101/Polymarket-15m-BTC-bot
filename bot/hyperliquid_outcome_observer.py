@@ -45,6 +45,14 @@ def _book_top(book: Any) -> tuple[Optional[float], Optional[float], Optional[flo
         return None, None, None, None
 
 
+def _bbo_top(bbo: Any) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    try:
+        bid, ask = bbo[0], bbo[1]
+        return _number(bid["px"]), _number(ask["px"]), _number(bid.get("sz")), _number(ask.get("sz"))
+    except (IndexError, KeyError, TypeError):
+        return None, None, None, None
+
+
 def reconnect_delay_sec(attempt: int) -> float:
     """Bound reconnects so a bad endpoint cannot create a connection storm."""
     return min(MAX_RECONNECT_DELAY_SEC, float(2 ** min(max(0, int(attempt) - 1), 5)))
@@ -65,6 +73,7 @@ class HyperliquidOutcomeObserver:
         ws_url: Optional[str] = None,
         authority_path: Optional[str] = None,
         tick_listener: Optional[Callable[[float, int, int], None]] = None,
+        probe_listener: Optional[Callable[[str, float, int | None, float | None, float | None, int], None]] = None,
         lifecycle_listener: Optional[Callable[[str, dict[str, Any]], None]] = None,
     ) -> None:
         self.market_id = int(market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID", "1313"))
@@ -76,6 +85,7 @@ class HyperliquidOutcomeObserver:
         self._pending_market_id: Optional[int] = None
         self._last_error_log_ts = 0.0
         self._tick_listener = tick_listener
+        self._probe_listener = probe_listener
         self._lifecycle_listener = lifecycle_listener
         self._set_market(self.market_id, reason="not_connected")
 
@@ -148,6 +158,19 @@ class HyperliquidOutcomeObserver:
         except Exception:
             pass
 
+    def _emit_probe(self, source: str, *, price: float, event_ts_ms: int | None,
+                    bid: float | None, ask: float | None) -> None:
+        """Record high-frequency BTC observations without granting signal authority."""
+        if self._probe_listener is None:
+            return
+        try:
+            self._probe_listener(
+                source, price, event_ts_ms, bid, ask,
+                int(self._snapshot.get("connection_epoch", 0)),
+            )
+        except Exception:
+            pass
+
     def _authority_market_id(self) -> Optional[int]:
         """Read the other bot's atomically published current 1d market."""
         if not self.authority_path or not Path(self.authority_path).is_file():
@@ -208,8 +231,33 @@ class HyperliquidOutcomeObserver:
                         self._tick_listener(btc_mark, self.market_id, int(self._snapshot.get("connection_epoch", 0)))
                     except Exception:
                         pass
+        elif channel == "bbo" and isinstance(data, dict) and str(data.get("coin") or "") == "BTC":
+            bid, ask, bid_depth, ask_depth = _bbo_top(data.get("bbo"))
+            if bid is not None and ask is not None:
+                self._merge(
+                    btc_bbo_bid=bid, btc_bbo_ask=ask, btc_bbo_bid_depth=bid_depth,
+                    btc_bbo_ask_depth=ask_depth, btc_bbo_received_ts=now_ts,
+                    btc_bbo_server_timestamp_ms=data.get("time"), btc_bbo_mid=(bid + ask) / 2.0,
+                )
+                self._emit_probe(
+                    "hyperliquid_btc_bbo", price=(bid + ask) / 2.0,
+                    event_ts_ms=data.get("time"), bid=bid, ask=ask,
+                )
         elif channel == "l2Book" and isinstance(data, dict):
             coin = str(data.get("coin") or "")
+            if coin == "BTC":
+                bid, ask, bid_depth, ask_depth = _book_top(data)
+                if bid is not None and ask is not None:
+                    self._merge(
+                        btc_l2book_bid=bid, btc_l2book_ask=ask, btc_l2book_bid_depth=bid_depth,
+                        btc_l2book_ask_depth=ask_depth, btc_l2book_received_ts=now_ts,
+                        btc_l2book_server_timestamp_ms=data.get("time"), btc_l2book_mid=(bid + ask) / 2.0,
+                    )
+                    self._emit_probe(
+                        "hyperliquid_btc_l2book", price=(bid + ask) / 2.0,
+                        event_ts_ms=data.get("time"), bid=bid, ask=ask,
+                    )
+                return
             if coin not in {side0_coin, side1_coin}:
                 return
             bid, ask, bid_depth, ask_depth = _book_top(data)
@@ -252,7 +300,14 @@ class HyperliquidOutcomeObserver:
                         connection_epoch=connection_epoch,
                     )
                     self._emit_lifecycle("connected", attempt=connection_attempt_count)
-                    for subscription in ({"type": "allMids"}, {"type": "l2Book", "coin": side0_coin}, {"type": "l2Book", "coin": side1_coin}):
+                    subscriptions = [
+                        {"type": "allMids"},
+                        {"type": "l2Book", "coin": side0_coin},
+                        {"type": "l2Book", "coin": side1_coin},
+                    ]
+                    if self._probe_listener is not None:
+                        subscriptions.extend(({"type": "bbo", "coin": "BTC"}, {"type": "l2Book", "coin": "BTC"}))
+                    for subscription in subscriptions:
                         await ws.send(json.dumps({"method": "subscribe", "subscription": subscription}))
                     self._emit_lifecycle("subscribed", side0_coin=side0_coin, side1_coin=side1_coin)
                     stable_reset = False

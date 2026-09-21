@@ -510,6 +510,7 @@ class OutcomeLeadLagConfig:
     follower_confirm_window_ms: int
     follower_confirm_cents: int
     max_outcome_return_interval_ms: int
+    high_frequency_shadow_enabled: bool
     bypass_execution_penalty: bool
     live_signal_ttl_ms: int
     live_max_entry_price: Decimal
@@ -1114,8 +1115,9 @@ class AppConfig:
                 follower_confirm_window_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_WINDOW_MS", 5000)),
                 follower_confirm_cents=max(1, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_CENTS", 100)),
                 max_outcome_return_interval_ms=max(
-                    250, _env_int("OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS", 2000)
+                    250, _env_int("OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS", 6000)
                 ),
+                high_frequency_shadow_enabled=_env_bool("OUTCOME_HIGH_FREQUENCY_SHADOW_ENABLED", False),
                 bypass_execution_penalty=_env_bool("OUTCOME_BYPASS_EXECUTION_PENALTY", False),
                 live_signal_ttl_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS", 6000)),
                 live_max_entry_price=_env_decimal("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE", "0.90"),

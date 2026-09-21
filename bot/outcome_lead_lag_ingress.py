@@ -28,3 +28,27 @@ def publish_strategy_tick(strategy, *, source: str, price, source_event_ts_ms: i
         ))
     except (ArithmeticError, TypeError, ValueError):
         return
+
+
+def record_hyperliquid_btc_probe(
+    strategy, *, source: str, price, source_event_ts_ms: int | None = None,
+    bid=None, ask=None, connection_epoch: int = 0,
+) -> None:
+    """Persist high-frequency Hyperliquid BTC observations for research only."""
+    db = getattr(strategy, "lead_lag_db", None)
+    if db is None:
+        return
+    try:
+        price_cents = int((Decimal(str(price)) * 100).to_integral_value())
+        if price_cents <= 0:
+            return
+        received_epoch_ns = time.time_ns()
+        db.enqueue_reference_1s(
+            run_id=str(getattr(strategy, "run_id", "")),
+            slug=str(getattr(strategy, "current_market_slug", "") or ""),
+            market_id=None,
+            bucket_epoch_ms=(received_epoch_ns // 1_000_000 // 1_000) * 1_000,
+            source=str(source), price_cents=price_cents, received_epoch_ns=received_epoch_ns,
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return
