@@ -277,11 +277,28 @@ class IntegratedBTCStrategy(
         """
         forecast = None
         current_forecast = getattr(self, "_build_fast_follow_forecast_state", None)
+        max_forecast_age_sec = float(getattr(self, "fast_follow_max_forecast_age_sec", 5.0))
         if callable(current_forecast):
             try:
-                forecast = current_forecast(instrument_id=instrument_id, market_mid=Decimal(str(limit_price)))
+                forecast = current_forecast(
+                    instrument_id=instrument_id,
+                    market_mid=Decimal(str(limit_price)),
+                    max_source_age_sec=max_forecast_age_sec,
+                )
             except Exception as exc:
                 logger.warning(f"Fast-follow current forecast unavailable; using cached forecast if fresh: {exc}")
+            source_diagnostic = getattr(self, "_last_fast_follow_forecast_source_diagnostic", {})
+            if forecast is None and isinstance(source_diagnostic, dict) and source_diagnostic.get("reason") == "fast_follow_source_stale":
+                self._last_fast_follow_economics_context = {
+                    "economics_reason": "fast_follow_source_stale",
+                    **source_diagnostic,
+                }
+                logger.error(
+                    "Fast-follow economics unavailable: stale underlying TWAP "
+                    f"source_age={source_diagnostic.get('source_age_sec')} "
+                    f"max_age={source_diagnostic.get('max_source_age_sec')}"
+                )
+                return False
         forecast = forecast or getattr(self, "last_forecast_state", None)
         self._last_fast_follow_economics_context = {}
         side = getattr(self._side_for_instrument_id(instrument_id), "value", "NONE").lower()
@@ -291,7 +308,6 @@ class IntegratedBTCStrategy(
             logger.error("Fast-follow economics unavailable: no current directional forecast")
             return False
         forecast_age_sec = time.time() - float(getattr(forecast, "created_ts", 0.0) or 0.0)
-        max_forecast_age_sec = float(getattr(self, "fast_follow_max_forecast_age_sec", 5.0))
         if forecast_age_sec < 0 or forecast_age_sec > max_forecast_age_sec:
             self._last_fast_follow_economics_context = {
                 "economics_reason": "stale_forecast",

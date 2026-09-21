@@ -1082,6 +1082,8 @@ class SpotPricerMixin:
         outcome: str,
         reference_source: str,
         now_ts: Optional[float] = None,
+        source_observed_ts: Optional[float] = None,
+        source_age_sec: Optional[float] = None,
     ) -> ForecastState:
         """Build the one forecast representation used by price and side logic."""
         now = float(now_ts if now_ts is not None else time.time())
@@ -1114,12 +1116,14 @@ class SpotPricerMixin:
             twap_window_sec=twap_window_sec,
             observed_twap_average=observed_twap_average,
             observed_twap_seconds=observed_twap_seconds,
+            source_observed_ts=source_observed_ts,
+            source_age_sec=source_age_sec,
         )
         self.last_forecast_state = state
         return state
 
     def _build_fast_follow_forecast_state(
-        self, *, instrument_id: Any, market_mid: Decimal
+        self, *, instrument_id: Any, market_mid: Decimal, max_source_age_sec: float
     ) -> Optional[ForecastState]:
         """Build a current shared forecast from the already-live TWAP cache.
 
@@ -1131,7 +1135,20 @@ class SpotPricerMixin:
         now = time.time()
         spot = getattr(self, "_polymarket_chainlink_twap_price", None)
         observed_ts = float(getattr(self, "_polymarket_chainlink_twap_observation_ts", 0.0) or 0.0)
-        if spot is None or observed_ts <= 0 or now - observed_ts > 10.0:
+        source_age_sec = now - observed_ts if observed_ts > 0 else float("inf")
+        allowed_source_age_sec = min(10.0, max(0.0, float(max_source_age_sec)))
+        self._last_fast_follow_forecast_source_diagnostic = {
+            "source_observed_ts": observed_ts if observed_ts > 0 else None,
+            "source_age_sec": source_age_sec if observed_ts > 0 else None,
+            "max_source_age_sec": allowed_source_age_sec,
+        }
+        if (
+            spot is None
+            or observed_ts <= 0
+            or source_age_sec < 0
+            or source_age_sec > allowed_source_age_sec
+        ):
+            self._last_fast_follow_forecast_source_diagnostic["reason"] = "fast_follow_source_stale"
             return None
         slug = str(getattr(self, "current_market_slug", "") or "")
         if not slug or not self._market_strike_is_entry_eligible(slug):
@@ -1153,6 +1170,8 @@ class SpotPricerMixin:
                 f"{int(getattr(self, '_polymarket_chainlink_twap_window_sec', 60) or 60)}s_ws"
             ),
             now_ts=now,
+            source_observed_ts=observed_ts,
+            source_age_sec=source_age_sec,
         )
 
     async def _compute_fair_probability(self, market_mid: Decimal, instrument_id: Optional[Any] = None) -> Decimal:

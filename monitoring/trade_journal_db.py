@@ -9,6 +9,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -96,11 +97,15 @@ class TradeJournalDB:
     }
 
     def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
-                 backup_interval_sec: float = 30.0, legacy_db_path: Optional[str | Path] = None) -> None:
+                 backup_interval_sec: float = 30.0, legacy_db_path: Optional[str | Path] = None,
+                 journal_meta_path: Optional[str | Path] = None) -> None:
         self.db_path = str(Path(db_path))
         target = Path(self.db_path)
+        self.journal_meta_path = Path(journal_meta_path) if journal_meta_path is not None else target.parent / "journal_meta.json"
+        self._marker_present = self._valid_marker_exists()
         self._migration_error: Optional[str] = None
         self._startup_origin = "existing" if target.is_file() else "fresh"
+        self._unexpectedly_missing = False
         if not target.is_file():
             legacy = Path(legacy_db_path) if legacy_db_path is not None else self._default_legacy_path(target)
             if legacy is not None and legacy.is_file() and legacy.resolve() != target.resolve():
@@ -112,6 +117,12 @@ class TradeJournalDB:
                     self._migration_error = str(exc)
                     self._startup_origin = "migration_failed"
                     logger.error(f"Trade journal migration failed: source={legacy} target={target} error={exc}")
+            elif self._marker_present:
+                # This host has previously had a primary journal. Do not turn
+                # its disappearance into a brand-new installation and reset a
+                # same-market successful-BUY budget.
+                self._startup_origin = "unexpectedly_missing"
+                self._unexpectedly_missing = True
         default_backup = Path(self.db_path).parent.parent / "backups" / Path(self.db_path).name
         self.backup_path = str(Path(backup_path)) if backup_path else str(default_backup)
         self._existed_at_startup = Path(self.db_path).is_file()
@@ -131,8 +142,17 @@ class TradeJournalDB:
         self._backup_wakeup = threading.Event()
         self._backup_stop = threading.Event()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        if not self._unexpectedly_missing:
+            self._init_schema()
         self._startup_health = self._assess_startup_health()
+        if self._startup_health.get("ready") and not self._marker_present:
+            try:
+                self._write_installation_marker()
+                self._marker_present = True
+            except Exception as exc:
+                self._startup_health = {
+                    "ready": False, "reason": "journal_marker_write_failed", "error": str(exc),
+                }
         self._backup_thread = threading.Thread(target=self._backup_worker, daemon=True, name="trade-journal-backup")
         self._backup_thread.start()
 
@@ -142,6 +162,32 @@ class TradeJournalDB:
         if target.parent.name == "trading" and target.parent.parent.name == "data":
             return target.parent.parent.parent / "logs" / "trade_journal.db"
         return None
+
+    def _valid_marker_exists(self) -> bool:
+        try:
+            with self.journal_meta_path.open("r", encoding="utf-8") as handle:
+                marker = json.load(handle)
+            return bool(marker.get("journal_initialized") is True and marker.get("installation_id"))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+
+    def _write_installation_marker(self) -> None:
+        self.journal_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "format_version": 1,
+            "installation_id": str(uuid.uuid4()),
+            "journal_initialized": True,
+        }
+        temporary = self.journal_meta_path.with_name(f".{self.journal_meta_path.name}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(marker, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.journal_meta_path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _migrate_legacy_journal(source: Path, target: Path) -> None:
@@ -343,6 +389,8 @@ class TradeJournalDB:
 
     def _assess_startup_health(self) -> Dict[str, Any]:
         """Fail closed when a restart cannot safely restore trading risk state."""
+        if self._unexpectedly_missing:
+            return {"ready": False, "reason": "journal_unexpectedly_missing"}
         if self._migration_error:
             return {"ready": False, "reason": "legacy_migration_failed", "error": self._migration_error}
         if self._schema_init_error:

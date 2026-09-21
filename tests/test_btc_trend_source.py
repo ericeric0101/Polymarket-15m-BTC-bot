@@ -1,4 +1,5 @@
 from decimal import Decimal
+from types import SimpleNamespace
 
 from bot.signal_engine import SignalEngine
 from bot.spot_pricer import SpotPricerMixin
@@ -48,3 +49,48 @@ def test_binance_always_reclaims_btc_trend_source():
 
     assert strategy._btc_trend_source == "binance_ws"
     assert strategy._btc_trend_source_price == Decimal("101.0")
+
+
+class _FastFollowForecastHost(SpotPricerMixin):
+    def __init__(self, observed_ts: float) -> None:
+        self._polymarket_chainlink_twap_price = Decimal("100.0")
+        self._polymarket_chainlink_twap_observation_ts = observed_ts
+        self._polymarket_chainlink_twap_window_sec = 60
+        self.current_market_slug = "btc-updown-test"
+        self.market_strike_cache_by_slug = {"btc-updown-test": Decimal("99.0")}
+        self.current_market_end_timestamp = 1_600.0
+        self.cache = SimpleNamespace(instrument=lambda _inst: SimpleNamespace())
+        self.inputs = None
+
+    def _market_strike_is_entry_eligible(self, _slug):
+        return True
+
+    def _normalize_instrument_id(self, instrument_id):
+        return instrument_id
+
+    def _extract_outcome_from_instrument(self, _instrument):
+        return "up"
+
+    def _build_forecast_state(self, **kwargs):
+        self.inputs = kwargs
+        return SimpleNamespace(created_ts=1_000.0)
+
+
+def test_fast_follow_forecast_rejects_stale_underlying_twap(monkeypatch):
+    monkeypatch.setattr("bot.spot_pricer.time.time", lambda: 1_000.0)
+    strategy = _FastFollowForecastHost(observed_ts=994.0)
+
+    assert strategy._build_fast_follow_forecast_state(
+        instrument_id="UP.INST", market_mid=Decimal("0.60"), max_source_age_sec=5.0,
+    ) is None
+
+
+def test_fast_follow_forecast_accepts_fresh_underlying_twap_and_exposes_source_age(monkeypatch):
+    monkeypatch.setattr("bot.spot_pricer.time.time", lambda: 1_000.0)
+    strategy = _FastFollowForecastHost(observed_ts=997.0)
+
+    assert strategy._build_fast_follow_forecast_state(
+        instrument_id="UP.INST", market_mid=Decimal("0.60"), max_source_age_sec=5.0,
+    ) is not None
+    assert strategy.inputs["source_observed_ts"] == 997.0
+    assert strategy.inputs["source_age_sec"] == 3.0

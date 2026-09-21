@@ -31,6 +31,7 @@ def test_fresh_journal_created_at_startup_is_buy_ready(tmp_path):
 
     assert health["ready"] is True
     assert health["reason"] == "fresh_initialized"
+    assert (tmp_path / "journal_meta.json").is_file()
     db.stop()
 
 
@@ -59,8 +60,23 @@ def test_missing_new_path_migrates_healthy_legacy_journal_atomically(tmp_path):
     assert db.startup_health()["ready"] is True
     assert db.startup_health()["reason"] == "migrated_legacy_journal"
     assert target.is_file()
+    assert (target.parent / "journal_meta.json").is_file()
     assert db.load_market_guard_counts("btc-updown-test")["buy_count"] == 1
     db.stop()
+
+
+def test_previously_initialized_install_with_missing_journal_fails_closed(tmp_path):
+    path = tmp_path / "data" / "trading" / "trade_journal.db"
+    first = TradeJournalDB(path)
+    first.stop()
+    assert (path.parent / "journal_meta.json").is_file()
+    path.unlink()
+
+    restarted = TradeJournalDB(path, legacy_db_path=tmp_path / "logs" / "trade_journal.db")
+
+    assert restarted.startup_health()["ready"] is False
+    assert restarted.startup_health()["reason"] == "journal_unexpectedly_missing"
+    restarted.stop()
 
 
 def test_legacy_journal_schema_is_not_buy_ready(tmp_path):

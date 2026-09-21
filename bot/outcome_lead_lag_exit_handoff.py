@@ -303,6 +303,11 @@ class OutcomeFastFollowLive:
         if slug:
             self._attempted_slugs.discard(slug)
             self._failed_slug_cooldown_until[slug] = time.time() + self.config.failed_entry_cooldown_sec
+        recent = getattr(self.strategy, "recent_buy_submit_by_inst", None)
+        if isinstance(recent, dict):
+            for instrument_key, state in tuple(recent.items()):
+                if str((state or {}).get("client_order_id") or "") == client_order_id:
+                    recent.pop(instrument_key, None)
 
     def blocks_normal_buy(self, slug: str) -> bool:
         # A signal, an eligibility rejection, and a rejected FOK have not

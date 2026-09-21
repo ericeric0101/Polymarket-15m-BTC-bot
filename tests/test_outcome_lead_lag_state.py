@@ -423,6 +423,48 @@ def test_fast_follow_submit_exception_rolls_back_local_reservation():
     assert owner.blocks_normal_buy("s") is False
 
 
+def test_fast_follow_failures_do_not_leak_across_sequential_maker_markets():
+    owner, _submitted, kwargs, _events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    maker_submissions = []
+
+    def submit_healthy_maker(slug):
+        assert owner.blocks_normal_buy(slug) is False
+        maker_submissions.append(slug)
+
+    # Market 1: healthy normal maker path remains available.
+    submit_healthy_maker("market-1")
+
+    # Market 2: an Outcome signal is pending but fails before reservation; it
+    # must not own the independent maker path.
+    owner.strategy.current_market_slug = "market-2"
+    decision = LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(), "twap_followed_outcome")
+    owner.record_candidate(LeadLagCandidate(decision, "r", "market-2", 1, time.time_ns()))
+    submit_healthy_maker("market-2")
+    owner._pending = None
+
+    # Market 3: no signal state from Market 2 may leak.
+    submit_healthy_maker("market-3")
+
+    # Market 4: a real FOK reservation reaches terminal rejection.
+    owner.strategy.current_market_slug = "market-4"
+    owner.record_candidate(LeadLagCandidate(decision, "r", "market-4", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is True
+    owner.on_order_terminal(str(kwargs[-1]["client_order_id"]))
+    assert owner._attempted_slugs == set()
+    assert owner._pending_order_ids == {}
+    assert owner._night_pending_entry_ids["2026-09-08"] == set()
+    assert owner.strategy.recent_buy_submit_by_inst == {}
+    assert owner.strategy.market_buy_count_total_by_slug == {}
+
+    # Market 5: terminal FOK cleanup cannot poison a later maker market.
+    submit_healthy_maker("market-5")
+    assert maker_submissions == ["market-1", "market-2", "market-3", "market-5"]
+
+
 def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
     owner, _submitted, kwargs, _events = _live_harness(ask=Decimal("0.60"))
     coid = str(kwargs[0]["client_order_id"])

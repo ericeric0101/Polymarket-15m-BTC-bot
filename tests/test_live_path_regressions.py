@@ -135,6 +135,32 @@ def test_fast_follow_economics_uses_configured_forecast_freshness(monkeypatch):
     }
 
 
+def test_fast_follow_cached_forecast_cannot_bypass_stale_current_source(monkeypatch):
+    now = 1_000.0
+    monkeypatch.setattr("run_bot.time.time", lambda: now)
+    cached = SimpleNamespace(
+        created_ts=now,
+        probability_for_outcome=lambda _side: Decimal("0.90"),
+    )
+    host = SimpleNamespace(
+        _build_fast_follow_forecast_state=lambda **_kwargs: None,
+        _last_fast_follow_forecast_source_diagnostic={
+            "reason": "fast_follow_source_stale", "source_observed_ts": 994.0,
+            "source_age_sec": 6.0, "max_source_age_sec": 5.0,
+        },
+        last_forecast_state=cached,
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        fast_follow_execution_penalty_per_share=Decimal("0.01"),
+        fast_follow_max_forecast_age_sec=5.0,
+        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="UP"),
+    )
+
+    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
+        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
+    ) is False
+    assert host._last_fast_follow_economics_context["economics_reason"] == "fast_follow_source_stale"
+
+
 def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
     error = MarketDiscoveryUnavailable("instrument IDs not published")
 

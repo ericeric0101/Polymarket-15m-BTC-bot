@@ -39,6 +39,11 @@
   it finds real exposure without a cost basis. Unreadable, incompatible, or
   failed-migration journals remain fail-closed for BUY while exits remain
   available.
+- `data/trading/journal_meta.json` is an atomically published installation
+  marker, separate from SQLite. Its absence together with both journal paths
+  means a genuine fresh install and is BUY-ready; if the marker exists but both
+  journals disappear, startup reports `journal_unexpectedly_missing` and blocks
+  BUY rather than resetting same-market fill history.
 - Outcome returns are normalized by their actual elapsed interval. The current
   provisional limit is 6 seconds (`OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS`),
   matching the observed approximately five-second Outcome `allMids` cadence;
@@ -64,6 +69,12 @@
   quantity, resolution EV, taker fee, markout penalty, and expected net for
   calibration. A terminal FOK failure or eligibility rejection releases
   fast-follow ownership; neither suppresses an independent normal maker BUY.
+- Fast-follow forecast freshness is the underlying Chainlink/TWAP observation
+  age, capped by the stricter of its configured maximum and the canonical
+  10-second TWAP freshness limit. A freshly constructed Python forecast never
+  refreshes stale source data. Diagnostics retain separate `created_ts`,
+  `source_observed_ts`, and `source_age_sec`; `fast_follow_source_stale` cannot
+  fall back to a recently-created cached forecast.
 - Runtime journal health is checked again before every fast-follow entry,
   including reuse of an already-loaded Taipei-night risk cache; a cached night
   can never bypass the BUY gate. The pending fast-follow reservation must be
