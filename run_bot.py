@@ -276,6 +276,7 @@ class IntegratedBTCStrategy(
         issues price or fee I/O while deciding whether to send an order.
         """
         forecast = getattr(self, "last_forecast_state", None)
+        self._last_fast_follow_economics_context = {}
         side = getattr(self._side_for_instrument_id(instrument_id), "value", "NONE").lower()
         probability_for_outcome = getattr(forecast, "probability_for_outcome", None)
         penalty = getattr(getattr(self, "maker_engine", None), "config", None)
@@ -284,8 +285,17 @@ class IntegratedBTCStrategy(
             logger.error("Fast-follow economics unavailable: no current directional forecast")
             return False
         forecast_age_sec = time.time() - float(getattr(forecast, "created_ts", 0.0) or 0.0)
-        if forecast_age_sec < 0 or forecast_age_sec > float(getattr(self, "fast_follow_max_forecast_age_sec", 2.0)):
-            logger.error(f"Fast-follow economics unavailable: stale forecast age={forecast_age_sec:.3f}s")
+        max_forecast_age_sec = float(getattr(self, "fast_follow_max_forecast_age_sec", 5.0))
+        if forecast_age_sec < 0 or forecast_age_sec > max_forecast_age_sec:
+            self._last_fast_follow_economics_context = {
+                "economics_reason": "stale_forecast",
+                "forecast_age_sec": float(forecast_age_sec),
+                "max_forecast_age_sec": float(max_forecast_age_sec),
+            }
+            logger.error(
+                "Fast-follow economics unavailable: stale forecast "
+                f"age={forecast_age_sec:.3f}s max_age={max_forecast_age_sec:.3f}s"
+            )
             return False
         try:
             result = evaluate_fast_follow_economics(
@@ -298,10 +308,29 @@ class IntegratedBTCStrategy(
             logger.error(f"Fast-follow economics evaluation failed: {exc}")
             return False
         self._last_fast_follow_economics = result
+        self._last_fast_follow_economics_context = {
+            "economics_reason": result.reason,
+            "forecast_age_sec": float(forecast_age_sec),
+            "max_forecast_age_sec": float(max_forecast_age_sec),
+            "fair_price": float(probability_for_outcome(side)),
+            "limit_price": float(limit_price),
+            "quantity": float(quantity),
+            "resolution_ev_usdc": float(result.resolution_ev_usdc),
+            "taker_fee_usdc": float(result.taker_fee_usdc),
+            "execution_penalty_usdc": float(result.execution_penalty_usdc),
+            "expected_net_usdc": float(result.expected_net_usdc),
+            "min_expected_net_usdc": float(self.maker_min_expected_net_usdc),
+        }
         if not result.allowed:
             logger.warning(
                 "Fast-follow BUY blocked by economics: "
-                f"reason={result.reason} net={float(result.expected_net_usdc):+.6f}"
+                f"reason={result.reason} fair={float(probability_for_outcome(side)):.6f} "
+                f"limit={float(limit_price):.6f} qty={float(quantity):.4f} "
+                f"resolution_ev={float(result.resolution_ev_usdc):+.6f} "
+                f"taker_fee={float(result.taker_fee_usdc):.6f} "
+                f"markout_penalty={float(result.execution_penalty_usdc):.6f} "
+                f"net={float(result.expected_net_usdc):+.6f} "
+                f"min={float(self.maker_min_expected_net_usdc):.6f}"
             )
         return result.allowed
     """

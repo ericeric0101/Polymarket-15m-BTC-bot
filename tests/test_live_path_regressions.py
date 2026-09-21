@@ -100,6 +100,40 @@ class DummyOrder:
         self.client_order_id = client_order_id
 
 
+def test_fast_follow_economics_uses_configured_forecast_freshness(monkeypatch):
+    now = 1_000.0
+    monkeypatch.setattr("run_bot.time.time", lambda: now)
+
+    host = SimpleNamespace(
+        last_forecast_state=SimpleNamespace(
+            created_ts=now - 3.0,
+            probability_for_outcome=lambda _side: Decimal("0.90"),
+        ),
+        maker_engine=SimpleNamespace(
+            config=SimpleNamespace(maker_execution_empirical_adverse_markout_per_share=Decimal("0.01")),
+        ),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        fast_follow_max_forecast_age_sec=5.0,
+        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="UP"),
+    )
+
+    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
+        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
+    ) is True
+    assert host._last_fast_follow_economics_context["forecast_age_sec"] == 3.0
+    assert host._last_fast_follow_economics_context["resolution_ev_usdc"] == 0.3
+
+    host.fast_follow_max_forecast_age_sec = 2.0
+    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
+        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
+    ) is False
+    assert host._last_fast_follow_economics_context == {
+        "economics_reason": "stale_forecast",
+        "forecast_age_sec": 3.0,
+        "max_forecast_age_sec": 2.0,
+    }
+
+
 def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
     error = MarketDiscoveryUnavailable("instrument IDs not published")
 

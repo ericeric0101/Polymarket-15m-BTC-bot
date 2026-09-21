@@ -50,10 +50,15 @@
   behavior requires a strategy execution-penalty check; an unavailable or
   failing check rejects the fast-follow BUY.
 - A runtime journal write failure immediately marks the journal unhealthy and
-  prevents new BUYs while preserving SELL/stop-loss authority. Fast-follow also
-  requires its cached forecast to be no older than two seconds. A terminal FOK
-  failure releases market ownership after a short cooldown instead of blocking
-  every remaining entry opportunity for that market.
+  prevents new BUYs while preserving SELL/stop-loss authority. Fast-follow
+  requires its cached normal-quote forecast to be no older than the independent
+  `OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC` limit (currently 5 seconds, below
+  its 6-second signal TTL). This matches the observed normal quote-cycle cadence
+  without allowing an expired Outcome signal to reuse a forecast. Economics
+  rejections persist fair price, FOK limit, quantity, resolution EV, taker fee,
+  markout penalty, and expected net for calibration. A terminal FOK failure
+  releases market ownership after a short cooldown instead of blocking every
+  remaining entry opportunity for that market.
 - Runtime journal health is checked again before every fast-follow entry,
   including reuse of an already-loaded Taipei-night risk cache; a cached night
   can never bypass the BUY gate. The pending fast-follow reservation must be

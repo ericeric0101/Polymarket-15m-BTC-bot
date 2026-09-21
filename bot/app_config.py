@@ -519,6 +519,7 @@ class OutcomeLeadLagConfig:
     live_max_loss_usdc_per_night: Decimal
     live_l2_depth_buffer: Decimal
     live_l2_max_age_sec: float
+    live_max_forecast_age_sec: float
 
     def __post_init__(self) -> None:
         if self.mode not in {"off", "shadow", "live_entry_only"}:
@@ -531,6 +532,12 @@ class OutcomeLeadLagConfig:
             raise ValueError("OUTCOME_FAST_FOLLOW_L2_DEPTH_BUFFER must be >= 1")
         if self.live_l2_max_age_sec <= 0:
             raise ValueError("OUTCOME_FAST_FOLLOW_L2_MAX_AGE_SEC must be positive")
+        if self.live_max_forecast_age_sec <= 0:
+            raise ValueError("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC must be positive")
+        if self.live_max_forecast_age_sec > self.live_signal_ttl_ms / 1000.0:
+            raise ValueError(
+                "OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC cannot exceed OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS"
+            )
 
 
 @dataclass(frozen=True)
@@ -1131,6 +1138,9 @@ class AppConfig:
                 ),
                 live_l2_max_age_sec=max(
                     0.05, _env_float("OUTCOME_FAST_FOLLOW_L2_MAX_AGE_SEC", 1.0)
+                ),
+                live_max_forecast_age_sec=max(
+                    0.05, _env_float("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", 5.0)
                 ),
             ),
         )

@@ -44,3 +44,11 @@ def test_market_entry_budget_is_hard_limited_to_one_successful_buy(monkeypatch):
     config = AppConfig.from_env(enable_terminal_dashboard=False)
 
     assert config.exit.market_max_buy_events_per_market == 1
+
+
+def test_fast_follow_forecast_freshness_is_independently_configurable(monkeypatch):
+    monkeypatch.setenv("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", "4.5")
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.outcome_lead_lag.live_max_forecast_age_sec == 4.5

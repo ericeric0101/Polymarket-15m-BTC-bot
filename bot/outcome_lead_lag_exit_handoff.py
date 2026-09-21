@@ -530,7 +530,12 @@ class OutcomeFastFollowLive:
                 except Exception as e:
                     logger.error(f"Outcome execution-penalty check failed; blocking BUY: {e}")
             if not allowed:
-                self._record_blocked(candidate, "execution_penalty_check_failed")
+                economics = getattr(self.strategy, "_last_fast_follow_economics_context", {})
+                self._record_blocked(
+                    candidate,
+                    "execution_penalty_check_failed",
+                    **(economics if isinstance(economics, dict) else {}),
+                )
                 return False
 
         coid = ClientOrderId(f"BTC-15M-FAST-FOLLOW-BUY-{int(now_ts * 1000)}")
