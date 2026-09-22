@@ -622,6 +622,53 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
             return None
 
+    def load_fast_follow_buy_markout_calibration(self, *, lookback_hours: float,
+                                                 horizon_sec: int, min_samples: int) -> Optional[Dict[str, float | int | str]]:
+        """Return Outcome FOK/taker-only adverse markout evidence.
+
+        Maker fills are intentionally excluded.  One completed observation per
+        market prevents a multi-event fill lifecycle from inflating evidence.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT CASE WHEN CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL) < 0
+                             THEN -CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL)
+                             ELSE 0 END, json_extract(payload_json, '$.slug')
+                    FROM order_events
+                    WHERE event_type='FILL_MARKOUT' AND side='BUY'
+                      AND json_extract(payload_json, '$.liquidity_class')='taker'
+                      AND json_extract(payload_json, '$.fill_id') LIKE 'BTC-15M-FAST-FOLLOW-BUY-%'
+                      AND CAST(json_extract(payload_json, '$.horizon_sec') AS INTEGER)=?
+                      AND CAST(json_extract(payload_json, '$.markout_context_schema_version') AS INTEGER)=2
+                      AND julianday(ts) >= julianday('now', ?)
+                    ORDER BY ts ASC, id ASC
+                    """,
+                    (int(horizon_sec), f"-{float(lookback_hours):g} hours"),
+                ).fetchall()
+            seen_slugs: set[str] = set()
+            values: list[float] = []
+            for value, slug_value in rows:
+                slug = str(slug_value or "")
+                if not slug or slug in seen_slugs:
+                    continue
+                seen_slugs.add(slug)
+                values.append(float(value or 0.0))
+            calibration = _summarize_adverse_markouts(
+                values, min_samples=min_samples, horizon_sec=horizon_sec,
+                lookback_hours=lookback_hours,
+            )
+            if calibration:
+                calibration["source"] = "outcome_fast_follow_taker_first_market"
+            return calibration
+        except Exception as e:
+            logger.error(
+                "TradeJournalDB load Outcome fast-follow markout failed; FOK BUYs remain blocked: "
+                f"{e}"
+            )
+            return None
+
     def load_maker_buy_markout_calibrations(
         self,
         *,

@@ -63,9 +63,15 @@
   a durable `ORDER_MAKER_INTENT` before venue submission; fast-follow does the
   equivalent with `ORDER_FAST_FOLLOW_INTENT`. Fast-follow builds a current
   shared forecast directly from the fresh in-memory Chainlink/TWAP cache rather
-  than waiting on a prior maker cycle. Its fallback penalty is the explicitly
-  separate `OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_PER_SHARE`, not the maker-fill
-  markout estimator. Economics rejections persist fair price, FOK limit,
+  than waiting on a prior maker cycle. Its execution penalty is calibrated only
+  from 10-second markouts of completed Outcome FOK/taker BUYs: one observation
+  per market, schema-v2 context, a 168-hour lookback, and at least 30 independent
+  markets. It uses a winsorized-P90 adverse-markout estimate. Maker-fill markout,
+  the portable D.4 maker snapshot, and a missing calibration are never an Outcome
+  fallback; unavailable evidence blocks new FOK BUYs rather than treating cost as
+  zero. The former `OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_PER_SHARE` static
+  profile value was removed because it encoded the unrelated maker snapshot.
+  Economics rejections persist fair price, FOK limit,
   quantity, resolution EV, taker fee, markout penalty, and expected net for
   calibration. A terminal FOK failure or eligibility rejection releases
   fast-follow ownership; neither suppresses an independent normal maker BUY.

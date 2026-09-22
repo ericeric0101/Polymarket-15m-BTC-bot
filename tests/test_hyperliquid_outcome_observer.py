@@ -148,6 +148,39 @@ def test_rollover_authority_rejects_stale_or_mismatched_state(tmp_path):
     assert observer._authority_market_id() is None
 
 
+def test_unexpired_authority_is_usable_at_startup_even_if_publisher_is_not_recent(tmp_path):
+    authority_path = tmp_path / "outcome_market_authority.json"
+    now_ms = int(time.time() * 1000)
+    authority_path.write_text(json.dumps({
+        "market_id": 4576, "period": "1d", "side0_coin": "#45760",
+        "side1_coin": "#45761", "updated_at_ms": now_ms - 6 * 60 * 60 * 1000,
+        "expiry": "20990101-0000",
+    }), encoding="utf-8")
+
+    observer = HyperliquidOutcomeObserver(authority_path=str(authority_path))
+
+    assert observer.market_id == 4576
+    assert observer._subscription_messages() == [
+        {"type": "allMids"},
+        {"type": "l2Book", "coin": "#45760"},
+        {"type": "l2Book", "coin": "#45761"},
+    ]
+
+
+def test_no_usable_authority_keeps_btc_signal_subscription_without_stale_side_books(tmp_path):
+    authority_path = tmp_path / "outcome_market_authority.json"
+    authority_path.write_text(json.dumps({
+        "market_id": 1313, "period": "1d", "side0_coin": "#13130",
+        "side1_coin": "#13131", "updated_at_ms": 1,
+        "expiry": "20000101-0000",
+    }), encoding="utf-8")
+
+    observer = HyperliquidOutcomeObserver(authority_path=str(authority_path))
+
+    assert observer._subscription_messages() == [{"type": "allMids"}]
+    assert observer.snapshot()["side_book_subscription_enabled"] is False
+
+
 def test_lead_lag_report_tests_btc_mark_against_twap_and_keeps_groups_separate():
     outcome_marks = [100.0, 110.0, 130.0, 160.0, 200.0, 250.0]
     twaps = [90.0, 100.0, 110.0, 130.0, 160.0, 200.0]

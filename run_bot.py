@@ -340,7 +340,9 @@ class IntegratedBTCStrategy(
             "resolution_ev_usdc": float(result.resolution_ev_usdc),
             "taker_fee_usdc": float(result.taker_fee_usdc),
             "execution_penalty_usdc": float(result.execution_penalty_usdc),
-            "execution_penalty_source": "configured_fast_follow_fallback",
+            "execution_penalty_source": str(
+                getattr(self, "fast_follow_execution_penalty_source", "unavailable")
+            ),
             "expected_net_usdc": float(result.expected_net_usdc),
             "min_expected_net_usdc": float(self.maker_min_expected_net_usdc),
         }

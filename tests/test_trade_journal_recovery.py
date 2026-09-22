@@ -413,6 +413,51 @@ def test_execution_penalty_snapshot_fails_closed_after_expiry():
     assert snapshot is None
 
 
+def test_fast_follow_markout_calibration_excludes_maker_rows_and_deduplicates_markets(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    for index in range(30):
+        db.log_order_event(
+            "run", "FILL_MARKOUT", side="BUY",
+            payload={
+                "fill_id": f"BTC-15M-FAST-FOLLOW-BUY-{index}",
+                "slug": f"outcome-{index}", "liquidity_class": "taker",
+                "horizon_sec": 10, "signed_markout_ps": -0.01,
+                "markout_context_schema_version": 2,
+            },
+        )
+    # Neither a maker fill nor a second observation from the same market is
+    # Outcome/FOK evidence.
+    db.log_order_event("run", "FILL_MARKOUT", side="BUY", payload={
+        "fill_id": "maker", "slug": "maker-only", "liquidity_class": "maker",
+        "horizon_sec": 10, "signed_markout_ps": -0.50,
+        "markout_context_schema_version": 2,
+    })
+    db.log_order_event("run", "FILL_MARKOUT", side="BUY", payload={
+        "fill_id": "BTC-15M-FAST-FOLLOW-BUY-duplicate", "slug": "outcome-0",
+        "liquidity_class": "taker", "horizon_sec": 10, "signed_markout_ps": -0.50,
+        "markout_context_schema_version": 2,
+    })
+
+    calibration = db.load_fast_follow_buy_markout_calibration(
+        lookback_hours=168, horizon_sec=10, min_samples=30,
+    )
+
+    assert calibration is not None
+    assert calibration["sample_count"] == 30
+    assert calibration["adverse_markout_per_share"] == 0.01
+    assert calibration["source"] == "outcome_fast_follow_taker_first_market"
+    db.stop()
+
+
+def test_fast_follow_calibration_never_uses_maker_snapshot_as_fallback():
+    strategy = _FallbackCalibrationStrategy()
+
+    strategy._apply_fast_follow_execution_penalty_calibration()
+
+    assert strategy.fast_follow_execution_penalty_per_share is None
+    assert strategy.fast_follow_execution_penalty_source == "unavailable"
+
+
 def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     for index, (candidate, outcome) in enumerate((("UP", "UP"), ("DOWN", "UP"), ("UP", "UP"))):

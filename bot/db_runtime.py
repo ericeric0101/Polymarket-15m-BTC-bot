@@ -14,8 +14,42 @@ class StrategyDBRuntimeMixin:
         self.trade_db_health_reason = str(reason)
         logger.error(f"Trade journal is not safe for restart recovery; blocking new BUYs: reason={reason}")
 
+    def _apply_fast_follow_execution_penalty_calibration(self) -> None:
+        """Load only Outcome FOK evidence for Outcome FOK entry economics."""
+        self.fast_follow_execution_penalty_per_share = None
+        self.fast_follow_execution_penalty_calibration = None
+        self.fast_follow_execution_penalty_source = "unavailable"
+        loader = getattr(getattr(self, "trade_db", None), "load_fast_follow_buy_markout_calibration", None)
+        if not callable(loader):
+            logger.warning("Outcome FOK execution calibration unavailable; new fast-follow BUYs remain blocked")
+            return
+        calibration = loader(lookback_hours=168.0, horizon_sec=10, min_samples=30)
+        if not calibration:
+            logger.warning(
+                "Outcome FOK execution calibration has insufficient evidence; refusing maker-markout fallback"
+            )
+            return
+        penalty = Decimal(str(calibration.get("adverse_markout_per_share", "0")))
+        if penalty <= 0:
+            logger.warning("Outcome FOK execution calibration is invalid; new fast-follow BUYs remain blocked")
+            return
+        self.fast_follow_execution_penalty_per_share = penalty
+        self.fast_follow_execution_penalty_calibration = calibration
+        self.fast_follow_execution_penalty_source = str(calibration.get("source") or "outcome_fast_follow_taker")
+        self._db_strategy_event("OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_CALIBRATED", {
+            "source": self.fast_follow_execution_penalty_source,
+            "sample_count": int(calibration["sample_count"]),
+            "horizon_sec": 10,
+            "lookback_hours": 168.0,
+            "adverse_markout_per_share": float(penalty),
+            "raw_mean_adverse_markout_per_share": float(calibration["raw_mean_adverse_markout_per_share"]),
+            "winsor_cap_per_share": float(calibration["winsor_cap_per_share"]),
+            "method": str(calibration["method"]),
+        })
+
     def _apply_empirical_execution_penalty_calibration(self) -> None:
         """Replace synthetic entry stress with observed maker BUY adverse markouts."""
+        self._apply_fast_follow_execution_penalty_calibration()
         engine = getattr(self, "maker_engine", None)
         config = getattr(engine, "config", None)
         if not config:

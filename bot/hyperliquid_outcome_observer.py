@@ -7,6 +7,7 @@ import os
 import random
 import threading
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -76,13 +77,18 @@ class HyperliquidOutcomeObserver:
         probe_listener: Optional[Callable[[str, float, int | None, float | None, float | None, int], None]] = None,
         lifecycle_listener: Optional[Callable[[str, dict[str, Any]], None]] = None,
     ) -> None:
-        self.market_id = int(market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID", "1313"))
         self.ws_url = os.getenv("HYPERLIQUID_OUTCOME_WS_URL") or ws_url or HYPERLIQUID_MAINNET_WS_URL
         self.authority_path = authority_path or os.getenv("HYPERLIQUID_OUTCOME_AUTHORITY_PATH", DEFAULT_AUTHORITY_PATH)
+        configured_market_id = market_id if market_id is not None else os.getenv("HYPERLIQUID_OUTCOME_DAILY_MARKET_ID")
+        self._market_id_is_explicit = configured_market_id is not None
+        authority_market_id = self._authority_market_id()
+        self._side_book_subscription_enabled = bool(self._market_id_is_explicit or authority_market_id is not None)
+        self.market_id = int(configured_market_id if configured_market_id is not None else authority_market_id or 1313)
         self._lock, self._stop = threading.Lock(), threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._authority_thread: Optional[threading.Thread] = None
         self._pending_market_id: Optional[int] = None
+        self._authority_unavailable = authority_market_id is None and not self._market_id_is_explicit
         self._last_error_log_ts = 0.0
         self._tick_listener = tick_listener
         self._probe_listener = probe_listener
@@ -100,6 +106,7 @@ class HyperliquidOutcomeObserver:
                 "stream_ready": False, "connection_attempt_count": 0, "connection_epoch": 0,
                 "disconnect_count": 0, "consecutive_disconnects": 0,
                 "reconnect_delay_sec": None,
+                "side_book_subscription_enabled": self._side_book_subscription_enabled,
             }
 
     def start(self) -> None:
@@ -178,12 +185,24 @@ class HyperliquidOutcomeObserver:
         try:
             payload = json.loads(Path(self.authority_path).read_text(encoding="utf-8"))
             updated_at_ms = int(payload["updated_at_ms"])
-            if time.time() - (updated_at_ms / 1000.0) > 180.0:
-                return None
             if str(payload.get("period") or "").lower() not in {"1d", "daily", "24h"}:
                 return None
             market_id = int(payload["market_id"])
             if (str(payload.get("side0_coin")), str(payload.get("side1_coin"))) != outcome_coins(market_id):
+                return None
+            now_ts = time.time()
+            expiry = str(payload.get("expiry") or "")
+            if expiry:
+                try:
+                    expiry_ts = datetime.strptime(expiry, "%Y%m%d-%H%M").replace(tzinfo=timezone.utc).timestamp()
+                except ValueError:
+                    return None
+                # A completed contract must never remain authoritative merely
+                # because its writer stopped.  Before expiry, its immutable
+                # coin mapping remains safe even when the publisher is down.
+                if now_ts >= expiry_ts:
+                    return None
+            elif now_ts - (updated_at_ms / 1000.0) > 180.0:
                 return None
             return market_id
         except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
@@ -193,20 +212,58 @@ class HyperliquidOutcomeObserver:
         """Keep slow local journal I/O out of the WebSocket receive loop."""
         while not self._stop.wait(30.0):
             market_id = self._authority_market_id()
-            if market_id is None or market_id == self.market_id:
+            if market_id is None:
+                with self._lock:
+                    self._authority_unavailable = not self._market_id_is_explicit
                 continue
             with self._lock:
+                self._authority_unavailable = False
+                if market_id == self.market_id:
+                    continue
                 self._pending_market_id = market_id
 
     def _maybe_roll_market(self) -> bool:
         with self._lock:
             market_id = self._pending_market_id
             self._pending_market_id = None
-        if market_id is None or market_id == self.market_id:
+            authority_unavailable = self._authority_unavailable
+        if market_id is None:
+            if authority_unavailable and self._side_book_subscription_enabled:
+                self._side_book_subscription_enabled = False
+                self._merge(side_book_subscription_enabled=False, reason="authority_unavailable")
+                return True
+            return False
+        if market_id == self.market_id:
+            if not self._side_book_subscription_enabled:
+                self._side_book_subscription_enabled = True
+                self._merge(side_book_subscription_enabled=True)
+                return True
             return False
         logger.info(f"Hyperliquid Outcome market rollover: #{self.market_id} -> #{market_id}")
+        self._side_book_subscription_enabled = True
         self._set_market(market_id, reason="market_rollover_resubscribe")
         return True
+
+    def _subscription_messages(self) -> list[dict[str, str]]:
+        """Keep the BTC signal feed independent of optional Outcome side books.
+
+        An expired Outcome coin makes Hyperliquid close the complete socket,
+        including ``allMids``.  The lead/lag signal consumes BTC from
+        ``allMids``; side books are analytical enrichment and are subscribed
+        only when an explicit or currently authoritative market identity is
+        available.
+        """
+        subscriptions: list[dict[str, str]] = [{"type": "allMids"}]
+        if self._side_book_subscription_enabled:
+            with self._lock:
+                side0_coin, side1_coin = self._snapshot["side0_coin"], self._snapshot["side1_coin"]
+            subscriptions.extend((
+                {"type": "l2Book", "coin": side0_coin},
+                {"type": "l2Book", "coin": side1_coin},
+            ))
+        if self._probe_listener is not None:
+            subscriptions.extend(({"type": "bbo", "coin": "BTC"}, {"type": "l2Book", "coin": "BTC"}))
+        return subscriptions
 
     def _on_message(self, payload: dict[str, Any]) -> None:
         channel, data, now_ts = payload.get("channel"), payload.get("data"), time.time()
@@ -300,14 +357,7 @@ class HyperliquidOutcomeObserver:
                         connection_epoch=connection_epoch,
                     )
                     self._emit_lifecycle("connected", attempt=connection_attempt_count)
-                    subscriptions = [
-                        {"type": "allMids"},
-                        {"type": "l2Book", "coin": side0_coin},
-                        {"type": "l2Book", "coin": side1_coin},
-                    ]
-                    if self._probe_listener is not None:
-                        subscriptions.extend(({"type": "bbo", "coin": "BTC"}, {"type": "l2Book", "coin": "BTC"}))
-                    for subscription in subscriptions:
+                    for subscription in self._subscription_messages():
                         await ws.send(json.dumps({"method": "subscribe", "subscription": subscription}))
                     self._emit_lifecycle("subscribed", side0_coin=side0_coin, side1_coin=side1_coin)
                     stable_reset = False
