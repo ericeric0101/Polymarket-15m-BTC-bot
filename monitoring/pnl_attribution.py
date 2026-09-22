@@ -34,7 +34,23 @@ def _empty_market_pnl(slug: str) -> dict[str, Any]:
         "taker_exit_fill_count": 0, "reported_cycle_pnl_usdc": None,
         "computed_pnl_usdc": 0.0, "attributable_pnl_usdc": None,
         "accounting_status": "no_tracked_entry", "reconciliation_adjustment_usdc": None,
+        "buy_qty": 0.0, "sell_qty": 0.0, "entry_sources": set(),
+        "entry_source": None, "source_attribution_status": "no_tracked_entry",
+        "settlement_recorded": False,
     }
+
+
+def _entry_source(client_order_id: Any, payload: dict[str, Any]) -> str:
+    """Classify an entry without treating unknown historic rows as Outcome."""
+    explicit = str(payload.get("entry_source") or "").strip().lower()
+    if explicit in {"outcome_fast_follow", "normal_maker"}:
+        return explicit
+    order_id = str(client_order_id or "")
+    if order_id.startswith("BTC-15M-FAST-FOLLOW-BUY-"):
+        return "outcome_fast_follow"
+    if order_id.startswith("BTC-15M-MAKER-BUY-"):
+        return "normal_maker"
+    return "unknown"
 
 
 def load_market_pnl_attributions(
@@ -83,7 +99,10 @@ def load_market_pnl_attributions(
                 row["buy_fill_count"] += 1
                 row["buy_notional_usdc"] += notional
                 row["buy_fee_usdc"] += fee
+                row["buy_qty"] += _num(qty)
+                row["entry_sources"].add(_entry_source(client_order_id, payload))
             elif fill_side == "SELL":
+                row["sell_qty"] += _num(qty)
                 if str(client_order_id or "") in taker_ids[slug]:
                     row["taker_exit_fill_count"] += 1
                     row["taker_exit_proceeds_usdc"] += notional
@@ -118,6 +137,7 @@ def load_market_pnl_attributions(
                     row["redeem_value_source"] = "onchain_redeem"
             elif event_type == "MARKET_SETTLEMENT":
                 settlement_redeem[slug] = _num(payload.get("redeem_value_usdc"))
+                row["settlement_recorded"] = True
             elif event_type == "MARKET_CYCLE_PNL":
                 row["reported_cycle_pnl_usdc"] = _num(payload.get("cycle_combined_pnl_usdc"))
 
@@ -138,13 +158,58 @@ def load_market_pnl_attributions(
         if row["buy_fill_count"] == 0 and has_exit_cash:
             row["accounting_status"] = "pre_journal_inventory"
         elif row["buy_fill_count"] > 0:
-            row["accounting_status"] = "complete"
-            row["attributable_pnl_usdc"] = row["computed_pnl_usdc"]
-            if row["reported_cycle_pnl_usdc"] is not None:
-                row["reconciliation_adjustment_usdc"] = (
-                    row["reported_cycle_pnl_usdc"] - row["computed_pnl_usdc"]
-                )
+            sources = row["entry_sources"]
+            if len(sources) == 1:
+                row["entry_source"] = next(iter(sources))
+                row["source_attribution_status"] = "source_pure"
+            else:
+                row["source_attribution_status"] = "mixed_entry_sources"
+            settled_or_fully_sold = bool(row["settlement_recorded"]) or (
+                row["sell_qty"] + 1e-9 >= row["buy_qty"]
+            )
+            if not settled_or_fully_sold:
+                row["accounting_status"] = "open_or_unreconciled"
+            elif len(sources) != 1:
+                row["accounting_status"] = "mixed_entry_sources"
+            else:
+                row["accounting_status"] = "complete"
+                row["attributable_pnl_usdc"] = row["computed_pnl_usdc"]
+                if row["reported_cycle_pnl_usdc"] is not None:
+                    row["reconciliation_adjustment_usdc"] = (
+                        row["reported_cycle_pnl_usdc"] - row["computed_pnl_usdc"]
+                    )
     return result
+
+
+def load_fast_follow_pnl_summary(db_path: str | Path) -> dict[str, Any]:
+    """Return only completed, source-pure Outcome fast-follow PnL.
+
+    Open positions and mixed-source markets are intentionally excluded. This
+    is an audit ledger, never a position or settlement estimator.
+    """
+    rows = load_market_pnl_attributions(db_path)
+    completed = [
+        row for row in rows.values()
+        if row["entry_source"] == "outcome_fast_follow"
+        and row["accounting_status"] == "complete"
+    ]
+    return {
+        "completed_trade_count": len(completed),
+        "completed_pnl_usdc": sum(
+            float(row["attributable_pnl_usdc"] or 0.0) for row in completed
+        ),
+        "excluded_open_or_unreconciled_count": sum(
+            1 for row in rows.values()
+            if row["entry_source"] == "outcome_fast_follow"
+            and row["accounting_status"] == "open_or_unreconciled"
+        ),
+        "excluded_mixed_source_count": sum(
+            1 for row in rows.values()
+            if row["accounting_status"] == "mixed_entry_sources"
+            and "outcome_fast_follow" in row["entry_sources"]
+        ),
+        "markets": completed,
+    }
 
 
 def load_market_pnl_attribution(db_path: str | Path, slug: str) -> dict[str, Any]:

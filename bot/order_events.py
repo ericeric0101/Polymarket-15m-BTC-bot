@@ -175,8 +175,22 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         filled_limit_price = Decimal(str(fast_follow_metadata.get("limit_price", "0")))
         filled_directional_snapshot = {
             "entry_mode": "fast_follow",
+            "entry_source": "outcome_fast_follow",
             "outcome_fast_follow": fast_follow_metadata,
         }
+    elif filled_id.startswith("BTC-15M-FAST-FOLLOW-BUY-"):
+        # A process may have restarted after durable intent but before the
+        # venue fill callback. The client-order-id namespace preserves the
+        # entry source for that late callback.
+        filled_entry_mode = "fast_follow"
+        filled_directional_snapshot = {
+            "entry_mode": "fast_follow",
+            "entry_source": "outcome_fast_follow",
+        }
+    elif maker_matched and str(filled_side or "").lower() == "buy":
+        # Persist an explicit source for all new maker fills. Historic rows
+        # remain conservatively classified by client-order-id prefix.
+        filled_directional_snapshot.setdefault("entry_source", "normal_maker")
     if filled_inst is None:
         filled_inst = getattr(event, "instrument_id", None) or strategy.instrument_id
 

@@ -26,6 +26,11 @@
 - `OUTCOME_LEAD_LAG_MODE=live_entry_only` is the active profile behavior. It is
   no longer documentation-only observability: an Outcome/TWAP confirmation can
   request a FOK BUY, subject to all guards below.
+- `NORMAL_MAKER_BUY_ENABLED=false` is active in the BTC profile while the
+  deleted-journal maker BUY calibration is rebuilt. It blocks only new normal
+  maker BUY submissions; Outcome fast-follow FOK BUY, maker SELL, stop-loss,
+  and emergency exits retain their existing authority. This is an explicit
+  entry-mode choice, not a relaxation of any risk gate.
 - The canonical trade journal path is `data/trading/trade_journal.db`; research
   lead/lag and wallet-label databases use `data/research/` and `data/reference/`.
   Successful strategy/order event writes mark a coalesced background snapshot
@@ -97,6 +102,14 @@
   fill/submission records are absent, recovery may use its price as a
   conservative cost-basis fallback. Intent-write failure blocks the FOK and
   rolls its in-memory reservation back.
+- Every new fast-follow intent and fill carries `entry_source=outcome_fast_follow`;
+  new maker BUY fills carry `entry_source=normal_maker`. The journal PnL report
+  (`scripts/outcome_fast_follow_pnl_report.py`) reports Outcome PnL only for
+  source-pure markets with complete sell or settlement evidence. Open and
+  mixed-source markets are disclosed and excluded rather than guessed. Historic
+  FOK fills are classified only through the established fast-follow client-order
+  ID prefix. This ledger is the calibration evidence for Outcome execution cost;
+  it must not be used to lower or substitute maker-BUY markout penalties.
 - Runtime health must be an explicit `{"ready": true}` result; malformed or
   unreadable values fail closed for new BUYs. Failed backup snapshots keep the
   journal dirty for retry and log the fault, but do not alone disable trading

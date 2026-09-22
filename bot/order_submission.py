@@ -35,6 +35,20 @@ def submit_maker_quote(
 ) -> None:
     instrument_id = strategy._normalize_instrument_id(instrument_id)
     inst_key = strategy._instrument_key(instrument_id)
+    # Outcome-only entry mode is deliberately narrower than maker mode: it
+    # blocks only newly-created normal maker BUYs. Existing inventory retains
+    # normal and protective SELL authority.
+    if side == "buy" and not bool(getattr(strategy, "normal_maker_buy_enabled", True)):
+        strategy._db_order_event(
+            event_type="ORDER_SKIP_NORMAL_MAKER_BUY_DISABLED",
+            side="BUY",
+            price=float(limit_price),
+            status="SKIPPED",
+            reason="normal_maker_buy_disabled",
+            payload={"instrument_id": str(instrument_id)},
+        )
+        logger.info("Skip normal maker BUY: Outcome-only entry mode is enabled")
+        return
     recovery_stage = getattr(strategy, "recovery_exit_stage_by_inst", {}).get(inst_key)
     if side == "sell" and recovery_exit_owns_sell_reservation(recovery_stage):
         strategy._db_order_event(

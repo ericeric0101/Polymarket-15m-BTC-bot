@@ -560,6 +560,7 @@ class OutcomeFastFollowLive:
             time_in_force=TimeInForce.FOK,
         )
         metadata = {
+            "entry_source": "outcome_fast_follow",
             "slug": slug, "direction": candidate.decision.direction,
             "wanted_side": wanted_side, "signal_age_ms": age_ms,
             "best_bid": float(best_bid), "best_ask": float(best_ask),

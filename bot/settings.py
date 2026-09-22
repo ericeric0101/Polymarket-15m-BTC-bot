@@ -157,6 +157,7 @@ def initialize_strategy_settings(
     )
     raw_quote_mode = config.maker.quote_sides
     strategy.maker_quote_sides = config.maker.quote_sides
+    strategy.normal_maker_buy_enabled = config.maker.normal_maker_buy_enabled
     if raw_quote_mode in {"sell", "both_buy"}:
         logger.warning(
             f"Deprecated maker quote mode '{raw_quote_mode}' detected; coercing to UP-only 'both'."

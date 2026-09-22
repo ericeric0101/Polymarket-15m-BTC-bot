@@ -3633,6 +3633,23 @@ def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "value"
 
 
+def test_normal_maker_buy_can_be_explicitly_disabled_without_disabling_sells():
+    strategy = DummyTrendSubmitStrategy()
+    strategy.normal_maker_buy_enabled = False
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=SimpleNamespace(expected_net_usdc=Decimal("0.38")),
+    )
+
+    assert strategy.submitted_orders == []
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_NORMAL_MAKER_BUY_DISABLED"
+    assert strategy.order_events[-1]["reason"] == "normal_maker_buy_disabled"
+
+
 def test_maker_buy_does_not_reach_venue_when_durable_intent_fails():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up", side="buy", inst_id="inst-up",

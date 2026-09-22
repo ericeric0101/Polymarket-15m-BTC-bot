@@ -360,6 +360,17 @@ def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold()
     assert any(event == "ORDER_FAST_FOLLOW_SUBMIT" for event, _ in events)
 
 
+def test_live_fast_follow_persists_explicit_outcome_entry_source():
+    owner, _submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"))
+
+    intent_payload = next(
+        payload for event, payload in events if event == "ORDER_FAST_FOLLOW_INTENT"
+    )
+    assert intent_payload["payload"]["entry_source"] == "outcome_fast_follow"
+    metadata = next(iter(owner._pending_order_ids.values()))
+    assert metadata["entry_source"] == "outcome_fast_follow"
+
+
 def test_fast_follow_l2_precheck_requires_full_fill_and_buffer():
     ok, estimate = fast_follow_l2_precheck(
         asks=[(Decimal("0.60"), Decimal("10"))],

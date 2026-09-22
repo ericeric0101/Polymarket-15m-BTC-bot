@@ -40,6 +40,7 @@ def build_fill_order_event_payload(
     realized_net_usdc: Decimal | None,
 ) -> dict[str, Any]:
     return {
+        "entry_source": filled_directional_snapshot.get("entry_source"),
         "liquidity_side": str(liquidity_side_raw),
         "inventory_delta_shares": float(inventory_delta_shares),
         "raw_commission": float(raw_commission_dec),
