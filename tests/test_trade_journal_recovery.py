@@ -439,7 +439,7 @@ def test_fast_follow_markout_calibration_excludes_maker_rows_and_deduplicates_ma
     })
 
     calibration = db.load_fast_follow_buy_markout_calibration(
-        lookback_hours=168, horizon_sec=10, min_samples=30,
+        lookback_hours=720, horizon_sec=10, min_samples=30,
     )
 
     assert calibration is not None

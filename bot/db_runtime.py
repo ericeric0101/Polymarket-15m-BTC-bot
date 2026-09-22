@@ -23,7 +23,11 @@ class StrategyDBRuntimeMixin:
         if not callable(loader):
             logger.warning("Outcome FOK execution calibration unavailable; new fast-follow BUYs remain blocked")
             return
-        calibration = loader(lookback_hours=168.0, horizon_sec=10, min_samples=30)
+        # Outcome FOK evidence is sparse by design (one entry per market).  It
+        # uses an independent 30-day window rather than borrowing the maker
+        # strategy's denser 168-hour policy.
+        lookback_hours = 24.0 * 30.0
+        calibration = loader(lookback_hours=lookback_hours, horizon_sec=10, min_samples=30)
         if not calibration:
             logger.warning(
                 "Outcome FOK execution calibration has insufficient evidence; refusing maker-markout fallback"
@@ -40,7 +44,7 @@ class StrategyDBRuntimeMixin:
             "source": self.fast_follow_execution_penalty_source,
             "sample_count": int(calibration["sample_count"]),
             "horizon_sec": 10,
-            "lookback_hours": 168.0,
+            "lookback_hours": lookback_hours,
             "adverse_markout_per_share": float(penalty),
             "raw_mean_adverse_markout_per_share": float(calibration["raw_mean_adverse_markout_per_share"]),
             "winsor_cap_per_share": float(calibration["winsor_cap_per_share"]),
