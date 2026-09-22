@@ -121,6 +121,29 @@
   observations have no state-machine, candidate, or order authority. The
   six-second setting remains provisional pending measured higher-frequency-
   channel evidence.
+- Fast-follow processes a fresh Polymarket L2 quote immediately after updating
+  the executable BBO cache, before optional per-tick telemetry, shadow, and
+  research work.  It records one diagnostic-only `FAST_FOLLOW_QUOTE_HANDOFF`
+  event per candidate with candidate-to-quote latency; that observation has no
+  order authority and distinguishes local handoff delay from upstream delivery
+  delay.
+- `live_entry_only` also keeps the lead/lag shadow recorder active.  The same
+  immutable candidate is sent to the FOK owner and asynchronously to shadow;
+  shadow records post-signal 1/5/10/30/60-second markouts but cannot submit,
+  cancel, or otherwise affect orders.  This prevents live FOK operation from
+  creating a research-data blind spot.
+- `scripts/outcome_lead_lag_threshold_replay.py` replays the already-persisted
+  Outcome/TWAP references over a configurable shock/residual/debounce grid.
+  It is offline, read-only directional-TWAP evidence—not executable FOK PnL or
+  sufficient evidence by itself to change a live threshold.  In particular,
+  lower-threshold results must still be reconciled with fresh L2, FOK price,
+  fees, and Outcome-specific execution markout before any live-policy change.
+- The active BTC profile uses one Outcome confirmation tick
+  (`OUTCOME_LEAD_LAG_DEBOUNCE_TICKS=1`) rather than two.  Existing reference
+  replay showed substantially more candidates with a lower directional hit
+  rate; this is a deliberate frequency/quality trade-off.  It does **not**
+  relax the shock/residual threshold, 6-second interval guard, signal TTL,
+  FOK price cap, L2 depth, economics, or journal/risk gates.
 - Runtime journal fail-closed applies to writes needed for exposure/risk
   recovery (including fills, submissions, fast-follow intent and night-risk
   state). A failed shadow or diagnostic write is logged but does not by itself

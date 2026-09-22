@@ -768,12 +768,16 @@ def initialize_strategy_settings(
     strategy.outcome_fast_follow_live = None
     candidate_handler = None
     tick_handler = None
-    if lead_lag.mode == "shadow":
+    if lead_lag.mode in {"shadow", "live_entry_only"}:
+        # Research capture is intentionally retained in live-entry mode.  It
+        # writes asynchronously and has no order authority, but prevents a
+        # switch to FOK execution from creating a markout-data blind spot.
         strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(
             strategy, max_markout_delay_ms=lead_lag.markout_max_delay_ms,
         )
-        candidate_handler = strategy.outcome_lead_lag_shadow.record_candidate
         tick_handler = strategy.outcome_lead_lag_shadow.on_tick
+    if lead_lag.mode == "shadow":
+        candidate_handler = strategy.outcome_lead_lag_shadow.record_candidate
     elif lead_lag.mode == "live_entry_only":
         strategy.outcome_fast_follow_live = OutcomeFastFollowLive(
             strategy,
@@ -787,7 +791,11 @@ def initialize_strategy_settings(
                 l2_max_age_sec=lead_lag.live_l2_max_age_sec,
             ),
         )
-        candidate_handler = strategy.outcome_fast_follow_live.record_candidate
+        def candidate_handler(candidate):
+            # The live owner alone may submit; shadow receives the exact same
+            # immutable event only to collect post-signal markouts.
+            strategy.outcome_lead_lag_shadow.record_candidate(candidate)
+            strategy.outcome_fast_follow_live.record_candidate(candidate)
     if lead_lag.mode in {"shadow", "live_entry_only"}:
         strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
             config=OutcomeLeadLagStateConfig(

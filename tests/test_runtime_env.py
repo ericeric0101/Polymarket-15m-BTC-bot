@@ -125,3 +125,9 @@ def test_versioned_profile_has_no_sensitive_keys():
     profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
 
     assert _keys(profile).isdisjoint(SENSITIVE_ENV_KEYS)
+
+
+def test_active_profile_uses_single_tick_outcome_debounce():
+    profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
+
+    assert "OUTCOME_LEAD_LAG_DEBOUNCE_TICKS=1" in profile.read_text(encoding="utf-8")

@@ -144,6 +144,7 @@ class OutcomeFastFollowLive:
         self._position_night_by_instrument: dict[str, str] = {}
         self._loaded_nights: set[str] = set()
         self._blocked_candidate_reasons: set[tuple[int, str]] = set()
+        self._quote_handoff_observed_candidates: set[int] = set()
 
     def _ensure_night_loaded(self, night: str) -> bool:
         if not self._runtime_journal_ready():
@@ -346,6 +347,22 @@ class OutcomeFastFollowLive:
         if candidate is None or candidate.slug != str(getattr(self.strategy, "current_market_slug", "") or ""):
             return False
         age_ms = (time.time_ns() - candidate.created_epoch_ns) / 1_000_000
+        candidate_key = int(candidate.created_epoch_ns)
+        if candidate_key not in self._quote_handoff_observed_candidates:
+            self._quote_handoff_observed_candidates.add(candidate_key)
+            # One durable observation per candidate makes queue starvation
+            # measurable without turning quote-rate telemetry into a hot-path
+            # journal write. It is diagnostic only and never gates a BUY.
+            self.strategy._db_strategy_event("FAST_FOLLOW_QUOTE_HANDOFF", {
+                "slug": candidate.slug,
+                "market_id": candidate.market_id,
+                "direction": candidate.decision.direction,
+                "candidate_created_epoch_ns": candidate.created_epoch_ns,
+                "quote_received_ts": now_ts,
+                "candidate_to_quote_ms": age_ms,
+                "best_bid": float(best_bid),
+                "best_ask": float(best_ask),
+            })
         if age_ms < 0 or age_ms > self.config.signal_ttl_ms:
             with self._lock:
                 if self._pending is candidate:

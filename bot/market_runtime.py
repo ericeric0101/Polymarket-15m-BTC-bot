@@ -519,30 +519,16 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                 clock_skew_tolerance_sec=clock_skew_tolerance_sec,
             )
         )
-        _record_quote_transport_telemetry(
-            strategy,
-            tick=tick,
-            received_ts=quote_received_ts,
-            event_ts=quote_event_ts,
-            adapter_emitted_ts=adapter_emitted_ts,
-            source=quote_source,
-            quote_is_fresh=quote_is_fresh,
-            raw_ws_received_ts=(
-                float(provenance["raw_ws_received_ts"])
-                if provenance.get("raw_ws_received_ts") is not None
-                else None
-            ),
-            data_engine_queue_depth=(
-                int(provenance["data_engine_queue_depth"])
-                if provenance.get("data_engine_queue_depth") is not None
-                else None
-            ),
-            raw_bid_present=raw_bid_present,
-            raw_ask_present=raw_ask_present,
-            bid_size=bid_size_decimal,
-            ask_size=ask_size_decimal,
-        )
         if not quote_is_fresh:
+            _record_quote_transport_telemetry(
+                strategy, tick=tick, received_ts=quote_received_ts,
+                event_ts=quote_event_ts, adapter_emitted_ts=adapter_emitted_ts,
+                source=quote_source, quote_is_fresh=False,
+                raw_ws_received_ts=provenance.get("raw_ws_received_ts"),
+                data_engine_queue_depth=provenance.get("data_engine_queue_depth"),
+                raw_bid_present=raw_bid_present, raw_ask_present=raw_ask_present,
+                bid_size=bid_size_decimal, ask_size=ask_size_decimal,
+            )
             # A cached transport heartbeat or old exchange event is not valid
             # pricing. Do not update the executable quote state, but do retain
             # the receipt timestamp above so the watchdog can distinguish an
@@ -555,6 +541,41 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # emitted, not the book's last internal market-update timestamp.
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = adapter_emitted_ts
         publish_strategy_tick(strategy, source="polymarket_bbo", price=(bid_decimal + ask_decimal) / 2, bid=bid_decimal, ask=ask_decimal, bid_size=bid_size_decimal, ask_size=ask_size_decimal)
+        # A confirmed FOK candidate has a short TTL. Run its handoff before
+        # optional shadow/research work and before the per-tick telemetry DB
+        # write, while the fresh L2 state is already available.
+        fast_follow = getattr(strategy, "outcome_fast_follow_live", None)
+        if fast_follow is not None:
+            try:
+                fast_follow.on_quote(
+                    instrument_id=tick.instrument_id,
+                    best_bid=bid_decimal,
+                    best_ask=ask_decimal,
+                    ask_size=ask_size_decimal,
+                    now_ts=quote_received_ts,
+                )
+            except Exception as fast_follow_error:
+                strategy._db_strategy_event("FAST_FOLLOW_ERROR", {
+                    "slug": str(getattr(strategy, "current_market_slug", "") or ""),
+                    "instrument_id": str(tick.instrument_id),
+                    "error": f"{type(fast_follow_error).__name__}: {fast_follow_error}",
+                })
+                logger.error(f"Fast-follow handoff failed: {fast_follow_error}")
+        _record_quote_transport_telemetry(
+            strategy,
+            tick=tick,
+            received_ts=quote_received_ts,
+            event_ts=quote_event_ts,
+            adapter_emitted_ts=adapter_emitted_ts,
+            source=quote_source,
+            quote_is_fresh=True,
+            raw_ws_received_ts=provenance.get("raw_ws_received_ts"),
+            data_engine_queue_depth=provenance.get("data_engine_queue_depth"),
+            raw_bid_present=raw_bid_present,
+            raw_ask_present=raw_ask_present,
+            bid_size=bid_size_decimal,
+            ask_size=ask_size_decimal,
+        )
         pending_instruments = getattr(strategy, "quote_recovery_pending_instruments", set())
         if str(tick.instrument_id) in pending_instruments:
             # A binary market needs a fresh book for every subscribed outcome.
@@ -582,23 +603,6 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                 ask_decimal,
                 quote_received_ts,
             )
-        fast_follow = getattr(strategy, "outcome_fast_follow_live", None)
-        if fast_follow is not None:
-            try:
-                fast_follow.on_quote(
-                    instrument_id=tick.instrument_id,
-                    best_bid=bid_decimal,
-                    best_ask=ask_decimal,
-                    ask_size=ask_size_decimal,
-                    now_ts=quote_received_ts,
-                )
-            except Exception as fast_follow_error:
-                strategy._db_strategy_event("FAST_FOLLOW_ERROR", {
-                    "slug": str(getattr(strategy, "current_market_slug", "") or ""),
-                    "instrument_id": str(tick.instrument_id),
-                    "error": f"{type(fast_follow_error).__name__}: {fast_follow_error}",
-                })
-                logger.error(f"Fast-follow handoff failed: {fast_follow_error}")
         if is_preferred_quote:
             strategy.last_valid_quote_ts = quote_received_ts
             strategy.consecutive_invalid_quote_ticks = 0

@@ -279,6 +279,28 @@ def test_shadow_records_actual_markout_timing_and_late_quality_flag():
     assert row["payload"]["timely"] is False
 
 
+def test_shadow_also_records_live_follower_confirmation_without_order_authority():
+    class DB:
+        def __init__(self): self.markouts = []
+        def enqueue_decision(self, **_kwargs): pass
+        def enqueue_markout(self, **kwargs): self.markouts.append(kwargs)
+
+    db = DB()
+    strategy = SimpleNamespace(lead_lag_db=db, active_side="NONE", _polymarket_chainlink_twap_price=0)
+    shadow = OutcomeLeadLagShadow(strategy)
+    candidate = LeadLagCandidate(
+        LeadLagDecision("follower_confirmed", 1, 0, 0, 2, "v", 0, "twap_followed_outcome",
+                        follower_price_cents=7_700_000),
+        "r", "s", None, 1_000_000_000,
+    )
+
+    shadow.record_candidate(candidate)
+    shadow.on_tick(tick("polymarket_twap", 7_700_100, 1_400), None)
+
+    assert db.markouts
+    assert db.markouts[0]["payload"]["decision"]["state"] == "follower_confirmed"
+
+
 def _live_harness(*, ask: Decimal, submit_automatically: bool = True):
     now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
     submitted, order_kwargs, events = [], [], []
@@ -369,6 +391,18 @@ def test_live_fast_follow_persists_explicit_outcome_entry_source():
     assert intent_payload["payload"]["entry_source"] == "outcome_fast_follow"
     metadata = next(iter(owner._pending_order_ids.values()))
     assert metadata["entry_source"] == "outcome_fast_follow"
+
+
+def test_live_fast_follow_records_candidate_to_quote_handoff_once():
+    owner, _submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"))
+    owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=time.time(),
+    )
+
+    handoffs = [payload for event, payload in events if event == "FAST_FOLLOW_QUOTE_HANDOFF"]
+    assert len(handoffs) == 1
+    assert handoffs[0]["slug"] == "s"
 
 
 def test_fast_follow_l2_precheck_requires_full_fill_and_buffer():
