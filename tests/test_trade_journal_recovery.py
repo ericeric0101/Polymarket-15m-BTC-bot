@@ -35,6 +35,25 @@ def test_fresh_journal_created_at_startup_is_buy_ready(tmp_path):
     db.stop()
 
 
+def test_markout_calibration_scan_uses_partial_buy_fill_markout_index(tmp_path):
+    db = TradeJournalDB(tmp_path / "markout-index.db")
+    try:
+        with sqlite3.connect(db.db_path) as conn:
+            plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT id FROM order_events
+                WHERE event_type='FILL_MARKOUT' AND side='BUY'
+                  AND julianday(ts) >= julianday('now', '-720 hours')
+                ORDER BY ts ASC, id ASC
+                """
+            ).fetchall()
+
+        assert any("idx_order_events_fill_markout_buy_ts_id" in row[3] for row in plan)
+    finally:
+        db.stop()
+
+
 def test_existing_empty_journal_without_recovery_evidence_is_buy_ready(tmp_path):
     path = tmp_path / "empty-journal.db"
     first = TradeJournalDB(path)
@@ -393,6 +412,20 @@ def test_insufficient_journal_uses_portable_d4_168h_penalty_fallback(monkeypatch
     assert payload["configured_lookback_hours"] == 48.0
     assert payload["minimum_independent_samples"] == 30
     assert payload["snapshot_id"] == "test-d4-snapshot"
+
+
+def test_startup_execution_calibration_has_begin_and_duration_diagnostics(monkeypatch):
+    strategy = _FallbackCalibrationStrategy()
+    messages = []
+    clock_values = iter([10.0, 12.5])
+    monkeypatch.setattr(db_runtime.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(db_runtime.logger, "info", messages.append)
+    strategy._apply_empirical_execution_penalty_calibration = lambda: None
+
+    strategy._run_startup_execution_calibration()
+
+    assert any("Startup execution calibration started" in message for message in messages)
+    assert any("elapsed_sec=2.500" in message for message in messages)
 
 
 def test_execution_penalty_snapshot_is_valid_before_its_expiry():

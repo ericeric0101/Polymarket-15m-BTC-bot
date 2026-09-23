@@ -268,6 +268,40 @@ class IntegratedBTCStrategy(
     StrategyLifecycleMixin,
     Strategy,
 ):
+    def _log_fast_follow_economics_block_throttled(
+        self, *, instrument_id, reason: str, message: str, now_ts: float | None = None,
+    ) -> None:
+        """Keep repeated quote-level economics vetoes out of the terminal flood."""
+        now_ts = time.time() if now_ts is None else float(now_ts)
+        interval_sec = max(1.0, float(getattr(self, "fast_follow_economics_log_interval_sec", 30.0)))
+        slug = str(getattr(self, "current_market_slug", None) or getattr(self, "selected_slug", None) or "-")
+        key = (slug, str(instrument_id), str(reason))
+        states = getattr(self, "_fast_follow_economics_log_state_by_key", None)
+        if not isinstance(states, dict):
+            states = {}
+            self._fast_follow_economics_log_state_by_key = states
+
+        state = states.get(key)
+        if state is not None and now_ts - state["last_log_ts"] < interval_sec:
+            state["suppressed"] += 1
+            return
+
+        suppressed = int(state["suppressed"]) if state is not None else 0
+        suffix = f" suppressed={suppressed} in_last={interval_sec:.0f}s" if suppressed else ""
+        logger.warning(message + suffix)
+        states[key] = {"last_log_ts": now_ts, "suppressed": 0}
+
+        # Keep the per-process diagnostic cache bounded across market rolls.
+        if len(states) > 128:
+            stale_before = now_ts - interval_sec * 2
+            for old_key, old_state in list(states.items()):
+                if old_state["last_log_ts"] < stale_before:
+                    states.pop(old_key, None)
+                    if len(states) <= 96:
+                        break
+            while len(states) > 128:
+                states.pop(next(iter(states)))
+
     def fast_follow_execution_penalty_allows(self, *, candidate, instrument_id, limit_price, quantity) -> bool:
         """Apply the canonical cached forecast and empirical penalty to a FOK BUY.
 
@@ -347,15 +381,20 @@ class IntegratedBTCStrategy(
             "min_expected_net_usdc": float(self.maker_min_expected_net_usdc),
         }
         if not result.allowed:
-            logger.warning(
-                "Fast-follow BUY blocked by economics: "
-                f"reason={result.reason} fair={float(probability_for_outcome(side)):.6f} "
-                f"limit={float(limit_price):.6f} qty={float(quantity):.4f} "
-                f"resolution_ev={float(result.resolution_ev_usdc):+.6f} "
-                f"taker_fee={float(result.taker_fee_usdc):.6f} "
-                f"markout_penalty={float(result.execution_penalty_usdc):.6f} "
-                f"net={float(result.expected_net_usdc):+.6f} "
-                f"min={float(self.maker_min_expected_net_usdc):.6f}"
+            IntegratedBTCStrategy._log_fast_follow_economics_block_throttled(
+                self,
+                instrument_id=instrument_id,
+                reason=result.reason,
+                message=(
+                    "Fast-follow BUY blocked by economics: "
+                    f"reason={result.reason} fair={float(probability_for_outcome(side)):.6f} "
+                    f"limit={float(limit_price):.6f} qty={float(quantity):.4f} "
+                    f"resolution_ev={float(result.resolution_ev_usdc):+.6f} "
+                    f"taker_fee={float(result.taker_fee_usdc):.6f} "
+                    f"markout_penalty={float(result.execution_penalty_usdc):.6f} "
+                    f"net={float(result.expected_net_usdc):+.6f} "
+                    f"min={float(self.maker_min_expected_net_usdc):.6f}"
+                ),
             )
         return result.allowed
     """
@@ -3358,7 +3397,7 @@ class IntegratedBTCStrategy(
         self._rehydrate_inventory_state_on_startup()
         self._restore_market_risk_guards_from_trade_db_on_startup()
         self._recover_market_strike_from_trade_db_on_startup()
-        self._apply_empirical_execution_penalty_calibration()
+        self._run_startup_execution_calibration()
 
         log_strategy_run_start(
             trade_db=self.trade_db,

@@ -1,20 +1,23 @@
 # Polymarket BTC 15-Minute Trading Bot — Current Authority
 
-> Audit baseline: repository HEAD `da128d9` (2026-08-21).  This document is
-> the authority for the current implementation, its known debts, and the only
-> approved implementation sequence.  It replaces phase/group checklists as a
-> decision authority; historical documents remain evidence until the document
-> cleanup stage is approved and completed.
+> Current audit baseline: branch `codex/db-resilience-and-stoploss-priority`,
+> repository HEAD `b204372` plus explicitly tracked working-tree changes.
+> This document is the authority for the current implementation and known
+> operational debts; historical documents remain evidence until cleanup is
+> approved and completed.
 
 ## Audit scope and safety status
 
-- This is a read-only code audit except for creating this document.  No live
-  trading code, profile, existing document, or test was changed.
+- The 2026-09-24 lifecycle hardening pass changes quote freshness handling,
+  scheduled-rollover exposure inspection, startup calibration diagnostics,
+  related tests, and this document. No live process was controlled by that
+  pass; working-tree changes already present at its start were preserved.
 - The production path is `run_bot.py` → `bot.launcher` → `IntegratedBTCStrategy`
   plus `bot/`, the Nautilus Polymarket adapter, `execution/` helpers, and
   `monitoring/trade_journal_db.py`.  `--live` is the only path that sends
   wallet orders; dry run exercises the same decision/order lifecycle locally.
-- The worktree was clean at audit start.  GitHub CI executes only
+- The worktree was not clean at audit start; pre-existing local changes were
+  retained and must be reviewed separately from the branch HEAD. GitHub CI executes only
   `python -m pytest -q` (`.github/workflows/tests.yml`).  It does **not** run
   reports, preflight, replay, or any `scripts/` command.
 - Findings tagged **unknown—ask first** are deliberately not removal
@@ -78,7 +81,10 @@
   profile value was removed because it encoded the unrelated maker snapshot.
   Economics rejections persist fair price, FOK limit,
   quantity, resolution EV, taker fee, markout penalty, and expected net for
-  calibration. A terminal FOK failure or eligibility rejection releases
+  calibration. Repeated economics-rejection warnings are rate-limited to one
+  terminal line per market/instrument/reason per 30 seconds, with the number
+  suppressed reported on the next line; each candidate's full veto details
+  remain in the trade journal. A terminal FOK failure or eligibility rejection releases
   fast-follow ownership; neither suppresses an independent normal maker BUY.
 - Fast-follow forecast freshness is the underlying Chainlink/TWAP observation
   age, capped by the stricter of its configured maximum and the canonical
@@ -95,11 +101,28 @@
   trade journal worker, which synchronously flushes the final dirty journal
   snapshot. Runtime journal fail-closed applies only to new maker/fast-follow
   BUYs: SELL, stop-loss, and emergency-exit authority remains available.
+- Startup markout calibration runs before `STRATEGY_START`; the journal keeps a
+  partial `(ts, id)` index for BUY `FILL_MARKOUT` rows so maker and Outcome
+  calibration do not repeatedly scan and sort the full `order_events` table.
+  The first schema initialization on an older journal builds this index once;
+  later node rebuilds reuse it.
 - Scheduled node rollover continues to wait for confirmed current inventory
   and active current-market SELL orders. A SELL on an instrument outside the
   currently selected market pair is an orphaned prior-market order and cannot
   protect current-market inventory, so it no longer wedges node refresh. Any
-  confirmed current inventory still blocks rollover. An empty instrument cache
+  failure to enumerate strategies is now treated as unknown exposure and
+  defers the scheduled rollover. Watchdog-triggered node rollover is an
+  emergency quote-recovery path and still requests a rebuild when exposure
+  exists; shutdown cancels tracked maker orders but does not synchronously wait
+  for venue cancel acknowledgements. Reconnect/open-order reconciliation across
+  this window remains an operational risk requiring live-adapter verification.
+  Quote receipt and executable freshness are separate: a received stale tick
+  updates transport telemetry but no longer resets `last_valid_quote_ts`, so
+  repeated stale DataEngine deliveries cannot indefinitely suppress watchdog
+  recovery. Startup execution-penalty calibration emits a start marker and
+  elapsed duration before `STRATEGY_START`, making a slow journal scan visible.
+  For scheduled rollover, any confirmed current inventory still blocks the
+  stop. An empty instrument cache
   during node startup is an expected provider warm-up
   state and is logged at debug level; startup/reload callers retain their
   bounded retry and report failure if the cache never becomes ready.

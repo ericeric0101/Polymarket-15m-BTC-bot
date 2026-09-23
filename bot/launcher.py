@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import math
 import os
 import threading
 import time
@@ -109,18 +110,28 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
     timeout or profile setting.
     """
     if node is None:
-        return []
+        return ["strategy exposure state unavailable: node is missing"]
     try:
         strategies = list(node.trader.strategies())
-    except Exception:
-        return []
+    except Exception as exc:
+        # Unknown exposure must not be treated as a flat account.  In
+        # particular, the scheduled rollover worker must defer if it cannot
+        # inspect the strategy state it is about to shut down.
+        return [f"strategy exposure state unavailable: {type(exc).__name__}: {exc}"]
+    if not strategies:
+        return ["strategy exposure state unavailable: node has no registered strategies"]
 
     reasons: list[str] = []
     terminal_states = ("REJECTED", "FILLED", "CANCELED", "CANCELLED")
     for index, strategy in enumerate(strategies):
         try:
-            inventory = float(getattr(strategy, "inventory_delta_shares", 0) or 0)
-        except (TypeError, ValueError):
+            inventory_raw = getattr(strategy, "inventory_delta_shares")
+            inventory = float(inventory_raw or 0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            reasons.append(f"strategy[{index}]:inventory_state_unavailable")
+            inventory = 0.0
+        if not math.isfinite(inventory):
+            reasons.append(f"strategy[{index}]:inventory_state_unavailable")
             inventory = 0.0
         try:
             exchange_min = float(
@@ -133,11 +144,13 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
         if inventory + 0.000001 >= protected_min:
             reasons.append(f"strategy[{index}]:inventory={inventory:.6f}")
 
-        active_orders = getattr(strategy, "active_maker_orders", {})
+        active_orders = getattr(strategy, "active_maker_orders", None)
         if not isinstance(active_orders, dict):
+            reasons.append(f"strategy[{index}]:active_order_state_unavailable")
             continue
         for order_key, state in active_orders.items():
             if not isinstance(state, dict):
+                reasons.append(f"strategy[{index}]:active_order_state_unavailable")
                 continue
             side = str(state.get("side", "") or "").lower()
             if side != "sell" and not str(order_key).lower().startswith("sell:"):

@@ -183,6 +183,42 @@ def test_fast_follow_refuses_missing_outcome_specific_execution_penalty(monkeypa
     assert host._last_fast_follow_economics_context["execution_penalty_source"] == "unavailable"
 
 
+def test_fast_follow_economics_block_warnings_are_throttled(monkeypatch):
+    now = 1_000.0
+    monkeypatch.setattr("run_bot.time.time", lambda: now)
+    warnings = []
+    monkeypatch.setattr("run_bot.logger.warning", warnings.append)
+    host = SimpleNamespace(
+        current_market_slug="btc-updown-15m-test",
+        last_forecast_state=SimpleNamespace(
+            created_ts=now, probability_for_outcome=lambda _side: Decimal("0.65"),
+        ),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        fast_follow_execution_penalty_per_share=Decimal("0.01"),
+        fast_follow_max_forecast_age_sec=5.0,
+        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="DOWN"),
+    )
+
+    check = lambda: IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
+        host,
+        candidate=object(),
+        instrument_id="down-token",
+        limit_price=Decimal("0.69"),
+        quantity=Decimal("10"),
+    )
+
+    assert check() is False
+    now += 0.25
+    assert check() is False
+    assert len(warnings) == 1
+
+    now += 30.0
+    host.last_forecast_state.created_ts = now
+    assert check() is False
+    assert len(warnings) == 2
+    assert "suppressed=1" in warnings[-1]
+
+
 def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
     error = MarketDiscoveryUnavailable("instrument IDs not published")
 
@@ -5089,7 +5125,10 @@ def test_stale_transport_heartbeat_updates_liveness_without_updating_quote_state
     handle_quote_tick(strategy, tick)
 
     assert strategy.last_quote_received_ts_by_inst["up-token"] > 0
-    assert strategy.last_valid_quote_ts > 0
+    # Receipt proves the transport delivered a tick, but this exchange-stale
+    # heartbeat is not a valid executable quote and must not reset the
+    # quote-freshness watchdog.
+    assert strategy.last_valid_quote_ts == 0.0
     assert strategy.latest_quote_by_inst == {}
     assert strategy.watchdog_triggers == []
 
@@ -5488,6 +5527,40 @@ def test_rollover_does_not_wedge_on_orphaned_prior_market_sell():
         trader = Trader()
 
     assert _strategy_rollover_exposure_reasons(Node()) == []
+
+
+def test_scheduled_rollover_fails_closed_when_strategy_exposure_cannot_be_read():
+    class Trader:
+        @staticmethod
+        def strategies():
+            raise RuntimeError("trader is stopping")
+
+    class Node:
+        trader = Trader()
+
+    reasons = _strategy_rollover_exposure_reasons(Node())
+
+    assert reasons
+    assert "unknown" in reasons[0].lower() or "unavailable" in reasons[0].lower()
+
+
+def test_scheduled_rollover_fails_closed_when_exposure_fields_are_malformed():
+    class Strategy:
+        inventory_delta_shares = "not-a-number"
+        active_maker_orders = None
+
+    class Trader:
+        @staticmethod
+        def strategies():
+            return [Strategy()]
+
+    class Node:
+        trader = Trader()
+
+    reasons = _strategy_rollover_exposure_reasons(Node())
+
+    assert len(reasons) >= 2
+    assert all("unknown" in reason.lower() or "unavailable" in reason.lower() for reason in reasons)
 
 
 def test_rollover_still_defers_for_current_market_pending_sell_and_inventory():

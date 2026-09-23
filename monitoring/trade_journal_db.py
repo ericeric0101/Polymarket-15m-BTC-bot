@@ -360,6 +360,13 @@ class TradeJournalDB:
 
         CREATE INDEX IF NOT EXISTS idx_order_events_run_ts ON order_events(run_id, ts);
         CREATE INDEX IF NOT EXISTS idx_order_events_client ON order_events(client_order_id);
+        -- Startup maker/Outcome markout calibration always filters these rows
+        -- by event_type and BUY side, then orders by timestamp. Without this
+        -- compact partial index every node restart parses the full journal's
+        -- large payload_json column to find a small calibration sample.
+        CREATE INDEX IF NOT EXISTS idx_order_events_fill_markout_buy_ts_id
+            ON order_events(ts, id)
+            WHERE event_type='FILL_MARKOUT' AND side='BUY';
 
         CREATE TABLE IF NOT EXISTS strategy_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -9,6 +9,18 @@ from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 
 
 class StrategyDBRuntimeMixin:
+    def _run_startup_execution_calibration(self) -> None:
+        """Expose the synchronous startup calibration phase and its duration."""
+        started = time.perf_counter()
+        logger.info("Startup execution calibration started")
+        try:
+            self._apply_empirical_execution_penalty_calibration()
+        finally:
+            logger.info(
+                "Startup execution calibration finished: "
+                f"elapsed_sec={max(0.0, time.perf_counter() - started):.3f}"
+            )
+
     def _block_new_buys_for_trade_db(self, reason: str) -> None:
         self.trade_db_buy_ready = False
         self.trade_db_health_reason = str(reason)

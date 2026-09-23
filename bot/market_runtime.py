@@ -498,8 +498,6 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # Receipt time proves the subscribed transport remains alive. It is
         # deliberately independent from the exchange event timestamp below.
         getattr(strategy, "last_quote_received_ts_by_inst", {})[str(tick.instrument_id)] = quote_received_ts
-        if is_preferred_quote:
-            strategy.last_valid_quote_ts = quote_received_ts
         clock_skew_tolerance_sec = getattr(
             strategy,
             "quote_event_clock_skew_tolerance_sec",
