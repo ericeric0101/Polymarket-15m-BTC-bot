@@ -356,15 +356,14 @@ class StrategyLifecycleMixin:
                     self._stopping = True
                     self._rollover_requested_flag = True
                     try:
-                        import nautilus_trader  # noqa: F811
-                        if hasattr(self, "_trader") and hasattr(self._trader, "node"):
-                            self._trader.node.stop()
-                        else:
-                            raise SystemExit("rollover_needed")
-                    except SystemExit:
-                        raise
-                    except Exception:
-                        pass
+                        stop_node = getattr(self, "_request_node_stop_callback", None)
+                        if not callable(stop_node):
+                            raise RuntimeError("launcher node-stop callback is not configured")
+                        stop_node()
+                    except Exception as exc:
+                        self._stopping = False
+                        self._rollover_requested_flag = False
+                        logger.error(f"Lifecycle node rollover stop failed: {exc}")
 
                 self._waiting_miss_count = handle_waiting_phase_search(
                     search_next_market_fn=self._search_next_market,

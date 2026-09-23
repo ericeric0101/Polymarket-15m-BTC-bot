@@ -31,6 +31,7 @@ from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import (
+    find_btc_instrument,
     handle_quote_tick,
     quote_event_is_fresh,
     quote_tick_adapter_timestamp,
@@ -5455,6 +5456,88 @@ def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
         Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": SimpleNamespace(status="CANCELED")}})
     ])
     assert _strategy_rollover_exposure_reasons(terminal_sell) == []
+
+
+def test_rollover_does_not_wedge_on_orphaned_prior_market_sell():
+    class Order:
+        status = "ACCEPTED"
+
+    class Strategy:
+        inventory_delta_shares = Decimal("0")
+        maker_exchange_min_shares = Decimal("5")
+        current_market_instruments = ["new-market-up", "new-market-down"]
+        active_maker_orders = {
+            "sell:old-market-up": {
+                "side": "sell",
+                "instrument_id": "old-market-up",
+                "pending_cancel": True,
+                "order": Order(),
+            }
+        }
+
+        @staticmethod
+        def _get_confirmed_inventory_qty_for_instrument(instrument_id):
+            raise RuntimeError("old market is no longer selected")
+
+    class Trader:
+        @staticmethod
+        def strategies():
+            return [Strategy()]
+
+    class Node:
+        trader = Trader()
+
+    assert _strategy_rollover_exposure_reasons(Node()) == []
+
+
+def test_rollover_still_defers_for_current_market_pending_sell_and_inventory():
+    class Order:
+        status = "ACCEPTED"
+
+    class Strategy:
+        inventory_delta_shares = Decimal("0")
+        maker_exchange_min_shares = Decimal("5")
+        current_market_instruments = ["new-market-up", "new-market-down"]
+
+        def __init__(self, instrument_id):
+            self.active_maker_orders = {
+                f"sell:{instrument_id}": {
+                    "side": "sell",
+                    "instrument_id": instrument_id,
+                    "pending_cancel": True,
+                    "order": Order(),
+                }
+            }
+
+    class Trader:
+        def __init__(self, strategy):
+            self.strategy = strategy
+
+        def strategies(self):
+            return [self.strategy]
+
+    class Node:
+        def __init__(self, strategy):
+            self.trader = Trader(strategy)
+
+    current_market = _strategy_rollover_exposure_reasons(Node(Strategy("new-market-up")))
+    assert current_market == ["strategy[0]:active_sell=sell:new-market-up"]
+
+    Strategy.inventory_delta_shares = Decimal("5")
+    current_inventory = _strategy_rollover_exposure_reasons(Node(Strategy("old-market-up")))
+    assert current_inventory == ["strategy[0]:inventory=5.000000"]
+
+
+def test_empty_instrument_cache_is_treated_as_startup_wait_not_error(monkeypatch):
+    errors = []
+    monkeypatch.setattr("bot.market_runtime.logger.error", errors.append)
+    strategy = SimpleNamespace(
+        cache=SimpleNamespace(instruments=lambda: []),
+        startup_verbose=False,
+    )
+
+    assert find_btc_instrument(strategy) is False
+    assert errors == []
 
 
 def test_unchanged_top_of_book_emits_bounded_heartbeat():

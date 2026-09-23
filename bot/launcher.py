@@ -146,6 +146,23 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
             status = str(getattr(order, "status", "") or "").upper()
             if any(terminal in status for terminal in terminal_states):
                 continue
+            current_instruments = getattr(strategy, "current_market_instruments", None)
+            order_instrument = str(state.get("instrument_id", "") or "")
+            current_instrument_ids = {
+                str(instrument) for instrument in (current_instruments or ()) if instrument is not None
+            }
+            is_prior_market_order = bool(
+                current_instrument_ids
+                and order_instrument
+                and order_instrument not in current_instrument_ids
+            )
+            if side == "sell" and is_prior_market_order:
+                # Once the selected market pair has moved on, an old-token
+                # SELL cannot protect inventory in the current market. Keep
+                # the normal market-transition cancel/reconcile path, but do
+                # not let an orphaned old-market tracker wedge scheduled node
+                # refresh indefinitely.
+                continue
             reasons.append(f"strategy[{index}]:active_sell={order_key}")
     return reasons
 
@@ -494,6 +511,10 @@ def run_integrated_bot(
         node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
         node.trader.add_strategy(strategy)
         node.build()
+        # Strategies are Actors and do not have a public back-reference to the
+        # TradingNode. Give lifecycle/watchdog recovery an explicit stop hook so
+        # a requested rollover actually returns node.run() to this launcher.
+        strategy._request_node_stop_callback = node.stop
         logger.info("Nautilus node built successfully")
         return node, primary_slug
 

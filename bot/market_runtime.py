@@ -264,7 +264,10 @@ def find_btc_instrument(strategy: Any) -> bool:
         logger.info(f"Checking {len(instruments)} loaded instruments...")
 
     if not instruments:
-        logger.error("NO INSTRUMENTS LOADED!")
+        # During node startup the data client can become ready before its
+        # instrument provider has populated the cache. Callers already retry
+        # and emit a terminal startup/reload warning if the wait expires.
+        logger.debug("Instrument cache is not populated yet; waiting for market data.")
         return False
 
     btc_instruments, current_timestamp = collect_btc_market_candidates(

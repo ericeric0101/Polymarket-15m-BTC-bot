@@ -95,6 +95,14 @@
   trade journal worker, which synchronously flushes the final dirty journal
   snapshot. Runtime journal fail-closed applies only to new maker/fast-follow
   BUYs: SELL, stop-loss, and emergency-exit authority remains available.
+- Scheduled node rollover continues to wait for confirmed current inventory
+  and active current-market SELL orders. A SELL on an instrument outside the
+  currently selected market pair is an orphaned prior-market order and cannot
+  protect current-market inventory, so it no longer wedges node refresh. Any
+  confirmed current inventory still blocks rollover. An empty instrument cache
+  during node startup is an expected provider warm-up
+  state and is logged at debug level; startup/reload callers retain their
+  bounded retry and report failure if the cache never becomes ready.
 - Fast-follow records a durable `ORDER_FAST_FOLLOW_INTENT` after risk-state
   reservation and before the FOK reaches the venue. Intent is crash-recovery
   evidence, not venue acceptance or a fill: it cannot create inventory, quota,
@@ -1347,6 +1355,14 @@ change.
   removes a host-local switch that could make identical code stop on one
   deployment and recover on another. It changes operational availability, not
   entry, pricing, or exit policy.
+  **Quote-watchdog rollover wiring fix (2026-09-23):** Strategies do not own a
+  public `TradingNode` back-reference. Quote-watchdog and lifecycle recovery
+  therefore receive an explicit launcher-provided node-stop callback; they no
+  longer set `_stopping` and silently fail while the node keeps running. If
+  stop scheduling fails, the strategy clears the stop/rollover flags and logs
+  the failure so recovery can be retried. A watchdog rollover still requires
+  the configured quote-recovery timeout; this does not weaken stale-quote
+  gating or alter trading signals.
   **P5 loss-path audit (2026-08-22 through 2026-08-26):** the canonical
   journal contains 15 settled negative cycles (aggregate **-$67.97**, before
   treating fee dust as a meaningful position). Six exited at $0.001–$0.08 and

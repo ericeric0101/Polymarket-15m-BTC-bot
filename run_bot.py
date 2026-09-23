@@ -3660,9 +3660,14 @@ class IntegratedBTCStrategy(
             {"trigger": trigger, "instrument": str(self.instrument_id) if self.instrument_id else None, "ts": now_ts},
         )
         try:
-            if hasattr(self, "_trader") and hasattr(self._trader, "node"):
-                self._trader.node.stop()
+            stop_node = getattr(self, "_request_node_stop_callback", None)
+            if not callable(stop_node):
+                raise RuntimeError("launcher node-stop callback is not configured")
+            stop_node()
         except Exception as exc:
+            self._stopping = False
+            self._rollover_requested_flag = False
+            self._quote_stream_rollover_requested = False
             logger.error(f"Quote stream node rollover stop failed: {exc}")
 
     def _quote_watchdog_recovery_is_needed(self) -> bool:
