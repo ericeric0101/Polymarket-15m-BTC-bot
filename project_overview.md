@@ -154,10 +154,25 @@
   channel evidence.
 - Fast-follow processes a fresh Polymarket L2 quote immediately after updating
   the executable BBO cache, before optional per-tick telemetry, shadow, and
-  research work.  It records one diagnostic-only `FAST_FOLLOW_QUOTE_HANDOFF`
-  event per candidate with candidate-to-quote latency; that observation has no
-  order authority and distinguishes local handoff delay from upstream delivery
-  delay.
+  research work. Both outcome tokens are subscribed; a quote for the token
+  opposite the confirmed Outcome direction is ignored for that candidate, not
+  treated as a side mismatch or used to consume the candidate. The handoff is
+  measured only when a fresh quote for the signal-side token arrives, and the
+  event records that target token, candidate-to-quote latency, and maker's
+  locked side. The maker side lock controls maker quoting but does not alone
+  veto an independent fast-follow signal. A confirmed position or outstanding
+  opposite-side BUY still blocks the FOK; all existing freshness, price, L2,
+  economics, journal, inventory, and night-risk gates remain in force.
+- Every confirmed fast-follow candidate with a mapped target token records a
+  research-only `FAST_FOLLOW_COUNTERFACTUAL_ENTRY` at the first fresh
+  target-token BBO, plus 1/5/10/30-second
+  `FAST_FOLLOW_COUNTERFACTUAL_MARKOUT` observations using that entry ask and
+  later executable top bid. Events include top-level ask/bid size and the
+  matched top-of-book quantity where available. These are gross BBO markouts,
+  without fees or a guarantee of full-order fill/depth; each event distinguishes
+  blocked candidates from candidates that also submitted a live order. This
+  data is for evaluating signal-to-quote delay and rejected opportunities,
+  not a live admission input or a substitute for actual FOK execution PnL.
 - `live_entry_only` also keeps the lead/lag shadow recorder active.  The same
   immutable candidate is sent to the FOK owner and asynchronously to shadow;
   shadow records post-signal 1/5/10/30/60-second markouts but cannot submit,

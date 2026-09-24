@@ -328,6 +328,7 @@ def _live_harness(*, ask: Decimal, submit_automatically: bool = True):
     book = Book()
     strategy = SimpleNamespace(
         current_market_slug="s", current_market_end_timestamp=now_ts + 600,
+        current_up_instrument_matched=True, current_down_instrument_matched=True,
         maker_min_minutes_to_close=1, bi_side_min_time_left_sec=60,
         first_entry_max_time_left_sec=720, market_buy_count_total_by_slug={},
         live_inventory_cost={}, active_side=SimpleNamespace(value="NONE"), active_side_locked=False,
@@ -345,7 +346,10 @@ def _live_harness(*, ask: Decimal, submit_automatically: bool = True):
         _market_strike_is_entry_eligible=lambda _slug: True,
         cache=SimpleNamespace(instrument=lambda _inst: instrument, order_book=lambda _inst: book),
         fast_follow_l2_update_ts_by_inst={"UP.INST": now_ts},
-        _side_for_instrument_id=lambda _inst: SimpleNamespace(value="UP"),
+        _instrument_for_side=lambda side: "UP.INST" if getattr(side, "value", str(side)) == "UP" else "DOWN.INST",
+        _side_for_instrument_id=lambda inst: SimpleNamespace(
+            value="UP" if str(inst) == "UP.INST" else "DOWN" if str(inst) == "DOWN.INST" else "NONE"
+        ),
         _instrument_key=lambda inst: str(inst),
         _align_price_to_tick=lambda price, _side, _instrument: price,
         _is_dry_run_mode=lambda: False,
@@ -403,6 +407,108 @@ def test_live_fast_follow_records_candidate_to_quote_handoff_once():
     handoffs = [payload for event, payload in events if event == "FAST_FOLLOW_QUOTE_HANDOFF"]
     assert len(handoffs) == 1
     assert handoffs[0]["slug"] == "s"
+
+
+def test_fast_follow_waits_for_signal_side_quote_and_ignores_maker_side_lock():
+    owner, submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    owner.strategy.active_side = SimpleNamespace(value="DOWN")
+    owner.strategy.active_side_locked = True
+    owner.record_candidate(LeadLagCandidate(
+        LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v", time.perf_counter_ns(), "confirmed"),
+        "r", "s", 1, time.time_ns(),
+    ))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    # Both tokens are subscribed. A DOWN quote must not consume or veto an UP
+    # candidate; wait for the executable quote on the signal's own token.
+    assert owner.on_quote(
+        instrument_id="DOWN.INST", best_bid=Decimal("0.27"), best_ask=Decimal("0.28"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is False
+    assert owner._pending is not None
+    assert submitted == []
+    assert not any(
+        event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] in {"side_or_price_ineligible", "locked_side_invalidated"}
+        for event, payload in events
+    )
+    assert not any(event == "FAST_FOLLOW_QUOTE_HANDOFF" for event, _payload in events)
+
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is True
+    assert len(submitted) == 1
+    assert owner._pending is None
+    handoff = next(payload for event, payload in events if event == "FAST_FOLLOW_QUOTE_HANDOFF")
+    assert handoff["target_side"] == "UP"
+    assert handoff["maker_locked_side"] == "DOWN"
+
+
+def test_fast_follow_side_lock_independence_does_not_override_opposite_inventory_guard():
+    owner, submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    owner.strategy.active_side = SimpleNamespace(value="DOWN")
+    owner.strategy.active_side_locked = True
+    owner.strategy.live_inventory_cost["DOWN.INST"] = {"qty": Decimal("2")}
+    owner.record_candidate(LeadLagCandidate(
+        LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v", time.perf_counter_ns(), "confirmed"),
+        "r", "s", 1, time.time_ns(),
+    ))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is False
+    assert submitted == []
+    assert any(
+        event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "conflicting_market_inventory"
+        for event, payload in events
+    )
+
+
+def test_fast_follow_requires_explicit_market_token_mapping():
+    owner, submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    owner.strategy.current_up_instrument_matched = False
+    owner.record_candidate(LeadLagCandidate(
+        LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v", time.perf_counter_ns(), "confirmed"),
+        "r", "s", 1, time.time_ns(),
+    ))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is False
+    assert submitted == []
+    assert any(
+        event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload["reason"] == "signal_side_instrument_unavailable"
+        for event, payload in events
+    )
+
+
+def test_fast_follow_records_executable_bbo_counterfactual_markouts_for_blocked_signal():
+    owner, _submitted, _kwargs, events = _live_harness(ask=Decimal("0.60"), submit_automatically=False)
+    owner.strategy.outcome_bypass_execution_penalty = False
+    owner.strategy.fast_follow_execution_penalty_allows = lambda **_kwargs: False
+    candidate_epoch_ns = time.time_ns()
+    owner.record_candidate(LeadLagCandidate(
+        LeadLagDecision("follower_confirmed", 1, 500, 300, 2, "v", time.perf_counter_ns(), "confirmed"),
+        "r", "s", 1, candidate_epoch_ns,
+    ))
+    start = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    for elapsed, bid in ((0.0, "0.59"), (1.1, "0.61"), (5.1, "0.64"), (10.1, "0.55"), (30.1, "0.62")):
+        owner.on_quote(
+            instrument_id="UP.INST", best_bid=Decimal(bid), best_ask=Decimal("0.65"),
+            bid_size=Decimal("80"), ask_size=Decimal("100"), now_ts=start + elapsed,
+        )
+
+    marks = [payload for event, payload in events if event == "FAST_FOLLOW_COUNTERFACTUAL_MARKOUT"]
+    assert [mark["horizon_sec"] for mark in marks] == [1, 5, 10, 30]
+    assert all(mark["entry_ask"] == 0.65 for mark in marks)
+    assert [mark["exit_bid"] for mark in marks] == [0.61, 0.64, 0.55, 0.62]
+    assert all(mark["execution_basis"] == "top_of_book_gross_no_fees" for mark in marks)
+    assert all(mark["matched_top_of_book_quantity"] == 80 for mark in marks)
+    assert [mark["gross_top_of_book_pnl_usdc"] for mark in marks] == [-3.2, -0.8, -8.0, -2.4]
 
 
 def test_fast_follow_l2_precheck_requires_full_fill_and_buffer():

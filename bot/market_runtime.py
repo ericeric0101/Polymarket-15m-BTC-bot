@@ -333,6 +333,8 @@ def find_btc_instrument(strategy: Any) -> bool:
     strategy.current_down_instrument_id = strategy._normalize_instrument_id(
         selection.down_instrument_id if selection.matched_down else None
     )
+    strategy.current_up_instrument_matched = bool(selection.matched_up)
+    strategy.current_down_instrument_matched = bool(selection.matched_down)
     if not selection.matched_up:
         logger.warning(
             f"UP outcome instrument not found explicitly for slug={strategy.current_market_slug}; "
@@ -552,6 +554,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                     instrument_id=tick.instrument_id,
                     best_bid=bid_decimal,
                     best_ask=ask_decimal,
+                    bid_size=bid_size_decimal,
                     ask_size=ask_size_decimal,
                     now_ts=quote_received_ts,
                 )

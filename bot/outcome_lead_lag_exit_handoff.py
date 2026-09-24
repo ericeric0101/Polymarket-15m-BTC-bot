@@ -15,6 +15,7 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
 from bot.depth_risk import ExecutionEstimate, estimate_taker_execution
+from bot.enums import ActiveSide
 
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -145,6 +146,9 @@ class OutcomeFastFollowLive:
         self._loaded_nights: set[str] = set()
         self._blocked_candidate_reasons: set[tuple[int, str]] = set()
         self._quote_handoff_observed_candidates: set[int] = set()
+        # Research-only executable BBO observations for every confirmed
+        # candidate. These never participate in admission or sizing.
+        self._counterfactual_quotes: dict[int, dict] = {}
 
     def _ensure_night_loaded(self, night: str) -> bool:
         if not self._runtime_journal_ready():
@@ -279,7 +283,30 @@ class OutcomeFastFollowLive:
     def record_candidate(self, candidate) -> None:
         if candidate.decision.state != "follower_confirmed":
             return
+        wanted = ActiveSide.UP if candidate.decision.direction > 0 else ActiveSide.DOWN
+        matched_attr = "current_up_instrument_matched" if wanted == ActiveSide.UP else "current_down_instrument_matched"
+        target_selector = getattr(self.strategy, "_instrument_for_side", None)
+        target_instrument = target_selector(wanted) if callable(target_selector) else None
+        if getattr(self.strategy, matched_attr, None) is False:
+            target_instrument = None
+        candidate_key = int(candidate.created_epoch_ns)
         with self._lock:
+            self._counterfactual_quotes[candidate_key] = {
+                "candidate": candidate,
+                "target_instrument_key": (
+                    self.strategy._instrument_key(target_instrument)
+                    if target_instrument is not None else None
+                ),
+                "entry_ts": None,
+                "entry_ask": None,
+                "entry_ask_size": None,
+                "entry_bid": None,
+                "entry_bid_size": None,
+                "markouts_written": set(),
+                "live_order_submitted": False,
+            }
+            while len(self._counterfactual_quotes) > 512:
+                self._counterfactual_quotes.pop(next(iter(self._counterfactual_quotes)))
             self._pending = candidate
         self.strategy._db_strategy_event("FAST_FOLLOW_CONFIRMED", {
             "slug": candidate.slug,
@@ -288,6 +315,110 @@ class OutcomeFastFollowLive:
             "signal_created_epoch_ns": candidate.created_epoch_ns,
             "decision": candidate.decision.__dict__,
         })
+
+    def _observe_counterfactual_quote(
+        self, *, instrument_id, best_bid: Decimal, best_ask: Decimal,
+        bid_size: Decimal | None, ask_size: Decimal | None, now_ts: float,
+    ) -> None:
+        """Record signal-side executable BBO entry and later gross bid markouts."""
+        horizons = (1, 5, 10, 30)
+        instrument_key = self.strategy._instrument_key(instrument_id)
+        events: list[tuple[str, dict]] = []
+        current_slug = str(getattr(self.strategy, "current_market_slug", "") or "")
+        with self._lock:
+            for candidate_key, state in tuple(self._counterfactual_quotes.items()):
+                candidate = state["candidate"]
+                if float(now_ts) - candidate.created_epoch_ns / 1_000_000_000 > 120:
+                    missing = sorted(set(horizons) - state["markouts_written"])
+                    if state["entry_ts"] is None or missing:
+                        events.append(("FAST_FOLLOW_COUNTERFACTUAL_INCOMPLETE", {
+                            "slug": candidate.slug,
+                            "candidate_created_epoch_ns": candidate.created_epoch_ns,
+                            "direction": candidate.decision.direction,
+                            "instrument_id": str(instrument_id),
+                            "reason": "target_quote_missing" if state["entry_ts"] is None else "markout_horizons_missing",
+                            "missing_horizons_sec": missing,
+                        }))
+                    self._counterfactual_quotes.pop(candidate_key, None)
+                    continue
+                if candidate.slug != current_slug:
+                    events.append(("FAST_FOLLOW_COUNTERFACTUAL_INCOMPLETE", {
+                        "slug": candidate.slug,
+                        "candidate_created_epoch_ns": candidate.created_epoch_ns,
+                        "direction": candidate.decision.direction,
+                        "reason": "market_changed_before_markouts_complete",
+                        "missing_horizons_sec": sorted(set(horizons) - state["markouts_written"]),
+                        "entry_quote_missing": state["entry_ts"] is None,
+                    }))
+                    self._counterfactual_quotes.pop(candidate_key, None)
+                    continue
+                target_key = state.get("target_instrument_key")
+                if target_key is None or str(target_key) != str(instrument_key):
+                    continue
+                if state["entry_ts"] is None:
+                    if best_ask <= 0:
+                        continue
+                    state["entry_ts"] = float(now_ts)
+                    state["entry_ask"] = Decimal(str(best_ask))
+                    state["entry_bid"] = Decimal(str(best_bid))
+                    state["entry_ask_size"] = ask_size
+                    state["entry_bid_size"] = bid_size
+                    signal_to_quote_ms = max(
+                        0.0, (float(now_ts) - candidate.created_epoch_ns / 1_000_000_000) * 1000.0,
+                    )
+                    events.append(("FAST_FOLLOW_COUNTERFACTUAL_ENTRY", {
+                        "slug": candidate.slug,
+                        "candidate_created_epoch_ns": candidate.created_epoch_ns,
+                        "direction": candidate.decision.direction,
+                        "instrument_id": str(instrument_id),
+                        "entry_quote_ts": float(now_ts),
+                        "signal_to_quote_ms": signal_to_quote_ms,
+                        "within_live_signal_ttl": signal_to_quote_ms <= self.config.signal_ttl_ms,
+                        "entry_ask": float(best_ask),
+                        "entry_bid": float(best_bid),
+                        "entry_ask_size": float(ask_size) if ask_size is not None else None,
+                        "entry_bid_size": float(bid_size) if bid_size is not None else None,
+                        "execution_basis": "fresh_target_token_bbo_not_a_fill",
+                    }))
+                    continue
+                elapsed_sec = float(now_ts) - float(state["entry_ts"])
+                for horizon in horizons:
+                    if horizon in state["markouts_written"] or elapsed_sec < horizon or best_bid <= 0:
+                        continue
+                    entry_ask = state["entry_ask"]
+                    markout_ps = Decimal(str(best_bid)) - entry_ask
+                    top_depth_qty = (
+                        min(Decimal(str(state["entry_ask_size"])), Decimal(str(bid_size)))
+                        if state["entry_ask_size"] is not None and bid_size is not None
+                        else None
+                    )
+                    live_order_submitted = bool(state.get("live_order_submitted", False))
+                    events.append(("FAST_FOLLOW_COUNTERFACTUAL_MARKOUT", {
+                        "slug": candidate.slug,
+                        "candidate_created_epoch_ns": candidate.created_epoch_ns,
+                        "direction": candidate.decision.direction,
+                        "instrument_id": str(instrument_id),
+                        "horizon_sec": horizon,
+                        "observed_elapsed_ms": int(elapsed_sec * 1000),
+                        "observation_delay_ms": max(0, int((elapsed_sec - horizon) * 1000)),
+                        "entry_ask": float(entry_ask),
+                        "exit_bid": float(best_bid),
+                        "entry_ask_size": float(state["entry_ask_size"]) if state["entry_ask_size"] is not None else None,
+                        "exit_bid_size": float(bid_size) if bid_size is not None else None,
+                        "gross_bbo_markout_per_share": float(markout_ps),
+                        "matched_top_of_book_quantity": float(top_depth_qty) if top_depth_qty is not None else None,
+                        "gross_top_of_book_pnl_usdc": (
+                            float(markout_ps * top_depth_qty) if top_depth_qty is not None else None
+                        ),
+                        "execution_basis": "top_of_book_gross_no_fees",
+                        "execution_blocked": not live_order_submitted,
+                        "live_order_submitted": live_order_submitted,
+                    }))
+                    state["markouts_written"].add(horizon)
+                if len(state["markouts_written"]) == len(horizons):
+                    self._counterfactual_quotes.pop(candidate_key, None)
+        for event_type, payload in events:
+            self.strategy._db_strategy_event(event_type, payload)
 
     def order_metadata(self, client_order_id: str) -> dict | None:
         return self._pending_order_ids.get(client_order_id)
@@ -341,28 +472,18 @@ class OutcomeFastFollowLive:
                 if key is not None:
                     self._persist_night(key)
 
-    def on_quote(self, *, instrument_id, best_bid: Decimal, best_ask: Decimal, ask_size: Decimal | None, now_ts: float) -> bool:
+    def on_quote(self, *, instrument_id, best_bid: Decimal, best_ask: Decimal,
+                 ask_size: Decimal | None, now_ts: float, bid_size: Decimal | None = None) -> bool:
+        self._observe_counterfactual_quote(
+            instrument_id=instrument_id, best_bid=best_bid, best_ask=best_ask,
+            bid_size=bid_size, ask_size=ask_size, now_ts=now_ts,
+        )
         with self._lock:
             candidate = self._pending
         if candidate is None or candidate.slug != str(getattr(self.strategy, "current_market_slug", "") or ""):
             return False
         age_ms = (time.time_ns() - candidate.created_epoch_ns) / 1_000_000
         candidate_key = int(candidate.created_epoch_ns)
-        if candidate_key not in self._quote_handoff_observed_candidates:
-            self._quote_handoff_observed_candidates.add(candidate_key)
-            # One durable observation per candidate makes queue starvation
-            # measurable without turning quote-rate telemetry into a hot-path
-            # journal write. It is diagnostic only and never gates a BUY.
-            self.strategy._db_strategy_event("FAST_FOLLOW_QUOTE_HANDOFF", {
-                "slug": candidate.slug,
-                "market_id": candidate.market_id,
-                "direction": candidate.decision.direction,
-                "candidate_created_epoch_ns": candidate.created_epoch_ns,
-                "quote_received_ts": now_ts,
-                "candidate_to_quote_ms": age_ms,
-                "best_bid": float(best_bid),
-                "best_ask": float(best_ask),
-            })
         if age_ms < 0 or age_ms > self.config.signal_ttl_ms:
             with self._lock:
                 if self._pending is candidate:
@@ -374,6 +495,41 @@ class OutcomeFastFollowLive:
         slug = candidate.slug
         side = getattr(self.strategy._side_for_instrument_id(instrument_id), "value", "NONE")
         wanted_side = "UP" if candidate.decision.direction > 0 else "DOWN"
+        target_selector = getattr(self.strategy, "_instrument_for_side", None)
+        matched_attr = "current_up_instrument_matched" if candidate.decision.direction > 0 else "current_down_instrument_matched"
+        wanted_instrument = target_selector(
+            ActiveSide.UP if candidate.decision.direction > 0 else ActiveSide.DOWN
+        ) if callable(target_selector) else None
+        if getattr(self.strategy, matched_attr, None) is False:
+            wanted_instrument = None
+        if wanted_instrument is None:
+            self._record_blocked(candidate, "signal_side_instrument_unavailable", wanted_side=wanted_side)
+            return False
+        wanted_instrument_key = self.strategy._instrument_key(wanted_instrument)
+        if self.strategy._instrument_key(instrument_id) != wanted_instrument_key:
+            # Quote callbacks arrive for both outcome tokens. Do not let an
+            # unrelated side's first callback consume or veto this candidate.
+            return False
+        if side != wanted_side:
+            self._record_blocked(candidate, "signal_side_mapping_invalid", observed_side=side,
+                                 wanted_side=wanted_side, instrument_id=str(instrument_id))
+            return False
+        if candidate_key not in self._quote_handoff_observed_candidates:
+            self._quote_handoff_observed_candidates.add(candidate_key)
+            self.strategy._db_strategy_event("FAST_FOLLOW_QUOTE_HANDOFF", {
+                "slug": candidate.slug,
+                "market_id": candidate.market_id,
+                "direction": candidate.decision.direction,
+                "target_side": wanted_side,
+                "target_instrument_id": str(wanted_instrument),
+                "observed_instrument_id": str(instrument_id),
+                "maker_locked_side": str(getattr(getattr(self.strategy, "active_side", None), "value", "NONE")),
+                "candidate_created_epoch_ns": candidate.created_epoch_ns,
+                "quote_received_ts": now_ts,
+                "candidate_to_quote_ms": age_ms,
+                "best_bid": float(best_bid),
+                "best_ask": float(best_ask),
+            })
         inst_key = self.strategy._instrument_key(instrument_id)
         # Entry-only authority: an opposite-side signal never sells, cancels
         # TP, or otherwise alters an existing position.  The normal strategy
@@ -413,7 +569,7 @@ class OutcomeFastFollowLive:
         if self._night_realized_pnl.get(night, Decimal("0")) <= -self.config.max_loss_usdc_per_night:
             self._record_blocked(candidate, "nightly_realized_loss_limit")
             return False
-        if side != wanted_side or best_ask <= 0 or best_ask > self.config.max_entry_price:
+        if best_ask <= 0 or best_ask > self.config.max_entry_price:
             self._record_blocked(candidate, "side_or_price_ineligible", observed_side=side, best_ask=float(best_ask))
             return False
         if ask_size is not None and ask_size <= 0:
@@ -439,14 +595,29 @@ class OutcomeFastFollowLive:
         if max_time_left > 0 and time_left > max_time_left:
             self._record_blocked(candidate, "too_early_in_market", time_left=time_left)
             return False
-        active = getattr(getattr(self.strategy, "active_side", None), "value", "NONE")
-        if bool(getattr(self.strategy, "active_side_locked", False)) and active not in {"NONE", wanted_side}:
-            self._record_blocked(candidate, "locked_side_invalidated", active_side=active)
-            return False
         held = Decimal(str(getattr(self.strategy, "live_inventory_cost", {}).get(inst_key, {}).get("qty", "0")))
         if held > 0:
             self._record_blocked(candidate, "existing_inventory", held=float(held))
             return False
+
+        opposite_side = ActiveSide.DOWN if candidate.decision.direction > 0 else ActiveSide.UP
+        opposite_instrument = target_selector(opposite_side)
+        opposite_key = self.strategy._instrument_key(opposite_instrument) if opposite_instrument is not None else None
+        if opposite_key is not None:
+            opposite_held = Decimal(str(
+                getattr(self.strategy, "live_inventory_cost", {}).get(opposite_key, {}).get("qty", "0")
+            ))
+            if opposite_held > 0:
+                self._record_blocked(candidate, "conflicting_market_inventory", instrument_id=opposite_key,
+                                     held=float(opposite_held))
+                return False
+            for state in getattr(self.strategy, "active_maker_orders", {}).values():
+                if (
+                    str(state.get("side", "") or "").lower() == "buy"
+                    and self.strategy._instrument_key(state.get("instrument_id")) == opposite_key
+                ):
+                    self._record_blocked(candidate, "conflicting_opposite_buy_order", instrument_id=opposite_key)
+                    return False
 
         instrument = self.strategy.cache.instrument(instrument_id)
         if instrument is None:
@@ -650,6 +821,10 @@ class OutcomeFastFollowLive:
             price=float(limit_price), qty=float(quantity), status="SUBMITTED",
             reason="outcome_then_twap_confirmed", payload=metadata,
         )
+        with self._lock:
+            counterfactual_state = self._counterfactual_quotes.get(candidate_key)
+            if counterfactual_state is not None:
+                counterfactual_state["live_order_submitted"] = True
         logger.warning(
             f"FAST FOLLOW BUY submit: slug={slug} side={wanted_side} qty={quantity} "
             f"limit={limit_price} signal_age_ms={age_ms:.1f}"

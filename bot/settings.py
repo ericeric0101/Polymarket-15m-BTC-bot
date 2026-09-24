@@ -792,10 +792,10 @@ def initialize_strategy_settings(
             ),
         )
         def candidate_handler(candidate):
-            # The live owner alone may submit; shadow receives the exact same
-            # immutable event only to collect post-signal markouts.
-            strategy.outcome_lead_lag_shadow.record_candidate(candidate)
+            # Publish the signal to its live owner first. The research shadow
+            # remains asynchronous and cannot delay the quote handoff or trade.
             strategy.outcome_fast_follow_live.record_candidate(candidate)
+            strategy.outcome_lead_lag_shadow.record_candidate(candidate)
     if lead_lag.mode in {"shadow", "live_entry_only"}:
         strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
             config=OutcomeLeadLagStateConfig(
