@@ -481,6 +481,7 @@ def initialize_strategy_settings(
     strategy.quote_healthcheck_interval_sec = 10
     strategy.strategy_status_interval_sec = config.observability.strategy_status_interval_sec
     strategy.quote_stale_sec = config.market_data.quote_stale_sec
+    strategy.quote_max_delivery_delay_sec = config.market_data.quote_max_delivery_delay_sec
     strategy.quote_event_clock_skew_tolerance_sec = config.market_data.quote_event_clock_skew_tolerance_sec
     strategy.quote_invalid_tick_reload_threshold = 80
     strategy.quote_reload_cooldown_sec = 60

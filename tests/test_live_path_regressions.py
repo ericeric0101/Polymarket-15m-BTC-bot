@@ -7,14 +7,17 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from bot.adapter_overrides import (
+    batch_order_book_deltas,
     build_transport_heartbeat_quote,
     coalesce_price_changes_by_asset,
+    enqueue_shutdown_sentinels,
     install_runtime_compatibility_overrides,
     position_fetch_retry_delay_sec,
     record_quote_data_engine_queue_depth,
     quote_provenance_for_tick,
     record_quote_provenance,
     retain_latest_quote,
+    record_data_engine_queue_telemetry,
     should_emit_quote_heartbeat,
     should_publish_order_book_deltas,
     should_emit_transport_heartbeat,
@@ -33,10 +36,12 @@ from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import (
     find_btc_instrument,
     handle_quote_tick,
+    quote_delivery_is_fresh,
     quote_event_is_fresh,
     quote_tick_adapter_timestamp,
     quote_transport_is_fresh,
     refresh_quote_tick_subscriptions,
+    replace_market_subscriptions,
 )
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
@@ -345,7 +350,6 @@ def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
         SimpleNamespace(asset_id="up", price="0.51"),
         SimpleNamespace(asset_id="down", price="0.48"),
     ]
-
     groups = coalesce_price_changes_by_asset(changes)
 
     assert [[change.price for change in group] for group in groups] == [
@@ -353,6 +357,190 @@ def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
         ["0.49", "0.48"],
     ]
 
+
+def test_batched_order_book_deltas_mark_only_the_final_delta_as_last():
+    from enum import IntFlag
+
+    class Flags(IntFlag):
+        F_LAST = 128
+        F_TOB = 64
+
+    class Delta:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Deltas:
+        def __init__(self, instrument_id, deltas):
+            self.instrument_id = instrument_id
+            self.deltas = deltas
+
+    data_mod = SimpleNamespace(RecordFlag=Flags, OrderBookDelta=Delta, OrderBookDeltas=Deltas)
+    source = [
+        Delta(instrument_id="up", action="UPDATE", order=1, flags=Flags.F_LAST | Flags.F_TOB,
+              sequence=0, ts_event=10, ts_init=11),
+        Delta(instrument_id="up", action="DELETE", order=2, flags=Flags.F_LAST,
+              sequence=0, ts_event=12, ts_init=13),
+    ]
+
+    batch = batch_order_book_deltas(data_mod, "up", source)
+
+    assert batch.instrument_id == "up"
+    assert len(batch.deltas) == 2
+    assert not batch.deltas[0].flags & Flags.F_LAST
+    assert batch.deltas[0].flags & Flags.F_TOB
+    assert batch.deltas[1].flags & Flags.F_LAST
+
+
+def test_market_subscription_replacement_unsubscribes_old_pair_and_avoids_duplicate_subscribe():
+    class Strategy:
+        def __init__(self):
+            self.calls = []
+
+        def unsubscribe_quote_ticks(self, inst): self.calls.append(("unsub_quote", inst))
+        def unsubscribe_order_book_deltas(self, inst): self.calls.append(("unsub_l2", inst))
+        def subscribe_quote_ticks(self, inst): self.calls.append(("sub_quote", inst))
+        def subscribe_order_book_deltas(self, inst): self.calls.append(("sub_l2", inst))
+
+    strategy = Strategy()
+    replace_market_subscriptions(strategy, ["old-up", "old-down"], ["new-up", "new-down"])
+    replace_market_subscriptions(strategy, ["new-up", "new-down"], ["new-up", "new-down"])
+
+    assert strategy.calls == [
+        ("unsub_quote", "old-down"), ("unsub_l2", "old-down"),
+        ("unsub_quote", "old-up"), ("unsub_l2", "old-up"),
+        ("sub_quote", "new-up"), ("sub_l2", "new-up"),
+        ("sub_quote", "new-down"), ("sub_l2", "new-down"),
+    ]
+
+
+def test_native_quote_delivery_lag_is_bounded_independently_from_feed_watchdog():
+    assert quote_delivery_is_fresh(
+        received_ts=100.0,
+        adapter_emitted_ts=98.1,
+        max_delivery_delay_sec=2.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+    assert not quote_delivery_is_fresh(
+        received_ts=100.0,
+        adapter_emitted_ts=97.9,
+        max_delivery_delay_sec=2.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+
+
+def test_handle_quote_tick_rejects_locally_delayed_native_book():
+    class Price:
+        def __init__(self, value): self.value = Decimal(value)
+        def as_decimal(self): return self.value
+
+    class Strategy:
+        _stopping = False
+        instrument_id = "up-token"
+        current_market_instruments = ["up-token"]
+        stale_quote_synth_max_age_sec = 10.0
+        latest_market_bid_ts = 0.0
+        latest_market_ask_ts = 0.0
+        latest_market_bid = None
+        latest_market_ask = None
+        active_side = ActiveSide.UP
+        quote_stale_sec = 30.0
+        quote_max_delivery_delay_sec = 2.0
+        quote_event_clock_skew_tolerance_sec = Decimal("0.25")
+        last_valid_quote_ts = 0.0
+        consecutive_invalid_quote_ticks = 0
+
+        def __init__(self):
+            self.last_quote_received_ts_by_inst = {}
+            self.latest_quote_by_inst = {}
+            self.latest_quote_depth_by_inst = {}
+            self.events = []
+
+        def _instrument_for_side(self, _side): return "up-token"
+        def _primary_instrument_for_market(self): return "up-token"
+        def _maybe_run_quote_watchdog(self, _trigger): pass
+        def _db_strategy_event(self, event_type, payload): self.events.append((event_type, payload))
+
+    now_ns = time.time_ns()
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        bid_price=Price("0.60"),
+        ask_price=Price("0.61"),
+        bid_size=Price("10"),
+        ask_size=Price("10"),
+        ts_event=now_ns - 1_000_000_000,
+        ts_init=now_ns - 3_000_000_000,
+    )
+    record_quote_provenance(tick, source="ws_snapshot")
+    strategy = Strategy()
+
+    handle_quote_tick(strategy, tick)
+
+    assert strategy.latest_quote_by_inst == {}
+    assert strategy.events[-1][1]["quote_is_fresh"] is False
+    assert strategy.events[-1][1]["adapter_to_strategy_delay_sec"] >= 2.0
+
+
+def test_shutdown_sentinel_waits_for_capacity_instead_of_raising_queue_full():
+    async def scenario():
+        class Engine:
+            def __init__(self):
+                self._sentinel = object()
+                self._cmd_queue = asyncio.Queue(maxsize=1)
+                self._req_queue = asyncio.Queue(maxsize=1)
+                self._res_queue = asyncio.Queue(maxsize=1)
+                self._data_queue = asyncio.Queue(maxsize=1)
+
+        engine = Engine()
+        engine._data_queue.put_nowait("backlog")
+        task = asyncio.create_task(enqueue_shutdown_sentinels(engine))
+        await asyncio.sleep(0)
+        assert await engine._data_queue.get() == "backlog"
+        await asyncio.wait_for(task, timeout=1.0)
+        assert engine._data_queue.get_nowait() is engine._sentinel
+        assert engine._cmd_queue.get_nowait() is engine._sentinel
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_sentinel_cancels_wedged_consumers_after_bounded_wait():
+    async def scenario():
+        class Engine:
+            def __init__(self):
+                self._sentinel = object()
+                self._cmd_queue = asyncio.Queue(maxsize=1)
+                self._req_queue = asyncio.Queue(maxsize=1)
+                self._res_queue = asyncio.Queue(maxsize=1)
+                self._data_queue = asyncio.Queue(maxsize=1)
+                self._data_queue.put_nowait("backlog")
+                self._data_queue_task = asyncio.create_task(asyncio.Event().wait())
+
+        engine = Engine()
+        await enqueue_shutdown_sentinels(engine, timeout_sec=0.1)
+        try:
+            await engine._data_queue_task
+        except asyncio.CancelledError:
+            pass
+        assert engine._data_queue_task.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_data_engine_queue_telemetry_reports_all_data_types_and_per_type_high_water():
+    class QuoteTick:
+        pass
+
+    class OrderBookDeltas:
+        pass
+
+    engine = SimpleNamespace()
+    assert record_data_engine_queue_telemetry(engine, QuoteTick(), 5, now_ts=100.0) is None
+    assert record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 19, now_ts=105.0) is None
+
+    report = record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 8, now_ts=110.1)
+
+    assert report["counts"] == {"QuoteTick": 1, "OrderBookDeltas": 2}
+    assert report["high_water"] == {"QuoteTick": 5, "OrderBookDeltas": 19}
+    assert report["queue_depth"] == 8
 
 def test_retain_latest_quote_replaces_undelivered_tick_per_instrument():
     pending: dict[str, object] = {}

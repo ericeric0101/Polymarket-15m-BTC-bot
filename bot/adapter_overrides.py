@@ -91,6 +91,69 @@ def should_publish_order_book_deltas(*, has_delta_subscription: bool) -> bool:
     return bool(has_delta_subscription)
 
 
+def batch_order_book_deltas(data_mod, instrument_id, deltas):
+    """Build one ordered DataEngine event for all book changes in a WS frame."""
+    if not deltas:
+        return None
+    last_flag = data_mod.RecordFlag.F_LAST
+    batched = []
+    for index, delta in enumerate(deltas):
+        flags = type(delta.flags)(int(delta.flags) & ~int(last_flag))
+        if index == len(deltas) - 1:
+            flags |= last_flag
+        batched.append(data_mod.OrderBookDelta(
+            instrument_id=delta.instrument_id,
+            action=delta.action,
+            order=delta.order,
+            flags=flags,
+            sequence=delta.sequence,
+            ts_event=delta.ts_event,
+            ts_init=delta.ts_init,
+        ))
+    return data_mod.OrderBookDeltas(instrument_id, batched)
+
+
+async def enqueue_shutdown_sentinels(engine, *, timeout_sec: float = 8.0) -> None:
+    """Wait for queue capacity, then bound shutdown if a consumer is wedged."""
+    queues = [
+        getattr(engine, name, None)
+        for name in ("_cmd_queue", "_req_queue", "_res_queue", "_data_queue")
+    ]
+    putters = [queue.put(engine._sentinel) for queue in queues if queue is not None]
+    try:
+        await asyncio.wait_for(asyncio.gather(*putters), timeout=max(0.1, timeout_sec))
+    except asyncio.TimeoutError:
+        logger.error("DataEngine queues did not drain for shutdown; cancelling stuck queue workers")
+        for name in ("_cmd_queue_task", "_req_queue_task", "_res_queue_task", "_data_queue_task"):
+            task = getattr(engine, name, None)
+            if task is not None and not task.done():
+                task.cancel()
+
+
+def record_data_engine_queue_telemetry(engine, data, queue_depth: int, *, now_ts: float | None = None):
+    """Aggregate queue pressure by event type without writing to the hot-path DB."""
+    now = time.monotonic() if now_ts is None else float(now_ts)
+    state = getattr(engine, "_btc15m_queue_telemetry_state", None)
+    if state is None:
+        state = {"started": now, "counts": {}, "high_water": {}}
+        engine._btc15m_queue_telemetry_state = state
+    type_name = type(data).__name__
+    state["counts"][type_name] = int(state["counts"].get(type_name, 0)) + 1
+    state["high_water"][type_name] = max(
+        int(state["high_water"].get(type_name, 0)), int(queue_depth)
+    )
+    if now - float(state["started"]) < 10.0:
+        return None
+    report = {
+        "window_sec": max(0.0, now - float(state["started"])),
+        "counts": dict(state["counts"]),
+        "high_water": dict(state["high_water"]),
+        "queue_depth": int(queue_depth),
+    }
+    state.update(started=now, counts={}, high_water={})
+    return report
+
+
 def should_emit_quote_heartbeat(
     *,
     quote_unchanged: bool,
@@ -277,7 +340,15 @@ def _install_polymarket_data_overrides() -> None:
             f"Instrument tick size changed: id={instrument.id} price_increment={instrument.price_increment} ws_tick={ws_tick}",
         )
 
-    def patched_apply_quote_change(self, instrument, ws_message, price_change) -> bool:
+    def patched_apply_quote_change(
+        self,
+        instrument,
+        ws_message,
+        price_change,
+        *,
+        delta_sink=None,
+        publish_delta: bool = True,
+    ) -> bool:
         """Apply an incremental CLOB update to the local book without publishing a quote."""
         now_ns = self._clock.timestamp_ns()
         order = data_mod.BookOrder(
@@ -307,7 +378,9 @@ def _install_polymarket_data_overrides() -> None:
 
         local_book = self._local_books[instrument.id]
         local_book.apply(deltas)
-        if should_publish_order_book_deltas(
+        if delta_sink is not None:
+            delta_sink.append(delta)
+        if publish_delta and should_publish_order_book_deltas(
             has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
         ):
             self._handle_data(deltas)
@@ -386,8 +459,19 @@ def _install_polymarket_data_overrides() -> None:
                 self._log.error(f"Cannot find instrument for {instrument_id}")
                 continue
             applied = False
+            frame_deltas = []
             for price_change in changes:
-                applied = self._apply_quote_change(instrument, ws_message, price_change) or applied
+                applied = self._apply_quote_change(
+                    instrument,
+                    ws_message,
+                    price_change,
+                    delta_sink=frame_deltas,
+                    publish_delta=False,
+                ) or applied
+            if frame_deltas and should_publish_order_book_deltas(
+                has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
+            ):
+                self._handle_data(batch_order_book_deltas(data_mod, instrument.id, frame_deltas))
             if applied:
                 self._publish_quote(instrument, ws_message)
 
@@ -451,15 +535,56 @@ def _install_live_data_engine_observability_override() -> None:
 
     original_process = LiveDataEngine.process
 
+    def patched_enqueue_sentinels(self) -> None:
+        task = getattr(self, "_btc15m_sentinel_enqueue_task", None)
+        if task is not None and not task.done():
+            return
+
+        async def enqueue_when_available():
+            await enqueue_shutdown_sentinels(self)
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            self._btc15m_sentinel_enqueue_task = self._loop.create_task(
+                enqueue_when_available(), name="btc15m_data_engine_shutdown_sentinels"
+            )
+        elif self._loop.is_running():
+            self._btc15m_sentinel_enqueue_task = asyncio.run_coroutine_threadsafe(
+                enqueue_when_available(), self._loop
+            )
+        else:
+            logger.error("DataEngine loop is not running; cannot gracefully enqueue shutdown sentinels")
+
     def patched_process(self, data) -> None:
-        if type(data).__name__ == "QuoteTick":
-            try:
-                record_quote_data_engine_queue_depth(data, self.data_qsize())
-            except Exception:
-                # Queue observability must never interfere with market data.
-                pass
+        try:
+            queue_depth = self.data_qsize()
+            if type(data).__name__ == "QuoteTick":
+                record_quote_data_engine_queue_depth(data, queue_depth)
+            report = record_data_engine_queue_telemetry(self, data, queue_depth)
+            if report is not None:
+                queue_limit = int(getattr(getattr(self, "_config", None), "qsize", 0) or 0)
+                summary = ",".join(
+                    f"{kind}={count}/high={report['high_water'].get(kind, 0)}"
+                    for kind, count in sorted(report["counts"].items())
+                )
+                message = (
+                    "DataEngine queue telemetry: "
+                    f"depth={report['queue_depth']}/{queue_limit or 'unknown'} "
+                    f"window={report['window_sec']:.1f}s events=[{summary}]"
+                )
+                if queue_limit and report["queue_depth"] >= int(queue_limit * 0.75):
+                    logger.warning(message)
+                else:
+                    logger.info(message)
+        except Exception:
+            # Queue observability must never interfere with market data.
+            pass
         original_process(self, data)
 
+    LiveDataEngine._enqueue_sentinels = patched_enqueue_sentinels
     LiveDataEngine.process = patched_process
     LiveDataEngine._btc15m_queue_telemetry_patched = True
 

@@ -452,6 +452,7 @@ class MarketDataConfig:
     market_strike_anchor_near_sec: int
     market_strike_rest_retry_sec: int
     quote_stale_sec: int
+    quote_max_delivery_delay_sec: float
     quote_event_clock_skew_tolerance_sec: Decimal
     quote_resubscribe_grace_sec: int
     stale_quote_synth_max_age_sec: float
@@ -1062,6 +1063,9 @@ class AppConfig:
                 market_strike_anchor_near_sec=max(5, _env_int("MARKET_STRIKE_ANCHOR_NEAR_SEC", 30)),
                 market_strike_rest_retry_sec=max(10, _env_int("MARKET_STRIKE_REST_RETRY_SEC", 60)),
                 quote_stale_sec=_env_int("QUOTE_STALE_SEC", 30),
+                quote_max_delivery_delay_sec=max(
+                    0.1, _env_float("QUOTE_MAX_DELIVERY_DELAY_SEC", 2.0),
+                ),
                 quote_event_clock_skew_tolerance_sec=max(
                     Decimal("0"),
                     _env_decimal("QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC", "0.25"),

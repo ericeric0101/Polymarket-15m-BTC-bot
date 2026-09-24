@@ -86,6 +86,22 @@ def quote_transport_is_fresh(
     )
 
 
+def quote_delivery_is_fresh(
+    *,
+    received_ts: float,
+    adapter_emitted_ts: float,
+    max_delivery_delay_sec: float,
+    clock_skew_tolerance_sec: Decimal | float,
+) -> bool:
+    """Reject native books delayed in the local adapter/DataEngine pipeline."""
+    return quote_event_is_fresh(
+        received_ts=received_ts,
+        event_ts=adapter_emitted_ts,
+        max_age_sec=max_delivery_delay_sec,
+        clock_skew_tolerance_sec=clock_skew_tolerance_sec,
+    )
+
+
 def _record_quote_transport_telemetry(
     strategy: Any,
     *,
@@ -241,6 +257,60 @@ def refresh_quote_tick_subscriptions(strategy: Any) -> None:
             logger.warning(f"L2 resubscribe failed for {inst_id}: {exc}")
 
 
+def replace_market_subscriptions(
+    strategy: Any,
+    previous_instrument_ids: List[Any],
+    current_instrument_ids: List[Any],
+) -> bool:
+    """Keep quote/L2 subscriptions bounded to the selected market pair."""
+    previous = {str(inst): inst for inst in previous_instrument_ids if inst is not None}
+    tracked_quote = getattr(strategy, "_managed_market_quote_subscription_ids", None)
+    tracked_l2 = getattr(strategy, "_managed_market_l2_subscription_ids", None)
+    if not isinstance(tracked_quote, set):
+        tracked_quote = set(previous)
+    else:
+        tracked_quote = set(tracked_quote)
+    if not isinstance(tracked_l2, set):
+        tracked_l2 = set(previous)
+    else:
+        tracked_l2 = set(tracked_l2)
+    desired = {str(inst): inst for inst in current_instrument_ids if inst is not None}
+    healthy = True
+
+    for inst_key in sorted((tracked_quote | tracked_l2) - set(desired)):
+        inst = previous.get(inst_key, inst_key)
+        for tracked, unsubscribe in (
+            (tracked_quote, strategy.unsubscribe_quote_ticks),
+            (tracked_l2, strategy.unsubscribe_order_book_deltas),
+        ):
+            if inst_key not in tracked:
+                continue
+            try:
+                unsubscribe(inst)
+                tracked.discard(inst_key)
+            except Exception as exc:
+                healthy = False
+                logger.warning(f"Old market subscription cleanup failed for {inst}: {exc}")
+
+    for inst_key, inst in desired.items():
+        for tracked, subscribe in (
+            (tracked_quote, strategy.subscribe_quote_ticks),
+            (tracked_l2, strategy.subscribe_order_book_deltas),
+        ):
+            if inst_key in tracked:
+                continue
+            try:
+                subscribe(inst)
+                tracked.add(inst_key)
+            except Exception as exc:
+                healthy = False
+                logger.warning(f"Market subscription failed for {inst}: {exc}")
+
+    strategy._managed_market_quote_subscription_ids = tracked_quote
+    strategy._managed_market_l2_subscription_ids = tracked_l2
+    return healthy
+
+
 def handle_order_book_deltas(strategy: Any, deltas: Any) -> None:
     """Stamp fresh native L2 delivery for fast-follow's FOK precheck.
 
@@ -312,6 +382,7 @@ def find_btc_instrument(strategy: Any) -> bool:
 
     previous_instrument = str(strategy.instrument_id) if strategy.instrument_id else None
     previous_slug = str(strategy.current_market_slug or "")
+    previous_market_instruments = list(getattr(strategy, "current_market_instruments", []) or [])
     previous_active_side = strategy.active_side
     previous_side_locked = strategy.active_side_locked
     previous_side_reason = strategy.side_decision_reason
@@ -402,12 +473,11 @@ def find_btc_instrument(strategy: Any) -> bool:
             strategy.current_market_instruments,
             clear_cached_quotes=True,
         )
-    for inst_id in strategy.current_market_instruments:
-        strategy.subscribe_quote_ticks(inst_id)
-        try:
-            strategy.subscribe_order_book_deltas(inst_id)
-        except Exception as exc:
-            logger.warning(f"L2 subscribe failed for {inst_id}: {exc}")
+    replace_market_subscriptions(
+        strategy,
+        previous_market_instruments,
+        strategy.current_market_instruments,
+    )
     return True
 
 
@@ -507,10 +577,12 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         )
         is_native_book_update = quote_source in {"ws_price_change", "ws_snapshot"}
         quote_is_fresh = (
-            quote_transport_is_fresh(
+            quote_delivery_is_fresh(
                 received_ts=quote_received_ts,
                 adapter_emitted_ts=adapter_emitted_ts,
-                max_age_sec=float(strategy.quote_stale_sec),
+                max_delivery_delay_sec=float(
+                    getattr(strategy, "quote_max_delivery_delay_sec", strategy.quote_stale_sec)
+                ),
                 clock_skew_tolerance_sec=clock_skew_tolerance_sec,
             )
             if is_native_book_update

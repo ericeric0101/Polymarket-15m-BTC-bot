@@ -7,7 +7,7 @@ from scripts.inspect_env_contract import OPERATOR_KEYS, _code_keys, _keys
 
 
 def test_operator_template_has_no_duplicate_or_empty_keys():
-    assert len(OPERATOR_KEYS) == 57
+    assert len(OPERATOR_KEYS) == 58
     assert "AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT" not in CORE_ENV_KEYS
     assert all(key and key.upper() == key for key in OPERATOR_KEYS)
     template = Path(__file__).parents[1] / "config" / "operator.env.example"
@@ -52,3 +52,13 @@ def test_fast_follow_forecast_freshness_is_independently_configurable(monkeypatc
     config = AppConfig.from_env(enable_terminal_dashboard=False)
 
     assert config.outcome_lead_lag.live_max_forecast_age_sec == 4.5
+
+
+def test_quote_delivery_delay_gate_defaults_to_two_seconds_and_is_configurable(monkeypatch):
+    monkeypatch.delenv("QUOTE_MAX_DELIVERY_DELAY_SEC", raising=False)
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert config.market_data.quote_max_delivery_delay_sec == 2.0
+
+    monkeypatch.setenv("QUOTE_MAX_DELIVERY_DELAY_SEC", "3.5")
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert config.market_data.quote_max_delivery_delay_sec == 3.5
