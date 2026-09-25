@@ -772,6 +772,7 @@ class OutcomeFastFollowLive:
             return False
         # This is an intent, not venue acceptance.  It closes the crash window
         # between a durable risk reservation and the FOK reaching the venue.
+        intent_persisted = False
         try:
             persisted = self.strategy._db_order_event(
                 event_type="ORDER_FAST_FOLLOW_INTENT", client_order_id=str(coid), side="BUY",
@@ -780,9 +781,17 @@ class OutcomeFastFollowLive:
             )
             if persisted is False:
                 self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"
+            else:
+                intent_persisted = True
         except Exception as e:
             self.strategy.trade_db_health_reason = "fast_follow_intent_persist_failed"
             logger.error(f"Fast-follow intent persistence failed; blocking BUY: {e}")
+        if not intent_persisted:
+            self._rollback_unsubmitted_entry_reservation(
+                slug=slug, night=night, client_order_id=str(coid),
+            )
+            self._record_blocked(candidate, "fast_follow_intent_persist_failed")
+            return False
         if not self._runtime_journal_ready():
             self._rollback_unsubmitted_entry_reservation(slug=slug, night=night, client_order_id=str(coid))
             self._record_blocked(candidate, "fast_follow_intent_persist_failed")

@@ -15,6 +15,7 @@ env/
 
 # Logs / runtime artifacts
 logs/
+backups/
 *.log
 
 # Local databases and reports

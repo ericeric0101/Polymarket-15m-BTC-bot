@@ -119,7 +119,11 @@
   including reuse of an already-loaded Taipei weekday risk-day cache; a cached day
   can never bypass the BUY gate. The pending fast-follow reservation must be
   persisted successfully and leave the journal healthy before its FOK is sent.
-  A persistence failure rolls back the unsubmitted reservation and ownership.
+  A persistence failure (explicit false result or exception, including an
+  `_db_order_event` call-contract mismatch) aborts the FOK and rolls back the
+  unsubmitted reservation and ownership, even if the journal health probe
+  itself still reports ready. A healthy primary journal is not globally marked
+  BUY-unready solely because an intent integration call failed.
 - Normal shutdown records `STRATEGY_STOP` and run-stop state before stopping the
   trade journal worker, which synchronously flushes the final dirty journal
   snapshot. Runtime journal fail-closed applies only to new maker/fast-follow

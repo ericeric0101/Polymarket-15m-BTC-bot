@@ -879,6 +879,48 @@ def test_live_fast_follow_intent_persist_failure_aborts_and_rolls_back_before_su
                for event, payload in events)
 
 
+def test_legacy_order_event_signature_rejects_intent_without_submitting_fok():
+    owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.60"))
+    owner.on_order_terminal(str(kwargs[0]["client_order_id"]))
+    owner.strategy.current_market_slug = "next"
+
+    # Reproduce the historical API mismatch: the call site passes
+    # instrument_id, while the old writer signature has no such parameter.
+    def legacy_order_event(
+        event_type, client_order_id=None, venue_order_id=None, side=None,
+        price=None, qty=None, status=None, reason=None, commission_usdc=None,
+        expected_net_usdc=None, payload=None,
+    ):
+        events.append((event_type, payload or {}))
+        return True
+
+    owner.strategy._db_order_event = legacy_order_event
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "next", 1, time.time_ns()))
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+    assert not owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    )
+    assert len(submitted) == 1  # only the earlier harness order exists
+    assert not owner._pending_order_ids
+    assert not owner._night_pending_entry_ids["2026-09-08"]
+    assert "next" not in owner._attempted_slugs
+    # The integration error must block this fast-follow, but a healthy primary
+    # journal should not automatically disable unrelated maker BUYs.
+    assert owner.strategy.trade_db_buy_ready is True
+    assert owner.strategy.trade_db_health_reason == "fast_follow_intent_persist_failed"
+    assert any(
+        event == "FAST_FOLLOW_ENTRY_BLOCKED"
+        and payload["reason"] == "fast_follow_intent_persist_failed"
+        for event, payload in events
+    )
+
+
 def test_live_fast_follow_durably_records_intent_before_venue_submit():
     owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.60"))
     owner.on_order_terminal(str(kwargs[0]["client_order_id"]))
