@@ -2,6 +2,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from run_bot import IntegratedBTCStrategy
+from bot.launcher import idempotent_stop_callback
+from concurrent.futures import ThreadPoolExecutor
 
 
 def test_quote_watchdog_skips_reduce_only_market_without_risk():
@@ -76,3 +78,17 @@ def test_quote_watchdog_stop_failure_does_not_leave_strategy_stuck_stopping():
     assert strategy._stopping is False
     assert strategy._rollover_requested_flag is False
     assert strategy._quote_stream_rollover_requested is False
+
+
+def test_watchdog_recovery_does_not_resubscribe_during_shutdown():
+    strategy = SimpleNamespace(_stopping=True)
+    IntegratedBTCStrategy._trigger_quote_watchdog_reload(strategy, "timer_stale_quotes", 10.0)
+
+
+def test_node_stop_callback_is_idempotent_across_concurrent_rollover_requests():
+    stops = []
+    request_stop = idempotent_stop_callback(lambda: stops.append("stop"))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: request_stop(), range(32)))
+    assert sum(results) == 1
+    assert stops == ["stop"]

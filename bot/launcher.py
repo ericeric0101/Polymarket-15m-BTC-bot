@@ -48,6 +48,28 @@ from telegram_bot import start_telegram_bot_thread
 from telegram_notifier import TelegramNotifier
 
 
+def idempotent_stop_callback(stop_fn):
+    """Serialize watchdog, timer and lifecycle stop requests for one node cycle."""
+    lock = threading.Lock()
+    requested = False
+
+    def request_once() -> bool:
+        nonlocal requested
+        with lock:
+            if requested:
+                return False
+            requested = True
+        try:
+            stop_fn()
+        except Exception:
+            with lock:
+                requested = False
+            raise
+        return True
+
+    return request_once
+
+
 # The execution layer has a hard lower bound for nonzero balance checks, but a
 # venue SELL must also meet the strategy's configured exchange minimum (5 by
 # default).  Rollover protection uses the latter when available so dust that
@@ -527,7 +549,7 @@ def run_integrated_bot(
         # Strategies are Actors and do not have a public back-reference to the
         # TradingNode. Give lifecycle/watchdog recovery an explicit stop hook so
         # a requested rollover actually returns node.run() to this launcher.
-        strategy._request_node_stop_callback = node.stop
+        strategy._request_node_stop_callback = idempotent_stop_callback(node.stop)
         logger.info("Nautilus node built successfully")
         return node, primary_slug
 
@@ -578,7 +600,7 @@ def run_integrated_bot(
                         )
                         try:
                             if node is not None:
-                                node.stop()
+                                strategy._request_node_stop_callback()
                         except Exception as e:
                             logger.error(f"Failed to stop node during auto rollover: {e}")
                         return

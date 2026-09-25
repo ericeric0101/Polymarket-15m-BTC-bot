@@ -7,7 +7,7 @@ from scripts.inspect_env_contract import OPERATOR_KEYS, _code_keys, _keys
 
 
 def test_operator_template_has_no_duplicate_or_empty_keys():
-    assert len(OPERATOR_KEYS) == 58
+    assert len(OPERATOR_KEYS) == 59
     assert "AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT" not in CORE_ENV_KEYS
     assert all(key and key.upper() == key for key in OPERATOR_KEYS)
     template = Path(__file__).parents[1] / "config" / "operator.env.example"

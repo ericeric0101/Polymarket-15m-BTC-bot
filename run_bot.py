@@ -3727,6 +3727,9 @@ class IntegratedBTCStrategy(
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
         """
+        if self._stopping:
+            logger.debug(f"Quote watchdog recovery ignored during shutdown: trigger={trigger}")
+            return
         if not should_attempt_quote_watchdog_recovery(
             now_ts=now_ts,
             last_quote_watchdog_reload_ts=float(self.last_quote_watchdog_reload_ts),

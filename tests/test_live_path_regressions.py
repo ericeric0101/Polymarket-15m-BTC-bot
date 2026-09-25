@@ -534,6 +534,31 @@ def test_shutdown_sentinel_waits_for_capacity_instead_of_raising_queue_full():
     asyncio.run(scenario())
 
 
+def test_shutdown_delivers_pending_latest_quotes_before_data_sentinel():
+    async def scenario():
+        class Engine:
+            def __init__(self):
+                self._sentinel = object()
+                self._cmd_queue = asyncio.Queue(maxsize=1)
+                self._req_queue = asyncio.Queue(maxsize=1)
+                self._res_queue = asyncio.Queue(maxsize=1)
+                self._data_queue = asyncio.Queue(maxsize=1)
+                self._btc15m_backpressure = {"quotes": {"up": "latest-quote"}}
+
+        engine = Engine()
+        engine._data_queue.put_nowait("backlog")
+        task = asyncio.create_task(enqueue_shutdown_sentinels(engine, timeout_sec=1.0))
+        assert await engine._data_queue.get() == "backlog"
+        await asyncio.sleep(0)
+        assert await engine._data_queue.get() == "latest-quote"
+        await asyncio.sleep(0)
+        await asyncio.wait_for(task, timeout=1.0)
+        assert await engine._data_queue.get() is engine._sentinel
+        assert engine._btc15m_backpressure["quotes"] == {}
+
+    asyncio.run(scenario())
+
+
 def test_shutdown_sentinel_cancels_wedged_consumers_after_bounded_wait():
     async def scenario():
         class Engine:
