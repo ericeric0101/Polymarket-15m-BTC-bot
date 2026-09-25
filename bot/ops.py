@@ -166,7 +166,7 @@ def handle_quote_watchdog_recovery(
     last_valid_quote_ts: float,
     consecutive_invalid_quote_ticks: int,
     db_strategy_event_fn: Callable[[str, dict[str, Any]], None],
-    cancel_active_maker_orders_fn: Callable[[], None],
+    cancel_active_buy_orders_fn: Callable[[], None],
     find_btc_instrument_fn: Callable[[], bool],
     logger_warning_fn: Callable[[str], None],
     logger_error_fn: Callable[[str], None],
@@ -195,7 +195,10 @@ def handle_quote_watchdog_recovery(
             "trigger_count": trigger_count,
         },
     )
-    cancel_active_maker_orders_fn()
+    # A stale quote stream is not a reason to withdraw a protective SELL.
+    # It is still a valid limit order at the venue and may be the only live
+    # exit protection while the data client is being rebuilt.
+    cancel_active_buy_orders_fn()
     selected_ok = find_btc_instrument_fn()
     return selected_ok, now_ts, stale_for, prev_instrument
 

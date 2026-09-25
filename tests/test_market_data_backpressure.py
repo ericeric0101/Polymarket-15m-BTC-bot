@@ -330,6 +330,67 @@ def test_pressure_latch_recovers_only_after_consumer_drains_below_release_mark()
     assert enqueue_bounded_market_data(engine, OrderBookDeltas())
 
 
+def test_large_data_queue_caps_optional_l2_backlog_and_keeps_latest_quote_near_front():
+    class QuoteTick:
+        def __init__(self, instrument_id, sequence):
+            self.instrument_id, self.sequence = instrument_id, sequence
+
+    class OrderBookDeltas:
+        def __init__(self, sequence):
+            self.sequence = sequence
+
+    class Engine:
+        def __init__(self):
+            self._data_queue = asyncio.Queue(maxsize=6000)
+            self._config = SimpleNamespace(qsize=6000)
+
+    engine = Engine()
+    for sequence in range(1000):
+        enqueue_bounded_market_data(engine, OrderBookDeltas(sequence))
+        enqueue_bounded_market_data(engine, QuoteTick("up", sequence))
+
+    assert engine._data_queue.qsize() <= 64
+    assert engine._btc15m_backpressure["quotes"]["up"].sequence == 999
+
+    # As soon as the consumer resumes, the latest quote is admitted behind at
+    # most the bounded L2 backlog, rather than hundreds of stale updates.
+    engine._data_queue.get_nowait()
+    flush_coalesced_quote_ticks(engine, consumer_drained=True)
+    contents = list(engine._data_queue._queue)
+    quote_index = next(
+        index for index, item in enumerate(contents)
+        if type(item).__name__ == "QuoteTick"
+    )
+    assert quote_index <= 63
+
+
+def test_disposing_data_engine_rejects_new_events_and_does_not_flush_staged_quotes():
+    class QuoteTick:
+        instrument_id = "up"
+
+    class OrderBookDeltas:
+        pass
+
+    engine = SimpleNamespace(
+        _btc15m_disposing=True,
+        _data_queue=asyncio.Queue(maxsize=8),
+        _config=SimpleNamespace(qsize=8),
+        _btc15m_backpressure={
+            "quotes": {"up": QuoteTick()},
+            "l2_suppression_active": False,
+            "l2_suppressed_window": 0,
+            "l2_suppressed_total": 0,
+            "quote_coalesced_window": 0,
+            "quote_coalesced_total": 0,
+        },
+    )
+    assert not enqueue_bounded_market_data(engine, OrderBookDeltas())
+    assert not enqueue_bounded_market_data(engine, QuoteTick())
+    assert flush_coalesced_quote_ticks(engine, consumer_drained=True) == 0
+    assert engine._data_queue.empty()
+    assert engine._btc15m_backpressure["quotes"]["up"].instrument_id == "up"
+
+
 def test_dispose_cleanup_drops_pending_quote_and_telemetry_state():
     engine = SimpleNamespace(
         _btc15m_backpressure={"quotes": {"up": object()}},

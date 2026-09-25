@@ -553,6 +553,7 @@ def test_shutdown_discards_pending_quotes_without_delaying_data_sentinel():
         await asyncio.wait_for(task, timeout=1.0)
         assert await engine._data_queue.get() is engine._sentinel
         assert engine._btc15m_backpressure["quotes"] == {}
+        assert engine._btc15m_disposing is True
 
     asyncio.run(scenario())
 

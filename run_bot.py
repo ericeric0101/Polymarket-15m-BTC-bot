@@ -3688,10 +3688,25 @@ class IntegratedBTCStrategy(
             logger_warning_fn=logger.warning,
         )
 
-    def _request_quote_stream_node_rollover(self, trigger: str, now_ts: float) -> None:
+    def _request_quote_stream_node_rollover(self, trigger: str, now_ts: float) -> bool:
         """Escalate a failed resubscribe to a clean data-client rebuild by the launcher."""
         if self._stopping or getattr(self, "_quote_stream_rollover_requested", False):
-            return
+            return False
+        protective_sell_keys = IntegratedBTCStrategy._live_protective_sell_order_keys(self)
+        if protective_sell_keys:
+            last_log_ts = float(getattr(self, "_last_protective_sell_rollover_deferred_ts", 0.0) or 0.0)
+            if now_ts - last_log_ts >= 60.0:
+                self._last_protective_sell_rollover_deferred_ts = now_ts
+                logger.error(
+                    "Quote stream rollover deferred to preserve live protective SELL order(s): "
+                    f"trigger={trigger} orders={','.join(protective_sell_keys)}; "
+                    "watchdog will continue recovery attempts."
+                )
+                self._db_strategy_event(
+                    "QUOTE_WATCHDOG_ROLLOVER_DEFERRED_PROTECTIVE_SELL",
+                    {"trigger": trigger, "orders": protective_sell_keys, "ts": now_ts},
+                )
+            return False
         self._quote_stream_rollover_requested = True
         self._rollover_requested_flag = True
         self._stopping = True
@@ -3705,11 +3720,41 @@ class IntegratedBTCStrategy(
             if not callable(stop_node):
                 raise RuntimeError("launcher node-stop callback is not configured")
             stop_node()
+            return True
         except Exception as exc:
             self._stopping = False
             self._rollover_requested_flag = False
             self._quote_stream_rollover_requested = False
             logger.error(f"Quote stream node rollover stop failed: {exc}")
+            return False
+
+    def _live_protective_sell_order_keys(self) -> list[str]:
+        """List tracked non-terminal SELL orders that must survive a node handoff."""
+        active_orders = getattr(self, "active_maker_orders", None)
+        if not isinstance(active_orders, dict):
+            return []
+        terminal_states = ("REJECTED", "FILLED", "CANCELED", "CANCELLED", "EXPIRED")
+        protected: list[str] = []
+        for order_key, state in active_orders.items():
+            if not isinstance(state, dict):
+                continue
+            if str(state.get("side", "") or "").lower() != "sell" and not str(order_key).lower().startswith("sell:"):
+                continue
+            order = state.get("order")
+            status = str(getattr(order, "status", "") or "").upper()
+            if any(terminal in status for terminal in terminal_states):
+                continue
+            protected.append(str(order_key))
+        return protected
+
+    def _cancel_maker_buys_for_quote_recovery(self) -> None:
+        """Withdraw stale entry bids without canceling venue-side exit protection."""
+        for order_key, state in list(getattr(self, "active_maker_orders", {}).items()):
+            if not isinstance(state, dict):
+                continue
+            side = str(state.get("side", "") or "").lower()
+            if side == "buy" or str(order_key).lower().startswith("buy:"):
+                self._cancel_maker_order_side(order_key, reason="quote_watchdog_recovery")
 
     def _quote_watchdog_recovery_is_needed(self) -> bool:
         """Only rebuild a quote stream when it can still affect risk or quoting."""
@@ -3760,7 +3805,7 @@ class IntegratedBTCStrategy(
             last_valid_quote_ts=float(self.last_valid_quote_ts),
             consecutive_invalid_quote_ticks=int(self.consecutive_invalid_quote_ticks),
             db_strategy_event_fn=self._db_strategy_event,
-            cancel_active_maker_orders_fn=self._cancel_active_maker_orders,
+            cancel_active_buy_orders_fn=self._cancel_maker_buys_for_quote_recovery,
             find_btc_instrument_fn=self._find_btc_instrument,
             logger_warning_fn=logger.warning,
             logger_error_fn=logger.error,
@@ -3848,8 +3893,12 @@ class IntegratedBTCStrategy(
                 recovery_age = now_ts - recovery_started_ts
                 if recovery_age >= float(self.quote_resubscribe_grace_sec):
                     if int(getattr(self, "quote_recovery_attempts", 0)) >= 1:
-                        self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts)
-                        return
+                        if self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts):
+                            return
+                        # A protected SELL still lives at the venue. Keep the
+                        # watchdog alive and retry recovery after another grace
+                        # interval; do not let the timed-out feed stop monitoring.
+                        self.quote_recovery_started_ts = now_ts
                     self._trigger_quote_watchdog_reload("quote_subscription_timeout", now_ts)
                 continue
             stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else None

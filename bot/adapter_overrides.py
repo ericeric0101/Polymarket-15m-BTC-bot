@@ -17,6 +17,8 @@ from py_clob_client_v2.exceptions import PolyApiException
 
 _QUOTE_PROVENANCE_TTL_SEC = 600.0
 _DEFAULT_L2_PUBLISH_INTERVAL_SEC = 0.25
+_MAX_MARKET_DATA_BACKLOG = 64
+_MAX_MARKET_DATA_RELEASE_BACKLOG = 32
 _quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
 
 
@@ -63,6 +65,8 @@ def build_bounded_order_book_snapshot(*, instrument_id, book, depth: int, ts_eve
 
 def enqueue_bounded_market_data(engine, data) -> bool:
     """Never create async putter backlogs; prefer quotes and coalesce them by instrument."""
+    if getattr(engine, "_btc15m_disposing", False):
+        return False
     queue = getattr(engine, "_data_queue", None)
     if queue is None:
         return False
@@ -77,7 +81,11 @@ def enqueue_bounded_market_data(engine, data) -> bool:
         engine._btc15m_backpressure = state
     limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
     depth = queue.qsize()
-    pressure_mark = max(1, int(limit * 0.25)) if limit else 0
+    # Nautilus queues are commonly configured in the thousands. A percentage
+    # threshold alone still permits tens of seconds of stale L2 to sit ahead
+    # of actionable quotes. Keep the optional market-data backlog bounded in
+    # absolute event count as well as by the configured queue size.
+    pressure_mark = min(max(1, int(limit * 0.25)), _MAX_MARKET_DATA_BACKLOG) if limit else 0
     if kind == "OrderBookDeltas" and state["l2_suppression_active"]:
         _record_backpressure(engine, "l2_suppressed")
         return False
@@ -112,13 +120,18 @@ def _record_backpressure(engine, counter: str) -> None:
 
 
 def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> int:
+    if getattr(engine, "_btc15m_disposing", False):
+        return 0
     state = getattr(engine, "_btc15m_backpressure", None)
     queue = getattr(engine, "_data_queue", None)
     if not state or queue is None:
         return 0
     if consumer_drained:
         limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
-        if limit and queue.qsize() < max(1, int(limit * 0.10)):
+        release_mark = min(
+            max(1, int(limit * 0.10)), _MAX_MARKET_DATA_RELEASE_BACKLOG,
+        ) if limit else 0
+        if limit and queue.qsize() < release_mark:
             state["l2_suppression_active"] = False
     sent = 0
     for key, quote in tuple(state["quotes"].items()):
@@ -203,6 +216,14 @@ def cleanup_data_engine_runtime_state(engine) -> None:
     engine._btc15m_backpressure = None
     engine._btc15m_queue_telemetry_state = None
     engine._btc15m_queue_telemetry_pending_report = None
+
+
+def begin_data_engine_shutdown(engine) -> None:
+    """Fence event producers before shutdown sentinels begin draining queues."""
+    engine._btc15m_disposing = True
+    backpressure = getattr(engine, "_btc15m_backpressure", None)
+    if backpressure is not None:
+        backpressure.get("quotes", {}).clear()
 
 
 def _quote_provenance_key(quote: object) -> tuple[object, ...]:
@@ -342,15 +363,13 @@ def batch_order_book_deltas(data_mod, instrument_id, deltas):
 
 async def enqueue_shutdown_sentinels(engine, *, timeout_sec: float = 8.0) -> None:
     """Wait for queue capacity, then bound shutdown if a consumer is wedged."""
+    begin_data_engine_shutdown(engine)
     queues = [
         getattr(engine, name, None)
         for name in ("_cmd_queue", "_req_queue", "_res_queue", "_data_queue")
     ]
-    # Shutdown is not a quote-delivery opportunity: do not delay sentinels or
-    # carry stale buffered market data into another node.
-    backpressure = getattr(engine, "_btc15m_backpressure", None)
-    if backpressure is not None:
-        backpressure.get("quotes", {}).clear()
+    # Shutdown is not a quote-delivery opportunity: staged quotes have already
+    # been discarded and future producer callbacks fenced above.
     putters = [queue.put(engine._sentinel) for queue in queues if queue is not None]
     try:
         await asyncio.wait_for(asyncio.gather(*putters), timeout=max(0.1, timeout_sec))
@@ -850,6 +869,9 @@ def _install_live_data_engine_observability_override() -> None:
     original_dispose = LiveDataEngine._dispose
 
     def patched_enqueue_sentinels(self) -> None:
+        # Set synchronously before scheduling, preventing a producer callback
+        # from refilling the queue before the sentinel coroutine starts.
+        begin_data_engine_shutdown(self)
         task = getattr(self, "_btc15m_sentinel_enqueue_task", None)
         if task is not None and not task.done():
             return
@@ -881,6 +903,11 @@ def _install_live_data_engine_observability_override() -> None:
             logger.error("DataEngine loop is not running; cannot gracefully enqueue shutdown sentinels")
 
     def patched_process(self, data) -> None:
+        # Once disposal begins, do not refill queues while sentinels are
+        # draining them. This also prevents late feed callbacks from reviving
+        # observability/backpressure state after cleanup.
+        if getattr(self, "_btc15m_disposing", False):
+            return
         try:
             queue_depth = self.data_qsize()
             if type(data).__name__ == "QuoteTick":
@@ -941,8 +968,11 @@ def _install_live_data_engine_observability_override() -> None:
         flush_coalesced_quote_ticks(self, consumer_drained=True)
 
     def patched_dispose(self) -> None:
-        cleanup_data_engine_runtime_state(self)
-        original_dispose(self)
+        self._btc15m_disposing = True
+        try:
+            original_dispose(self)
+        finally:
+            cleanup_data_engine_runtime_state(self)
 
     LiveDataEngine._enqueue_sentinels = patched_enqueue_sentinels
     LiveDataEngine.process = patched_process
