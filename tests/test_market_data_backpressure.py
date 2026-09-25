@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from concurrent.futures import Future
 from types import SimpleNamespace
 
 from nautilus_trader.model.book import OrderBook
@@ -13,9 +15,12 @@ from bot.adapter_overrides import (
     build_bounded_order_book_snapshot,
     enqueue_bounded_market_data,
     flush_coalesced_quote_ticks,
+    cleanup_data_engine_runtime_state,
     should_publish_l2_snapshot,
     l2_publish_interval_sec,
     install_runtime_compatibility_overrides,
+    record_quote_provenance,
+    record_quote_data_engine_latency,
 )
 import bot.adapter_overrides as adapter_overrides
 
@@ -182,14 +187,14 @@ def test_saturated_data_queue_coalesces_quotes_and_suppresses_l2_without_queuefu
     flush_coalesced_quote_ticks(engine)
     assert engine._data_queue.qsize() <= 32
     assert engine._data_queue.qsize() > 0
-    latest_by_instrument = {
-        item.instrument_id: item.sequence
-        for item in engine._data_queue._queue
-        if type(item).__name__ == "QuoteTick"
-    }
+    latest_by_instrument = {}
+    while not engine._data_queue.empty():
+        item = engine._data_queue.get_nowait()
+        if type(item).__name__ == "QuoteTick":
+            latest_by_instrument[item.instrument_id] = item.sequence
     assert latest_by_instrument == {"up": 127, "down": 127}
-    assert engine._btc15m_backpressure["l2_suppressed"] > 0
-    assert engine._btc15m_backpressure["quote_coalesced"] > 0
+    assert engine._btc15m_backpressure["l2_suppressed_total"] > 0
+    assert engine._btc15m_backpressure["quote_coalesced_total"] > 0
 
 
 def test_l2_rate_limit_coalesces_reconnect_snapshot_bursts():
@@ -261,11 +266,122 @@ def test_sustained_two_instrument_load_keeps_queue_bounded_and_quotes_fresh():
                 latest_delivered[item.instrument_id] = item.sequence
         flush_coalesced_quote_ticks(engine, consumer_drained=True)
         if not state["quotes"]:
+            while not engine._data_queue.empty():
+                item = engine._data_queue.get_nowait()
+                if type(item).__name__ == "QuoteTick":
+                    latest_delivered[item.instrument_id] = item.sequence
             break
 
     assert peak <= 32  # queue guard keeps pressure at or below 50% capacity
     assert engine._data_queue.qsize() <= 64
     assert accepted_l2 < 500  # optional L2 publication collapses under sustained pressure
     assert latest_delivered == {"up": 5399, "down": 5399}
-    assert state["l2_suppressed"] > 10_000
-    assert state["quote_coalesced"] > 0
+    assert state["l2_suppressed_total"] > 10_000
+    assert state["quote_coalesced_total"] > 0
+
+
+def test_quote_buffer_replaces_intermediates_and_flushes_latest_after_capacity_returns():
+    class QuoteTick:
+        def __init__(self, instrument_id, sequence):
+            self.instrument_id, self.sequence = instrument_id, sequence
+
+    class Engine:
+        def __init__(self):
+            self._data_queue = asyncio.Queue(maxsize=4)
+            self._config = SimpleNamespace(qsize=4)
+
+    engine = Engine()
+    for sequence in range(4):
+        engine._data_queue.put_nowait(QuoteTick("other", sequence))
+    for sequence in (1, 2, 3):
+        assert not enqueue_bounded_market_data(engine, QuoteTick("up", sequence))
+    assert engine._btc15m_backpressure["quotes"]["up"].sequence == 3
+
+    for _ in range(4):
+        engine._data_queue.get_nowait()
+    assert flush_coalesced_quote_ticks(engine) == 1
+    assert engine._data_queue.get_nowait().sequence == 3
+    assert engine._btc15m_backpressure["quotes"] == {}
+
+
+def test_pressure_latch_recovers_only_after_consumer_drains_below_release_mark():
+    class QuoteTick:
+        def __init__(self, instrument_id):
+            self.instrument_id = instrument_id
+
+    class OrderBookDeltas:
+        pass
+
+    class Engine:
+        def __init__(self):
+            self._data_queue = asyncio.Queue(maxsize=8)
+            self._config = SimpleNamespace(qsize=8)
+
+    engine = Engine()
+    for index in range(2):
+        engine._data_queue.put_nowait(index)
+    enqueue_bounded_market_data(engine, QuoteTick("up"))
+    assert engine._btc15m_backpressure["l2_suppression_active"] is True
+    assert not enqueue_bounded_market_data(engine, OrderBookDeltas())
+    while not engine._data_queue.empty():
+        engine._data_queue.get_nowait()
+    flush_coalesced_quote_ticks(engine, consumer_drained=True)
+    assert engine._btc15m_backpressure["l2_suppression_active"] is False
+    assert enqueue_bounded_market_data(engine, OrderBookDeltas())
+
+
+def test_dispose_cleanup_drops_pending_quote_and_telemetry_state():
+    engine = SimpleNamespace(
+        _btc15m_backpressure={"quotes": {"up": object()}},
+        _btc15m_queue_telemetry_state={"counts": {"QuoteTick": 1}},
+        _btc15m_queue_telemetry_pending_report={"queue_depth": 1},
+        _btc15m_sentinel_enqueue_task=None,
+    )
+    cleanup_data_engine_runtime_state(engine)
+    assert engine._btc15m_backpressure is None
+    assert engine._btc15m_queue_telemetry_state is None
+    assert engine._btc15m_queue_telemetry_pending_report is None
+    assert engine._btc15m_sentinel_enqueue_task is None
+
+
+def test_dispose_cleanup_cancels_async_task_and_concurrent_future():
+    async def scenario():
+        task = asyncio.create_task(asyncio.Event().wait())
+        future = Future()
+        engine = SimpleNamespace(_btc15m_sentinel_enqueue_task=task)
+        cleanup_data_engine_runtime_state(engine)
+        await asyncio.sleep(0)
+        assert task.cancelled()
+        assert engine._btc15m_sentinel_enqueue_task is None
+
+        engine._btc15m_sentinel_enqueue_task = future
+        cleanup_data_engine_runtime_state(engine)
+        assert future.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_quote_publish_timestamp_is_set_only_when_queue_admits_buffered_quote():
+    class QuoteTick:
+        instrument_id = "up"
+        ts_event = 1
+        ts_init = 2
+
+    class Engine:
+        def __init__(self):
+            self._data_queue = asyncio.Queue(maxsize=4)
+            self._config = SimpleNamespace(qsize=4)
+
+    quote = QuoteTick()
+    record_quote_provenance(quote, source="ws_price_change", raw_ws_received_ts=time.time())
+    engine = Engine()
+    for value in range(4):
+        engine._data_queue.put_nowait(value)
+    assert not enqueue_bounded_market_data(engine, quote)
+    assert record_quote_data_engine_latency(quote, time.time()) is None
+
+    while not engine._data_queue.empty():
+        engine._data_queue.get_nowait()
+    assert flush_coalesced_quote_ticks(engine) == 1
+    latency = record_quote_data_engine_latency(quote, time.time())
+    assert latency is not None and latency >= 0

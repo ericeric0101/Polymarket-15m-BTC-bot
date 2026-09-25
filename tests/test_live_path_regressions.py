@@ -534,7 +534,7 @@ def test_shutdown_sentinel_waits_for_capacity_instead_of_raising_queue_full():
     asyncio.run(scenario())
 
 
-def test_shutdown_delivers_pending_latest_quotes_before_data_sentinel():
+def test_shutdown_discards_pending_quotes_without_delaying_data_sentinel():
     async def scenario():
         class Engine:
             def __init__(self):
@@ -549,8 +549,6 @@ def test_shutdown_delivers_pending_latest_quotes_before_data_sentinel():
         engine._data_queue.put_nowait("backlog")
         task = asyncio.create_task(enqueue_shutdown_sentinels(engine, timeout_sec=1.0))
         assert await engine._data_queue.get() == "backlog"
-        await asyncio.sleep(0)
-        assert await engine._data_queue.get() == "latest-quote"
         await asyncio.sleep(0)
         await asyncio.wait_for(task, timeout=1.0)
         assert await engine._data_queue.get() is engine._sentinel
@@ -589,15 +587,33 @@ def test_data_engine_queue_telemetry_reports_all_data_types_and_per_type_high_wa
     class OrderBookDeltas:
         pass
 
-    engine = SimpleNamespace()
+    engine = SimpleNamespace(_btc15m_backpressure={
+        "l2_suppressed_window": 3, "l2_suppressed_total": 11,
+        "quote_coalesced_window": 2, "quote_coalesced_total": 5,
+    })
     assert record_data_engine_queue_telemetry(engine, QuoteTick(), 5, now_ts=100.0) is None
-    assert record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 19, now_ts=105.0) is None
+    engine._btc15m_queue_telemetry_state["quote_latency_samples"] = [0.001, 0.005, 0.010]
+    assert record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 19, now_ts=105.0, phase="process") is None
 
     report = record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 8, now_ts=110.1)
 
-    assert report["counts"] == {"QuoteTick": 1, "OrderBookDeltas": 2}
+    assert report["counts"] == {"QuoteTick": 1, "OrderBookDeltas": 1}
     assert report["high_water"] == {"QuoteTick": 5, "OrderBookDeltas": 19}
     assert report["queue_depth"] == 8
+    assert report["window_start_depth"] == 5
+    assert report["window_end_depth"] == 8
+    assert report["depth_delta"] == 3
+    assert report["throughput_delta"] == report["enqueued"] - report["processed"] == 1
+    assert report["enqueue_rate"] == report["enqueued"] / report["window_sec"]
+    assert report["process_rate"] == report["processed"] / report["window_sec"]
+    assert report["l2_suppressed_window"] == 3
+    assert report["l2_suppressed_total"] == 11
+    assert report["quote_coalesced_window"] == 2
+    assert report["quote_coalesced_total"] == 5
+    assert report["quote_latency_p50_ms"] == 5.0
+    assert report["quote_latency_max_ms"] == 10.0
+    assert engine._btc15m_backpressure["l2_suppressed_window"] == 0
+    assert engine._btc15m_backpressure["l2_suppressed_total"] == 11
 
 
 def test_quote_provenance_records_data_engine_publish_and_queue_window():

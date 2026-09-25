@@ -5,6 +5,7 @@ import os
 import time
 import threading
 from itertools import islice
+from concurrent.futures import Future as ConcurrentFuture
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -68,63 +69,46 @@ def enqueue_bounded_market_data(engine, data) -> bool:
     kind = type(data).__name__
     state = getattr(engine, "_btc15m_backpressure", None)
     if state is None:
-        state = {"quotes": {}, "l2_suppressed": 0, "quote_coalesced": 0, "l2_suppression_active": False}
+        state = {
+            "quotes": {}, "l2_suppression_active": False,
+            "l2_suppressed_window": 0, "l2_suppressed_total": 0,
+            "quote_coalesced_window": 0, "quote_coalesced_total": 0,
+        }
         engine._btc15m_backpressure = state
     limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
     depth = queue.qsize()
     pressure_mark = max(1, int(limit * 0.25)) if limit else 0
-    release_mark = max(1, int(limit * 0.10)) if limit else 0
     if kind == "OrderBookDeltas" and state["l2_suppression_active"]:
-        state["l2_suppressed"] += 1
+        _record_backpressure(engine, "l2_suppressed")
         return False
     if kind == "OrderBookDeltas" and limit and depth >= pressure_mark:
         state["l2_suppression_active"] = True
-        state["l2_suppressed"] += 1
+        _record_backpressure(engine, "l2_suppressed")
         return False
-    if kind == "QuoteTick" and limit and depth >= pressure_mark:
-        state["l2_suppression_active"] = True
-        # Under pressure, discard queued optional L2 and retain only the newest
-        # quote per instrument, rather than letting stale BBOs consume capacity.
-        items = getattr(queue, "_queue", None)
-        if items is not None:
-            for item in tuple(items):
-                if type(item).__name__ == "OrderBookDeltas":
-                    items.remove(item)
-                    queue.task_done()
-                    state["l2_suppressed"] += 1
-                elif type(item).__name__ == "QuoteTick":
-                    state["quotes"][str(getattr(item, "instrument_id", ""))] = item
-                    items.remove(item)
-                    queue.task_done()
-                    state["quote_coalesced"] += 1
+    if kind == "QuoteTick" and (queue.full() or (limit and depth >= pressure_mark)):
+        if limit and depth >= pressure_mark:
+            state["l2_suppression_active"] = True
         state["quotes"][str(getattr(data, "instrument_id", ""))] = data
-        state["quote_coalesced"] += 1
-        flush_coalesced_quote_ticks(engine)
+        _record_backpressure(engine, "quote_coalesced")
         return False
-    if kind == "QuoteTick" and queue.full():
-        items = getattr(queue, "_queue", None)
-        if items is not None:
-            instrument_id = str(getattr(data, "instrument_id", ""))
-            for item in tuple(items):
-                if type(item).__name__ == "QuoteTick" and str(getattr(item, "instrument_id", "")) == instrument_id:
-                    items.remove(item)
-                    queue.task_done()
-                    state["quote_coalesced"] += 1
-                    break
-            for item in tuple(items):
-                if type(item).__name__ == "OrderBookDeltas" and queue.full():
-                    items.remove(item)
-                    queue.task_done()
-                    state["l2_suppressed"] += 1
-                    break
     try:
         queue.put_nowait(data)
         return True
     except asyncio.QueueFull:
         if kind == "QuoteTick":
             state["quotes"][str(getattr(data, "instrument_id", ""))] = data
-            state["quote_coalesced"] += 1
+            _record_backpressure(engine, "quote_coalesced")
         return False
+
+
+def _record_backpressure(engine, counter: str) -> None:
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        return
+    window_key = f"{counter}_window"
+    total_key = f"{counter}_total"
+    state[window_key] = int(state.get(window_key, 0)) + 1
+    state[total_key] = int(state.get(total_key, 0)) + 1
 
 
 def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> int:
@@ -138,6 +122,7 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
             state["l2_suppression_active"] = False
     sent = 0
     for key, quote in tuple(state["quotes"].items()):
+        sampled_depth = queue.qsize()
         try:
             queue.put_nowait(quote)
         except asyncio.QueueFull:
@@ -146,11 +131,78 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
             state["quotes"].pop(key, None)
             sent += 1
             try:
-                record_data_engine_queue_telemetry(engine, quote, queue.qsize())
+                pending_report = getattr(engine, "_btc15m_queue_telemetry_pending_report", None)
+                record_quote_data_engine_queue_depth(
+                    quote, sampled_depth, queue_window=pending_report,
+                )
+                if pending_report is not None:
+                    engine._btc15m_queue_telemetry_pending_report = None
                 record_quote_data_engine_publish_ts(quote, time.time())
+                report = record_data_engine_queue_telemetry(engine, quote, queue.qsize())
+                if report is not None:
+                    emit_data_engine_queue_report(engine, report)
             except Exception:
                 pass
     return sent
+
+
+def emit_data_engine_queue_report(engine, report) -> None:
+    engine._btc15m_queue_telemetry_pending_report = report
+    queue_limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or 0)
+    summary = ",".join(
+        f"{kind}={count}/high={report['high_water'].get(kind, 0)}"
+        for kind, count in sorted(report["counts"].items())
+    )
+    message = (
+        "DataEngine queue telemetry: "
+        f"depth={report['queue_depth']}/{queue_limit or 'unknown'} "
+        f"start_depth={report['window_start_depth']} peak={report['peak']} "
+        f"depth_delta={report['depth_delta']} "
+        f"util={report['utilization_pct'] if report['utilization_pct'] is not None else 'unknown'}% "
+        f"window={report['window_sec']:.1f}s enqueued={report['enqueued']} processed={report['processed']} "
+        f"enqueue_rate={report['enqueue_rate']:.1f}/s process_rate={report['process_rate']:.1f}/s "
+        f"throughput_delta={report['throughput_delta']} "
+        f"l2_suppressed={report['l2_suppressed_window']}(total={report['l2_suppressed_total']}) "
+        f"quote_coalesced={report['quote_coalesced_window']}(total={report['quote_coalesced_total']}) "
+        f"quote_latency_ms=p50:{report.get('quote_latency_p50_ms', 0):.1f}/"
+        f"p95:{report.get('quote_latency_p95_ms', 0):.1f}/"
+        f"p99:{report.get('quote_latency_p99_ms', 0):.1f}/"
+        f"max:{report.get('quote_latency_max_ms', 0):.1f} events=[{summary}]"
+    )
+    if queue_limit and report["queue_depth"] >= int(queue_limit * 0.75):
+        logger.warning(message)
+    else:
+        logger.info(message)
+
+
+def cleanup_data_engine_runtime_state(engine) -> None:
+    """Best-effort cancel and detach per-engine tasks/state during synchronous dispose."""
+    task = getattr(engine, "_btc15m_sentinel_enqueue_task", None)
+    if task is not None:
+        try:
+            if isinstance(task, asyncio.Future):
+                loop = task.get_loop()
+                if not task.done():
+                    try:
+                        running_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        running_loop = None
+                    if running_loop is loop:
+                        task.cancel()
+                    elif loop.is_running():
+                        loop.call_soon_threadsafe(task.cancel)
+                    else:
+                        task.cancel()
+            elif isinstance(task, ConcurrentFuture):
+                task.cancel()
+            elif callable(getattr(task, "cancel", None)):
+                task.cancel()
+        except (RuntimeError, AttributeError):
+            pass
+    engine._btc15m_sentinel_enqueue_task = None
+    engine._btc15m_backpressure = None
+    engine._btc15m_queue_telemetry_state = None
+    engine._btc15m_queue_telemetry_pending_report = None
 
 
 def _quote_provenance_key(quote: object) -> tuple[object, ...]:
@@ -294,18 +346,14 @@ async def enqueue_shutdown_sentinels(engine, *, timeout_sec: float = 8.0) -> Non
         getattr(engine, name, None)
         for name in ("_cmd_queue", "_req_queue", "_res_queue", "_data_queue")
     ]
-    data_queue = getattr(engine, "_data_queue", None)
-    pending_quotes = tuple(
-        getattr(engine, "_btc15m_backpressure", {}).get("quotes", {}).values()
-    )
-    putters = []
-    if data_queue is not None:
-        putters.extend(data_queue.put(quote) for quote in pending_quotes)
-    putters.extend(queue.put(engine._sentinel) for queue in queues if queue is not None)
+    # Shutdown is not a quote-delivery opportunity: do not delay sentinels or
+    # carry stale buffered market data into another node.
+    backpressure = getattr(engine, "_btc15m_backpressure", None)
+    if backpressure is not None:
+        backpressure.get("quotes", {}).clear()
+    putters = [queue.put(engine._sentinel) for queue in queues if queue is not None]
     try:
         await asyncio.wait_for(asyncio.gather(*putters), timeout=max(0.1, timeout_sec))
-        if pending_quotes:
-            getattr(engine, "_btc15m_backpressure", {}).get("quotes", {}).clear()
     except asyncio.TimeoutError:
         logger.error("DataEngine queues did not drain for shutdown; cancelling stuck queue workers")
         workers = []
@@ -323,7 +371,11 @@ def record_data_engine_queue_telemetry(engine, data, queue_depth: int, *, now_ts
     now = time.monotonic() if now_ts is None else float(now_ts)
     state = getattr(engine, "_btc15m_queue_telemetry_state", None)
     if state is None:
-        state = {"started": now, "counts": {}, "high_water": {}, "enqueued": 0, "processed": 0, "peak": 0}
+        state = {
+            "started": now, "counts": {}, "high_water": {},
+            "enqueued": 0, "processed": 0, "peak": int(queue_depth),
+            "window_start_depth": int(queue_depth), "quote_latency_samples": [],
+        }
         engine._btc15m_queue_telemetry_state = state
     type_name = type(data).__name__
     counter = "processed" if phase == "process" else "enqueued"
@@ -348,7 +400,7 @@ def record_data_engine_queue_telemetry(engine, data, queue_depth: int, *, now_ts
         "processed": int(state["processed"]),
         "enqueue_rate": int(state["enqueued"]) / window_sec if window_sec else 0.0,
         "process_rate": int(state["processed"]) / window_sec if window_sec else 0.0,
-        "net_growth": int(state["enqueued"]) - int(state["processed"]),
+        "throughput_delta": int(state["enqueued"]) - int(state["processed"]),
         "utilization_pct": (100.0 * int(queue_depth) / queue_limit) if queue_limit else None,
     }
     samples = sorted(state.get("quote_latency_samples", []))
@@ -357,10 +409,20 @@ def record_data_engine_queue_telemetry(engine, data, queue_depth: int, *, now_ts
         report["quote_latency_p95_ms"] = 1000.0 * samples[int((len(samples) - 1) * 0.95)]
         report["quote_latency_p99_ms"] = 1000.0 * samples[int((len(samples) - 1) * 0.99)]
         report["quote_latency_max_ms"] = 1000.0 * samples[-1]
-    pressure = getattr(engine, "_btc15m_backpressure", {})
-    report["l2_suppressed"] = int(pressure.get("l2_suppressed", 0))
-    report["quote_coalesced"] = int(pressure.get("quote_coalesced", 0))
-    state.update(started=now, counts={}, high_water={}, enqueued=0, processed=0, peak=int(queue_depth), quote_latency_samples=[])
+    report["window_start_depth"] = int(state["window_start_depth"])
+    report["window_end_depth"] = int(queue_depth)
+    report["depth_delta"] = report["window_end_depth"] - report["window_start_depth"]
+    pressure = getattr(engine, "_btc15m_backpressure", {}) or {}
+    for counter in ("l2_suppressed", "quote_coalesced"):
+        window_key = f"{counter}_window"
+        total_key = f"{counter}_total"
+        report[f"{counter}_window"] = int(pressure.get(window_key, 0))
+        report[f"{counter}_total"] = int(pressure.get(total_key, 0))
+        pressure[window_key] = 0
+    state.update(
+        started=now, counts={}, high_water={}, enqueued=0, processed=0,
+        peak=int(queue_depth), window_start_depth=int(queue_depth), quote_latency_samples=[],
+    )
     return report
 
 
@@ -522,7 +584,6 @@ def _install_polymarket_data_overrides() -> None:
                 pending = self._quote_delivery_pending
                 self._quote_delivery_pending = {}
                 for quote in pending.values():
-                    record_quote_data_engine_publish_ts(quote, time.time())
                     self._handle_data(quote)
                 if not self._quote_delivery_pending:
                     return
@@ -819,31 +880,6 @@ def _install_live_data_engine_observability_override() -> None:
         else:
             logger.error("DataEngine loop is not running; cannot gracefully enqueue shutdown sentinels")
 
-    def emit_queue_report(self, report) -> None:
-        self._btc15m_queue_telemetry_pending_report = report
-        queue_limit = int(getattr(getattr(self, "_config", None), "qsize", 0) or 0)
-        summary = ",".join(
-            f"{kind}={count}/high={report['high_water'].get(kind, 0)}"
-            for kind, count in sorted(report["counts"].items())
-        )
-        message = (
-            "DataEngine queue telemetry: "
-            f"depth={report['queue_depth']}/{queue_limit or 'unknown'} "
-            f"peak={report['peak']} util={report['utilization_pct'] if report['utilization_pct'] is not None else 'unknown'}% "
-            f"window={report['window_sec']:.1f}s enqueued={report['enqueued']} processed={report['processed']} "
-            f"enqueue_rate={report['enqueue_rate']:.1f}/s process_rate={report['process_rate']:.1f}/s "
-            f"net_growth={report['net_growth']} l2_suppressed={report['l2_suppressed']} "
-            f"quote_coalesced={report['quote_coalesced']} "
-            f"quote_latency_ms=p50:{report.get('quote_latency_p50_ms', 0):.1f}/"
-            f"p95:{report.get('quote_latency_p95_ms', 0):.1f}/"
-            f"p99:{report.get('quote_latency_p99_ms', 0):.1f}/"
-            f"max:{report.get('quote_latency_max_ms', 0):.1f} events=[{summary}]"
-        )
-        if queue_limit and report["queue_depth"] >= int(queue_limit * 0.75):
-            logger.warning(message)
-        else:
-            logger.info(message)
-
     def patched_process(self, data) -> None:
         try:
             queue_depth = self.data_qsize()
@@ -862,17 +898,24 @@ def _install_live_data_engine_observability_override() -> None:
             if not accepted:
                 return
             try:
+                if type(data).__name__ == "QuoteTick":
+                    pending_report = getattr(self, "_btc15m_queue_telemetry_pending_report", None)
+                    record_quote_data_engine_queue_depth(
+                        data, queue_depth, queue_window=pending_report,
+                    )
+                    if pending_report is not None:
+                        self._btc15m_queue_telemetry_pending_report = None
                 record_quote_data_engine_publish_ts(data, time.time())
                 report = record_data_engine_queue_telemetry(self, data, self.data_qsize())
                 if report is not None:
-                    emit_queue_report(self, report)
+                    emit_data_engine_queue_report(self, report)
             except Exception:
                 pass
             return
         try:
             report = record_data_engine_queue_telemetry(self, data, queue_depth)
             if report is not None:
-                emit_queue_report(self, report)
+                emit_data_engine_queue_report(self, report)
         except Exception:
             # Queue observability must never interfere with market data.
             pass
@@ -884,7 +927,7 @@ def _install_live_data_engine_observability_override() -> None:
                 self, data, self.data_qsize(), phase="process",
             )
             if report is not None:
-                emit_queue_report(self, report)
+                emit_data_engine_queue_report(self, report)
             if type(data).__name__ == "QuoteTick":
                 latency = record_quote_data_engine_latency(data, time.time())
                 if latency is not None:
@@ -898,10 +941,7 @@ def _install_live_data_engine_observability_override() -> None:
         flush_coalesced_quote_ticks(self, consumer_drained=True)
 
     def patched_dispose(self) -> None:
-        task = getattr(self, "_btc15m_sentinel_enqueue_task", None)
-        if task is not None and not task.done():
-            task.cancel()
-        self._btc15m_sentinel_enqueue_task = None
+        cleanup_data_engine_runtime_state(self)
         original_dispose(self)
 
     LiveDataEngine._enqueue_sentinels = patched_enqueue_sentinels
