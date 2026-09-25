@@ -1,4 +1,4 @@
-"""Taipei trading-session policy for opening new BUY positions.
+"""Taipei weekday/weekend policy for opening new BUY positions.
 
 This deliberately controls entries only.  The process stays alive outside the
 entry session so it can cancel orders, exit inventory, reconcile and redeem.
@@ -25,14 +25,21 @@ class EntrySessionDecision:
 
 
 def is_taipei_weeknight_entry_session(when: datetime) -> bool:
-    """Allow Mon--Fri 19:00--07:00 Taipei sessions (Friday ends Sat 07:00)."""
+    """Historical weekday-night classifier retained for calibration cohorts."""
     local = when.astimezone(TAIPEI)
     if 19 <= local.hour:
         return local.weekday() < 5
     if local.hour < 7:
         # After midnight belongs to the previous calendar day's session.
-        return local.weekday() > 0
+        # Thus Tuesday-Saturday early morning can continue a weekday session;
+        # Monday/Sunday early morning follows a weekend night and is closed.
+        return 0 < local.weekday() < 6
     return False
+
+
+def is_taipei_weekday_entry_session(when: datetime) -> bool:
+    """Allow every hour Monday-Friday Taipei time; block all Saturday/Sunday."""
+    return when.astimezone(TAIPEI).weekday() < 5
 
 
 def new_buy_session_decision(now_ts: float) -> EntrySessionDecision:
@@ -40,6 +47,6 @@ def new_buy_session_decision(now_ts: float) -> EntrySessionDecision:
     local = when.astimezone(TAIPEI)
     if when < ENTRY_SESSION_ENFORCED_FROM_UTC:
         return EntrySessionDecision(True, "entry_session_policy_not_yet_enforced", local)
-    if is_taipei_weeknight_entry_session(when):
-        return EntrySessionDecision(True, "taipei_weeknight_entry_session", local)
-    return EntrySessionDecision(False, "taipei_day_or_weekend", local)
+    if is_taipei_weekday_entry_session(when):
+        return EntrySessionDecision(True, "taipei_weekday_entry_session", local)
+    return EntrySessionDecision(False, "taipei_weekend", local)

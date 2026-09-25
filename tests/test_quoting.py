@@ -1,5 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timezone
+import pytest
+from zoneinfo import ZoneInfo
 
 from bot.quoting import apply_quote_plan_guards, set_side_should_quote
 from bot.enums import MarketPhase
@@ -74,7 +76,16 @@ def test_legacy_directional_edge_gate_is_telemetry_not_a_buy_veto():
     assert outcome.side_disable_reason_by_side.get("buy") is None
 
 
-def test_quote_plan_guards_blocks_new_buy_but_not_sell_outside_entry_session():
+@pytest.mark.parametrize(
+    ("local_time", "buy_allowed", "buy_block_reason"),
+    [
+        (datetime(2026, 8, 29, 10, 0), False, "entry_session_blocked_taipei_weekend"),
+        (datetime(2026, 8, 31, 10, 0), True, None),
+    ],
+)
+def test_quote_plan_guards_blocks_only_weekend_buys_and_keeps_sell_allowed(
+    local_time, buy_allowed, buy_block_reason,
+):
     side_plan = {
         "buy": (Decimal("0.50"), object(), True, Decimal("0.10")),
         "sell": (Decimal("0.52"), object(), True, Decimal("0.10")),
@@ -86,8 +97,8 @@ def test_quote_plan_guards_blocks_new_buy_but_not_sell_outside_entry_session():
         inventory_delta_shares=Decimal("2"),
         early_sell_only_sec=0.0,
         time_left_sec_global=600.0,
-        # Monday 10:00 Taipei, after the policy enforcement date.
-        now_ts=datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc).timestamp(),
+        # Weekend is closed, but weekday daytime is now open.
+        now_ts=local_time.replace(tzinfo=ZoneInfo("Asia/Taipei")).timestamp(),
         buy_cooldown_until_ts=0.0,
         momentum_buy_filter_pct=Decimal("0"),
         momentum_sell_filter_pct=Decimal("0"),
@@ -102,6 +113,9 @@ def test_quote_plan_guards_blocks_new_buy_but_not_sell_outside_entry_session():
         forced_sell_only=False,
     )
 
-    assert side_plan["buy"][2] is False
+    assert side_plan["buy"][2] is buy_allowed
     assert side_plan["sell"][2] is True
-    assert outcome.side_disable_reason_by_side["buy"] == "entry_session_blocked_taipei_day_or_weekend"
+    if buy_block_reason is None:
+        assert outcome.side_disable_reason_by_side.get("buy") is None
+    else:
+        assert outcome.side_disable_reason_by_side["buy"] == buy_block_reason

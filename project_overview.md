@@ -93,7 +93,7 @@
   `source_observed_ts`, and `source_age_sec`; `fast_follow_source_stale` cannot
   fall back to a recently-created cached forecast.
 - Runtime journal health is checked again before every fast-follow entry,
-  including reuse of an already-loaded Taipei-night risk cache; a cached night
+  including reuse of an already-loaded Taipei weekday risk-day cache; a cached day
   can never bypass the BUY gate. The pending fast-follow reservation must be
   persisted successfully and leave the journal healthy before its FOK is sent.
   A persistence failure rolls back the unsubmitted reservation and ownership.
@@ -580,10 +580,11 @@ only as regression evidence; they are not a second roadmap.
 
 #### Planned D.4 — unified short-horizon execution-cost and market-regime policy
 
-**Current status (2026-08-29): data collection and the first reproducible
-walk-forward report are deployed. The 48h-versus-168h model selection remains
-pending, but the operator has explicitly approved a separate exposure-control
-policy: do not open new BUY positions outside Taipei weekday night sessions.**
+**Historical status (2026-08-29):** data collection and the first reproducible
+walk-forward report were deployed. The 48h-versus-168h model selection remains
+pending. At that time the operator approved restricting entries to Taipei
+weekday night sessions; this entry-session policy was superseded on 2026-09-25
+by the weekday-all-hours policy documented below.
 `scripts/market_regime_report.py` admits only current
 `markout_context_schema_version=2` real maker-BUY observations and takes one
 first fill per market/horizon. It now evaluates each candidate penalty using
@@ -619,18 +620,28 @@ live policy.
   seconds (38 markets). Wider BBO spread and higher realized quote volatility
   also show higher adverse markout directionally. Every subgroup remains too
   small for a live branch; retain them as journaled shadow features only.
-- **Approved exposure-control policy (2026-08-29):** `apply_quote_plan_guards`
-  now blocks **new BUY quotes only** outside the Taipei sessions that start
+- **Historical exposure-control policy (2026-08-29; superseded 2026-09-25):** `apply_quote_plan_guards`
+  blocked **new BUY quotes only** outside the Taipei sessions that started
   Monday--Friday at 19:00 and end at 07:00 the following day (thus Friday's
   session may run to Saturday 07:00; Saturday/Sunday nights do not open).
   The process, SELL/reduce-only exits, cancellation, reconciliation and
   redemption continue normally. This is not an inference that a regime model
   is proven; it is an operator-approved safety boundary based on realized
   operation and avoids trapping existing inventory by shutting the bot down.
+- **Current entry-session policy (2026-09-25):** new BUYs are allowed at all
+  hours on Monday-Friday in `Asia/Taipei` and blocked for the full Saturday
+  and Sunday local calendar days. This applies consistently to normal maker
+  and Outcome fast-follow entries. SELL, stop-loss, inventory recovery,
+  cancellation and redemption remain available on weekends. The fast-follow
+  max-entry and max-loss settings retain their existing limits but are now
+  bucketed by Taipei weekday calendar date; legacy journal/dashboard field
+  `night_key` is preserved for compatibility and `risk_day_key` labels status.
+  Markout calibration continues using its historical weekday-night cohort; it
+  is separate from the live entry-session permission.
 - **Approved live calibration (2026-08-29):** retain the conservative 168h
   window, but measure it only from the same eligible population: observations
   on/after 2026-08-22, `markout_context_schema_version=2`, real maker BUYs,
-  Taipei weekday-night entry session, and first 10-second fill per market.
+  historical Taipei weekday-night cohort, and first 10-second fill per market.
   At deployment the journal has 62 independent samples: winsorized-P90
   penalty **$0.03218/share** (raw mean $0.03685; cap $0.125). This single
   penalty remains the input to `robust_net`/`econ_gate`; no weekday/weekend
@@ -1155,8 +1166,8 @@ The mapping is mechanical: positive Outcome then positive TWAP buys the
 Polymarket **UP** token; negative Outcome then negative TWAP buys **DOWN**.
 The handoff is strategy-owned: the WebSocket/runtime thread may only queue a
 candidate, while the next native CLOB quote callback performs all final checks
-and owns the BUY order. It retains verified strike, fresh feed, approved Taipei
-weekday 19:00–07:00 session, minimum-time-to-close, balance, current inventory,
+and owns the BUY order. It retains verified strike, fresh feed, weekday-only
+Taipei entry session, minimum-time-to-close, balance, current inventory,
 one-BUY-per-market, locked-opposite-side, and non-empty ask checks. It rejects
 an entry above **0.90**. The normal maker-value path is excluded while an
 entry-only candidate or attempted order owns that market, so two BUY owners
@@ -1263,7 +1274,7 @@ pending-cancel state. This prevents the unsafe sequence observed on 2026-09-10:
 stale old SELL → global kill → Outcome BUY → no current-token TP refresh.
 
 **Fast-follow quota visibility:** Every periodic `STATUS` line now includes
-`fast_follow=<filled>/<max> pending=<n> night=<Taipei-night-key>`. `filled`
+`fast_follow=<filled>/<max> pending=<n> risk_day=<Taipei-weekday-key>`. `filled`
 counts only venue-confirmed BUY fills; `pending` is a temporarily reserved FOK
 slot and does not consume the permanent quota unless it fills. The same fields
 are retained in `FAST_FOLLOW_RISK_STATE` for historical audit.
@@ -1276,8 +1287,8 @@ fall below five sellable shares. This prevents `invalid amounts` rejections
 such as a $0.75 price times 5.5 shares producing a $4.125 maker amount. Risk
 state now persists `open_position_instruments`, so a restarted process restores
 fast-follow SELL ownership and credits the eventual realised PnL to the same
-Taipei-night loss budget. With these two repairs, the fast-follow cap is
-increased from 10 to **15 completed BUY fills** per Taipei night. The 10/5.5
+Taipei weekday risk-day loss budget. With these two repairs, the fast-follow cap is
+increased from 10 to **15 completed BUY fills** per risk day. The 10/5.5
 share sizing, one BUY per market, $0.90 entry-price ceiling, FOK behavior, and
 $5 realised-loss cap are unchanged.
 

@@ -3921,12 +3921,12 @@ class IntegratedBTCStrategy(
         if fast_follow_owner is not None:
             try:
                 fast_follow_risk = fast_follow_owner.night_risk_snapshot(now_ts)
-                night_key = fast_follow_risk["night_key"] or "off_session"
+                risk_day_key = fast_follow_risk.get("risk_day_key") or "off_session"
                 fast_follow_status = (
                     " "
                     f"fast_follow={fast_follow_risk['filled_entries']}/{fast_follow_risk['max_entries']} "
                     f"pending={fast_follow_risk['pending_entries']} "
-                    f"night={night_key}"
+                    f"risk_day={risk_day_key}"
                 )
             except Exception as fast_follow_status_error:
                 logger.debug(f"Fast-follow status snapshot skipped: {fast_follow_status_error}")

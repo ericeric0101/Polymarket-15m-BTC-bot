@@ -4,7 +4,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, ROUND_FLOOR
 from math import gcd
 from zoneinfo import ZoneInfo
@@ -28,19 +28,17 @@ class FastFollowLiveConfig:
     max_slippage_ticks: int = 1
     max_entries_per_night: int = 15
     max_loss_usdc_per_night: Decimal = Decimal("5")
+    # Config names remain backward-compatible; these limits are applied to
+    # the current Taipei weekday risk-day bucket, not a clock-time night.
     l2_depth_buffer: Decimal = Decimal("1.20")
     l2_max_age_sec: float = 1.0
     failed_entry_cooldown_sec: float = 10.0
 
 
 def _night_key(now_ts: float) -> str | None:
+    """Return the legacy-named risk bucket: current Taipei weekday date."""
     local = datetime.fromtimestamp(now_ts, tz=TAIPEI)
-    if local.hour >= 19:
-        return local.date().isoformat() if local.weekday() < 5 else None
-    if local.hour < 7:
-        prior = local - timedelta(days=1)
-        return prior.date().isoformat() if prior.weekday() < 5 else None
-    return None
+    return local.date().isoformat() if local.weekday() < 5 else None
 
 
 def _instrument_tick(instrument) -> Decimal:
@@ -243,12 +241,13 @@ class OutcomeFastFollowLive:
                     recent.pop(instrument_key, None)
 
     def night_risk_snapshot(self, now_ts: float | None = None) -> dict[str, int | str | float | None]:
-        """Return the live quota state for status output and diagnostics."""
+        """Return today's live quota state (legacy method name retained)."""
         now = time.time() if now_ts is None else float(now_ts)
         night = _night_key(now)
         if night is None:
             return {
                 "night_key": None,
+                "risk_day_key": None,
                 "filled_entries": 0,
                 "pending_entries": 0,
                 "max_entries": self.config.max_entries_per_night,
@@ -256,11 +255,15 @@ class OutcomeFastFollowLive:
             }
         if not self._ensure_night_loaded(night):
             return {
-                "night_key": night, "filled_entries": 0, "pending_entries": 0,
+                "night_key": night, "risk_day_key": night,
+                "filled_entries": 0, "pending_entries": 0,
                 "max_entries": self.config.max_entries_per_night, "realized_pnl_usdc": 0.0,
             }
         return {
+            # Keep `night_key` for journal/dashboard compatibility. The key is
+            # now one risk bucket per Taiwan weekday calendar date.
             "night_key": night,
+            "risk_day_key": night,
             "filled_entries": self._night_filled_entries.get(night, 0),
             "pending_entries": len(self._night_pending_entry_ids.get(night, set())),
             "max_entries": self.config.max_entries_per_night,
@@ -553,7 +556,7 @@ class OutcomeFastFollowLive:
             return False
         night = _night_key(now_ts)
         if night is None:
-            self._record_blocked(candidate, "outside_taipei_weeknight_session")
+            self._record_blocked(candidate, "outside_taipei_weekday_session")
             return False
         if not self._ensure_night_loaded(night):
             self._record_blocked(candidate, "trade_journal_unhealthy", reason_detail="night_risk_query_failed")

@@ -14,6 +14,7 @@ from bot.outcome_lead_lag_exit_handoff import (
     FastFollowLiveConfig,
     OutcomeFastFollowLive,
     _venue_compatible_fast_follow_quantity,
+    _night_key,
     fast_follow_l2_precheck,
     handoff_confirmed_candidate,
 )
@@ -379,6 +380,57 @@ def test_live_fast_follow_uses_ten_shares_at_or_below_high_price_threshold():
     assert kwargs[0]["time_in_force"].name == "FOK"
 
 
+def test_fast_follow_allows_weekday_daytime_and_uses_local_date_risk_bucket():
+    owner, submitted, _kwargs, _events = _live_harness(
+        ask=Decimal("0.60"), submit_automatically=False
+    )
+    now = datetime(2026, 8, 31, 10, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    owner.strategy.current_market_slug = "weekday-day"
+    owner.strategy.current_market_end_timestamp = now.timestamp() + 600
+    owner.strategy.fast_follow_l2_update_ts_by_inst = {"UP.INST": now.timestamp()}
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "weekday-day", 1, time.time_ns()))
+
+    assert _night_key(now.timestamp()) == "2026-08-31"
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now.timestamp(),
+    ) is True
+    assert len(submitted) == 1
+    assert "2026-08-31" in owner._night_pending_entry_ids
+
+
+def test_fast_follow_blocks_weekend_day_and_sunday_morning():
+    for local in (
+        datetime(2026, 8, 29, 10, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+        datetime(2026, 8, 30, 2, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+    ):
+        owner, submitted, _kwargs, events = _live_harness(
+            ask=Decimal("0.60"), submit_automatically=False
+        )
+        owner.strategy.current_market_slug = "weekend"
+        decision = LeadLagDecision(
+            "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+            "twap_followed_outcome", follower_price_cents=7_700_100,
+        )
+        owner.record_candidate(LeadLagCandidate(decision, "r", "weekend", 1, time.time_ns()))
+
+        assert _night_key(local.timestamp()) is None
+        assert owner.on_quote(
+            instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+            ask_size=Decimal("100"), now_ts=local.timestamp(),
+        ) is False
+        assert submitted == []
+        assert any(
+            event == "FAST_FOLLOW_ENTRY_BLOCKED"
+            and payload["reason"] == "outside_taipei_weekday_session"
+            for event, payload in events
+        )
+
+
 def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold():
     _owner, submitted, kwargs, events = _live_harness(ask=Decimal("0.71"))
     assert len(submitted) == 1
@@ -616,7 +668,7 @@ def test_fast_follow_failures_do_not_leak_across_sequential_maker_markets():
     assert maker_submissions == ["market-1", "market-2", "market-3", "market-5"]
 
 
-def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
+def test_live_fast_follow_buy_fill_consumes_exactly_one_weekday_risk_day_slot():
     owner, _submitted, kwargs, _events = _live_harness(ask=Decimal("0.60"))
     coid = str(kwargs[0]["client_order_id"])
     night = "2026-09-08"
@@ -631,6 +683,7 @@ def test_live_fast_follow_buy_fill_consumes_exactly_one_nightly_slot():
         datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
     ) == {
         "night_key": night,
+        "risk_day_key": night,
         "filled_entries": 1,
         "pending_entries": 0,
         "max_entries": 15,
