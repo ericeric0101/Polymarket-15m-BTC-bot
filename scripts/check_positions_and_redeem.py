@@ -184,6 +184,32 @@ def _estimate_redeem_gas(tx_func, tx_params: dict[str, Any]) -> int:
     return max(estimate, int(estimate * 1.2))
 
 
+def classify_nonce_advanced_redeem(
+    *, submitted_nonce: int, latest_nonce: int, remaining_position_balance: int,
+) -> str:
+    """Classify an unreceipted transaction after the account nonce has moved."""
+    if int(latest_nonce) <= int(submitted_nonce):
+        return "retry_same_nonce_or_timeout"
+    if int(remaining_position_balance) <= 0:
+        return "already_redeemed"
+    return "retry_with_new_nonce"
+
+
+def _condition_position_balance(contract, owner: str, collateral: str, condition: bytes) -> int:
+    """Read both binary CTF balances for one condition and collateral token."""
+    parent_collection_id = b"\x00" * 32
+    total_balance = 0
+    for index_set in (1, 2):
+        collection_id = contract.functions.getCollectionId(
+            parent_collection_id,
+            condition,
+            index_set,
+        ).call()
+        position_id = contract.functions.getPositionId(collateral, collection_id).call()
+        total_balance += int(contract.functions.balanceOf(owner, position_id).call())
+    return total_balance
+
+
 def _wait_for_receipt_with_replacement_check(w3, txh, owner: str, nonce: int, *, timeout_sec: int) -> Any:
     from web3.exceptions import TimeExhausted, TransactionNotFound
 
@@ -437,15 +463,9 @@ def _redeem_conditions(
         zero_parent_collection = b"\x00" * 32
         collateral_balances: list[tuple[str, str, int]] = []
         for symbol, collateral_address in collateral_candidates:
-            total_balance = 0
-            for index_set in (1, 2):
-                collection_id = contract.functions.getCollectionId(
-                    zero_parent_collection,
-                    condition_bytes,
-                    index_set,
-                ).call()
-                position_id = contract.functions.getPositionId(collateral_address, collection_id).call()
-                total_balance += int(contract.functions.balanceOf(owner, position_id).call())
+            total_balance = _condition_position_balance(
+                contract, owner, collateral_address, condition_bytes,
+            )
             collateral_balances.append((symbol, collateral_address, total_balance))
 
         selected_symbol, selected_collateral_address, selected_balance = max(
@@ -483,7 +503,9 @@ def _redeem_conditions(
 
         last_error: Exception | None = None
         receipt = None
+        reconciled_without_receipt = False
         for attempt in range(1, max_attempts + 1):
+            receipt = None
             tx_params = dict(tx_base)
             fee_params = _build_fee_params(w3)
             if "maxPriorityFeePerGas" in fee_params and "maxFeePerGas" in fee_params:
@@ -519,31 +541,77 @@ def _redeem_conditions(
                     nonce,
                     timeout_sec=receipt_timeout_sec,
                 )
+                if int(getattr(receipt, "status", 0)) != 1:
+                    raise RuntimeError(
+                        f"redeem transaction reverted tx={txh.hex()} status={getattr(receipt, 'status', None)}"
+                    )
                 break
             except Exception as exc:
                 last_error = exc
                 latest_nonce = int(w3.eth.get_transaction_count(owner, "latest"))
+                # A mined revert still consumes its nonce even if this RPC's
+                # latest-count view is lagging behind the returned receipt.
+                if receipt is not None and int(getattr(receipt, "status", 0)) == 0:
+                    latest_nonce = max(latest_nonce, nonce + 1)
+                if latest_nonce > nonce:
+                    try:
+                        remaining_balance = _condition_position_balance(
+                            contract, owner, selected_collateral_address, condition_bytes,
+                        )
+                    except Exception as reconcile_error:
+                        raise RuntimeError(
+                            "nonce advanced but redeem outcome cannot be reconciled from CTF balances; "
+                            f"condition={cid_txt} nonce={nonce} latest_nonce={latest_nonce} "
+                            f"tx={txh.hex()}"
+                        ) from reconcile_error
+                    recovery = classify_nonce_advanced_redeem(
+                        submitted_nonce=nonce,
+                        latest_nonce=latest_nonce,
+                        remaining_position_balance=remaining_balance,
+                    )
+                    if recovery == "already_redeemed":
+                        print(
+                            "redeem reconciled without receipt: "
+                            f"condition={cid_txt} tx={txh.hex()} remaining_ctf_balance=0 "
+                            f"latest_nonce={latest_nonce}"
+                        )
+                        pending_nonce = int(w3.eth.get_transaction_count(owner, "pending"))
+                        nonce = max(latest_nonce, pending_nonce)
+                        reconciled_without_receipt = True
+                        receipt = None
+                        break
+                    if recovery == "retry_with_new_nonce":
+                        pending_nonce = int(w3.eth.get_transaction_count(owner, "pending"))
+                        nonce = max(latest_nonce, pending_nonce)
+                        tx_base["nonce"] = nonce
+                        print(
+                            "redeem nonce was consumed but position remains; retrying with fresh nonce: "
+                            f"condition={cid_txt} remaining_ctf_balance={remaining_balance} nonce={nonce}"
+                        )
+                        if attempt >= max_attempts:
+                            raise RuntimeError(
+                                "nonce advanced without a receipt and the redeemable CTF position remains; "
+                                f"condition={cid_txt} remaining={remaining_balance} latest_nonce={latest_nonce}"
+                            ) from exc
+                        time.sleep(2)
+                        continue
                 print(
                     "redeem wait timeout/retry "
                     f"condition={cid_txt} attempt={attempt}/{max_attempts} "
                     f"tx={txh.hex()} latest_nonce={latest_nonce} error={exc}"
                 )
-                if latest_nonce > nonce:
-                    raise RuntimeError(
-                        f"nonce advanced for redeem tx but no receipt was found. "
-                        f"condition={cid_txt} nonce={nonce} latest_nonce={latest_nonce}"
-                    ) from exc
                 if attempt >= max_attempts:
                     raise
                 time.sleep(2)
 
-        if receipt is None:
+        if receipt is None and not reconciled_without_receipt:
             raise RuntimeError(
                 f"Failed to confirm redeem tx for condition={cid_txt}"
             ) from last_error
 
-        print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
-        nonce += 1
+        if receipt is not None:
+            print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
+            nonce += 1
 
         expected_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
         amount_base_units = expected_base_units if expected_base_units > 0 else selected_balance
