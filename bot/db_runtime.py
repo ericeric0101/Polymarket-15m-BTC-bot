@@ -1,11 +1,82 @@
 from __future__ import annotations
 
 import time
+import threading
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 from loguru import logger
 from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
+
+
+def _record_sync_journal_write_duration(
+    strategy: Any,
+    event_type: str,
+    duration_ms: float,
+    *,
+    now_ts: Optional[float] = None,
+) -> Optional[dict[str, Any]]:
+    """Aggregate synchronous journal I/O cost without adding more DB writes."""
+    lock = getattr(strategy, "_journal_write_timing_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        strategy._journal_write_timing_lock = lock
+    now = time.monotonic() if now_ts is None else float(now_ts)
+    with lock:
+        state = getattr(strategy, "_journal_write_timing_state", None)
+        if state is None:
+            state = {
+                "started": now,
+                "count": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+                "over_50ms": 0,
+                "over_250ms": 0,
+                "event_counts": {},
+            }
+            strategy._journal_write_timing_state = state
+        elapsed_ms = max(0.0, float(duration_ms))
+        state["count"] += 1
+        state["total_ms"] += elapsed_ms
+        state["max_ms"] = max(float(state["max_ms"]), elapsed_ms)
+        state["over_50ms"] += int(elapsed_ms > 50.0)
+        state["over_250ms"] += int(elapsed_ms > 250.0)
+        event_counts = state["event_counts"]
+        event_counts[str(event_type)] = int(event_counts.get(str(event_type), 0)) + 1
+        if now - float(state["started"]) < 10.0:
+            return None
+        report = {
+            "window_sec": max(0.0, now - float(state["started"])),
+            "count": int(state["count"]),
+            "total_ms": round(float(state["total_ms"]), 3),
+            "avg_ms": round(float(state["total_ms"]) / max(1, int(state["count"])), 3),
+            "max_ms": round(float(state["max_ms"]), 3),
+            "over_50ms": int(state["over_50ms"]),
+            "over_250ms": int(state["over_250ms"]),
+            "event_counts": dict(event_counts),
+        }
+        strategy._journal_write_last_report = report
+        strategy._journal_write_timing_state = {
+            "started": now,
+            "count": 0,
+            "total_ms": 0.0,
+            "max_ms": 0.0,
+            "over_50ms": 0,
+            "over_250ms": 0,
+            "event_counts": {},
+        }
+        return report
+
+
+def take_sync_journal_write_report(strategy: Any) -> Optional[dict[str, Any]]:
+    """Take the most recently completed journal-write window, if any."""
+    lock = getattr(strategy, "_journal_write_timing_lock", None)
+    if lock is None:
+        return None
+    with lock:
+        report = getattr(strategy, "_journal_write_last_report", None)
+        strategy._journal_write_last_report = None
+        return report
 
 
 class StrategyDBRuntimeMixin:
@@ -269,11 +340,19 @@ class StrategyDBRuntimeMixin:
             and (not payload_slug or payload_slug == str(self.current_market_slug or ""))
         ):
             payload_out["instrument_id"] = str(self.instrument_id)
-        return bool(self.trade_db.log_strategy_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            payload=payload_out,
-        ))
+        started = time.perf_counter()
+        try:
+            return bool(self.trade_db.log_strategy_event(
+                run_id=self.run_id,
+                event_type=event_type,
+                payload=payload_out,
+            ))
+        finally:
+            _record_sync_journal_write_duration(
+                self,
+                event_type,
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     def _db_order_event(
         self,
@@ -306,23 +385,31 @@ class StrategyDBRuntimeMixin:
             side_norm = self._normalize_side_text(side_out)
             if side_norm:
                 side_out = side_norm.upper()
-        return bool(self.trade_db.log_order_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            client_order_id=client_order_id,
-            venue_order_id=venue_order_id,
-            side=side_out,
-            price=price,
-            qty=qty,
-            status=status,
-            reason=reason,
-            instrument_id=event_instrument_id or None,
-            token_id=self.current_token_id,
-            fee_rate_bps=self.last_observed_fee_rate_bps,
-            expected_net_usdc=expected_net_usdc,
-            commission_usdc=commission_usdc,
-            payload=payload_out,
-        ))
+        started = time.perf_counter()
+        try:
+            return bool(self.trade_db.log_order_event(
+                run_id=self.run_id,
+                event_type=event_type,
+                client_order_id=client_order_id,
+                venue_order_id=venue_order_id,
+                side=side_out,
+                price=price,
+                qty=qty,
+                status=status,
+                reason=reason,
+                instrument_id=event_instrument_id or None,
+                token_id=self.current_token_id,
+                fee_rate_bps=self.last_observed_fee_rate_bps,
+                expected_net_usdc=expected_net_usdc,
+                commission_usdc=commission_usdc,
+                payload=payload_out,
+            ))
+        finally:
+            _record_sync_journal_write_duration(
+                self,
+                event_type,
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     def _db_buy_path_diagnostic(
         self,

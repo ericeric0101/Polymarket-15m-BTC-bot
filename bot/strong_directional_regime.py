@@ -41,9 +41,11 @@ def apply_strong_directional_regime_economics(
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """Replace only BUY economics when a fully measured regime is eligible.
 
-    The quote target stays unchanged.  Markout remains fully deducted.  This
-    function only changes the expected-value basis from passive half-spread to
-    a settled, score-conditioned resolution probability.
+    The quote target stays unchanged. Markout-adjusted net remains available
+    as shadow evidence, but markout does not veto live maker eligibility while
+    this path accumulates local maker fills. This function changes the
+    expected-value basis from passive half-spread to a settled,
+    score-conditioned resolution probability.
     """
     details: dict[str, Any] = {"applied": False, "reason": "not_eligible"}
     if not side_locked or str(active_side).upper() != str(outcome_side).upper():
@@ -129,7 +131,7 @@ def apply_strong_directional_regime_economics(
     updated = (
         price,
         updated_econ,
-        robust_net >= min_expected_net_usdc,
+        resolution_ev >= min_expected_net_usdc,
         robust_net,
         exec_penalty,
         directional_edge_ps,

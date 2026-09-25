@@ -343,12 +343,12 @@ class MakerEngine:
         ask_levels: Optional[List[Tuple[Decimal, Decimal]]],
         recent_vol: Optional[Decimal],
     ) -> dict[str, Decimal]:
-        """Return the sole entry-cost model for a passive maker BUY.
+        """Return the observed 10-second maker BUY markout for shadow telemetry.
 
-        A 10-second adverse markout is observed after actual maker fills. It
-        subsumes the old hypothetical VWAP liquidation, depth impact, spread,
-        non-atomic volatility, fixed floor, and taker-leakage proxies. A SELL
-        is an inventory-management action and has no entry-cost gate here.
+        This empirical quantity is retained for post-fill calibration and
+        analysis, but does not gate live quote eligibility while maker fills
+        are being accumulated. A SELL is an inventory-management action and
+        has no entry-cost estimate here.
         """
         empirical_markout_penalty: Optional[Decimal] = None
         if side == "buy" and self.config.maker_execution_empirical_adverse_markout_per_share is not None:
@@ -546,10 +546,13 @@ class MakerEngine:
             side_plan["buy"] = (
                 quote_bid,
                 bid_econ,
-                (
-                    bid_exec_components["cost_model_available"] > 0
-                    and robust_bid_net >= self.config.maker_min_expected_net_usdc
-                ),
+                # Empirical markout is shadow telemetry until local maker BUY
+                # fills provide a representative calibration. Requiring a
+                # calibration here would prevent the fills needed to produce
+                # one; deducting a portable snapshot can likewise make the
+                # live gate permanently unreachable. Keep the adjusted value
+                # below for audit, but gate on executable quote economics only.
+                bid_econ.expected_net_usdc >= self.config.maker_min_expected_net_usdc,
                 robust_bid_net,
                 bid_exec_penalty,
                 bid_directional_edge_ps,

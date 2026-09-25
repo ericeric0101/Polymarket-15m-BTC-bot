@@ -13,6 +13,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.enums import ActiveSide
 from bot.adapter_overrides import quote_provenance_for_tick
+from bot.db_runtime import take_sync_journal_write_report
 from bot.edge_observation import build_quote_age_telemetry
 from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_selection
 from bot.ops import log_strategy_run_stop, stop_event_threads
@@ -129,6 +130,18 @@ def _record_quote_transport_telemetry(
         if raw_ws_received_ts is not None
         else None
     )
+    provenance = quote_provenance_for_tick(tick)
+    data_engine_published_ts = provenance.get("data_engine_published_ts")
+    adapter_coalesce_delay_sec = (
+        float(data_engine_published_ts) - float(adapter_emitted_ts)
+        if data_engine_published_ts is not None
+        else None
+    )
+    data_engine_delivery_delay_sec = (
+        float(received_ts) - float(data_engine_published_ts)
+        if data_engine_published_ts is not None
+        else None
+    )
     state = getattr(strategy, "_quote_transport_telemetry_state", None)
     if state is None:
         state = {}
@@ -137,6 +150,8 @@ def _record_quote_transport_telemetry(
     if received_ts - last_ts < 5.0:
         return
     state[instrument_key] = received_ts
+    callback_report = getattr(strategy, "_quote_callback_last_report", None)
+    journal_write_report = take_sync_journal_write_report(strategy)
     strategy._db_strategy_event(
         "QUOTE_TRANSPORT_TELEMETRY",
         {
@@ -147,8 +162,14 @@ def _record_quote_transport_telemetry(
             "quote_received_ts": float(received_ts),
             "quote_age_raw_sec": float(raw_age_sec),
             "ws_to_adapter_delay_sec": ws_to_adapter_delay_sec,
+            "adapter_coalesce_delay_sec": adapter_coalesce_delay_sec,
+            "data_engine_published_ts": data_engine_published_ts,
+            "data_engine_delivery_delay_sec": data_engine_delivery_delay_sec,
             "data_engine_queue_depth": data_engine_queue_depth,
+            "data_engine_queue_window": provenance.get("data_engine_queue_window"),
             "adapter_to_strategy_delay_sec": float(adapter_delay_sec),
+            "quote_callback_window": callback_report,
+            "sync_journal_write_window": journal_write_report,
             "quote_is_fresh": bool(quote_is_fresh),
             "raw_bid_present": bool(raw_bid_present),
             "raw_ask_present": bool(raw_ask_present),
@@ -156,6 +177,56 @@ def _record_quote_transport_telemetry(
             "ask_size": float(ask_size) if ask_size is not None else None,
         },
     )
+    if callback_report is not None:
+        strategy._quote_callback_last_report = None
+
+
+def _record_quote_callback_duration(
+    strategy: Any,
+    duration_sec: float,
+    *,
+    now_ts: Optional[float] = None,
+) -> Optional[dict[str, float | int]]:
+    """Aggregate strategy callback cost over 10s without per-tick DB writes."""
+    now = time.monotonic() if now_ts is None else float(now_ts)
+    state = getattr(strategy, "_quote_callback_timing_state", None)
+    if state is None:
+        state = {
+            "started": now,
+            "count": 0,
+            "total_ms": 0.0,
+            "max_ms": 0.0,
+            "over_50ms": 0,
+            "over_250ms": 0,
+        }
+        strategy._quote_callback_timing_state = state
+    duration_ms = max(0.0, float(duration_sec) * 1000.0)
+    state["count"] += 1
+    state["total_ms"] += duration_ms
+    state["max_ms"] = max(float(state["max_ms"]), duration_ms)
+    state["over_50ms"] += int(duration_ms > 50.0)
+    state["over_250ms"] += int(duration_ms > 250.0)
+    if now - float(state["started"]) < 10.0:
+        return None
+    report = {
+        "window_sec": max(0.0, now - float(state["started"])),
+        "count": int(state["count"]),
+        "total_ms": round(float(state["total_ms"]), 3),
+        "avg_ms": round(float(state["total_ms"]) / max(1, int(state["count"])), 3),
+        "max_ms": round(float(state["max_ms"]), 3),
+        "over_50ms": int(state["over_50ms"]),
+        "over_250ms": int(state["over_250ms"]),
+    }
+    strategy._quote_callback_last_report = report
+    strategy._quote_callback_timing_state = {
+        "started": now,
+        "count": 0,
+        "total_ms": 0.0,
+        "max_ms": 0.0,
+        "over_50ms": 0,
+        "over_250ms": 0,
+    }
+    return report
 
 
 def align_price_to_tick(strategy: Any, price: Decimal, side: str, instrument: Optional[Any]) -> Decimal:
@@ -504,6 +575,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
     """Handle quote tick updates."""
     if strategy._stopping:
         return
+    callback_started = time.monotonic()
     try:
         if strategy.instrument_id is not None and tick.instrument_id != strategy.instrument_id:
             allowed = {str(i) for i in (strategy.current_market_instruments or [])}
@@ -718,6 +790,15 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             strategy._record_dashboard_error(f"Quote tick error: {e}")
         logger.error(f"Error processing quote tick: {e}")
         traceback.print_exc()
+    finally:
+        try:
+            _record_quote_callback_duration(
+                strategy,
+                time.monotonic() - callback_started,
+            )
+        except Exception:
+            # Diagnostics must not interfere with market-data handling.
+            pass
 
 
 def maker_quote_sync(strategy: Any, bid_price: float, ask_price: float) -> None:

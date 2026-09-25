@@ -221,8 +221,8 @@ flowchart LR
 |---|---|---|
 | Market discovery / phase | `bot.lifecycle.{collect_btc_market_candidates,resolve_bi_side_market_selection,evaluate_market_phase}` and `bot.lifecycle_runtime` select an alive BTC Up/Down market, set `WAITING/ACTIVE/REDUCE_ONLY/SETTLING`, and invoke settlement on rollover. Input: Gamma/cache instruments and clock. Output: slug, paired instruments, strike/end time, phase. | `BTC_MARKET_*`, fixed lifecycle policy (some defaults are intentionally no longer profile keys). |
 | Spot and TWAP | `bot.price_streams.extract_*_tick`, `bot.market_runtime.handle_quote_tick`, `bot.spot_pricer._fetch_external_spot_price`, and `bot.market_data.record_external_spot_observation`. BTC 15-minute reference is Polymarket RTDS relayed Chainlink BTC/USD **60-second TWAP**. The direct RTDS client sends its required text `PING` every five seconds. Trading freshness uses Chainlink `payload.timestamp` / observation time; local receipt time is retained only as transport-lag telemetry. Native CLOB books additionally fail closed for execution if adapter-to-strategy delivery exceeds `QUOTE_MAX_DELIVERY_DELAY_SEC`; this is independent of the broader feed watchdog's `QUOTE_STALE_SEC`. A missing, future, or stale source observation degrades rather than being accepted because it was received recently. | `POLYMARKET_CHAINLINK_TWAP_*`, `REQUIRE_TWAP_REFERENCE_SPOT`, `TWAP_DEGRADED_BLOCK_NEW_ENTRIES`, `EXTERNAL_SPOT_*`, `QUOTE_STALE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`, `QUOTE_RESUBSCRIBE_GRACE_SEC`, `QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC`. |
-| Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. Native quote updates older than `QUOTE_MAX_DELIVERY_DELAY_SEC` between adapter emission and strategy handling are rejected for execution; this does not change the broader feed watchdog interval. CLOB L2 changes are applied locally in order and emitted as one `OrderBookDeltas` event per asset per WebSocket frame, reducing queue message fan-out without dropping book changes. DataEngine telemetry samples queue depth/count/high-water by data type and logs it outside the journal hot path. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`. |
-| Market subscription lifecycle | On market-pair change, `bot.market_runtime.replace_market_subscriptions` unsubscribes quote and L2 streams for the prior pair and subscribes the new pair. Quote and L2 subscription state are tracked independently so a partial API failure is visible and retried on a later market reload. Shutdown sentinel delivery waits for DataEngine queue capacity; if queue consumers remain wedged for eight seconds, the shutdown path logs and cancels stuck consumers rather than raising an unhandled `QueueFull`. | Fixed lifecycle behavior; queue depth and event-type rates are visible in `DataEngine queue telemetry` logs. |
+| Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. Native quote updates older than `QUOTE_MAX_DELIVERY_DELAY_SEC` between adapter emission and strategy handling are rejected for execution; this does not change the broader feed watchdog interval. CLOB L2 changes are applied locally in order and emitted as one `OrderBookDeltas` event per asset per WebSocket frame, reducing queue message fan-out without dropping book changes. Queue depth is sampled immediately before enqueue; queue event-type counts/high-water are aggregated and attached to a subsequent native quote telemetry record. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`. |
+| Market subscription lifecycle | On market-pair change, `bot.market_runtime.replace_market_subscriptions` unsubscribes quote and L2 streams for the prior pair and subscribes the new pair. Quote and L2 subscription state are tracked independently so a partial API failure is visible and retried on a later market reload. Shutdown sentinel delivery waits for DataEngine queue capacity; if queue consumers remain wedged for eight seconds, the shutdown path logs and cancels stuck consumers rather than raising an unhandled `QueueFull`. | `QUOTE_TRANSPORT_TELEMETRY` journal events split WebSocket receipt→adapter emission, adapter coalescing, DataEngine publish→strategy receipt, and total adapter→strategy delivery. They also carry queue depth sampled before enqueue and the 10-second per-event-type count/high-water summary. Strategy quote-callback time and synchronous journal-write duration/event counts are aggregated into 10-second windows and attached to telemetry without an additional per-tick DB write. The separate `DataEngine queue telemetry` log remains useful for live alerts. |
 
 ### Polymarket Data API v2 read-plane contract (2026-09-18)
 
@@ -275,7 +275,7 @@ overwritten by `ForecastState.probability_for_outcome`.
 |---|---|---|
 | Quote cycle | `bot.quote_runtime._prepare_quote_cycle` blocks bad phases, checks balance/inventory, invokes protective exits, cancels expired exit-owned orders, then schedules `_evaluate_quote_targets`. | `MAKER_QUOTE_REFRESH_SEC`, `MARKET_MAX_POSITION_SHARES`, `MAKER_MAX_CONSECUTIVE_*`, `MAKER_GATE_BLOCK_GRACE_SEC`, balance-sync keys. |
 | Candidate/entry gates | `run_bot._evaluate_quote_targets` combines fair/book into `MakerEngine.generate_quote_plan`, then `bot.quote_service.evaluate_buy_entry_controls`, external confirmation, shadow veto, and `bot.quoting.apply_quote_plan_guards`. Inputs: fair, book, side/score, inventory and phase. Output: permitted BUY/SELL plan with reason and economics diagnostics. | `ENTRY_SCORE_MIN` → legacy score reader; `FIRST_ENTRY_SCORE_MIN`, `FIRST_ENTRY_MAX_TIME_LEFT_SEC`, `ENTRY_MIN_TIME_LEFT_SEC`, `ENTRY_MAX_FAIR_PRICE`, `MAKER_MIN_FAIR_PRICE`, external/smart-money keys, momentum keys, `MAKER_*EXPECTED_NET*`, fee/markout keys. |
-| Economics | `MakerEngine.generate_quote_plan` computes fair edge, fee and empirical execution penalty; `evaluate_buy_entry_controls` permits a new BUY only if the final scaled `robust_net` meets the common threshold. Directional edge values are telemetry, not an additional BUY veto (`bot.quoting.apply_quote_plan_guards`). | `ENTRY_MIN_ROBUST_NET_USDC` → `MAKER_MIN_EXPECTED_NET_USDC`; `EXECUTION_COST_*` → empirical-markout readers; `MAKER_ECON_FEE_RATE_DECIMAL`, fee-cache/default keys. |
+| Economics | `MakerEngine.generate_quote_plan` computes fair edge and modeled quote fees for maker BUY eligibility. Empirical adverse markout and `robust_net` remain shadow diagnostics and do not veto maker BUY. | `MAKER_MIN_EXPECTED_NET_USDC`, `MAKER_ECON_FEE_RATE_DECIMAL`, fee-cache/default keys; `EXECUTION_COST_*` remains relevant to calibration/telemetry, not the live maker veto. |
 | Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing high-price/weak-signal/Kelly multipliers only reduce the risk caps. | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`; `MARKET_TARGET_SHARES` remains legacy compatibility and is no longer a scale-up authority. |
 | Submission / repricing | `bot.quote_runtime._submit_quote_cycle` → `run_bot._submit_maker_quote` → `bot.order_submission.submit_maker_quote`. A maker entry is `LimitOrder` / **GTC**; `ORDER_POST_ONLY` requests post-only where adapter supports it. Existing entries are preserved if target version/hysteresis is unchanged; cancellation is handled by `bot.order_runtime`. The documented normal `ORDER_TTL_SEC` is no longer a TTL for unchanged BUYs. | `ORDER_POST_ONLY`, `MAKER_POST_ONLY_STRICT`, `ORDER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_HYSTERESIS_TICKS`, `MAX_REQUOTE_PER_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`; `ORDER_TTL_SEC` applies to exit-owned orders. |
 
@@ -653,10 +653,12 @@ live policy.
   prohibited as a fallback or live selection. Each startup records either
   `EXECUTION_PENALTY_CALIBRATED` from current samples or
   `EXECUTION_PENALTY_FALLBACK_APPLIED`, including the source and frozen D.4
-  evidence. Replacing this fixed fallback requires a new documented D.4 OOS
-  decision, not an environment-only change. Runtime selects exactly 168 hours
-  and enforces at least 30 independent samples even if a local environment
-  value attempts to request a shorter window or lower sample floor.
+  evidence. This was the live admission policy until 2026-09-25. It is now
+  superseded for maker BUY eligibility: runtime may continue loading this
+  snapshot/current calibration to populate shadow robust-net diagnostics, but
+  neither a missing local calibration nor the penalty itself blocks a maker
+  BUY. Runtime still selects exactly 168 hours and enforces at least 30
+  independent samples for any local calibration result.
 - **Verified strike recovery (2026-09-07):** A restart now preserves
   `verified` only when the latest same-slug `MARKET_STRIKE_LOCKED` event
   explicitly recorded both an authoritative source and `strike_status=verified`.
@@ -675,10 +677,10 @@ live policy.
   `EXECUTION_PENALTY_FALLBACK_APPLIED`; after the local journal reaches at
   least 30 independent eligible samples, the local 168h calibration takes
   precedence and produces `EXECUTION_PENALTY_CALIBRATED`. A missing, malformed,
-  scope-mismatched, or expired snapshot fails closed: it never substitutes zero
-  execution cost or relaxes `robust_net`. This bootstrap policy therefore can
-  trade a genuine post-cost opportunity on a new machine, but does not promise
-  an entry when the available book edge is smaller than the approved penalty.
+  scope-mismatched, or expired snapshot is not treated as a measured zero. The
+  snapshot/calibration remains useful for shadow `robust_net` analysis; the
+  prior rule that it could veto maker BUYs was superseded on 2026-09-25 as
+  documented below.
 
   The direct Polymarket Chainlink RTDS connection additionally has a liveness
   watchdog. `POLYMARKET_CHAINLINK_TWAP_SILENCE_RECONNECT_SEC=15` measures time
@@ -688,6 +690,20 @@ live policy.
   Chainlink TWAP observation arrives. Binance and Outcome remain diagnostic /
   research sources; neither can replace the settlement reference to bypass this
   guard.
+
+- **Maker markout deadlock removed (2026-09-25):** The rebuilt journal has zero
+  maker BUY `FILL_MARKOUT` samples, while runtime repeatedly applied the
+  portable `$0.02515/share` snapshot. Deducting that estimate from the
+  approximately `$0.05` expected net on a 10-share quote produced `-$0.2015`
+  and prevented the maker fills required to collect local observations. The
+  empirical markout is therefore no longer a live maker BUY veto. Maker quote
+  eligibility still requires the existing expected-net minimum (after modeled
+  quote fees) and remains subject to all independent direction, price,
+  freshness, L2/depth, journal-health, balance, inventory, position-size, and
+  risk controls. The markout and shadow robust-net fields remain recorded; real
+  fills continue to generate post-fill markouts. Reassess the penalty only
+  after sufficient independent local maker BUY fills exist; reaching a sample
+  count alone does not automatically restore it as a gate.
 
 New fills journal schema v2 with immutable 10s/30s spot continuation, BBO
 bid/ask/spread, bid/ask depth, realized quote volatility, time-left, and UTC
@@ -1149,9 +1165,9 @@ Outcome candidate is discarded: it must not cancel or modify that order.
 
 The entry-only BUY deliberately does **not** use the D.4 maker adverse-markout
 penalty as an admission gate. This is an isolated taker/momentum policy, not a
-claim that the maker penalty has fallen. The frozen 168-hour
-`$0.02515/share` D.4 calibration remains authoritative for ordinary maker-value
-orders, and every real entry-only fill still enters trade telemetry for
+claim that the maker penalty has fallen. Since 2026-09-25, ordinary maker-value
+orders also retain the frozen 168-hour `$0.02515/share` D.4 calibration only as
+shadow analysis, not as an admission gate. Every real entry-only fill still enters trade telemetry for
 1/3/5/10/30/60-second post-fill analysis. Entry-only fills must not be relabelled
 as maker fills or silently enter the maker-only D.4 training set.
 
@@ -1208,13 +1224,15 @@ state explicitly, and it clears only when inventory is again at or below the
 cap. This rule must remain independent of Outcome direction; it is custody and
 exit-protection handling, not Outcome exit authority.
 
-The approval rationale is deliberately narrow. The rebuilt ordinary maker
-journal has **zero** new 10-second maker-BUY fill markouts, so it cannot
-justify replacing the frozen D.4 168-hour penalty of **$0.02515/share**. A
-typical currently blocked maker observation has only $0.05 expected net per
-10 shares; mechanically lowering its penalty enough to pass the $0.001 robust
-minimum would require at most **$0.0049/share**, an unsupported ~80% reduction
-rather than a calibration. By contrast, the post-incident shadow run produced
+**Historical approval rationale (superseded 2026-09-25):** The rebuilt ordinary
+maker journal had **zero** new 10-second maker-BUY fill markouts, so it could
+not justify replacing the frozen D.4 168-hour penalty of **$0.02515/share**. A
+typical blocked maker observation had only $0.05 expected net per 10 shares;
+mechanically lowering its penalty enough to pass the $0.001 robust minimum
+would have required at most **$0.0049/share**, an unsupported ~80% reduction
+rather than a calibration. The decision is now to keep this penalty as shadow
+evidence and remove it from live maker admission until a representative local
+maker sample can be evaluated. By contrast, the post-incident shadow run produced
 102 `follower_confirmed` Outcome→fresh-Chainlink events across 15 markets in
 about 3.5 hours. This verifies the intended two-source trigger frequency, not
 its profitability; live entry remains capped at 10/5.5 shares, one BUY per

@@ -14,6 +14,7 @@ from bot.adapter_overrides import (
     install_runtime_compatibility_overrides,
     position_fetch_retry_delay_sec,
     record_quote_data_engine_queue_depth,
+    record_quote_data_engine_publish_ts,
     quote_provenance_for_tick,
     record_quote_provenance,
     retain_latest_quote,
@@ -24,6 +25,7 @@ from bot.adapter_overrides import (
 )
 import bot.launcher as launcher
 from bot.app_config import AppConfig
+from bot.db_runtime import _record_sync_journal_write_duration, take_sync_journal_write_report
 from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.execution_events import is_benign_cancel_reject_reason, reconcile_benign_cancel_reject
 from bot.edge_observation import build_quote_age_telemetry
@@ -36,6 +38,7 @@ from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import (
     find_btc_instrument,
     handle_quote_tick,
+    _record_quote_callback_duration,
     quote_delivery_is_fresh,
     quote_event_is_fresh,
     quote_tick_adapter_timestamp,
@@ -541,6 +544,58 @@ def test_data_engine_queue_telemetry_reports_all_data_types_and_per_type_high_wa
     assert report["counts"] == {"QuoteTick": 1, "OrderBookDeltas": 2}
     assert report["high_water"] == {"QuoteTick": 5, "OrderBookDeltas": 19}
     assert report["queue_depth"] == 8
+
+
+def test_quote_provenance_records_data_engine_publish_and_queue_window():
+    tick = SimpleNamespace(instrument_id="up-token", ts_event=1, ts_init=2)
+    record_quote_provenance(tick, source="ws_price_change", raw_ws_received_ts=10.0)
+
+    record_quote_data_engine_publish_ts(tick, 10.4)
+    record_quote_data_engine_queue_depth(
+        tick, 37,
+        queue_window={
+            "window_sec": 10.1,
+            "counts": {"QuoteTick": 12, "OrderBookDeltas": 50},
+            "high_water": {"QuoteTick": 88, "OrderBookDeltas": 120},
+            "queue_depth": 37,
+        },
+    )
+
+    provenance = quote_provenance_for_tick(tick)
+    assert provenance["data_engine_published_ts"] == 10.4
+    assert provenance["data_engine_queue_depth"] == 37
+    assert provenance["data_engine_queue_window"]["counts"]["OrderBookDeltas"] == 50
+
+
+def test_quote_callback_duration_aggregates_window_count_and_slow_callbacks():
+    strategy = SimpleNamespace()
+    assert _record_quote_callback_duration(strategy, 0.02, now_ts=100.0) is None
+    assert _record_quote_callback_duration(strategy, 0.08, now_ts=105.0) is None
+
+    report = _record_quote_callback_duration(strategy, 0.3, now_ts=110.1)
+
+    assert report["count"] == 3
+    assert report["total_ms"] == 400.0
+    assert report["max_ms"] == 300.0
+    assert report["over_50ms"] == 2
+    assert report["over_250ms"] == 1
+
+
+def test_sync_journal_write_duration_is_aggregated_and_taken_once():
+    strategy = SimpleNamespace()
+    assert _record_sync_journal_write_duration(strategy, "QUOTE", 12, now_ts=100.0) is None
+    assert _record_sync_journal_write_duration(strategy, "ORDER_SUBMIT", 80, now_ts=105.0) is None
+
+    report = _record_sync_journal_write_duration(strategy, "FILL", 300, now_ts=110.1)
+
+    assert report["count"] == 3
+    assert report["total_ms"] == 392.0
+    assert report["max_ms"] == 300.0
+    assert report["over_50ms"] == 2
+    assert report["over_250ms"] == 1
+    assert report["event_counts"] == {"QUOTE": 1, "ORDER_SUBMIT": 1, "FILL": 1}
+    assert take_sync_journal_write_report(strategy) == report
+    assert take_sync_journal_write_report(strategy) is None
 
 def test_retain_latest_quote_replaces_undelivered_tick_per_instrument():
     pending: dict[str, object] = {}
@@ -5369,6 +5424,17 @@ def test_quote_transport_telemetry_records_adapter_source_and_stale_age():
         ts_event=1,
     )
     record_quote_provenance(tick, source="transport_heartbeat")
+    record_quote_data_engine_publish_ts(tick, time.time() - 0.1)
+    record_quote_data_engine_queue_depth(
+        tick,
+        37,
+        queue_window={
+            "window_sec": 10.0,
+            "counts": {"QuoteTick": 8, "OrderBookDeltas": 40},
+            "high_water": {"QuoteTick": 90, "OrderBookDeltas": 6000},
+            "queue_depth": 37,
+        },
+    )
 
     assert quote_provenance_for_tick(tick)["source"] == "transport_heartbeat"
     handle_quote_tick(strategy, tick)
@@ -5380,6 +5446,9 @@ def test_quote_transport_telemetry_records_adapter_source_and_stale_age():
     assert payload["quote_is_fresh"] is False
     assert payload["quote_age_raw_sec"] > 30
     assert payload["raw_ws_received_ts"] is None
+    assert 0 <= payload["data_engine_delivery_delay_sec"] < 1
+    assert payload["data_engine_queue_depth"] == 37
+    assert payload["data_engine_queue_window"]["high_water"]["OrderBookDeltas"] == 6000
 
 
 def test_quote_provenance_retains_raw_websocket_ingress_timestamp():

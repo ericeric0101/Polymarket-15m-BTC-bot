@@ -90,3 +90,27 @@ def test_strong_directional_regime_applies_measured_60_plus_bucket():
     assert details["distance_bucket"] == "60_plus"
     assert updated[2] is True
     assert updated[3] == Decimal("1.70")  # 10 * (0.88 - 0.69) - 0.20
+
+
+def test_strong_directional_markout_remains_shadow_when_it_exceeds_resolution_ev():
+    updated, details = apply_strong_directional_regime_economics(
+        _quote_data(),
+        active_side="UP",
+        outcome_side="UP",
+        side_locked=True,
+        side_score=Decimal("0.40"),
+        time_left_sec=480,
+        spot=Decimal("10020"),
+        strike=Decimal("10000"),
+        calibrations={"10_30": {"win_probability": 0.72, "sample_count": 100}},
+        markout_calibrations={
+            "global": {"adverse_markout_per_share": 0.10, "sample_count": 100, "source": "global_fallback"},
+        },
+        min_expected_net_usdc=Decimal("0.001"),
+    )
+
+    assert details["applied"] is True
+    assert updated[1].expected_net_usdc == Decimal("0.30")
+    assert updated[4] == Decimal("1.00")
+    assert updated[3] == Decimal("-0.70")
+    assert updated[2] is True, "shadow markout must not veto a positive resolution-EV maker BUY"

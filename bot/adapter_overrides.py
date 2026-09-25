@@ -59,11 +59,25 @@ def quote_provenance_for_tick(tick: object) -> dict[str, object]:
     return dict(_quote_provenance_by_tick_key.get(_quote_provenance_key(tick), {}))
 
 
-def record_quote_data_engine_queue_depth(quote: object, queue_depth: int) -> None:
-    """Attach DataEngine queue depth observed immediately before enqueue."""
+def record_quote_data_engine_queue_depth(
+    quote: object,
+    queue_depth: int,
+    *,
+    queue_window: dict[str, object] | None = None,
+) -> None:
+    """Attach DataEngine backlog sampled immediately before enqueueing this quote."""
     metadata = _quote_provenance_by_tick_key.get(_quote_provenance_key(quote))
     if metadata is not None:
         metadata["data_engine_queue_depth"] = int(queue_depth)
+        if queue_window is not None:
+            metadata["data_engine_queue_window"] = dict(queue_window)
+
+
+def record_quote_data_engine_publish_ts(quote: object, published_ts: float) -> None:
+    """Record when the adapter hands a coalesced quote to the DataEngine."""
+    metadata = _quote_provenance_by_tick_key.get(_quote_provenance_key(quote))
+    if metadata is not None:
+        metadata["data_engine_published_ts"] = float(published_ts)
 
 
 def coalesce_price_changes_by_asset(price_changes: object) -> list[list[object]]:
@@ -257,6 +271,7 @@ def _install_polymarket_data_overrides() -> None:
                 pending = self._quote_delivery_pending
                 self._quote_delivery_pending = {}
                 for quote in pending.values():
+                    record_quote_data_engine_publish_ts(quote, time.time())
                     self._handle_data(quote)
                 if not self._quote_delivery_pending:
                     return
@@ -561,10 +576,9 @@ def _install_live_data_engine_observability_override() -> None:
     def patched_process(self, data) -> None:
         try:
             queue_depth = self.data_qsize()
-            if type(data).__name__ == "QuoteTick":
-                record_quote_data_engine_queue_depth(data, queue_depth)
             report = record_data_engine_queue_telemetry(self, data, queue_depth)
             if report is not None:
+                self._btc15m_queue_telemetry_pending_report = report
                 queue_limit = int(getattr(getattr(self, "_config", None), "qsize", 0) or 0)
                 summary = ",".join(
                     f"{kind}={count}/high={report['high_water'].get(kind, 0)}"
@@ -579,6 +593,15 @@ def _install_live_data_engine_observability_override() -> None:
                     logger.warning(message)
                 else:
                     logger.info(message)
+            if type(data).__name__ == "QuoteTick":
+                pending_report = getattr(self, "_btc15m_queue_telemetry_pending_report", None)
+                record_quote_data_engine_queue_depth(
+                    data,
+                    queue_depth,
+                    queue_window=pending_report,
+                )
+                if pending_report is not None:
+                    self._btc15m_queue_telemetry_pending_report = None
         except Exception:
             # Queue observability must never interfere with market data.
             pass
