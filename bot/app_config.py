@@ -389,7 +389,7 @@ class ExitConfig:
     endgame_twap_exit_min_distance_usd: Decimal
     endgame_twap_exit_max_age_sec: float
     absolute_max_loss_enabled: bool = True
-    absolute_max_loss_usdc: Decimal = Decimal("1.50")
+    absolute_max_loss_usdc: Decimal = Decimal("2.00")
     absolute_max_loss_min_hold_sec: int = 60
 
     def __post_init__(self) -> None:
@@ -1030,7 +1030,7 @@ class AppConfig:
                     0.1, _env_float("ENDGAME_TWAP_EXIT_MAX_AGE_SEC", 5.0),
                 ),
                 absolute_max_loss_enabled=_env_bool_inverted("ABSOLUTE_MAX_LOSS_ENABLED", True),
-                absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "1.50"),
+                absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "2.00"),
                 absolute_max_loss_min_hold_sec=max(0, _env_int("ABSOLUTE_MAX_LOSS_MIN_HOLD_SEC", 60)),
             ),
             risk=RiskConfig(

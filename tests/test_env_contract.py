@@ -67,7 +67,7 @@ def test_active_profile_uses_gradual_entry_window_and_effective_loss_breaker():
     contents = profile.read_text(encoding="utf-8")
 
     assert "FIRST_ENTRY_MAX_TIME_LEFT_SEC=780" in contents
-    assert "ABSOLUTE_MAX_LOSS_USDC=1.50" in contents
+    assert "ABSOLUTE_MAX_LOSS_USDC=2.00" in contents
     assert "ENTRY_QUALITY_SIZE_DOWN_ENABLED=1" in contents
 
 

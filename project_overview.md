@@ -42,10 +42,12 @@
   (`FIRST_ENTRY_MAX_TIME_LEFT_SEC=780`); directional and all hard-safety gates
   remain active. `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` applies the already logged
   chase-risk suggested size reduction instead of ignoring it. The absolute
-  loss breaker is restored to `$1.50` (from `$6.50`, which exceeded the
-  configured `$5.50` maker quote budget and could not protect an ordinary
-  single-position loss); it remains an execution trigger, not a guaranteed
-  bound during gaps or poor liquidity. `ENTRY_DECISION_TRACE` now records
+  loss breaker is set to `$2.00`. It now requires a locked, strong opposite-side
+  signal or confirmed side invalidation in addition to the loss threshold, so
+  a transient price/BBO dip while the locked thesis still matches will not
+  trigger it. This is a trend-confirmed exit trigger, not a guaranteed maximum
+  loss: losses can exceed $2 while the thesis remains supported, and gaps or
+  poor liquidity can worsen execution. `ENTRY_DECISION_TRACE` now records
   market age and binary resolution reward/full-loss ratio as observation-only
   fields. These payout ratios do not represent stop-loss risk and are not a
   new live veto; collect more closed maker/Outcome samples before adding a
@@ -223,9 +225,20 @@
   recovery (including fills, submissions, fast-follow intent and night-risk
   state). A failed shadow or diagnostic write is logged but does not by itself
   disable new BUYs; critical failures retain the event type and SQLite error.
-- `absolute_max_loss_breaker` takes priority over the normal spread guard and
-  fresh-existing-SELL wait. Once it fires, the taker exit path cancels the
-  existing order and submits the protective exit immediately.
+- `HOLD_TO_REDEEM=1` remains enabled in the local operator environment; the
+  active profile also enables the 100% passive tail TP at `0.97` for eligible
+  inventory. The hold policy blocks ordinary exits, not a trend-confirmed
+  protective exit. The previous absolute breaker was evaluated before thesis
+  checks and could cancel that TP on a temporary drawdown; it now requires a
+  locked strong opposite signal or confirmed side invalidation, and uses a
+  `$2.00` estimated-net-loss threshold. When confirmed, it still takes priority
+  over spread guard and fresh-existing-SELL wait, cancels the conflicting TP,
+  and submits the protective taker exit. A matching locked thesis leaves the
+  matching locked signal with no independent confirmed invalidation leaves
+  the position held and its passive TP available.
+- Absolute-breaker audit metadata records the actual `$2.00` threshold and
+  zero additional stop-loss confirmation cycles; it no longer falls back to
+  the unrelated `$0.50` ordinary stop-loss threshold.
 
 ## 1. End-to-end trading lifecycle
 

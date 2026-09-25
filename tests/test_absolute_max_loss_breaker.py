@@ -48,7 +48,7 @@ def _make_config(**overrides):
         catastrophic_stop_loss_min_score_abs=Decimal("0.50"),
         catastrophic_stop_loss_confirmations=2,
         absolute_max_loss_enabled=True,
-        absolute_max_loss_usdc=Decimal("1.50"),
+        absolute_max_loss_usdc=Decimal("2.00"),
         absolute_max_loss_min_hold_sec=60,
     )
     defaults.update(overrides)
@@ -93,9 +93,9 @@ def _position(avg_entry, hold_sec=90.0, confirm_hits=0, qty=Decimal("5.3")):
     )
 
 
-def _signal(score=Decimal("0.30"), locked=True, matches=True):
+def _signal(score=Decimal("0.30"), locked=True, matches=True, active_side="UP"):
     return SignalDecision(
-        active_side="UP",
+        active_side=active_side,
         score=score,
         locked=locked,
         reason="test",
@@ -106,24 +106,21 @@ def _signal(score=Decimal("0.30"), locked=True, matches=True):
 # =========================================================================
 # TEST 1: Exact Test 4 scenario — the gap that prompted this feature.
 #
-# Entry=0.69, bid=0.41, signal locked+matching, hold_sec=90.
-# Net loss: 5.3 * (0.41*0.998 - 0.69) - 0.05 - fee ≈ -$1.59
+# Entry=0.69, bid=0.20, confirmed opposite direction, hold_sec=90.
+# Net loss is beyond the new $2.00 threshold.
 #
 # Before this fix: ALL 5 exit paths were blocked (thesis healthy).
-# After this fix: absolute_max_loss_breaker fires IMMEDIATELY.
+# After this fix: absolute_max_loss_breaker requires trend confirmation.
 # =========================================================================
 def test_exact_gap_scenario_fires_breaker():
     """
-    The REAL failure from trade 1776024900:
-    Signal locked UP + matching + thesis healthy, but bid collapsed to 0.41.
-    The circuit breaker must fire unconditionally.
+    A strong, locked opposite-side signal and loss beyond $2.00 fire the breaker.
     """
     engine = ExitPolicyEngine(_make_config())
     result = engine.evaluate(
-        _snapshot(best_bid="0.41", fair="0.42"),
+        _snapshot(best_bid="0.20", fair="0.21"),
         _position(avg_entry="0.69", hold_sec=90),
-        _signal(score=Decimal("0.30"), locked=True, matches=True),
-        # NOTE: no external_thesis_weakened passed — thesis is HEALTHY
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
     )
     assert result.decision_type == ExitDecisionType.TAKER_STOP_LOSS, (
         f"FAIL: breaker did not fire! Got {result.decision_type.value}/{result.reason}"
@@ -138,6 +135,56 @@ def test_exact_gap_scenario_fires_breaker():
     print(f"  net_if_exit={result.net_if_exit:.4f}")
     print(f"  metadata: absolute_max_loss_usdc={result.metadata['absolute_max_loss_usdc']}, "
           f"best_bid={result.metadata['best_bid']}")
+
+
+def test_matching_locked_trend_suppresses_absolute_breaker_even_beyond_two_dollars():
+    engine = ExitPolicyEngine(_make_config())
+    result = engine.evaluate(
+        _snapshot(best_bid="0.20", fair="0.21"),
+        _position(avg_entry="0.69", hold_sec=90),
+        _signal(score=Decimal("0.30"), locked=True, matches=True),
+    )
+    assert result.reason != "absolute_max_loss_breaker"
+
+
+def test_matching_locked_trend_does_not_cancel_resting_tail_tp():
+    host = _BreakerExitHost()
+
+    asyncio.run(host._maybe_taker_exit_positions(10_000.0, is_simulation=False))
+
+    assert host.submissions == []
+    assert "sell:up" in host.active_maker_orders
+
+
+def test_strong_opposite_locked_trend_fires_absolute_breaker_at_two_dollars():
+    engine = ExitPolicyEngine(_make_config())
+    result = engine.evaluate(
+        _snapshot(best_bid="0.20", fair="0.21"),
+        _position(avg_entry="0.69", hold_sec=90),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
+    )
+    assert result.reason == "absolute_max_loss_breaker"
+    assert result.metadata["absolute_max_loss_usdc"] == "2.00"
+
+
+def test_hold_to_redeem_keeps_position_when_trend_still_matches():
+    engine = ExitPolicyEngine(_make_config(hold_to_redeem_enabled=True))
+    result = engine.evaluate(
+        _snapshot(best_bid="0.20", fair="0.21"),
+        _position(avg_entry="0.69", hold_sec=90),
+        _signal(score=Decimal("0.30"), locked=True, matches=True),
+    )
+    assert result.decision_type == ExitDecisionType.HOLD_TO_REDEEM
+
+
+def test_unlocked_or_none_signal_does_not_confirm_adverse_trend():
+    engine = ExitPolicyEngine(_make_config())
+    result = engine.evaluate(
+        _snapshot(best_bid="0.20", fair="0.21"),
+        _position(avg_entry="0.69", hold_sec=90),
+        _signal(score=Decimal("0"), locked=False, matches=False, active_side="NONE"),
+    )
+    assert result.reason != "absolute_max_loss_breaker"
 
 
 class _BreakerExitHost(TakerExitMixin):
@@ -187,7 +234,7 @@ class _BreakerExitHost(TakerExitMixin):
     def _instrument_key(self, inst): return str(inst)
     def _order_key_for(self, side, inst): return f"{side}:{inst}"
     def _normalize_instrument_id(self, inst): return inst
-    def _get_quote_for_instrument(self, _inst): return Decimal("0.41"), Decimal("0.45")
+    def _get_quote_for_instrument(self, _inst): return Decimal("0.20"), Decimal("0.25")
     def _side_for_instrument_id(self, _inst): return ActiveSide.UP
     def _instrument_for_side(self, side): return "up" if side == ActiveSide.UP else None
     def _extract_token_id_from_instrument(self, _inst): return None
@@ -200,12 +247,16 @@ class _BreakerExitHost(TakerExitMixin):
 
 def test_absolute_breaker_bypasses_wide_spread_and_fresh_existing_sell():
     host = _BreakerExitHost()
+    host.active_side = ActiveSide.DOWN
+    host.side_decision_score = Decimal("-0.30")
 
     asyncio.run(host._maybe_taker_exit_positions(10_000.0, is_simulation=False))
 
     assert len(host.submissions) == 1
     assert host.submissions[0]["reason"] == "stop_loss"
     assert host.submissions[0]["decision_payload"]["decision_reason"] == "absolute_max_loss_breaker"
+    assert host.submissions[0]["decision_payload"]["stop_loss_threshold"] == "2.00"
+    assert host.submissions[0]["decision_payload"]["required_confirmations"] == 0
 
 
 # =========================================================================
@@ -218,9 +269,9 @@ def test_feature_flag_disabled_does_not_fire():
     """
     engine = ExitPolicyEngine(_make_config(absolute_max_loss_enabled=False))
     result = engine.evaluate(
-        _snapshot(best_bid="0.41", fair="0.42"),
+        _snapshot(best_bid="0.20", fair="0.21"),
         _position(avg_entry="0.69", hold_sec=90),
-        _signal(score=Decimal("0.30"), locked=True, matches=True),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
     )
     assert result.reason != "absolute_max_loss_breaker", (
         f"FAIL: breaker fired despite being disabled! reason={result.reason}"
@@ -230,18 +281,18 @@ def test_feature_flag_disabled_does_not_fire():
 
 # =========================================================================
 # TEST 3: Loss below threshold — must NOT fire.
-# Entry=0.69, bid=0.55 → net ≈ -$0.82 (below $1.50 threshold).
+# Entry=0.69, bid=0.55 → net ≈ -$0.82 (below $2.00 threshold).
 # =========================================================================
 def test_loss_below_threshold_does_not_fire():
     """
-    Moderate loss (-$0.82) is below the $1.50 absolute threshold.
+    Moderate loss (-$0.82) is below the $2.00 absolute threshold.
     Normal exit logic should handle this, not the circuit breaker.
     """
     engine = ExitPolicyEngine(_make_config())
     result = engine.evaluate(
         _snapshot(best_bid="0.55", fair="0.56"),
         _position(avg_entry="0.69", hold_sec=90),
-        _signal(score=Decimal("0.30"), locked=True, matches=True),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
     )
     assert result.reason != "absolute_max_loss_breaker", (
         f"FAIL: breaker fired on moderate loss! reason={result.reason}"
@@ -262,7 +313,7 @@ def test_hold_too_short_does_not_fire():
     result = engine.evaluate(
         _snapshot(best_bid="0.20", fair="0.21"),
         _position(avg_entry="0.69", hold_sec=30),
-        _signal(score=Decimal("0.30"), locked=True, matches=True),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
     )
     assert result.reason != "absolute_max_loss_breaker", (
         f"FAIL: breaker fired on fresh position! reason={result.reason}"
@@ -271,25 +322,19 @@ def test_hold_too_short_does_not_fire():
 
 
 # =========================================================================
-# TEST 5: Confirm breaker fires BEFORE band/thesis logic.
-# Verify it bypasses HOLD_IN_BAND completely.
+# TEST 5: Confirm adverse trend lets breaker bypass HOLD_IN_BAND.
 # =========================================================================
 def test_breaker_bypasses_hold_in_band():
     """
-    Setup a scenario where band="hold" (bid >= 0.68, signal high+locked).
-    Normally this would HOLD_IN_BAND. But with loss > $1.50, the breaker
-    fires first.
+    Strong opposite-side confirmation and loss > $2.00 should bypass HOLD_IN_BAND.
 
-    Entry=0.95 (extremely high entry), bid=0.68 (still in hold band).
-    Gross = 5.3 * (0.68*0.998 - 0.95) = 5.3 * (0.6786 - 0.95) = 5.3 * -0.2714 = -1.438
-    Net = -1.438 - 0.05 - fee ≈ -1.56
-    Net > -1.50 → breaker fires.
+    Entry=0.95, bid=0.68, qty=10; the net loss exceeds $2.00.
     """
     engine = ExitPolicyEngine(_make_config())
     result = engine.evaluate(
         _snapshot(best_bid="0.68", fair="0.72"),
-        _position(avg_entry="0.95", hold_sec=120),
-        _signal(score=Decimal("0.30"), locked=True, matches=True),
+        _position(avg_entry="0.95", hold_sec=120, qty=Decimal("10")),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
     )
     assert result.decision_type == ExitDecisionType.TAKER_STOP_LOSS, (
         f"FAIL: breaker didn't bypass hold band! Got {result.decision_type.value}/{result.reason}"
@@ -322,19 +367,17 @@ def test_profitable_position_never_fires():
 
 
 # =========================================================================
-# TEST 7: No confirmations needed — fires immediately without waiting.
-# Unlike catastrophic SL (which needs 2 cycles), the breaker fires in 1 cycle.
+# TEST 7: Strong opposite-side confirmation can fire immediately.
 # =========================================================================
 def test_breaker_fires_immediately_no_confirmations():
     """
-    Verify the breaker returns confirm_hits=0 and fires on the FIRST cycle.
-    This is critical: at -$1.50, there's no time to wait for confirmations.
+    A confirmed opposite trend can still fire without extra confirmation cycles.
     """
     engine = ExitPolicyEngine(_make_config())
     result = engine.evaluate(
         _snapshot(best_bid="0.30", fair="0.31"),
         _position(avg_entry="0.69", hold_sec=120, confirm_hits=0),
-        _signal(score=Decimal("0.30"), locked=True, matches=True),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
     )
     assert result.decision_type == ExitDecisionType.TAKER_STOP_LOSS, (
         f"FAIL: expected immediate TAKER_STOP_LOSS, got {result.decision_type.value}"
@@ -353,5 +396,10 @@ if __name__ == "__main__":
     test_hold_too_short_does_not_fire()
     test_breaker_bypasses_hold_in_band()
     test_profitable_position_never_fires()
+    test_matching_locked_trend_suppresses_absolute_breaker_even_beyond_two_dollars()
+    test_matching_locked_trend_does_not_cancel_resting_tail_tp()
+    test_strong_opposite_locked_trend_fires_absolute_breaker_at_two_dollars()
+    test_hold_to_redeem_keeps_position_when_trend_still_matches()
+    test_unlocked_or_none_signal_does_not_confirm_adverse_trend()
     test_breaker_fires_immediately_no_confirmations()
     print("\n✅ All circuit breaker tests passed.")

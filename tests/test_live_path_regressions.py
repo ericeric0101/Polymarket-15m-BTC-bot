@@ -2626,7 +2626,7 @@ def test_exit_policy_holds_position_when_signal_is_none():
     assert decision.metadata["signal_is_none"] == "1"
 
 
-def test_exit_policy_treats_none_signal_as_thesis_weakening_when_losing():
+def test_exit_policy_does_not_treat_none_signal_alone_as_adverse_trend():
     engine = ExitPolicyEngine(
         ExitEngineConfig(
             min_hold_sec=0,
@@ -2678,9 +2678,9 @@ def test_exit_policy_treats_none_signal_as_thesis_weakening_when_losing():
 
     decision = engine.evaluate(snapshot, position, signal)
 
-    assert decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION
+    assert decision.decision_type != ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION
     assert decision.metadata["signal_is_none"] == "1"
-    assert decision.metadata["thesis_weakened"] == "1"
+    assert decision.metadata["thesis_weakened"] == "0"
 
 
 def test_exit_policy_holds_in_band_when_roi_is_below_release_threshold():

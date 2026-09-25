@@ -685,11 +685,10 @@ class TakerExitMixin:
                 ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
                 ExitDecisionType.TAKER_STOP_LOSS,
             ) and hasattr(self, "position_manager"):
-                # The unconditional circuit breaker must bypass the position_manager
-                # gate entirely. By design, it fires when the signal is healthy
-                # (locked + matching + thesis good) but the loss exceeds the
-                # absolute max. The position_manager would return "hold" in this
-                # exact scenario, silently blocking the breaker.
+                # The trend-confirmed absolute loss breaker must bypass the
+                # position_manager gate after ExitPolicyEngine has established
+                # adverse-side confirmation; otherwise a generic hold result
+                # could silently suppress the approved protective exit.
                 _is_absolute_breaker = (
                     exit_decision.reason == "absolute_max_loss_breaker"
                 )

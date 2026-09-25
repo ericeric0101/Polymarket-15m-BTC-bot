@@ -30,6 +30,8 @@ class PricingRuntimeHost(Protocol):
     live_inventory_cost: dict[str, Any]
     current_token_id: Optional[str]
     _balance_clob_client: Any
+    fast_follow_l2_update_ts_by_inst: dict[str, float]
+    quote_max_delivery_delay_sec: float
 
     def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
     def _instrument_key(self, instrument_id: Any) -> str: ...
@@ -221,6 +223,70 @@ class PricingRuntimeMixin:
             if cached is not None:
                 return cached.get("bids"), cached.get("asks")
             return None, None
+
+    @staticmethod
+    def _levels_from_native_order_book(book: Any, side: str, limit: int) -> List[Tuple[Decimal, Decimal]]:
+        """Read price/size levels from the same live Nautilus book as quote deltas."""
+        if book is None:
+            return []
+        try:
+            raw_levels = getattr(book, side)()
+        except Exception:
+            return []
+        levels: List[Tuple[Decimal, Decimal]] = []
+        for level in raw_levels:
+            if len(levels) >= max(1, int(limit)):
+                break
+            try:
+                raw_price = level.price
+                price = (
+                    raw_price.as_decimal()
+                    if hasattr(raw_price, "as_decimal")
+                    else Decimal(str(raw_price))
+                )
+                raw_size = level.size()
+                size = (
+                    raw_size.as_decimal()
+                    if hasattr(raw_size, "as_decimal")
+                    else Decimal(str(raw_size))
+                )
+            except Exception:
+                continue
+            if price > 0 and size > 0:
+                levels.append((price, size))
+        return levels
+
+    async def _get_orderbook_levels_for_instrument(
+        self: PricingRuntimeHost,
+        instrument_id: Any,
+    ) -> Tuple[Optional[List[Tuple[Decimal, Decimal]]], Optional[List[Tuple[Decimal, Decimal]]]]:
+        """Get fresh maker depth from the live cache, never a separately polled REST book.
+
+        QuoteTicks and OrderBookDeltas share the same venue stream. The REST
+        order-book endpoint is independently polled/cached and can lag a fresh
+        quote or cache an empty response, which made the maker depth gate report
+        ``missing_l2`` while the current BBO already had an ask in range.
+        A missing/stale native L2 update still fails closed.
+        """
+        inst_id = self._normalize_instrument_id(instrument_id)
+        inst_key = str(instrument_id or "")
+        last_l2_ts = float(
+            getattr(self, "fast_follow_l2_update_ts_by_inst", {}).get(inst_key, 0.0) or 0.0
+        )
+        max_age_sec = max(0.1, float(getattr(self, "quote_max_delivery_delay_sec", 2.0)))
+        age_sec = time.time() - last_l2_ts if last_l2_ts > 0 else None
+        if age_sec is None or age_sec < 0 or age_sec > max_age_sec or inst_id is None:
+            return None, None
+        try:
+            book = self.cache.order_book(inst_id)
+        except Exception:
+            book = None
+        if book is None:
+            return None, None
+        limit = int(getattr(self, "orderbook_levels_limit", 10) or 10)
+        bids = self._levels_from_native_order_book(book, "bids", limit)
+        asks = self._levels_from_native_order_book(book, "asks", limit)
+        return bids, asks
 
     def _get_confirmed_inventory_qty_for_instrument(self, instrument_id: Optional[Any] = None) -> Decimal:
         """

@@ -1560,7 +1560,7 @@ async def build_quote_instrument_context(
     cache_instrument_fn: Callable[[Any], Any],
     extract_token_id_fn: Callable[[str], str | None],
     get_dynamic_fee_rate_fn: Callable[..., Any],
-    get_orderbook_levels_fn: Callable[[str | None], Any],
+    get_orderbook_levels_fn: Callable[[Any], Any],
     latest_quote_depth_by_inst: dict[str, tuple[Any, Any]],
     maker_econ_fee_rate_decimal: Decimal,
     latest_quote_ts_by_inst: dict[str, float] | None = None,
@@ -1595,7 +1595,7 @@ async def build_quote_instrument_context(
 
     token_id = extract_token_id_fn(str(inst_id))
     dynamic_fee_rate = await get_dynamic_fee_rate_fn(token_id=token_id)
-    bid_levels, ask_levels = await get_orderbook_levels_fn(token_id)
+    bid_levels, ask_levels = await get_orderbook_levels_fn(inst_id)
     bid_depth, ask_depth = latest_quote_depth_by_inst.get(str(inst_id), (None, None))
     return QuoteInstrumentContext(
         inst_id=inst_id,

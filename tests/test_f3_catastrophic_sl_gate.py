@@ -108,11 +108,10 @@ def _make_signal(score=Decimal("0.20"), locked=True, matches=True, active_side="
     )
 
 
-def test_01_large_loss_unlocked_signal_triggers_catastrophic():
+def test_01_large_loss_unlocked_signal_does_not_confirm_catastrophic():
     """
     Entry=0.69, bid=0.55 → gross ~ 5*(0.55-0.69) = -0.70, net ~ -0.73
-    Signal is NOT locked → gate passes → catastrophic candidate.
-    With confirm_hits=0, should get STOP_LOSS_PENDING_CONFIRMATION (needs 2).
+    Signal is NOT locked → it is uncertainty, not adverse trend confirmation.
     """
     engine = ExitPolicyEngine(_make_config())
     result = engine.evaluate(
@@ -120,13 +119,11 @@ def test_01_large_loss_unlocked_signal_triggers_catastrophic():
         _make_position(avg_entry="0.69", hold_sec=120, confirm_hits=0),
         _make_signal(score=Decimal("0.15"), locked=False, matches=True),
     )
-    assert result.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION, (
-        f"FAIL: expected STOP_LOSS_PENDING_CONFIRMATION, got {result.decision_type}"
+    assert result.decision_type != ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION
+    assert result.metadata.get("catastrophic_stop_loss_candidate") != "1", (
+        f"FAIL: unlocked/noisy signal treated as adverse trend. metadata={result.metadata}"
     )
-    assert result.metadata.get("catastrophic_stop_loss_candidate") == "1", (
-        f"FAIL: not flagged as catastrophic. metadata={result.metadata}"
-    )
-    print(f"PASS test_01: large loss + unlocked signal → catastrophic candidate (pending confirmation)")
+    print("PASS test_01: large loss + unlocked signal → no catastrophic stop")
 
 
 def test_02_large_loss_thesis_weakened_triggers():
@@ -220,10 +217,9 @@ def test_06_large_loss_but_hold_too_short():
     print(f"PASS test_06: large loss but hold too short → NOT catastrophic (hold protection) ✓")
 
 
-def test_07_catastrophic_with_enough_confirmations_fires():
+def test_07_unlocked_signal_does_not_fire_catastrophic_after_repeated_hits():
     """
-    Entry=0.69, bid=0.55, unlocked signal, confirm_hits=1 (needs 2 total).
-    After evaluation, confirm hits should be 2 → TAKER_STOP_LOSS fires.
+    Repeated price weakness with an unlocked signal is still not trend confirmation.
     """
     engine = ExitPolicyEngine(_make_config())
     result = engine.evaluate(
@@ -231,13 +227,9 @@ def test_07_catastrophic_with_enough_confirmations_fires():
         _make_position(avg_entry="0.69", hold_sec=120, confirm_hits=1),
         _make_signal(score=Decimal("0.15"), locked=False, matches=True),
     )
-    assert result.decision_type == ExitDecisionType.TAKER_STOP_LOSS, (
-        f"FAIL: expected TAKER_STOP_LOSS with 2 confirmations, got {result.decision_type}"
-    )
-    assert result.reason == "catastrophic_stop_loss_confirmed", (
-        f"FAIL: wrong reason: {result.reason}"
-    )
-    print(f"PASS test_07: catastrophic + 2 confirmations → TAKER_STOP_LOSS ✓")
+    assert result.decision_type != ExitDecisionType.TAKER_STOP_LOSS
+    assert result.metadata.get("catastrophic_stop_loss_candidate") != "1"
+    print("PASS test_07: unlocked repeated signal does not trigger catastrophic stop")
 
 
 def test_08_normal_stop_loss_path_unchanged():
@@ -275,12 +267,12 @@ def test_08_normal_stop_loss_path_unchanged():
 
 
 if __name__ == "__main__":
-    test_01_large_loss_unlocked_signal_triggers_catastrophic()
+    test_01_large_loss_unlocked_signal_does_not_confirm_catastrophic()
     test_02_large_loss_thesis_weakened_triggers()
     test_03_large_loss_signal_mismatch_triggers()
     test_04_large_loss_healthy_thesis_does_NOT_trigger()
     test_05_small_loss_does_NOT_trigger()
     test_06_large_loss_but_hold_too_short()
-    test_07_catastrophic_with_enough_confirmations_fires()
+    test_07_unlocked_signal_does_not_fire_catastrophic_after_repeated_hits()
     test_08_normal_stop_loss_path_unchanged()
     print("\n✅ All F-3 tests passed.")

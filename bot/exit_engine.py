@@ -40,7 +40,7 @@ class ExitEngineConfig:
     catastrophic_stop_loss_min_score_abs: Decimal = Decimal("0.50")
     catastrophic_stop_loss_confirmations: int = 2
     absolute_max_loss_enabled: bool = True
-    absolute_max_loss_usdc: Decimal = Decimal("1.50")
+    absolute_max_loss_usdc: Decimal = Decimal("2.00")
     absolute_max_loss_min_hold_sec: int = 60
     profit_run_trailing_drawdown_ratio: Decimal = Decimal("0.45")
     profit_run_trailing_drawdown_floor_ps: Decimal = Decimal("0.04")
@@ -293,11 +293,25 @@ class ExitPolicyEngine:
             if entry_cost_usdc > 0
             else Decimal("0")
         )
-        # --- Unconditional loss circuit breaker ---
-        # Fires BEFORE any thesis, band, or signal logic.
-        # This is the absolute last line of defense against catastrophic
-        # positions where the signal is wrong but hasn't flipped.
-        # No thesis check. No signal check. Pure loss-magnitude cutoff.
+        signal_side = str(signal.active_side).upper()
+        signal_is_none = signal_side == "NONE"
+        explicit_offside = (not signal.matches_position) and not signal_is_none
+        strong_opposite = (
+            explicit_offside
+            and signal.locked
+            and abs(signal.score) >= self.config.stop_loss_thesis_min_score_abs
+        )
+        adverse_trend_confirmed = bool(
+            locked_side_invalidated
+            or confirmed_adverse_exit_active
+            or external_thesis_weakened is True
+            or external_offside_confirmed is True
+            or strong_opposite
+        )
+        # --- Trend-confirmed absolute loss breaker ---
+        # A large mark-to-market drawdown alone can be transient noise. Preserve
+        # the hard-loss exit, but require an independently confirmed adverse
+        # trend (locked invalidation or a locked, strong opposite-side signal).
         _price_adverse_raw = (
             position.avg_entry_price > 0
             and snapshot.best_bid < position.avg_entry_price
@@ -307,6 +321,7 @@ class ExitPolicyEngine:
             self.config.absolute_max_loss_enabled
             and position.hold_sec >= max(0, self.config.absolute_max_loss_min_hold_sec)
             and _price_adverse_raw
+            and adverse_trend_confirmed
             and net_if_exit <= -abs(self.config.absolute_max_loss_usdc)
         ):
             return ExitDecision(
@@ -323,6 +338,9 @@ class ExitPolicyEngine:
                     "signal_score": str(signal.score),
                     "signal_locked": "1" if signal.locked else "0",
                     "absolute_max_loss_usdc": str(self.config.absolute_max_loss_usdc),
+                    "stop_loss_threshold": str(self.config.absolute_max_loss_usdc),
+                    "adverse_trend_confirmed": "1",
+                    "required_confirmations": "0",
                     "net_if_exit": str(net_if_exit),
                     "hold_sec": str(position.hold_sec),
                     "avg_entry_price": str(position.avg_entry_price),
@@ -350,19 +368,14 @@ class ExitPolicyEngine:
             "locked_side_invalidated": "1" if locked_side_invalidated else "0",
             "confirmed_adverse_exit_active": "1" if confirmed_adverse_exit_active else "0",
         }
-        signal_side = str(signal.active_side).upper()
-        signal_is_none = signal_side == "NONE"
-        explicit_offside = (not signal.matches_position) and not signal_is_none
-        strong_opposite = explicit_offside and abs(signal.score) >= self.config.stop_loss_thesis_min_score_abs
         price_adverse = (
             position.avg_entry_price > 0
             and snapshot.best_bid < position.avg_entry_price
             and gross_if_exit < 0
         )
-        # Internal instant computation (used as fallback and for logging).
+        # An absent or unlocked signal is uncertainty, not proof that trend
+        # reversed. Require a locked, sufficiently strong opposite side.
         _instant_thesis_weakened = strong_opposite
-        if signal_is_none and price_adverse:
-            _instant_thesis_weakened = True
         # Prefer the externally-confirmed thesis state when available:
         # the strategy layer applies multi-confirmation + higher score
         # thresholds, so its signal is more reliable.
@@ -474,19 +487,7 @@ class ExitPolicyEngine:
             and position.hold_sec >= effective_min_hold_sec
             and price_adverse
             and net_if_exit <= -abs(self.config.catastrophic_stop_loss_usdc)
-            # Relaxed gate: require that the thesis is NOT fully healthy.
-            # Old gate required _held_side_strong_opposite(score >= 0.50),
-            # which was structurally unreachable during real catastrophes
-            # because the signal engine doesn't flip fast enough.
-            # New gate: fires if thesis is weakened, signal doesn't match
-            # position, OR signal isn't locked.  A fully healthy position
-            # (thesis intact + signal locked + signal matches) is still
-            # protected from this path.
-            and (
-                thesis_weakened
-                or not signal.matches_position
-                or not signal.locked
-            )
+            and (thesis_weakened or strong_opposite)
         )
         if catastrophic_stop_loss_candidate:
             stop_loss_threshold = abs(self.config.catastrophic_stop_loss_usdc)

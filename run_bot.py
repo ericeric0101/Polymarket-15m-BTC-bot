@@ -1847,7 +1847,7 @@ class IntegratedBTCStrategy(
                 cache_instrument_fn=self.cache.instrument,
                 extract_token_id_fn=self._extract_token_id_from_instrument,
                 get_dynamic_fee_rate_fn=self._get_dynamic_fee_rate,
-                get_orderbook_levels_fn=self._get_orderbook_levels_for_token,
+                get_orderbook_levels_fn=self._get_orderbook_levels_for_instrument,
                 latest_quote_depth_by_inst=self.latest_quote_depth_by_inst,
                 latest_quote_ts_by_inst=getattr(self, "last_quote_update_ts_by_inst", {}),
                 maker_econ_fee_rate_decimal=self.maker_econ_fee_rate_decimal,

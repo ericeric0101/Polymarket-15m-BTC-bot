@@ -48,7 +48,7 @@ def _make_config(**overrides):
         catastrophic_stop_loss_min_score_abs=Decimal("0.50"),
         catastrophic_stop_loss_confirmations=2,
         absolute_max_loss_enabled=True,
-        absolute_max_loss_usdc=Decimal("1.50"),
+        absolute_max_loss_usdc=Decimal("2.00"),
         absolute_max_loss_min_hold_sec=60,
     )
     defaults.update(overrides)
@@ -279,50 +279,27 @@ def test_noise_oscillation_no_exit():
 
 
 # =========================================================================
-# TEST 4: Signal locked while price collapses — NOW COVERED by circuit breaker
-# Entry=0.69, signal locked UP, matches=True, thesis NOT weakened.
-# Bid drops to 0.20. Net loss ≈ -$2.65 (exceeds $1.50 threshold).
-#
-# PREVIOUSLY: This was a KNOWN LIMITATION — no exit path fired.
-# NOW: The absolute_max_loss_breaker fires BEFORE band/thesis logic.
+# TEST 4: A matching locked signal protects against a noise-only drawdown.
 # =========================================================================
 def test_signal_locked_price_collapse_breaker_catches():
     """
-    The REAL failure pattern from trade 1776024900:
-    Signal locked UP, matches, thesis good. Price collapses from 0.69 to 0.20.
-
-    Previously this was a documented gap — no exit path fired.
-    Now the absolute_max_loss_breaker catches it:
-    - net_if_exit ≈ -$2.65 ≤ -$1.50 ✓
-    - hold_sec = 300 ≥ 60 ✓
-    - price_adverse = True ✓
-    → TAKER_STOP_LOSS / absolute_max_loss_breaker
+    Even beyond the $2 threshold, a matching locked signal is not an adverse
+    trend confirmation. Avoid repeating the transient-dip exit from the incident.
     """
     engine = ExitPolicyEngine(_make_config())
 
-    # Step 1: Signal locked + matching + not weakened, bid=0.20
-    # The circuit breaker fires regardless of thesis state.
+    # Step 1: Signal locked + matching + not weakened, bid=0.20.
     result_locked = engine.evaluate(
         _snapshot(best_bid="0.20", fair="0.21"),
         _position(avg_entry="0.69", hold_sec=300, confirm_hits=0),
         _signal(score=Decimal("0.20"), locked=True, matches=True),
         external_thesis_weakened=False,
     )
-    assert result_locked.decision_type == ExitDecisionType.TAKER_STOP_LOSS, (
-        f"Step 1 FAIL: breaker should fire at loss ≈ -$2.65. "
-        f"Got {result_locked.decision_type.value}/{result_locked.reason}"
-    )
-    assert result_locked.reason == "absolute_max_loss_breaker", (
-        f"Step 1 FAIL: wrong reason. Expected absolute_max_loss_breaker, "
-        f"got {result_locked.reason}"
-    )
-    print(f"Step 1: bid=0.20, signal locked+matching+healthy → "
-          f"{result_locked.decision_type.value}/{result_locked.reason} ✓")
-    print(f"  net_if_exit={result_locked.net_if_exit:.4f}")
-    print(f"  ✅ GAP CLOSED: unconditional circuit breaker caught this position.")
+    assert result_locked.reason != "absolute_max_loss_breaker"
+    print(f"Step 1: bid=0.20, signal locked+matching+healthy → no absolute breaker ✓")
 
     # Step 2: Verify that at moderate loss (bid=0.55), breaker does NOT fire
-    # (net ≈ -$0.82, below $1.50 threshold). F-3 thesis gate is the backstop here.
+    # (net ≈ -$0.82, below $2.00 threshold).
     result_moderate = engine.evaluate(
         _snapshot(best_bid="0.55", fair="0.56"),
         _position(avg_entry="0.69", hold_sec=300, confirm_hits=0),
