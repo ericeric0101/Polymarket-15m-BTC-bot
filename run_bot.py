@@ -55,6 +55,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/lead_lag_observation.py",
         "bot/hyperliquid_outcome_observer.py",
         "bot/order_submission.py",
+        "bot/adapter_overrides.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",
         "bot/db_runtime.py",

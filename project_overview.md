@@ -29,11 +29,15 @@
 - `OUTCOME_LEAD_LAG_MODE=live_entry_only` is the active profile behavior. It is
   no longer documentation-only observability: an Outcome/TWAP confirmation can
   request a FOK BUY, subject to all guards below.
-- `NORMAL_MAKER_BUY_ENABLED=false` is active in the BTC profile while the
-  deleted-journal maker BUY calibration is rebuilt. It blocks only new normal
-  maker BUY submissions; Outcome fast-follow FOK BUY, maker SELL, stop-loss,
-  and emergency exits retain their existing authority. This is an explicit
-  entry-mode choice, not a relaxation of any risk gate.
+- `NORMAL_MAKER_BUY_ENABLED=true` is active in the BTC profile. Empirical
+  maker-BUY markout remains shadow-only and does not veto normal maker BUY;
+  expected-net and the other existing direction, price, freshness, L2/depth,
+  journal-health, balance, inventory, sizing, and risk controls still apply.
+  Maker and Outcome fast-follow share market-level entry ownership: pending
+  fast-follow reservations block normal maker BUY, existing maker BUY orders
+  block a conflicting fast-follow entry, and a filled BUY consumes the shared
+  one-entry-per-market allowance. The two modes therefore cannot intentionally
+  establish independent entries in the same market.
 - The canonical trade journal path is `data/trading/trade_journal.db`; research
   lead/lag and wallet-label databases use `data/research/` and `data/reference/`.
   Successful strategy/order event writes mark a coalesced background snapshot
@@ -119,7 +123,15 @@
   Quote receipt and executable freshness are separate: a received stale tick
   updates transport telemetry but no longer resets `last_valid_quote_ts`, so
   repeated stale DataEngine deliveries cannot indefinitely suppress watchdog
-  recovery. Startup execution-penalty calibration emits a start marker and
+  recovery. A later incident showed subscribed `OrderBookDeltas` could fill
+  the 6,000-message DataEngine queue (quote delivery lag reached ~14 seconds),
+  causing watchdog resubscribe to repeat against a saturated queue; rollover
+  then timed out waiting for DataEngine disconnect. The adapter now continues
+  applying every CLOB L2 change to its local book but publishes full snapshots
+  to DataEngine at a bounded 4 Hz per instrument, retaining fresh depth for
+  fast-follow checks while bounding queue fan-out. Queue telemetry and watchdog
+  remain in place to verify live backlog after deployment. Startup
+  execution-penalty calibration emits a start marker and
   elapsed duration before `STRATEGY_START`, making a slow journal scan visible.
   For scheduled rollover, any confirmed current inventory still blocks the
   stop. An empty instrument cache
@@ -221,7 +233,7 @@ flowchart LR
 |---|---|---|
 | Market discovery / phase | `bot.lifecycle.{collect_btc_market_candidates,resolve_bi_side_market_selection,evaluate_market_phase}` and `bot.lifecycle_runtime` select an alive BTC Up/Down market, set `WAITING/ACTIVE/REDUCE_ONLY/SETTLING`, and invoke settlement on rollover. Input: Gamma/cache instruments and clock. Output: slug, paired instruments, strike/end time, phase. | `BTC_MARKET_*`, fixed lifecycle policy (some defaults are intentionally no longer profile keys). |
 | Spot and TWAP | `bot.price_streams.extract_*_tick`, `bot.market_runtime.handle_quote_tick`, `bot.spot_pricer._fetch_external_spot_price`, and `bot.market_data.record_external_spot_observation`. BTC 15-minute reference is Polymarket RTDS relayed Chainlink BTC/USD **60-second TWAP**. The direct RTDS client sends its required text `PING` every five seconds. Trading freshness uses Chainlink `payload.timestamp` / observation time; local receipt time is retained only as transport-lag telemetry. Native CLOB books additionally fail closed for execution if adapter-to-strategy delivery exceeds `QUOTE_MAX_DELIVERY_DELAY_SEC`; this is independent of the broader feed watchdog's `QUOTE_STALE_SEC`. A missing, future, or stale source observation degrades rather than being accepted because it was received recently. | `POLYMARKET_CHAINLINK_TWAP_*`, `REQUIRE_TWAP_REFERENCE_SPOT`, `TWAP_DEGRADED_BLOCK_NEW_ENTRIES`, `EXTERNAL_SPOT_*`, `QUOTE_STALE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`, `QUOTE_RESUBSCRIBE_GRACE_SEC`, `QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC`. |
-| Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. Native quote updates older than `QUOTE_MAX_DELIVERY_DELAY_SEC` between adapter emission and strategy handling are rejected for execution; this does not change the broader feed watchdog interval. CLOB L2 changes are applied locally in order and emitted as one `OrderBookDeltas` event per asset per WebSocket frame, reducing queue message fan-out without dropping book changes. Queue depth is sampled immediately before enqueue; queue event-type counts/high-water are aggregated and attached to a subsequent native quote telemetry record. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`. |
+| Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. Native quote updates older than `QUOTE_MAX_DELIVERY_DELAY_SEC` between adapter emission and strategy handling are rejected for execution; this does not change the broader feed watchdog interval. CLOB L2 changes are all applied in order to the adapter-local book, but subscribed DataEngine consumers receive a complete local-book snapshot at most 4 times/sec per instrument rather than every WebSocket frame. This preserves current depth for fast-follow precheck while bounding event fan-out. Queue depth is sampled immediately before enqueue; queue event-type counts/high-water are aggregated and attached to a subsequent native quote telemetry record. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`. |
 | Market subscription lifecycle | On market-pair change, `bot.market_runtime.replace_market_subscriptions` unsubscribes quote and L2 streams for the prior pair and subscribes the new pair. Quote and L2 subscription state are tracked independently so a partial API failure is visible and retried on a later market reload. Shutdown sentinel delivery waits for DataEngine queue capacity; if queue consumers remain wedged for eight seconds, the shutdown path logs and cancels stuck consumers rather than raising an unhandled `QueueFull`. | `QUOTE_TRANSPORT_TELEMETRY` journal events split WebSocket receipt→adapter emission, adapter coalescing, DataEngine publish→strategy receipt, and total adapter→strategy delivery. They also carry queue depth sampled before enqueue and the 10-second per-event-type count/high-water summary. Strategy quote-callback time and synchronous journal-write duration/event counts are aggregated into 10-second windows and attached to telemetry without an additional per-tick DB write. The separate `DataEngine queue telemetry` log remains useful for live alerts. |
 
 ### Polymarket Data API v2 read-plane contract (2026-09-18)

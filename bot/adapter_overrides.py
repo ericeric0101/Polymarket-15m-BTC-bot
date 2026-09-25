@@ -14,6 +14,7 @@ from py_clob_client_v2.exceptions import PolyApiException
 
 
 _QUOTE_PROVENANCE_TTL_SEC = 600.0
+_ORDER_BOOK_SNAPSHOT_INTERVAL_SEC = 0.25
 _quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
 
 
@@ -103,6 +104,22 @@ def position_fetch_retry_delay_sec(error: Exception, attempt: int) -> float | No
 def should_publish_order_book_deltas(*, has_delta_subscription: bool) -> bool:
     """Avoid filling the DataEngine with depth updates no consumer requested."""
     return bool(has_delta_subscription)
+
+
+def should_publish_l2_snapshot(
+    *,
+    has_delta_subscription: bool,
+    now_monotonic: float,
+    last_publish_monotonic: float,
+    interval_sec: float = _ORDER_BOOK_SNAPSHOT_INTERVAL_SEC,
+) -> bool:
+    """Bound subscribed L2 delivery while keeping periodic full-book freshness."""
+    if not has_delta_subscription:
+        return False
+    if last_publish_monotonic <= 0:
+        return True
+    interval = max(0.01, float(interval_sec))
+    return float(now_monotonic) - float(last_publish_monotonic) + 1e-9 >= interval
 
 
 def batch_order_book_deltas(data_mod, instrument_id, deltas):
@@ -262,6 +279,31 @@ def _install_polymarket_data_overrides() -> None:
                 0.05,
                 float(os.getenv("POLYMARKET_QUOTE_COALESCE_SEC", "0.25")),
             )
+        if not hasattr(self, "_btc15m_l2_snapshot_publish_ts"):
+            self._btc15m_l2_snapshot_publish_ts = {}
+
+    def publish_l2_snapshot_if_due(self, instrument, ws_message) -> bool:
+        """Publish a complete current local book at a bounded per-instrument rate."""
+        if instrument.id not in self.subscribed_order_book_deltas():
+            return False
+        now_monotonic = time.monotonic()
+        last_publish = float(self._btc15m_l2_snapshot_publish_ts.get(instrument.id, 0.0) or 0.0)
+        if not should_publish_l2_snapshot(
+            has_delta_subscription=True,
+            now_monotonic=now_monotonic,
+            last_publish_monotonic=last_publish,
+        ):
+            return False
+        book = self._local_books.get(instrument.id)
+        if book is None:
+            return False
+        snapshot = book.to_deltas_c(
+            ts_event=data_mod.millis_to_nanos(float(ws_message.timestamp)),
+            ts_init=self._clock.timestamp_ns(),
+        )
+        self._handle_data(snapshot)
+        self._btc15m_l2_snapshot_publish_ts[instrument.id] = now_monotonic
+        return True
 
     async def flush_latest_quotes(self) -> None:
         """Deliver a bounded, latest-only QuoteTick stream to the strategy loop."""
@@ -461,7 +503,8 @@ def _install_polymarket_data_overrides() -> None:
             self._queue_latest_quote(quote)
 
     def patched_handle_quote(self, instrument, ws_message, price_change) -> None:
-        if self._apply_quote_change(instrument, ws_message, price_change):
+        if self._apply_quote_change(instrument, ws_message, price_change, publish_delta=False):
+            self._publish_l2_snapshot_if_due(instrument, ws_message)
             self._publish_quote(instrument, ws_message)
 
     def patched_handle_quotes(self, ws_message) -> None:
@@ -474,20 +517,15 @@ def _install_polymarket_data_overrides() -> None:
                 self._log.error(f"Cannot find instrument for {instrument_id}")
                 continue
             applied = False
-            frame_deltas = []
             for price_change in changes:
                 applied = self._apply_quote_change(
                     instrument,
                     ws_message,
                     price_change,
-                    delta_sink=frame_deltas,
                     publish_delta=False,
                 ) or applied
-            if frame_deltas and should_publish_order_book_deltas(
-                has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
-            ):
-                self._handle_data(batch_order_book_deltas(data_mod, instrument.id, frame_deltas))
             if applied:
+                self._publish_l2_snapshot_if_due(instrument, ws_message)
                 self._publish_quote(instrument, ws_message)
 
     def patched_handle_book_snapshot(self, instrument, ws_message) -> None:
@@ -538,6 +576,7 @@ def _install_polymarket_data_overrides() -> None:
     cls._handle_quote = patched_handle_quote
     cls._handle_quotes = patched_handle_quotes
     cls._handle_book_snapshot = patched_handle_book_snapshot
+    cls._publish_l2_snapshot_if_due = publish_l2_snapshot_if_due
     cls._btc15m_runtime_compat_patched = True
 
 

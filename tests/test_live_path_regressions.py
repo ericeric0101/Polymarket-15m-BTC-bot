@@ -22,6 +22,7 @@ from bot.adapter_overrides import (
     should_emit_quote_heartbeat,
     should_publish_order_book_deltas,
     should_emit_transport_heartbeat,
+    should_publish_l2_snapshot,
 )
 import bot.launcher as launcher
 from bot.app_config import AppConfig
@@ -392,6 +393,34 @@ def test_batched_order_book_deltas_mark_only_the_final_delta_as_last():
     assert not batch.deltas[0].flags & Flags.F_LAST
     assert batch.deltas[0].flags & Flags.F_TOB
     assert batch.deltas[1].flags & Flags.F_LAST
+
+
+def test_l2_data_engine_snapshots_are_rate_limited_but_remain_fresh():
+    assert should_publish_l2_snapshot(
+        has_delta_subscription=True, now_monotonic=10.0, last_publish_monotonic=0.0,
+    )
+    assert not should_publish_l2_snapshot(
+        has_delta_subscription=True, now_monotonic=10.05, last_publish_monotonic=10.0,
+    )
+    assert should_publish_l2_snapshot(
+        has_delta_subscription=True, now_monotonic=10.25, last_publish_monotonic=10.0,
+    )
+    assert not should_publish_l2_snapshot(
+        has_delta_subscription=False, now_monotonic=11.0, last_publish_monotonic=0.0,
+    )
+
+    last_publish = 0.0
+    published = 0
+    for index in range(3500):
+        now = 20.0 + index / 350.0
+        if should_publish_l2_snapshot(
+            has_delta_subscription=True,
+            now_monotonic=now,
+            last_publish_monotonic=last_publish,
+        ):
+            published += 1
+            last_publish = now
+    assert published <= 41
 
 
 def test_market_subscription_replacement_unsubscribes_old_pair_and_avoids_duplicate_subscribe():
