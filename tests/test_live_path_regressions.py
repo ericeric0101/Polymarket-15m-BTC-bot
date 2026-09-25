@@ -5227,6 +5227,78 @@ def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
     assert out.event_type == "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE"
     assert out.reason == "directional_first_entry_gate"
 
+
+def test_gradual_first_entry_window_allows_candidates_after_two_minute_warmup():
+    kwargs = dict(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        latest_observation_supports_locked_side=True,
+        side_score=Decimal("0.40"),
+        directional_entry_min_score_abs_new=Decimal("0.18"),
+        directional_first_entry_min_score_abs_new=Decimal("0.25"),
+        locked_side_score_abs=Decimal("0.40"),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        current_inst_inventory_qty=Decimal("0"),
+        current_slug="btc-updown-15m-test",
+        inst_id="inst-up",
+        market_buy_count=0,
+        time_left_sec=780.0,
+        best_bid=Decimal("0.80"),
+        fair=Decimal("0.85"),
+    )
+
+    blocked_by_old_window = evaluate_buy_entry_controls(
+        first_entry_max_time_left_sec=720, **kwargs
+    )
+    allowed_by_gradual_window = evaluate_buy_entry_controls(
+        first_entry_max_time_left_sec=780, **kwargs
+    )
+
+    assert blocked_by_old_window.event_type == "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW"
+    assert allowed_by_gradual_window.skip is False
+
+
+def test_entry_quality_can_reduce_maker_size_without_changing_entry_allowance():
+    kwargs = dict(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        latest_observation_supports_locked_side=True,
+        side_score=Decimal("0.72"),
+        directional_entry_min_score_abs_new=Decimal("0.18"),
+        directional_first_entry_min_score_abs_new=Decimal("0.25"),
+        locked_side_score_abs=Decimal("0.72"),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        current_inst_inventory_qty=Decimal("0"),
+        current_slug="btc-updown-15m-test",
+        inst_id="inst-up",
+        market_buy_count=0,
+        time_left_sec=600.0,
+        best_bid=Decimal("0.84"),
+        fair=Decimal("0.87"),
+        candidate_entry_price=Decimal("0.84"),
+        robust_net_usdc=Decimal("0.03"),
+        spot_minus_strike_avg=Decimal("12"),
+        shadow_payload={
+            "spot_minus_strike": 8.0,
+            "ret_30_bps": 6.2,
+            "breakout_persistence_60s": 0.15,
+        },
+    )
+
+    full_size = evaluate_buy_entry_controls(
+        entry_quality_allow_size_down=False, **kwargs
+    )
+    risk_adjusted = evaluate_buy_entry_controls(
+        entry_quality_allow_size_down=True, **kwargs
+    )
+
+    assert full_size.skip is False and risk_adjusted.skip is False
+    assert risk_adjusted.size_multiplier < full_size.size_multiplier
+
 def test_continuation_entry_cannot_open_first_position_in_market():
     desired_entry = {
         "should_quote": False,

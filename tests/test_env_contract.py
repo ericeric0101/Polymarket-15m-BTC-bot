@@ -54,6 +54,23 @@ def test_fast_follow_forecast_freshness_is_independently_configurable(monkeypatc
     assert config.outcome_lead_lag.live_max_forecast_age_sec == 4.5
 
 
+def test_entry_quality_size_down_is_configurable(monkeypatch):
+    monkeypatch.setenv("ENTRY_QUALITY_SIZE_DOWN_ENABLED", "1")
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.maker.entry_quality_size_down_enabled is True
+
+
+def test_active_profile_uses_gradual_entry_window_and_effective_loss_breaker():
+    profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
+    contents = profile.read_text(encoding="utf-8")
+
+    assert "FIRST_ENTRY_MAX_TIME_LEFT_SEC=780" in contents
+    assert "ABSOLUTE_MAX_LOSS_USDC=1.50" in contents
+    assert "ENTRY_QUALITY_SIZE_DOWN_ENABLED=1" in contents
+
+
 def test_quote_delivery_delay_gate_defaults_to_two_seconds_and_is_configurable(monkeypatch):
     monkeypatch.delenv("QUOTE_MAX_DELIVERY_DELAY_SEC", raising=False)
     config = AppConfig.from_env(enable_terminal_dashboard=False)

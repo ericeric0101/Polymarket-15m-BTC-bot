@@ -53,6 +53,10 @@ class EntryDecision:
     settlement_ev_per_share: float | None
     settlement_ev_usdc: float | None
     settlement_ev_observation_only: bool
+    market_elapsed_sec: float | None
+    resolution_reward_per_share: float | None
+    resolution_loss_per_share: float | None
+    resolution_reward_to_full_loss_ratio: float | None
 
     @classmethod
     def observe(
@@ -74,6 +78,7 @@ class EntryDecision:
         calibrated_probability: float | None = None,
         fee_per_share: float | None = None,
         planned_quantity: float | None = None,
+        observed_ts: float | None = None,
     ) -> "EntryDecision":
         if shadow_only:
             state = "SHADOW"
@@ -100,6 +105,22 @@ class EntryDecision:
             except (ArithmeticError, TypeError, ValueError):
                 # Observation telemetry must never alter the existing entry path.
                 pass
+        market_elapsed_sec = None
+        try:
+            market_start_ts = float(str(slug).rsplit("-", 1)[-1])
+            if observed_ts is not None and market_start_ts > 0:
+                market_elapsed_sec = max(0.0, float(observed_ts) - market_start_ts)
+        except (TypeError, ValueError):
+            pass
+        resolution_reward = resolution_loss = resolution_reward_to_loss = None
+        try:
+            price = float(entry_price) if entry_price is not None else None
+            if price is not None and 0.0 < price < 1.0:
+                resolution_reward = 1.0 - price
+                resolution_loss = price
+                resolution_reward_to_loss = resolution_reward / resolution_loss
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
         return cls(
             slug=str(slug or ""),
             instrument_id=str(instrument_id or ""),
@@ -126,6 +147,10 @@ class EntryDecision:
             settlement_ev_per_share=settlement_ev_ps,
             settlement_ev_usdc=settlement_ev_usdc,
             settlement_ev_observation_only=True,
+            market_elapsed_sec=market_elapsed_sec,
+            resolution_reward_per_share=resolution_reward,
+            resolution_loss_per_share=resolution_loss,
+            resolution_reward_to_full_loss_ratio=resolution_reward_to_loss,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -151,4 +176,9 @@ class EntryDecision:
             "settlement_ev_per_share": self.settlement_ev_per_share,
             "settlement_ev_usdc": self.settlement_ev_usdc,
             "settlement_ev_observation_only": self.settlement_ev_observation_only,
+            "market_elapsed_sec": self.market_elapsed_sec,
+            "resolution_reward_per_share": self.resolution_reward_per_share,
+            "resolution_loss_per_share": self.resolution_loss_per_share,
+            "resolution_reward_to_full_loss_ratio": self.resolution_reward_to_full_loss_ratio,
+            "risk_observations_only": True,
         }

@@ -59,3 +59,24 @@ def test_entry_decision_records_calibrated_settlement_ev_without_touching_gate_s
     assert decision.settlement_ev_per_share == pytest.approx(0.04)
     assert decision.settlement_ev_usdc == pytest.approx(0.40)
     assert decision.to_payload()["settlement_ev_observation_only"] is True
+
+
+def test_entry_decision_records_market_age_and_binary_payoff_risk_observations():
+    market_start = 1_800_000_000
+    decision = EntryDecision.observe(
+        slug=f"btc-updown-15m-{market_start}",
+        instrument_id="inst-up",
+        side="buy",
+        should_quote=True,
+        fair=0.90,
+        entry_price=0.89,
+        planned_quantity=5.0,
+        observed_ts=market_start + 600,
+    )
+
+    payload = decision.to_payload()
+    assert payload["market_elapsed_sec"] == pytest.approx(600)
+    assert payload["resolution_reward_per_share"] == pytest.approx(0.11)
+    assert payload["resolution_loss_per_share"] == pytest.approx(0.89)
+    assert payload["resolution_reward_to_full_loss_ratio"] == pytest.approx(0.11 / 0.89)
+    assert payload["risk_observations_only"] is True

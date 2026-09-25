@@ -38,6 +38,23 @@
   block a conflicting fast-follow entry, and a filled BUY consumes the shared
   one-entry-per-market allowance. The two modes therefore cannot intentionally
   establish independent entries in the same market.
+- Entry-risk follow-up (2026-09-25): the first-entry warm-up is now 120 seconds
+  (`FIRST_ENTRY_MAX_TIME_LEFT_SEC=780`); directional and all hard-safety gates
+  remain active. `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` applies the already logged
+  chase-risk suggested size reduction instead of ignoring it. The absolute
+  loss breaker is restored to `$1.50` (from `$6.50`, which exceeded the
+  configured `$5.50` maker quote budget and could not protect an ordinary
+  single-position loss); it remains an execution trigger, not a guaranteed
+  bound during gaps or poor liquidity. `ENTRY_DECISION_TRACE` now records
+  market age and binary resolution reward/full-loss ratio as observation-only
+  fields. These payout ratios do not represent stop-loss risk and are not a
+  new live veto; collect more closed maker/Outcome samples before adding a
+  new minimum reward/risk gate or changing the first-entry warm-up again.
+- `scripts/trade_path_pnl_report.py --db logs/trade_journal.db --hours 24`
+  separates realized PnL and entry timing for `normal_maker` and
+  `outcome_fast_follow`, including allow-to-intent, signal-to-intent,
+  intent-to-submit, submit-to-fill, and elapsed market time. Treat open
+  positions and partial exits separately from closed-market performance.
 - The canonical trade journal path is `data/trading/trade_journal.db`; research
   lead/lag and wallet-label databases use `data/research/` and `data/reference/`.
   Successful strategy/order event writes mark a coalesced background snapshot

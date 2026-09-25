@@ -69,6 +69,7 @@ class CompatibilityConfig:
 class MakerConfig:
     maker_mode: bool
     normal_maker_buy_enabled: bool
+    entry_quality_size_down_enabled: bool
     quote_refresh_sec: int
     half_spread: Decimal
     quote_size_usdc: Decimal
@@ -647,6 +648,9 @@ class AppConfig:
             maker=MakerConfig(
                 maker_mode=_env_bool_inverted("MAKER_MODE", True),
                 normal_maker_buy_enabled=_env_bool("NORMAL_MAKER_BUY_ENABLED", True),
+                entry_quality_size_down_enabled=_env_bool(
+                    "ENTRY_QUALITY_SIZE_DOWN_ENABLED", False
+                ),
                 quote_refresh_sec=_env_int("MAKER_QUOTE_REFRESH_SEC", 5),
                 half_spread=_env_decimal("MAKER_HALF_SPREAD", "0.01"),
                 quote_size_usdc=_env_decimal("MAKER_QUOTE_SIZE_USDC", "1.0"),

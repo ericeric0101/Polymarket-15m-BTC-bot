@@ -1794,6 +1794,7 @@ class IntegratedBTCStrategy(
             calibrated_probability=_as_float(fair),
             fee_per_share=_as_float(fee_per_share),
             planned_quantity=_as_float(planned_quantity),
+            observed_ts=float(now_ts),
         )
         payload = decision.to_payload()
         payload["decision_stage"] = "pre_submit"
