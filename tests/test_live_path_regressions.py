@@ -5676,7 +5676,7 @@ def test_quote_adapter_timestamp_uses_nautilus_ts_init_not_exchange_event_time()
     assert abs(quote_tick_adapter_timestamp(tick, 0.0) - now_ts) < 0.01
 
 
-def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_fresh():
+def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_fresh(monkeypatch):
     class Price:
         def __init__(self, value):
             self.value = Decimal(value)
@@ -5733,12 +5733,27 @@ def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_
     )
     record_quote_provenance(tick, source="ws_snapshot")
 
+    shadow_calls = []
+    monkeypatch.setattr(
+        "bot.market_runtime.record_strategy_quote",
+        lambda strategy, **kwargs: shadow_calls.append((strategy, kwargs)),
+    )
     strategy = Strategy()
     handle_quote_tick(strategy, tick)
 
     assert strategy.latest_quote_by_inst["up-token"] == (Decimal("0.60"), Decimal("0.61"))
     assert abs(strategy.last_quote_update_ts_by_inst["up-token"] - now_ts) < 0.01
     assert strategy.events[-1][1]["quote_is_fresh"] is True
+    assert len(shadow_calls) == 1
+    called_strategy, shadow_kwargs = shadow_calls[0]
+    assert called_strategy is strategy
+    assert shadow_kwargs["instrument_id"] == "up-token"
+    assert shadow_kwargs["bid"] == Decimal("0.60")
+    assert shadow_kwargs["ask"] == Decimal("0.61")
+    assert shadow_kwargs["bid_size"] == Decimal("10")
+    assert shadow_kwargs["ask_size"] == Decimal("10")
+    assert abs(shadow_kwargs["now_ts"] - now_ts) < 0.01
+    assert abs(shadow_kwargs["quote_source_ts"] - now_ts) < 0.01
 
 
 def test_quote_recovery_waits_for_both_binary_outcomes_before_clearing_pending_set():

@@ -41,6 +41,7 @@ from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
 from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastFollowLive
 from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
+from bot.trend_entry_shadow import TrendEntryShadow
 
 
 def initialize_strategy_settings(
@@ -757,6 +758,12 @@ def initialize_strategy_settings(
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
     strategy._lead_lag_cancel_started_ns_by_order_id = {}
     strategy.lead_lag_db = LeadLagDB()
+    # Research-only comparison of early BTC trend-entry schedules. This
+    # recorder has no venue/order ownership and persists through the async DB.
+    strategy.trend_entry_shadow = TrendEntryShadow(
+        db=strategy.lead_lag_db,
+        run_id=strategy.run_id,
+    )
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode
     strategy.outcome_high_frequency_shadow_enabled = lead_lag.high_frequency_shadow_enabled

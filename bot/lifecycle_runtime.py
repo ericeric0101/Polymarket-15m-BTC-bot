@@ -165,6 +165,20 @@ class StrategyLifecycleMixin:
                 })
                 return
 
+            trend_shadow = getattr(self, "trend_entry_shadow", None)
+            if trend_shadow is not None:
+                try:
+                    trend_shadow.on_settlement(
+                        slug=slug,
+                        outcome="UP" if spot >= strike else "DOWN",
+                        settlement_ts=time.time(),
+                    )
+                except Exception as shadow_error:
+                    logger.warning(
+                        "Trend-entry shadow settlement capture failed: "
+                        f"{type(shadow_error).__name__}: {shadow_error}"
+                    )
+
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
                 # Persist the market label even with no trade. This is required

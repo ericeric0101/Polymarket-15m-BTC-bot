@@ -18,6 +18,7 @@ from bot.edge_observation import build_quote_age_telemetry
 from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_selection
 from bot.ops import log_strategy_run_stop, stop_event_threads
 from bot.outcome_lead_lag_ingress import publish_strategy_tick
+from bot.trend_entry_shadow import record_strategy_quote
 
 
 def quote_tick_event_timestamp(tick: Any, fallback_now: float) -> float:
@@ -709,6 +710,18 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                     "error": f"{type(fast_follow_error).__name__}: {fast_follow_error}",
                 })
                 logger.error(f"Fast-follow handoff failed: {fast_follow_error}")
+        # Research-only early-entry comparison. It is fed only a fresh quote,
+        # writes to the asynchronous research DB, and has no venue authority.
+        record_strategy_quote(
+            strategy,
+            instrument_id=tick.instrument_id,
+            now_ts=quote_received_ts,
+            bid=bid_decimal,
+            ask=ask_decimal,
+            bid_size=bid_size_decimal,
+            ask_size=ask_size_decimal,
+            quote_source_ts=adapter_emitted_ts,
+        )
         _record_quote_transport_telemetry(
             strategy,
             tick=tick,

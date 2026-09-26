@@ -458,6 +458,22 @@ prices/costs, not just resolved direction.
    naturally occurring invalidation/stop-loss outcomes. Never create trades to
    meet a sample target.
 
+**Trend-entry shadow capture implementation (2026-09-26):** the six schedules
+in item 3 are now sampled from fresh Polymarket quotes by
+`bot.trend_entry_shadow.TrendEntryShadow`. Candidate rows include the BTC
+open-return signal and qualification flag, signal-side executable ask/BBO,
+top sizes, depth within 1/2/5 cents, reference/quote ages, and time left.
+Subsequent fresh same-token bids produce 1/5/10/30-second executable gross
+markouts; missed observation windows and market settlement are explicitly
+recorded. Data is queued to the asynchronous lead/lag research DB. This
+recorder has no order, cancel, sizing, or ownership authority and does not
+change live gates. Settlement labels only count as a hypothetical win when
+the configured BTC-return threshold qualified; the current settlement label
+comes from the strategy's settlement spot versus cached strike, not a separate
+Polymarket resolution API lookup. Candidate sampling occurs on
+the first eligible fresh quote at or after each scheduled market age, so the
+recorded `schedule_lateness_sec` must be inspected when interpreting results.
+
 The future research objective is out-of-sample expected value:
 estimated resolution probability minus executable contract price and expected
 execution/fee cost. This statement defines a research objective only; it does
