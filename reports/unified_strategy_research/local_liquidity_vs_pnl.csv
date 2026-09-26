@@ -1,0 +1,4 @@
+liquidity_regime,n_local_closed_trades,mean_actual_pnl,total_actual_pnl,positive_share
+high,15,-0.9669097984205766,-14.503646976308648,0.6
+low,8,0.97439125161597,7.79513001292776,1.0
+medium,9,1.4240953958161175,12.816858562345057,1.0

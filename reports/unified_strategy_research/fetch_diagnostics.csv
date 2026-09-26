@@ -1,0 +1,9 @@
+stage,status,sample_rows,cached_markets,count,candles
+public_market_sample,loaded_cache,200,200,,
+gamma,success,,,200,
+trades,empty,,,3,
+trades,success,,,197,
+prices,empty,,,29,
+prices,success,,,171,
+sample_fetch,SUCCESS_PUBLIC_HISTORY,,,200,
+btc_1m,loaded,,,,80640

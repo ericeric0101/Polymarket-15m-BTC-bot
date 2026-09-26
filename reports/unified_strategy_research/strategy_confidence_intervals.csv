@@ -1,0 +1,10 @@
+partition,metric,n_trades,block_days,ci_low,ci_high,method
+all,win_rate,73,39,0.6764705882352942,0.8571428571428571,date-block bootstrap
+all,ev_net_pnl,73,39,-1.090097548253921,1.3218934083765705,date-block bootstrap
+all,roi,73,39,-0.10900975482539209,0.13218934083765704,date-block bootstrap
+development,win_rate,44,25,0.64,0.9117647058823529,date-block bootstrap
+development,ev_net_pnl,44,25,-1.7123185202372067,1.7483440252093985,date-block bootstrap
+development,roi,44,25,-0.17123185202372068,0.17483440252093985,date-block bootstrap
+holdout,win_rate,29,14,0.6428571428571429,0.88,date-block bootstrap
+holdout,ev_net_pnl,29,14,-1.483766213669503,1.8206309568732402,date-block bootstrap
+holdout,roi,29,14,-0.14837662136695032,0.182063095687324,date-block bootstrap

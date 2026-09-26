@@ -1,0 +1,9 @@
+metric,weekday_n,weekday_mean,weekend_n,weekend_mean,weekend_minus_weekday,bootstrap_95_low,bootstrap_95_high,market_level_permutation_p,note
+trade_count,100,928.81,100,851.87,-76.93999999999994,-217.25,44.08000000000004,0.25337331334332835,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+volume_shares,100,27185.07943323,100,23133.9945088,-4051.0849244300007,-10740.636271510004,1515.1614354599988,0.21689155422288856,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+volume_usdc_estimate,100,14274.956651046914,100,12254.964812237386,-2019.9918388095284,-5395.7406130726085,771.948960069014,0.23438280859570215,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+median_trade_size,98,8.958592346938776,99,8.732982777777778,-0.22560956916099784,-0.7340983868274584,0.30524224829932045,0.3918040979510245,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+max_no_trade_interval_sec,100,61.44,100,47.56,-13.879999999999995,-45.15,14.850000000000001,0.31134432783608196,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+trade_frequency_per_sec,100,1.0320111111111112,100,0.9465222222222223,-0.08548888888888895,-0.24138888888888888,0.04897777777777779,0.25337331334332835,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+trade_print_realized_volatility,98,1.8723030793395747,99,1.8363103518917494,-0.035992727447825335,-0.4716939791485584,0.3564950771561375,0.8685657171414293,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv
+price_jump_count_5c,100,12.01,100,12.52,0.5099999999999998,-2.3400000000000016,3.3100000000000005,0.744127936031984,market-level uncertainty; paired weekly result is in public_weekly_blocked.csv

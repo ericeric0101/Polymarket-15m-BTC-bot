@@ -2,9 +2,12 @@ import json
 import math
 import socket
 import sqlite3
+import gzip
 from urllib.error import HTTPError, URLError
 from io import BytesIO
 from datetime import datetime, timezone
+from datetime import date
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from bot.analytics.weekend_liquidity import (
@@ -27,6 +30,11 @@ from scripts.analyze_weekend_liquidity import (
     _stratified_public_market_sample, _week_blocked_public_comparison,
 )
 from scripts.record_polymarket_l2 import apply_market_event, subscription_message, _DailyParquetSink
+from scripts.backtest_simple_trend_hold import (
+    entry_proxy, market_start, outcome_pnl, threshold_side, winner_from_gamma,
+    weekend_and_hour, summarize_pnls, _last_closed, _returns_for_market, run_research,
+    _liquidity_features,
+)
 
 
 def test_et_weekday_weekend_classification_and_friday_saturday_edge():
@@ -81,6 +89,140 @@ def test_public_market_universe_sample_covers_weekday_and_weekend_dates_evenly()
             for bucket in ("00-06", "06-12", "12-18", "18-24")
         }
         assert max(bucket_counts.values()) - min(bucket_counts.values()) <= 1
+
+
+def test_backtest_market_start_and_et_grouping():
+    ts = int(datetime(2026, 9, 26, 6, 0, tzinfo=timezone.utc).timestamp())
+    assert market_start(f"btc-updown-15m-{ts}") == ts
+    assert market_start("not-a-market") is None
+    weekend, local_date, hour = weekend_and_hour(ts)
+    assert weekend is True
+    assert local_date == "2026-09-26"
+    assert hour == "00-06"
+
+
+def test_settlement_truth_requires_closed_decisive_gamma_prices():
+    assert winner_from_gamma({"closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["1", "0"]'}) == "UP"
+    assert winner_from_gamma({"closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["0", "1"]'}) == "DOWN"
+    assert winner_from_gamma({"closed": False, "outcomes": '["Up", "Down"]', "outcomePrices": '["1", "0"]'}) is None
+    assert winner_from_gamma({"closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["0.6", "0.4"]'}) is None
+
+
+def test_trend_sign_threshold_and_no_trade_boundary():
+    assert threshold_side(5.1, 5) == "UP"
+    assert threshold_side(-5.1, 5) == "DOWN"
+    assert threshold_side(5, 5) == "UP"
+    assert threshold_side(4.999, 5) is None
+    assert threshold_side(None, 0) is None
+
+
+def test_fixed_notional_up_and_down_payout_math():
+    up = outcome_pnl("UP", "UP", .5, 10)
+    down = outcome_pnl("DOWN", "DOWN", .8, 10, fee_usdc=.1)
+    loser = outcome_pnl("UP", "DOWN", .5, 10)
+    assert up["shares"] == 20
+    assert up["gross_pnl"] == 10
+    assert down["shares"] == 12.5
+    assert down["gross_pnl"] == 2.5
+    assert down["net_pnl"] == 2.4
+    assert loser["gross_pnl"] == -10
+
+
+def test_entry_proxy_uses_only_post_signal_trades_and_slippage():
+    trades = [
+        {"timestamp": 99, "price": .4, "size": 100, "outcome": "UP"},
+        {"timestamp": 101, "price": .6, "size": 2, "outcome": "UP"},
+        {"timestamp": 104, "price": .7, "size": 2, "outcome": "UP"},
+        {"timestamp": 102, "price": .2, "size": 100, "outcome": "DOWN"},
+    ]
+    assert entry_proxy(trades, "UP", 100, 0, "first_trade") == (.6, "proxy_trade_print")
+    price, status = entry_proxy(trades, "UP", 100, 0, "vwap_5s", slippage_cents=.01)
+    assert status == "proxy_trade_print"
+    assert math.isclose(price, .66)
+    assert entry_proxy(trades, "DOWN", 105, 0, "first_trade")[1] == "no_fill_proxy"
+
+
+def test_entry_proxy_reports_missing_fill_instead_of_imputing():
+    assert entry_proxy([], "UP", 100, 0, "vwap_5s") == (None, "no_fill_proxy")
+
+
+def test_liquidity_volatility_uses_complementary_outcomes_on_one_axis():
+    start=900
+    market={"trades":[
+        {"timestamp":start+1,"price":.6,"size":10,"outcome":"Up"},
+        {"timestamp":start+1,"price":.4,"size":10,"outcome":"Down"},
+    ]}
+    metrics=_liquidity_features(market,start)
+    assert metrics["trade_count"]==2
+    assert metrics["trade_print_realized_volatility"] is None
+    assert metrics["price_jump_count_5c"]==0
+
+
+def test_btc_candle_observation_never_uses_future_close():
+    start = 1_000
+    candles = [
+        {"ts": start, "open": 100.0, "close": 101.0, "close_ts": start + 59},
+        {"ts": start + 60, "open": 101.0, "close": 102.0, "close_ts": start + 119},
+        {"ts": start + 120, "open": 102.0, "close": 103.0, "close_ts": start + 179},
+        {"ts": start + 180, "open": 103.0, "close": 999.0, "close_ts": start + 239},
+    ]
+    assert _last_closed(candles, start + 180)["close"] == 103.0
+    returns = _returns_for_market(candles, start)
+    assert math.isclose(returns[60], 100.0)
+    assert math.isclose(returns[120], 200.0)
+    assert math.isclose(returns[180], 300.0)
+
+
+def test_backtest_summary_reports_risk_and_empty_samples():
+    empty = summarize_pnls([])
+    assert empty["trades"] == 0 and empty["win_rate"] is None
+    rows = [
+        {"side":"UP","winner":"UP","entry_price":.5,"notional":10,"gross_pnl":10,"net_pnl":9.9},
+        {"side":"UP","winner":"DOWN","entry_price":.5,"notional":10,"gross_pnl":-10,"net_pnl":-10.1},
+    ]
+    summary = summarize_pnls(rows)
+    assert summary["win_rate"] == .5
+    assert summary["max_drawdown"] == 10.1
+    assert summary["longest_losing_streak"] == 1
+    assert summary["worst_trade"] == -10.1
+
+
+def test_unified_backtest_writes_reproducible_outputs_from_offline_cache(tmp_path):
+    cache = tmp_path / "public"
+    btc_cache = tmp_path / "btc"
+    output = tmp_path / "report"
+    cache.mkdir()
+    start = int(datetime(2026, 9, 7, 4, 0, tzinfo=timezone.utc).timestamp())
+    slug = f"btc-updown-15m-{start}"
+    market = {
+        "slug": slug,
+        "gamma": {"status": "success", "market": {"closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["1", "0"]', "clobTokenIds": '["up-token", "down-token"]'}},
+        "trade_fetch_status": "success", "price_fetch_status": "empty", "price_history": [],
+        "trades": [
+            {"timestamp": start + 181, "price": .60, "size": 10, "outcome": "Up", "outcome_index": 0},
+            {"timestamp": start + 183, "price": .61, "size": 10, "outcome": "Up", "outcome_index": 0},
+            {"timestamp": start + 181, "price": .40, "size": 10, "outcome": "Down", "outcome_index": 1},
+        ],
+    }
+    (cache / f"{slug}-fixture.json").write_text(json.dumps(market), encoding="utf-8")
+    day_start = int(datetime(2026, 9, 7, tzinfo=timezone.utc).timestamp())
+    rows = []
+    for minute in range(1440):
+        ts = day_start + minute * 60
+        price = 100_000 + minute
+        rows.append([ts * 1000, str(price), str(price + 1), str(price - 1), str(price + .5), "1", ts * 1000 + 59_999])
+    btc_cache.mkdir()
+    with gzip.open(btc_cache / "binance_btcusdt_1m_2026-09-07.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump(rows, stream)
+    result = run_research(cache_dirs=[cache], sample_csv=None, output=output, btc_cache=btc_cache,
+                          start_date=date(2026, 9, 7), end_date=date(2026, 9, 7),
+                          timezone_name="America/New_York", offline=True)
+    assert len(result["markets"]) == 1
+    assert len(result["summaries"]) == 2430
+    assert (output / "public_time_to_resolution_summary.csv").exists()
+    assert (output / "local_stoploss_counterfactual.csv").exists()
+    assert (output / "control_strategy_summary.csv").exists()
+    assert any(row["signal_family"] == "btc_open_to_observation" for row in result["candidates"])
 
 
 def test_public_market_pilot_sample_spans_weeks_and_time_buckets():

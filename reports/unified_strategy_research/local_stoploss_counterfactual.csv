@@ -1,0 +1,2 @@
+market_slug,entry_source,exit_reason,qty,entry_price,actual_exit_pnl,hypothetical_hold_gross_pnl,hold_minus_actual,winner,held_side,comparison
+btc-updown-15m-1789395300,outcome_fast_follow,endgame_twap_stop_loss,5.28355,0.68,-3.4346396028188004,-3.592814,-0.15817439718119974,DOWN,UP,complete settlement and token mapping
