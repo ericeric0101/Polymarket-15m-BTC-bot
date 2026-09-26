@@ -587,7 +587,13 @@ def submit_maker_quote(
         expected_net_usdc=float(econ.expected_net_usdc),
         payload={
             "maker": True,
+            "slug": str(getattr(strategy, "current_market_slug", "") or ""),
             "submitted_instrument_id": str(instrument_id),
+            "research_candidate_id": (
+                directional_snapshot.get("research_candidate_id")
+                if directional_snapshot
+                else None
+            ),
             "rebate_estimate_usdc": float(econ.expected_rebate_usdc),
             "spread_capture_estimate_usdc": float(econ.expected_spread_capture_usdc),
             "directional_edge_ps": (

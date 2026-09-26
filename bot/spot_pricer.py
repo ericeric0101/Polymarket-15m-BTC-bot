@@ -227,6 +227,18 @@ class SpotPricerMixin:
                             self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
                             self._polymarket_chainlink_twap_observation_ts = chainlink_observation_ts(tick)
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
+                            research_observer = getattr(self, "_observe_live_strike_reference", None)
+                            observation_ts = chainlink_observation_ts(tick)
+                            if callable(research_observer) and observation_ts is not None:
+                                try:
+                                    research_observer(
+                                        spot=tick.price,
+                                        source=f"polymarket_chainlink_twap_{tick.window_seconds}s_ws",
+                                        observed_ts=float(observation_ts),
+                                    )
+                                except Exception:
+                                    # Research telemetry cannot interfere with feed ingestion.
+                                    pass
                             publish_strategy_tick(self, source="polymarket_twap", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                             if bool(getattr(self, "_polymarket_chainlink_twap_pending_recovery", False)):
                                 disconnected_at = float(

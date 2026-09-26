@@ -162,6 +162,7 @@ def build_directional_snapshot(desired: dict[str, Any]) -> dict[str, Any]:
         "planned_best_ask": desired.get("planned_best_ask"),
         "planned_quote_ts": desired.get("planned_quote_ts"),
         "entry_mode": desired.get("entry_mode", "value"),
+        "research_candidate_id": desired.get("research_candidate_id"),
         "size_multiplier": desired.get("size_multiplier", Decimal("1")),
         "weak_pfair_size_adjustment": desired.get("weak_pfair_size_adjustment"),
         "high_entry_price_size_adjustment": desired.get("high_entry_price_size_adjustment"),

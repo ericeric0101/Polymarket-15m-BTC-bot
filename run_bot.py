@@ -93,6 +93,12 @@ from bot.runtime_env import load_runtime_env
 from bot.edge_state import build_edge_state
 from bot.edge_observation import build_quote_age_telemetry
 from bot.entry_decision import EntryDecision
+from bot.live_entry_research import (
+    StrikeCrossingTracker,
+    build_safety_sigma,
+    build_shadow_labels,
+    classify_time_et,
+)
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.enums import ActiveSide, MarketPhase
@@ -269,6 +275,184 @@ class IntegratedBTCStrategy(
     StrategyLifecycleMixin,
     Strategy,
 ):
+    def _observe_live_strike_reference(self, *, spot, source: str, observed_ts: float) -> None:
+        """Update research-only crossing state from verified live reference ticks."""
+        slug = str(getattr(self, "current_market_slug", "") or "")
+        try:
+            eligible = bool(self._market_strike_is_entry_eligible(slug))
+            strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug) if eligible else None
+            canonical_spot = spot if str(source).startswith("polymarket_chainlink_twap_") else None
+            tracker = getattr(self, "_live_strike_crossing_tracker", None)
+            if tracker is None:
+                tracker = StrikeCrossingTracker()
+                self._live_strike_crossing_tracker = tracker
+            tracker.observe(slug=slug, spot=float(canonical_spot) if canonical_spot is not None else None,
+                            strike=float(strike) if strike is not None else None,
+                            observed_ts=float(observed_ts), canonical=eligible and canonical_spot is not None)
+        except Exception:
+            # Research state must never propagate into the feed or quote path.
+            return
+
+    def _build_live_entry_research_snapshot(self, *, now_ts: float, inst_id: Any,
+                                            side: str, fair: Any, entry_price: Any,
+                                            robust_net_usdc: Any, candidate_context: dict[str, Any],
+                                            candidate_id: str) -> dict[str, Any]:
+        """Serialize observational context only; callers never consume verdicts."""
+        def number(value):
+            try:
+                if value is None:
+                    return None
+                result = float(value)
+                return result if math.isfinite(result) else None
+            except (TypeError, ValueError):
+                return None
+
+        slug = str(self.current_market_slug or "")
+        try:
+            start_ts = float(slug.rsplit("-", 1)[-1])
+        except (TypeError, ValueError):
+            start_ts = None
+        end_ts = number(getattr(self, "current_market_end_timestamp", None))
+        time_left = number(candidate_context.get("time_left_sec"))
+        market_age = max(0.0, now_ts - start_ts) if start_ts is not None else None
+        strike_map = getattr(self, "market_strike_cache_by_slug", {})
+        strike = strike_map.get(slug) if isinstance(strike_map, dict) else None
+        strike_status = getattr(self, "market_strike_status_by_slug", {}).get(slug, "pending")
+        strike_source = getattr(self, "market_strike_source_by_slug", {}).get(slug)
+        eligible_fn = getattr(self, "_market_strike_is_entry_eligible", None)
+        strike_valid = bool(callable(eligible_fn) and eligible_fn(slug))
+        strike_value = number(strike) if strike_valid else None
+        spot_source = str(getattr(self, "latest_external_spot_source", "") or "")
+        spot_source_ts = number(getattr(self, "latest_external_spot_source_ts", None))
+        spot_age = max(0.0, now_ts - spot_source_ts) if spot_source_ts is not None else None
+        # Only the already-approved Polymarket Chainlink TWAP is canonical here;
+        # Binance/Coinbase fallbacks are retained as unavailable for distance.
+        spot = number(getattr(self, "latest_external_spot", None)) if spot_source.startswith("polymarket_chainlink_twap_") and spot_age is not None and spot_age <= 10 else None
+        signed_usd = spot - strike_value if spot is not None and strike_value is not None else None
+        abs_usd = abs(signed_usd) if signed_usd is not None else None
+        signed_bps = signed_usd / strike_value * 10000 if signed_usd is not None and strike_value else None
+        abs_bps = abs(signed_bps) if signed_bps is not None else None
+        leader = "UP" if signed_usd is not None and signed_usd > 0 else "DOWN" if signed_usd is not None and signed_usd < 0 else "TIE" if signed_usd == 0 else None
+        strike_observed_ts_by_slug = getattr(self, "market_strike_observed_ts_by_slug", {})
+        strike_observed_ts = number(strike_observed_ts_by_slug.get(slug)) if isinstance(strike_observed_ts_by_slug, dict) else None
+        age_strike = max(0.0, now_ts - strike_observed_ts) if strike_value is not None and strike_observed_ts is not None else None
+        forecast = getattr(self, "last_forecast_state", None)
+        forecast_age = now_ts - number(getattr(forecast, "created_ts", None)) if forecast is not None and number(getattr(forecast, "created_ts", None)) is not None else None
+        sigma = number(getattr(forecast, "sigma_final", None)) if forecast_age is not None and 0 <= forecast_age <= 5 else None
+        sigma_payload = build_safety_sigma(spot=spot, strike=strike_value, sigma_annual=sigma,
+                                           time_left_sec=time_left, sigma_source="forecast_state_sigma_final_annualized" if sigma is not None else None)
+        tracker = getattr(self, "_live_strike_crossing_tracker", None)
+        crossings = tracker.snapshot(slug, now_ts) if tracker is not None and strike_valid and spot is not None else {
+            "crossing_observation_available": False,
+            "crossing_observation_reason": "canonical_spot_or_strike_unavailable" if not (strike_valid and spot is not None) else "tracker_unavailable",
+        }
+        quote_ctx = candidate_context.get("quote_context")
+        desired = candidate_context.get("desired_entry") or {}
+        quote_data = candidate_context.get("quote_data")
+        price = number(entry_price)
+        probability = number(fair)
+        quantity = number(desired.get("planned_quantity") if isinstance(desired, dict) else None)
+        if quantity is None and isinstance(quote_data, (tuple, list)) and len(quote_data) > 1:
+            econ = quote_data[1]
+            quantity = number(getattr(econ, "shares", None))
+        fee_ps = number(desired.get("fee_ps") if isinstance(desired, dict) else None)
+        exec_penalty = number(desired.get("exec_penalty") if isinstance(desired, dict) else None)
+        directional_edge_ps = number(desired.get("directional_edge_ps") if isinstance(desired, dict) else None)
+        expected_net = number(getattr(desired.get("econ"), "expected_net_usdc", None) if isinstance(desired, dict) else None)
+        if isinstance(quote_data, (tuple, list)):
+            if robust_net_usdc is None and len(quote_data) > 3:
+                robust_net_usdc = quote_data[3]
+            if exec_penalty is None and len(quote_data) > 4:
+                exec_penalty = number(quote_data[4])
+            if directional_edge_ps is None and len(quote_data) > 5:
+                directional_edge_ps = number(quote_data[5])
+            if fee_ps is None and len(quote_data) > 8:
+                fee_ps = number(quote_data[8])
+            if expected_net is None and len(quote_data) > 1:
+                expected_net = number(getattr(quote_data[1], "expected_net_usdc", None))
+        economics_components = quote_data[10] if isinstance(quote_data, (tuple, list)) and len(quote_data) > 10 and isinstance(quote_data[10], dict) else {}
+        regime_resolution_ev = number(economics_components.get("regime_resolution_ev_usdc"))
+        if regime_resolution_ev is not None:
+            resolution_ev = regime_resolution_ev
+        robust = number(robust_net_usdc)
+        bid = ask = bid_size = ask_size = None
+        bid_depth = ask_depth = None
+        if quote_ctx is not None:
+            quote = getattr(quote_ctx, "quote", None)
+            if quote:
+                bid, ask = number(quote[0]), number(quote[1])
+            bid_depth, ask_depth = number(getattr(quote_ctx, "bid_depth", None)), number(getattr(quote_ctx, "ask_depth", None))
+            for attribute, field in (("bid_levels", "bid"), ("ask_levels", "ask")):
+                levels = getattr(quote_ctx, attribute, None) or []
+                if levels:
+                    first = levels[0]
+                    try:
+                        size = getattr(first, "size", None)
+                        size = size() if callable(size) else (size if size is not None else first[1])
+                    except Exception:
+                        size = None
+                    if field == "bid": bid_size = number(size)
+                    else: ask_size = number(size)
+        fee_usdc = fee_ps * quantity if fee_ps is not None and quantity is not None else None
+        penalty_ps = exec_penalty / quantity if exec_penalty is not None and quantity else None
+        penalty_usdc = exec_penalty
+        if regime_resolution_ev is None:
+            resolution_ev = quantity * (probability - price) if quantity is not None and probability is not None and price is not None else None
+        weekday_weekend, hour_block = classify_time_et(now_ts)
+        side_for_inst = getattr(self, "_side_for_instrument_id", None)
+        try:
+            outcome_side = str(getattr(side_for_inst(inst_id), "value", "") or "").upper() or None if callable(side_for_inst) else None
+        except Exception:
+            outcome_side = None
+        top_depth = ask_size if ask_size is not None else ask_depth
+        depth_adequate = top_depth >= quantity if top_depth is not None and quantity is not None else None
+        edge_for_shadow = directional_edge_ps
+        if edge_for_shadow is None and probability is not None and price is not None:
+            edge_for_shadow = probability - price - (fee_ps or 0.0) - (penalty_ps or 0.0)
+        labels = build_shadow_labels(edge_ps=edge_for_shadow, robust_net_usdc=robust,
+                                     fair=probability, entry_price=price, abs_distance_bps=abs_bps,
+                                     safety_sigma=sigma_payload["safety_sigma"],
+                                     crossings_last_120s=crossings.get("crossings_last_120s"),
+                                     weekend=weekday_weekend == "weekend", depth_adequate=depth_adequate)
+        if hour_block == "06-12": labels["shadow_labels"].append("SHADOW_ET_06_12")
+        plan_notional = price * quantity if price is not None and quantity is not None else None
+        actual_multiplier = number(desired.get("size_multiplier")) if isinstance(desired, dict) else None
+        return {
+            "candidate_id": candidate_id, "event_semantics": "ENTRY_RESEARCH_SNAPSHOT",
+            "event_ts": now_ts, "slug": slug, "instrument_id": str(inst_id), "side": str(side).upper(),
+            "outcome_side": outcome_side,
+            "market_start_ts": start_ts, "market_end_ts": end_ts, "time_left_sec": time_left,
+            "market_age_sec": market_age, "weekday_weekend": weekday_weekend, "hour_block_et": hour_block,
+            "official_strike": strike_value, "strike_source": strike_source if strike_valid else None,
+            "strike_status": strike_status, "strike_age_sec": age_strike,
+            "strike_age_unavailable_reason": None if age_strike is not None else "strike_source_observation_timestamp_unavailable",
+            "current_reference_spot": spot, "spot_source": spot_source or None, "spot_age_sec": spot_age,
+            "signed_distance_usd": signed_usd, "abs_distance_usd": abs_usd,
+            "signed_distance_bps": signed_bps, "abs_distance_bps": abs_bps, "current_leader": leader,
+            **sigma_payload, **crossings,
+            "signal_score": number(getattr(self, "side_decision_score", None)),
+            "estimated_probability": probability,
+            "probability_source": (
+                "settled_score_regime_calibration" if economics_components.get("regime_economics_applied")
+                else f"{str(getattr(self, 'maker_fair_pricer_mode', 'unknown'))}_fair_model"
+            ) if probability is not None else None,
+            "fair_probability": probability, "entry_price": price,
+            "entry_price_source": "maker_quote_plan" if price is not None else None,
+            "best_bid": bid, "best_ask": ask, "spread": ask - bid if ask is not None and bid is not None else None,
+            "top_ask_size": ask_size, "top_bid_size": bid_size,
+            "nearby_ask_depth": ask_depth, "nearby_bid_depth": bid_depth,
+            "fee_per_share": fee_ps, "fee_usdc": fee_usdc,
+            "execution_penalty_per_share": penalty_ps, "execution_penalty_usdc": penalty_usdc,
+            "resolution_ev_usdc": resolution_ev,
+            "resolution_ev_basis": "strong_directional_regime_calibrated_after_fee" if regime_resolution_ev is not None else "qty_times_model_fair_minus_candidate_price_before_costs",
+            "robust_net_usdc": robust,
+            "directional_edge_ps": edge_for_shadow, "expected_net_usdc": expected_net,
+            "planned_quantity": quantity, "planned_notional": plan_notional,
+            "final_planned_quantity": quantity, "final_notional": plan_notional,
+            "actual_size_multiplier": actual_multiplier,
+            **labels,
+        }
+
     def _log_fast_follow_economics_block_throttled(
         self, *, instrument_id, reason: str, message: str, now_ts: float | None = None,
     ) -> None:
@@ -1763,6 +1947,7 @@ class IntegratedBTCStrategy(
         fee_per_share: Any = None,
         planned_quantity: Any = None,
         time_left_sec: Optional[float] = None,
+        candidate_context: Optional[dict[str, Any]] = None,
     ) -> None:
         """Record the existing BUY decision path without changing its outcome."""
         if side != "buy" or not self.trade_db:
@@ -1820,6 +2005,25 @@ class IntegratedBTCStrategy(
             return
         self._last_entry_decision_trace_signature_by_inst[inst_key] = signature
         self._last_entry_decision_trace_ts_by_inst[inst_key] = now_ts
+        candidate_context = candidate_context if isinstance(candidate_context, dict) else {}
+        candidate_id = f"{payload['slug']}|{inst_key}|{int(float(now_ts) * 1_000_000)}"
+        desired = candidate_context.get("desired_entry")
+        if isinstance(desired, dict):
+            desired["research_candidate_id"] = candidate_id
+        try:
+            payload["research_snapshot"] = self._build_live_entry_research_snapshot(
+                now_ts=float(now_ts), inst_id=inst_id, side=side, fair=fair, entry_price=entry_price,
+                robust_net_usdc=robust_net_usdc, candidate_context=candidate_context,
+                candidate_id=candidate_id,
+            )
+        except Exception as exc:
+            # Research serialization must not interrupt a live quote cycle.
+            logger.debug(f"Live entry research snapshot unavailable: {type(exc).__name__}")
+            payload["research_snapshot"] = {
+                "candidate_id": candidate_id,
+                "event_semantics": "ENTRY_RESEARCH_SNAPSHOT",
+                "snapshot_unavailable_reason": type(exc).__name__,
+            }
         self._db_strategy_event("ENTRY_DECISION_TRACE", payload)
 
     async def _evaluate_quote_targets(
@@ -2414,6 +2618,12 @@ class IntegratedBTCStrategy(
                         fee_per_share=planned_fee_ps,
                         planned_quantity=(quote_plan.quantity if quote_plan is not None else None),
                         time_left_sec=time_left_sec_global,
+                        candidate_context={
+                            "quote_context": quote_ctx,
+                            "quote_data": quote_data,
+                            "time_left_sec": time_left_sec_global,
+                            "candidate_allowed": False,
+                        },
                     )
                     self._db_buy_path_diagnostic(
                         event_type=buy_entry_eval.event_type,
@@ -3317,6 +3527,13 @@ class IntegratedBTCStrategy(
                         fee_per_share=desired_entry.get("fee_ps"),
                         planned_quantity=desired_entry.get("planned_quantity"),
                         time_left_sec=time_left_sec_global,
+                        candidate_context={
+                            "quote_context": quote_ctx,
+                            "quote_data": quote_data,
+                            "desired_entry": desired_entry,
+                            "time_left_sec": time_left_sec_global,
+                            "candidate_allowed": bool(desired_entry.get("should_quote", False)),
+                        },
                     )
                 desired_quotes[order_key] = desired_entry
 
