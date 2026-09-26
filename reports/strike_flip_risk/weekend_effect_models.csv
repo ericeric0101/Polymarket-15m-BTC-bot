@@ -1,0 +1,11 @@
+model,n,outcome,term,coefficient,odds_ratio,ci_low,ci_high,weekend_or_shrinkage,warning
+weekend_only,198,flip_after_time,intercept,-2.586689366116332,0.07526881554700296,-3.354873874999999,-1.8185048572326652,,exploratory logistic regression; approximate Wald CI
+weekend_only,198,flip_after_time,weekend,-0.14333971625665629,0.866459668456901,-1.271227221484165,0.9845477889708523,-1.7886168738207577,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,intercept,-3.7541862072919816,0.02341950147595801,-5.199804489430448,-2.3085679251535156,,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,weekend,-0.3997195514419913,0.6705080626892217,-1.663760762282052,0.8643216593980694,-1.7886168738207577,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,abs_distance_bps,-0.43155242403679633,0.649500012233129,-2.4422615487946557,1.5791567007210632,,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,safety_sigma,-1.8666041026227311,0.15464793964708565,-3.9911923304999135,0.257984125254451,,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,crossings_prior_5m,0.14468187865416568,1.1556718678941782,-0.32011801639375137,0.6094817737020828,,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,hour_06_12,-0.030483441985703692,0.9699764928188782,-0.7871859419132631,0.7262190579418556,,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,hour_12_18,0.22372893080602843,1.2507319385747877,-0.4362026345916905,0.8836604962037473,,exploratory logistic regression; approximate Wald CI
+adjusted,198,flip_after_time,hour_18_24,-0.4025118922833942,0.6686383872416883,-1.4376980129173746,0.6326742283505864,,exploratory logistic regression; approximate Wald CI
