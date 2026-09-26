@@ -1,10 +1,21 @@
 # Polymarket BTC 15-Minute Trading Bot — Current Authority
 
-> Current audit baseline: branch `codex/db-resilience-and-stoploss-priority`,
-> repository HEAD `b204372` plus explicitly tracked working-tree changes.
-> This document is the authority for the current implementation and known
-> operational debts; historical documents remain evidence until cleanup is
-> approved and completed.
+> Operational implementation baseline: branch `codex/db-resilience-and-stoploss-priority`,
+> repository snapshot `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`. This commit
+> added historical-research code, tests, and reports; it did not change live
+> strategy behavior or configuration. The current worktree additionally
+> contains an uncommitted, explicitly approved 2026-09-26 change opening new
+> BUY entries on all seven Taipei calendar days; fast-follow risk limits
+> remain bucketed by Taipei calendar date. Other operational statements
+> describe the implementation baseline at the cited snapshot; entries with
+> explicit historical dates remain attributable to those dates and are not
+> implied to have originated in this commit.
+> Research evidence baseline: `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`,
+> including the reproducible outputs under
+> `reports/unified_strategy_research/`. This document is the single authority
+> for current implementation interpretation, research conclusions, approved
+> next evidence, and known operational debts; historical documents remain
+> evidence until cleanup is approved and completed.
 
 ## Audit scope and safety status
 
@@ -116,7 +127,7 @@
   `source_observed_ts`, and `source_age_sec`; `fast_follow_source_stale` cannot
   fall back to a recently-created cached forecast.
 - Runtime journal health is checked again before every fast-follow entry,
-  including reuse of an already-loaded Taipei weekday risk-day cache; a cached day
+  including reuse of an already-loaded Taipei calendar-day risk cache; a cached day
   can never bypass the BUY gate. The pending fast-follow reservation must be
   persisted successfully and leave the journal healthy before its FOK is sent.
   A persistence failure (explicit false result or exception, including an
@@ -251,6 +262,206 @@
 - Absolute-breaker audit metadata records the actual `$2.00` threshold and
   zero additional stop-loss confirmation cycles; it no longer falls back to
   the unrelated `$0.50` ordinary stop-loss threshold.
+
+## Historical strategy evidence — unified BTC 15m research (2026-09-26)
+
+This is the canonical interpretation of the current historical strategy
+evidence. The detailed reproducible report is
+[`reports/unified_strategy_research/summary.md`](reports/unified_strategy_research/summary.md).
+The CSVs in that directory are supporting evidence, not policy authority.
+The research baseline is commit
+`d8b6e29572a27807bfd87dfbf4e356dccafa08b8`.
+
+### Dataset and evidence limits
+
+- Study range: 2026-07-27 through 2026-09-20, using Eastern Time for market
+  stratification. The public sample contains 200 BTC 15-minute markets (100
+  weekdays and 100 weekends); Gamma resolved all 200. The BTC reference is
+  80,640 Binance BTCUSDT one-minute OHLCV candles.
+- Historical Polymarket entry is proxied by public trade prints / post-signal
+  VWAP. Trade prints are not executable ask quotes. Historical BBO and L2 are
+  unavailable, so actual fills, spread, depth, market impact, and executable
+  slippage cannot be verified. Backtest PnL is research evidence, not verified
+  executable live PnL.
+- Binance one-minute candles do not reproduce Chainlink 60-second TWAP or
+  second-level live indicators. Empty public API results are not treated as
+  zero activity. The public sample is stratified, not a census of every market.
+- The local journal has no weekend fills in this sample. Only one stop-loss
+  trade has complete external winner and token-side mapping for a hold-to-
+  settlement counterfactual; neither fact supports a broad policy conclusion.
+
+### Simple trend-hold baseline
+
+The canonical research baseline is a 180-second observation, 5 bps BTC move
+threshold, five-second trade-print VWAP entry proxy, `$10` notional, hold to
+settlement, and a 1% notional fee stress scenario:
+
+| Partition | N | Win rate | Mean entry | Edge/share | Net PnL | ROI |
+|---|---:|---:|---:|---:|---:|---:|
+| All sample | 73 | 76.71% | 0.7485 | +0.0186 | +$6.78 | +0.93% |
+| Development | 44 | 77.27% | 0.7584 | — | +$2.90 | +0.66% |
+| Holdout | 29 | 75.86% | 0.7336 | — | +$3.88 | +1.34% |
+
+The all-sample profit factor is approximately 1.04. Development and holdout
+point estimates are positive, but the date-block bootstrap confidence interval
+crosses zero. This is suggestive positive-edge evidence, **not a robustly
+established edge**.
+
+### Observation windows and trend confirmation economics
+
+The primary five-bps comparison uses the same entry proxy and fee-stress
+assumption:
+
+| Observation | N | Win rate | Mean entry | Net PnL | ROI |
+|---:|---:|---:|---:|---:|---:|
+| 60 sec | 45 | 73.33% | 0.6880 | +$25.65 | +5.70% |
+| 120 sec | 60 | 75.00% | 0.7250 | +$20.93 | +3.49% |
+| 180 sec | 73 | 76.71% | 0.7485 | +$6.78 | +0.93% |
+| 240 sec | 78 | 78.21% | 0.7644 | +$13.74 | +1.76% |
+| 300 sec | 91 | 76.92% | 0.7917 | -$47.10 | -5.18% |
+
+The cross-period evidence is unstable: 60 seconds was negative in holdout;
+240 seconds was negative in development but strongly positive in holdout;
+180 seconds was positive in both partitions but thin; 300 seconds was negative
+overall. No observation window has sufficient cross-period evidence to justify
+changing the live first-entry warm-up.
+
+The key economic finding is **not “wait longer.”** More trend confirmation can
+improve directional accuracy while the Polymarket contract price rises faster
+than the probability of winning:
+
+| 180-sec threshold | N | Win rate | Mean entry | Net PnL | ROI |
+|---:|---:|---:|---:|---:|---:|
+| 0 bps | 169 | 71.60% | 0.6569 | +$171.54 | +10.15% |
+| 2 bps | 124 | 74.19% | 0.7038 | +$58.24 | +4.70% |
+| 5 bps | 73 | 76.71% | 0.7485 | +$6.78 | +0.93% |
+| 10 bps | 34 | 73.53% | 0.7811 | -$27.45 | -8.07% |
+| 15 bps | 13 | 84.62% | 0.8271 | +$1.46 | +1.12% |
+| 20 bps | 8 | 75.00% | 0.8312 | -$9.64 | -12.05% |
+
+The 0-bps result is promising research evidence, **not authorization to use a
+zero-bps live threshold**; its holdout uncertainty remains material. Future
+research should optimize price-adjusted probability edge—estimated probability
+of winning minus executable contract price and expected execution/fee cost—
+out of sample, rather than raw direction accuracy.
+
+### Entry-price, trend, and weekday/weekend evidence
+
+Entry price can overwhelm direction accuracy. Descriptive buckets include
+0.60–0.65 (N=8, 75% wins, +16.1% ROI), 0.70–0.75 (N=16, 81.25% wins,
++10.95% ROI), 0.75–0.80 (N=17, 70.59% wins, -9.97% ROI), 0.80–0.85
+(N=12, 91.67% wins, +10.34% ROI), and 0.85–0.90 (N=4, 75% wins, -14.35%
+ROI). These sparse buckets do not establish live price thresholds. High
+accuracy may still be negative EV when the contract is expensive.
+
+Trend-strength buckets also do not support “stronger BTC trend = better
+trade”: 5–10 bps had N=39, 79.49% wins, mean entry about 0.7201 and +8.78%
+ROI; 10–15 bps had N=21, 66.67% wins and -13.77% ROI; 15–20 bps had N=5
+and +22.20% ROI; above 20 bps had N=8 and -12.05% ROI. Small samples and
+late/crowded entries make these descriptive only.
+
+For the 180-second / 5-bps research strategy, weekday results were N=46,
+80.43% wins, mean entry 0.7560, edge/share +0.0484, +$23.46 net and +5.10%
+ROI. Weekend results were N=27, 70.37% wins, mean entry 0.7358, edge/share
+-0.0321, -$16.68 net and -6.18% ROI. This is a research hypothesis, not enough
+evidence for a weekend live veto. One possible explanation is less reliable
+early trend continuation on weekends; larger weekend samples are required.
+
+In the 200-market public sample, weekday mean trade count was about 928.8
+versus 851.9 on weekends; share volume was about 27,185 versus 23,134. Overall
+confidence intervals include zero. An exploratory ET 06–12 slice showed lower
+weekend activity (trade count about 793.56 vs 1,000.16, p≈0.0265; volume about
+20,038.73 vs 27,444.97 shares, p≈0.0065), but multiple time slices make this
+hypothesis-generating, not a deployment rule.
+
+Activity also appears lifecycle-dependent. In the first five minutes (T-15m
+to T-10m), weekday trade count/volume were about 341.15 / 7,698.57 shares
+versus weekend 248.92 / 5,506.94 (permutation p≈0.0005). Late activity did not
+follow the same pattern: T-60s to T-30s trade count was about 25.63 weekday vs
+39.64 weekend; T-30s to T-15s was 6.72 vs 12.63; last-15-second USDC volume
+was about 45.83 vs 136.92 (p≈0.011). This suggests weekend activity may be
+more back-loaded, but is not causal evidence.
+
+### Controls, disagreement, and liquidity-regime caveat
+
+The 180-second BTC direction control had 67.74% wins, mean entry 0.6523,
++$18.56 net and +2.99% ROI. The Polymarket leader control had 68.25% wins,
+mean entry 0.6555, +$25.07 net and +3.98% ROI. Current evidence does not
+establish stable incremental alpha from BTC trend over direction already
+priced by Polymarket. Future research must compare BTC and Polymarket
+agreement/disagreement instead of assuming BTC direction is the source of
+edge.
+
+Descriptive agreement/disagreement results were: agreement N=165, about
+72.73% accuracy; disagreement N=25, BTC about 56% and market leader about
+44%. The disagreement sample is very small and hypothesis-only. Its
+asymmetry (BTC DOWN / market UP: N=15, BTC 40% vs leader 60%; BTC UP / market
+DOWN: N=10, BTC 80% vs leader 20%) does not authorize an UP/DOWN-specific live
+rule. Future analysis must separate direction, agreement state, weekday/weekend,
+and ET hour.
+
+The whole-market composite liquidity regime is descriptive only and is not
+eligible as a predictive/live feature: it includes information from after a
+candidate entry and can leak future market activity. The observed low-liquidity
+bucket win rate (24/24) must **not** be interpreted as low liquidity being
+favorable. Predictive liquidity features must use only pre-entry information.
+
+The only complete stop-loss counterfactual is N=1: actual exit PnL about
+-$3.4346, hypothetical hold gross PnL about -$3.5928, hold-minus-actual
+-$0.1582. This is insufficient evidence and must not strengthen or weaken live
+stop-loss behavior.
+
+### Research-gated live parameters — no change authorized by research alone
+
+Evidence in research baseline `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`
+does not authorize changing any of these live controls:
+
+- `FIRST_ENTRY_MAX_TIME_LEFT_SEC=780` (approximately T+120 seconds).
+- SignalEngine thresholds or entry trend thresholds.
+- A liquidity-regime gate. A weekend hard veto is not supported by this
+  research and, following explicit operator approval on 2026-09-26, weekends
+  are open for entries.
+- UP/DOWN asymmetric entry gates.
+- Stop-loss removal or relaxation.
+- `HOLD_TO_REDEEM`, `TAIL_PROTECT_TP`, protective invalidation/stop-loss
+  behavior, fast-follow policy, or one-entry-per-market ownership.
+- Existing economics gates.
+
+The research commit itself changed none of these settings or behaviors. The
+separate operator-approved weekend opening is recorded below; other future
+live changes require separate approval and evidence that reflects executable
+prices/costs, not just resolved direction.
+
+### Next evidence requirements
+
+1. **Scale public historical research:** target 1,000–3,000 BTC 15-minute
+   markets over 3–6 months, preferably the full universe when API/cache limits
+   permit, including multiple complete weekends.
+2. **Collect forward executable data:** at each research candidate record
+   timestamp, market age, BTC return/direction, signal side, UP/DOWN BBO,
+   spread, top sizes, depth near executable price, quote age, pre-entry volume
+   and trade activity, and eventual settlement.
+3. **Run shadow-only candidate comparisons** for T+60/120/180 at 0 bps,
+   T+120/180 at 2 bps, and T+180 at 5 bps. Record signal, executable ask,
+   depth, 1/5/10/30-second executable markout, and settlement. Shadow must
+   never submit/cancel orders or claim entry ownership.
+4. **Build pre-entry-only liquidity features**, when available: activity and
+   volume since open and over the last 30 seconds, maximum pre-entry trade
+   gap, recent trade-size distribution, pre-entry price jumps, BBO/spread,
+   top/executable depth, and quote age. Do not use whole-market/future data.
+5. **Test incremental information:** BTC vs Polymarket agreement and
+   disagreement, UP vs DOWN, weekday/weekend, and ET hour blocks, with
+   chronological out-of-sample evaluation and uncertainty intervals.
+6. **Accumulate naturally occurring local evidence:** research targets are
+   200–300 independent shadow/live entry opportunities, at least 100 actual
+   fills if they occur naturally, multiple complete weekends, and enough
+   naturally occurring invalidation/stop-loss outcomes. Never create trades to
+   meet a sample target.
+
+The future research objective is out-of-sample expected value:
+estimated resolution probability minus executable contract price and expected
+execution/fee cost. This statement defines a research objective only; it does
+not define a new live formula.
 
 ## 1. End-to-end trading lifecycle
 
@@ -640,7 +851,8 @@ only as regression evidence; they are not a second roadmap.
 walk-forward report were deployed. The 48h-versus-168h model selection remains
 pending. At that time the operator approved restricting entries to Taipei
 weekday night sessions; this entry-session policy was superseded on 2026-09-25
-by the weekday-all-hours policy documented below.
+by the weekday-all-hours policy, then superseded on 2026-09-26 by the
+all-days policy documented below.
 `scripts/market_regime_report.py` admits only current
 `markout_context_schema_version=2` real maker-BUY observations and takes one
 first fill per market/horizon. It now evaluates each candidate penalty using
@@ -684,14 +896,15 @@ live policy.
   redemption continue normally. This is not an inference that a regime model
   is proven; it is an operator-approved safety boundary based on realized
   operation and avoids trapping existing inventory by shutting the bot down.
-- **Current entry-session policy (2026-09-25):** new BUYs are allowed at all
-  hours on Monday-Friday in `Asia/Taipei` and blocked for the full Saturday
-  and Sunday local calendar days. This applies consistently to normal maker
-  and Outcome fast-follow entries. SELL, stop-loss, inventory recovery,
-  cancellation and redemption remain available on weekends. The fast-follow
-  max-entry and max-loss settings retain their existing limits but are now
-  bucketed by Taipei weekday calendar date; legacy journal/dashboard field
-  `night_key` is preserved for compatibility and `risk_day_key` labels status.
+- **Current entry-session policy (updated 2026-09-26):** following explicit
+  operator approval, new BUYs are allowed at all hours on all seven days in
+  `Asia/Taipei`. This applies consistently to normal maker and Outcome
+  fast-follow entries. All other entry gates remain active; SELL, stop-loss,
+  inventory recovery, cancellation and redemption remain available as before.
+  The fast-follow max-entry and max-loss settings retain their existing limits
+  but are bucketed by Taipei calendar date, including weekends; legacy
+  journal/dashboard field `night_key` is preserved for compatibility and
+  `risk_day_key` labels status.
   Markout calibration continues using its historical weekday-night cohort; it
   is separate from the live entry-session permission.
 - **Approved live calibration (2026-08-29):** retain the conservative 168h
@@ -1330,7 +1543,7 @@ pending-cancel state. This prevents the unsafe sequence observed on 2026-09-10:
 stale old SELL → global kill → Outcome BUY → no current-token TP refresh.
 
 **Fast-follow quota visibility:** Every periodic `STATUS` line now includes
-`fast_follow=<filled>/<max> pending=<n> risk_day=<Taipei-weekday-key>`. `filled`
+`fast_follow=<filled>/<max> pending=<n> risk_day=<Taipei-calendar-date>`. `filled`
 counts only venue-confirmed BUY fills; `pending` is a temporarily reserved FOK
 slot and does not consume the permanent quota unless it fills. The same fields
 are retained in `FAST_FOLLOW_RISK_STATE` for historical audit.
@@ -1343,8 +1556,8 @@ fall below five sellable shares. This prevents `invalid amounts` rejections
 such as a $0.75 price times 5.5 shares producing a $4.125 maker amount. Risk
 state now persists `open_position_instruments`, so a restarted process restores
 fast-follow SELL ownership and credits the eventual realised PnL to the same
-Taipei weekday risk-day loss budget. With these two repairs, the fast-follow cap is
-increased from 10 to **15 completed BUY fills** per risk day. The 10/5.5
+Taipei calendar-day risk bucket. With these two repairs, the fast-follow cap
+is increased from 10 to **15 completed BUY fills** per risk day. The 10/5.5
 share sizing, one BUY per market, $0.90 entry-price ceiling, FOK behavior, and
 $5 realised-loss cap are unchanged.
 

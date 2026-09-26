@@ -26,34 +26,27 @@ def test_weeknight_entry_session_boundaries_in_taipei_time():
     )  # Sunday 02:00 Taipei, continuation of Saturday night.
 
 
-def test_new_buy_session_decision_blocks_taipei_weekend_after_enforcement():
+def test_new_buy_session_decision_allows_taipei_weekend_after_policy_change():
     decision = new_buy_session_decision(datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc).timestamp())
 
-    assert decision.allowed is False
-    assert decision.reason == "taipei_weekend"
+    assert decision.allowed is True
+    assert decision.reason == "taipei_all_days_entry_session"
 
 
-def test_live_entry_session_allows_every_weekday_hour_but_blocks_all_weekend_hours():
-    # Monday 00:30 and 10:00 Taipei are both open; Friday 23:30 is open.
+def test_live_entry_session_allows_every_day_and_hour():
+    # Weekday and weekend hours are all open for new entries.
     for local in (
         datetime(2026, 8, 31, 0, 30, tzinfo=ZoneInfo("Asia/Taipei")),
         datetime(2026, 8, 31, 10, 0, tzinfo=ZoneInfo("Asia/Taipei")),
         datetime(2026, 9, 4, 23, 30, tzinfo=ZoneInfo("Asia/Taipei")),
-    ):
-        decision = new_buy_session_decision(local.timestamp())
-        assert decision.allowed is True
-        assert decision.reason == "taipei_weekday_entry_session"
-
-    # Saturday/Sunday are closed throughout, including the old Sunday-morning loophole.
-    for local in (
         datetime(2026, 9, 5, 2, 0, tzinfo=ZoneInfo("Asia/Taipei")),
         datetime(2026, 9, 5, 10, 0, tzinfo=ZoneInfo("Asia/Taipei")),
         datetime(2026, 9, 6, 2, 0, tzinfo=ZoneInfo("Asia/Taipei")),
         datetime(2026, 9, 6, 23, 30, tzinfo=ZoneInfo("Asia/Taipei")),
     ):
         decision = new_buy_session_decision(local.timestamp())
-        assert decision.allowed is False
-        assert decision.reason == "taipei_weekend"
+        assert decision.allowed is True
+        assert decision.reason == "taipei_all_days_entry_session"
 
 
 def test_historical_weeknight_classifier_stays_unchanged_for_markout_calibration():

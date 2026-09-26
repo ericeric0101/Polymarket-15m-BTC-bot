@@ -1,4 +1,4 @@
-"""Taipei weekday/weekend policy for opening new BUY positions.
+"""Taipei calendar policy for opening new BUY positions.
 
 This deliberately controls entries only.  The process stays alive outside the
 entry session so it can cancel orders, exit inventory, reconcile and redeem.
@@ -47,6 +47,4 @@ def new_buy_session_decision(now_ts: float) -> EntrySessionDecision:
     local = when.astimezone(TAIPEI)
     if when < ENTRY_SESSION_ENFORCED_FROM_UTC:
         return EntrySessionDecision(True, "entry_session_policy_not_yet_enforced", local)
-    if is_taipei_weekday_entry_session(when):
-        return EntrySessionDecision(True, "taipei_weekday_entry_session", local)
-    return EntrySessionDecision(False, "taipei_weekend", local)
+    return EntrySessionDecision(True, "taipei_all_days_entry_session", local)

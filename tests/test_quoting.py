@@ -79,11 +79,11 @@ def test_legacy_directional_edge_gate_is_telemetry_not_a_buy_veto():
 @pytest.mark.parametrize(
     ("local_time", "buy_allowed", "buy_block_reason"),
     [
-        (datetime(2026, 8, 29, 10, 0), False, "entry_session_blocked_taipei_weekend"),
+        (datetime(2026, 8, 29, 10, 0), True, None),
         (datetime(2026, 8, 31, 10, 0), True, None),
     ],
 )
-def test_quote_plan_guards_blocks_only_weekend_buys_and_keeps_sell_allowed(
+def test_quote_plan_guards_allows_weekend_buys_and_keeps_sell_available(
     local_time, buy_allowed, buy_block_reason,
 ):
     side_plan = {
@@ -97,7 +97,7 @@ def test_quote_plan_guards_blocks_only_weekend_buys_and_keeps_sell_allowed(
         inventory_delta_shares=Decimal("2"),
         early_sell_only_sec=0.0,
         time_left_sec_global=600.0,
-        # Weekend is closed, but weekday daytime is now open.
+        # Weekend entry is open; all other quote-plan guards still apply.
         now_ts=local_time.replace(tzinfo=ZoneInfo("Asia/Taipei")).timestamp(),
         buy_cooldown_until_ts=0.0,
         momentum_buy_filter_pct=Decimal("0"),

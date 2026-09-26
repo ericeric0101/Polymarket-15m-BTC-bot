@@ -29,16 +29,16 @@ class FastFollowLiveConfig:
     max_entries_per_night: int = 15
     max_loss_usdc_per_night: Decimal = Decimal("5")
     # Config names remain backward-compatible; these limits are applied to
-    # the current Taipei weekday risk-day bucket, not a clock-time night.
+    # the current Taipei calendar-day risk bucket, not a clock-time night.
     l2_depth_buffer: Decimal = Decimal("1.20")
     l2_max_age_sec: float = 1.0
     failed_entry_cooldown_sec: float = 10.0
 
 
-def _night_key(now_ts: float) -> str | None:
-    """Return the legacy-named risk bucket: current Taipei weekday date."""
+def _night_key(now_ts: float) -> str:
+    """Return the legacy-named risk bucket: current Taipei calendar date."""
     local = datetime.fromtimestamp(now_ts, tz=TAIPEI)
-    return local.date().isoformat() if local.weekday() < 5 else None
+    return local.date().isoformat()
 
 
 def _instrument_tick(instrument) -> Decimal:
@@ -244,15 +244,6 @@ class OutcomeFastFollowLive:
         """Return today's live quota state (legacy method name retained)."""
         now = time.time() if now_ts is None else float(now_ts)
         night = _night_key(now)
-        if night is None:
-            return {
-                "night_key": None,
-                "risk_day_key": None,
-                "filled_entries": 0,
-                "pending_entries": 0,
-                "max_entries": self.config.max_entries_per_night,
-                "realized_pnl_usdc": 0.0,
-            }
         if not self._ensure_night_loaded(night):
             return {
                 "night_key": night, "risk_day_key": night,
@@ -261,7 +252,7 @@ class OutcomeFastFollowLive:
             }
         return {
             # Keep `night_key` for journal/dashboard compatibility. The key is
-            # now one risk bucket per Taiwan weekday calendar date.
+            # now one risk bucket per Taiwan calendar date.
             "night_key": night,
             "risk_day_key": night,
             "filled_entries": self._night_filled_entries.get(night, 0),
@@ -555,9 +546,6 @@ class OutcomeFastFollowLive:
             self._record_blocked(candidate, "failed_fast_follow_cooldown")
             return False
         night = _night_key(now_ts)
-        if night is None:
-            self._record_blocked(candidate, "outside_taipei_weekday_session")
-            return False
         if not self._ensure_night_loaded(night):
             self._record_blocked(candidate, "trade_journal_unhealthy", reason_detail="night_risk_query_failed")
             return False
