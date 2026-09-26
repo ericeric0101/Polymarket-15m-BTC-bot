@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import random
 import sqlite3
 import sys
 import time
@@ -13,11 +14,13 @@ import socket
 from dataclasses import dataclass
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
+from itertools import product
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -180,6 +183,100 @@ def _market_weekend(slug: str, timezone_name: str) -> bool | None:
         return classify_weekend(int(str(slug).rsplit("-", 1)[-1]), timezone_name)
     except (TypeError, ValueError):
         return None
+
+
+def _stratified_public_market_sample(
+    start: datetime, end: datetime, *, timezone_name: str,
+    weekday_count: int, weekend_count: int, market_prefix: str = "btc-updown-15m-",
+) -> list[dict[str, Any]]:
+    """Sample 15-minute market slots across the whole requested window, not only journal slugs."""
+    if weekday_count < 0 or weekend_count < 0:
+        raise ValueError("public sample sizes cannot be negative")
+    if weekday_count == 0 and weekend_count == 0:
+        return []
+    tz = ZoneInfo(timezone_name)
+    start_utc = start.replace(tzinfo=timezone.utc) if start.tzinfo is None else start.astimezone(timezone.utc)
+    end_utc = end.replace(tzinfo=timezone.utc) if end.tzinfo is None else end.astimezone(timezone.utc)
+    if end_utc < start_utc:
+        raise ValueError("public study end must not precede start")
+    first_epoch = ((int(start_utc.timestamp()) + 899) // 900) * 900
+    last_epoch = int(end_utc.timestamp()) // 900 * 900
+    slots_by_group_day: dict[str, dict[Any, dict[int, list[int]]]] = {
+        "weekday": defaultdict(lambda: defaultdict(list)),
+        "weekend": defaultdict(lambda: defaultdict(list)),
+    }
+    for epoch in range(first_epoch, last_epoch + 1, 900):
+        local = datetime.fromtimestamp(epoch, tz)
+        group = "weekend" if local.weekday() >= 5 else "weekday"
+        slots_by_group_day[group][local.date()][local.hour // 6].append(epoch)
+
+    def evenly_spaced_indices(size: int, count: int) -> list[int]:
+        if count <= 0:
+            return []
+        return [min(size - 1, int((index + 0.5) * size / count)) for index in range(count)]
+
+    result: list[dict[str, Any]] = []
+    start_local = start_utc.astimezone(tz)
+    week_anchor = start_local.date() - timedelta(days=start_local.weekday())
+    for group, target in (("weekday", weekday_count), ("weekend", weekend_count)):
+        days = sorted(slots_by_group_day[group])
+        if target > sum(len(slots) for bins in slots_by_group_day[group].values() for slots in bins.values()):
+            raise ValueError(f"requested {target} {group} markets, but the date range has too few slots")
+        if target == 0:
+            continue
+        if not days:
+            raise ValueError(f"date range contains no {group} market slots")
+        allocations = {day: 0 for day in days}
+        if target < len(days):
+            for index in evenly_spaced_indices(len(days), target):
+                allocations[days[index]] += 1
+        else:
+            base, extra = divmod(target, len(days))
+            allocations = {day: base for day in days}
+            for index in evenly_spaced_indices(len(days), extra):
+                allocations[days[index]] += 1
+
+        sampled_days = [day for day in days if allocations[day] > 0]
+        day_rank = {day: index for index, day in enumerate(sampled_days)}
+        sampled_bucket_counts = [0, 0, 0, 0]
+        for day in sampled_days:
+            needed = allocations[day]
+            bins = slots_by_group_day[group][day]
+            rotation = day_rank[day] % 4
+            selected_epochs = []
+            per_day_bucket_cap = (needed + 3) // 4
+            used_by_bucket = [0, 0, 0, 0]
+            for _ in range(needed):
+                available = [bucket for bucket in range(4)
+                             if bins.get(bucket) and used_by_bucket[bucket] < per_day_bucket_cap]
+                if not available:
+                    raise ValueError(f"date range has too few 6-hour slots for {group} sample")
+                bucket = min(available, key=lambda value: (
+                    sampled_bucket_counts[value], (value - rotation) % 4,
+                ))
+                candidates = bins[bucket]
+                positions = evenly_spaced_indices(len(candidates), per_day_bucket_cap)
+                selected_epochs.append(candidates[positions[used_by_bucket[bucket]]])
+                used_by_bucket[bucket] += 1
+                sampled_bucket_counts[bucket] += 1
+            for epoch in selected_epochs:
+                local = datetime.fromtimestamp(epoch, tz)
+                week_index = (local.date() - week_anchor).days // 7
+                bucket_start = (local.hour // 6) * 6
+                result.append({
+                    "market_slug": f"{market_prefix}{epoch}",
+                    "market_start_epoch": epoch,
+                    "sample_group": group,
+                    "weekend_et": group == "weekend",
+                    "sample_frame_start": start_local.date().isoformat(),
+                    "sample_frame_end": end_utc.astimezone(tz).date().isoformat(),
+                    "local_date": local.date().isoformat(),
+                    "local_hour": local.hour,
+                    "time_bucket": f"{bucket_start:02d}-{bucket_start + 6:02d}",
+                    "week_index": week_index,
+                })
+    result.sort(key=lambda row: row["market_start_epoch"])
+    return result
 
 
 def _bounds(days: int, start: str | None, end: str | None) -> tuple[datetime, datetime]:
@@ -938,6 +1035,78 @@ def _comparison_rows(markets: list[dict[str, Any]], trades: list[dict[str, Any]]
     return output
 
 
+def _week_blocked_public_comparison(
+    markets: list[dict[str, Any]], *,
+    metrics: tuple[str, ...] = (
+        "public_trade_count", "public_volume_shares", "median_trade_size",
+        "max_no_trade_interval_sec", "realized_volatility",
+    ),
+) -> list[dict[str, Any]]:
+    """Compare equal-weight weekday/weekend means paired by week, reducing within-week dependence."""
+    output = []
+    for metric in metrics:
+        by_day: dict[tuple[int, str, str], list[float]] = defaultdict(list)
+        for row in markets:
+            group = row.get("sample_group")
+            value = _number(row.get(metric))
+            if group not in {"weekday", "weekend"} or value is None:
+                continue
+            try:
+                week = int(row["week_index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            by_day[(week, group, str(row.get("local_date") or ""))].append(value)
+        weekly_days: dict[tuple[int, str], list[float]] = defaultdict(list)
+        for (week, group, _day), values in by_day.items():
+            weekly_days[(week, group)].append(sum(values) / len(values))
+        paired = []
+        for week in sorted({key[0] for key in weekly_days}):
+            weekday_days = weekly_days.get((week, "weekday"), [])
+            weekend_days = weekly_days.get((week, "weekend"), [])
+            if weekday_days and weekend_days:
+                weekday_mean = sum(weekday_days) / len(weekday_days)
+                weekend_mean = sum(weekend_days) / len(weekend_days)
+                paired.append((weekday_mean, weekend_mean, weekend_mean - weekday_mean))
+        n = len(paired)
+        weekday_mean = sum(row[0] for row in paired) / n if n else None
+        weekend_mean = sum(row[1] for row in paired) / n if n else None
+        differences = [row[2] for row in paired]
+        difference = sum(differences) / n if n else None
+        ci = None
+        p_value = None
+        if n:
+            rng = random.Random(20260926)
+            bootstrap = [
+                sum(differences[rng.randrange(n)] for _ in range(n)) / n
+                for _ in range(10000)
+            ]
+            ci = [percentile(bootstrap, .025), percentile(bootstrap, .975)]
+            if n <= 16:
+                sign_patterns = product((-1, 1), repeat=n)
+                extreme = sum(
+                    abs(sum(value * sign for value, sign in zip(differences, signs)) / n)
+                    >= abs(difference) - 1e-12
+                    for signs in sign_patterns
+                )
+                p_value = extreme / (2 ** n)
+            else:
+                extreme = 0
+                for _ in range(10000):
+                    statistic = sum(value * rng.choice((-1, 1)) for value in differences) / n
+                    extreme += abs(statistic) >= abs(difference) - 1e-12
+                p_value = (extreme + 1) / 10001
+        output.append({
+            "metric": metric, "paired_weeks": n,
+            "weekday_weekly_mean": weekday_mean, "weekend_weekly_mean": weekend_mean,
+            "weekend_minus_weekday": difference,
+            "bootstrap_ci95_low": ci[0] if ci else None,
+            "bootstrap_ci95_high": ci[1] if ci else None,
+            "paired_sign_flip_p": p_value,
+            "weekend_lower_weeks": sum(value < 0 for value in differences),
+        })
+    return output
+
+
 def _stratified_rows(markets: list[dict[str, Any]], trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
     scores = [float(row["liquidity_score"]) for row in markets if _number(row.get("liquidity_score")) is not None]
     if not scores:
@@ -1049,7 +1218,8 @@ def _public_diagnostic_row(slug: str, data: dict[str, Any] | None,
 def _summary_md(local: dict[str, Any], markets: list[dict[str, Any]], public_markets: list[dict[str, Any]],
                 public_trades: list[dict[str, Any]], comparisons: list[dict[str, Any]],
                 public_diagnostics: list[dict[str, Any]], warnings: list[dict[str, Any]],
-                timezone_name: str) -> str:
+                timezone_name: str, public_market_sample: list[dict[str, Any]] | None = None,
+                week_blocked_comparisons: list[dict[str, Any]] | None = None) -> str:
     def fmt(value: Any) -> str:
         return "n/a" if value is None else f"{float(value):.4f}"
     weekday = summarize_pnl([row for row in local["trades"] if row.get("weekend_et") is False])
@@ -1060,15 +1230,15 @@ def _summary_md(local: dict[str, Any], markets: list[dict[str, Any]], public_mar
     emergency = summarize_pnl([
         row for row in local["trades"] if "emergency" in str(row.get("exit_reason") or "").lower()
     ])
-    et_weekend_markets = sum(row.get("weekend_et") is True for row in markets)
-    utc_weekend_markets = sum(row.get("weekend_utc") is True for row in markets)
+    et_weekend_markets = sum(row.get("weekend_et") is True for row in local["markets"])
+    utc_weekend_markets = sum(row.get("weekend_utc") is True for row in local["markets"])
     cmp = {row["metric"]: row for row in comparisons}
     counts = lambda field, value: sum(row.get(field) == value for row in public_diagnostics)
     lines = [
         "# 週末 vs 平日：BTC 15 分鐘市場流動性、執行與 PnL", "",
         "## Dataset", "",
         f"- Canonical journal：{local['quality']['order_event_rows']:,} order rows、{local['quality']['strategy_event_rows']:,} strategy rows；{local['quality']['status']}。",
-        f"- Local markets：{len(markets)}；public markets：{sum(row.get('public_status') in {'SUCCESS_PUBLIC_HISTORY', 'PARTIAL_PUBLIC_HISTORY'} for row in public_markets)}；public trades：{len(public_trades):,}。",
+        f"- Market rows：{len(markets)}（local journal markets {len(local['markets'])}；public-history markets {len(public_markets)}）；public trades：{len(public_trades):,}。",
         f"- Journal 實際記錄跨 {local['quality']['observed_utc_dates']} 個 UTC 日期、"
         f"{local['quality']['observed_market_count']} 個 slug；目前市場週末數 ET={et_weekend_markets}、UTC={utc_weekend_markets}。",
         f"- 查詢 window：{local['start'].isoformat()} — {local['end'].isoformat()}。",
@@ -1086,6 +1256,47 @@ def _summary_md(local: dict[str, Any], markets: list[dict[str, Any]], public_mar
         ci = row["bootstrap_ci95"]
         ci_text = f"[{fmt(ci[0])}, {fmt(ci[1])}]" if ci else "n/a"
         lines.append(f"| {metric} | {row['weekday_n']} / {fmt(row['weekday_mean'])} | {row['weekend_n']} / {fmt(row['weekend_mean'])} | {fmt(row['difference'])} | {ci_text} | {fmt(row['permutation_p'])} |")
+    if public_market_sample:
+        weekday_sample = [row for row in public_market_sample if row["sample_group"] == "weekday"]
+        weekend_sample = [row for row in public_market_sample if row["sample_group"] == "weekend"]
+        sample_diag = {row["market_slug"]: row for row in public_diagnostics}
+        def stage_counts(rows: list[dict[str, Any]], field: str) -> str:
+            statuses = [sample_diag.get(row["market_slug"], {}).get(field) for row in rows]
+            success = sum(status in {"success", "partial"} for status in statuses)
+            empty = sum(status == "empty" for status in statuses)
+            other = len(statuses) - success - empty
+            return f"{success}/{empty}/{other}"
+        def gamma_success_count(rows: list[dict[str, Any]]) -> int:
+            return sum(sample_diag.get(row["market_slug"], {}).get("gamma_status") == "success" for row in rows)
+
+        lines.extend([
+            "", "## Public market sample", "",
+            f"- Sample frame：{public_market_sample[0]['sample_frame_start']} 至 {public_market_sample[0]['sample_frame_end']}，時區 {timezone_name}；母體為此期間每 15 分鐘一個預期 BTC market slot，獨立於 local journal。",
+            f"- weekday n={len(weekday_sample)}：Gamma success {gamma_success_count(weekday_sample)}；trades success/empty/other {stage_counts(weekday_sample, 'trade_fetch_status')}；prices success/empty/other {stage_counts(weekday_sample, 'price_fetch_status')}。",
+            f"- weekend n={len(weekend_sample)}：Gamma success {gamma_success_count(weekend_sample)}；trades success/empty/other {stage_counts(weekend_sample, 'trade_fetch_status')}；prices success/empty/other {stage_counts(weekend_sample, 'price_fetch_status')}。",
+            "- 樣本按每個日期、週別及 6 小時時段分層；市場存在性與 identifiers 由 Gamma 驗證。",
+            "- 指標比較只使用取得相應 public history 的市場；未找到市場或 API 失敗的樣本保留在 public_market_sample.csv 診斷，不視為零成交。",
+            "- 每組樣本數低於 30 時結果只作 pilot 描述，不據此判定穩定差異。",
+        ])
+    if week_blocked_comparisons:
+        lines.extend([
+            "", "## Week-blocked sensitivity", "",
+            "| Metric | paired weeks | weekday weekly mean | weekend weekly mean | weekend − weekday | 95% bootstrap CI | paired sign-flip p | weeks weekend lower |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ])
+        for row in week_blocked_comparisons:
+            ci = None if row["bootstrap_ci95_low"] is None else (
+                row["bootstrap_ci95_low"], row["bootstrap_ci95_high"],
+            )
+            ci_text = f"[{fmt(ci[0])}, {fmt(ci[1])}]" if ci else "n/a"
+            lines.append(
+                f"| {row['metric']} | {row['paired_weeks']} | {fmt(row['weekday_weekly_mean'])} | "
+                f"{fmt(row['weekend_weekly_mean'])} | {fmt(row['weekend_minus_weekday'])} | "
+                f"{ci_text} | {fmt(row['paired_sign_flip_p'])} | {row['weekend_lower_weeks']} |"
+            )
+        lines.extend([
+            "", "- This sensitivity analysis first averages markets within each local date, then gives each week equal weight and pairs weekdays against weekends. Its effective sample size is the number of complete weeks; eight weeks still provides limited power.",
+        ])
     lines.extend([
         "", "## PnL and left-tail", "",
         f"- Weekday paired sell trades n={weekday['sample_size']}; total={fmt(weekday['total_pnl'])} USDC; win={fmt(weekday['win_rate'])}; P10/P5/P1={fmt(weekday['pnl_p10'])}/{fmt(weekday['pnl_p5'])}/{fmt(weekday['pnl_p1'])}.",
@@ -1105,7 +1316,7 @@ def _summary_md(local: dict[str, Any], markets: list[dict[str, Any]], public_mar
         "## Interpretation and limitations", "",
         "- Weekend is defined by America/New_York Saturday/Sunday; UTC sensitivity is included per market in market_level.csv.",
         "- Statistical differences are associations, not causal evidence; markets are the resampling/comparison units for public liquidity. Empty weekday/weekend groups mean no difference test is available.",
-        "- weekday_vs_weekend_utc.csv repeats comparisons with UTC Saturday/Sunday to show timezone sensitivity; primary grouping is the requested ET.",
+        "- weekday_vs_weekend_utc.csv repeats comparisons with UTC Saturday/Sunday to show timezone sensitivity; primary grouping is the requested timezone.",
         "- Compare time_to_resolution.csv for settlement windows. Public trade size and local spread are separate metrics.",
         "- Historical L2 is not available in this journal. Historical price/trade feeds do not reconstruct BBO/depth or fill probability; unknown fields stay empty.",
         "- Local depth observations come only from fill-conditioned markout payloads, so they are selected observations, not an unbiased market-time sample.",
@@ -1116,6 +1327,9 @@ def _summary_md(local: dict[str, Any], markets: list[dict[str, Any]], public_mar
         "- weekday_vs_weekend_utc.csv", "- public_fetch_diagnostics.csv",
         "- time_to_resolution.csv", "- parameter_sensitivity.csv", "- liquidity_regime.csv", "",
     ])
+    if public_market_sample:
+        lines.insert(lines.index("- time_to_resolution.csv"), "- public_market_sample.csv")
+        lines.insert(lines.index("- time_to_resolution.csv"), "- weekly_blocked_comparison.csv")
     return "\n".join(lines)
 
 
@@ -1123,15 +1337,34 @@ def generate_report(*, db_path: str, output_dir: str, days: int = 90, timezone_n
                     start: str | None = None, end: str | None = None, cache_dir: str = "data/polymarket_history",
                     offline: bool = False, refresh_public_data: bool = False,
                     max_public_markets: int = 500,
-                    market_prefix: str = "btc-updown-15m-", public_debug: bool = False) -> dict[str, Any]:
+                    market_prefix: str = "btc-updown-15m-", public_debug: bool = False,
+                    public_market_universe: bool = False, public_sample_per_group: int = 50) -> dict[str, Any]:
     local = load_local_journal(
         db_path, days=days, start=start, end=end, timezone_name=timezone_name,
         market_prefix=market_prefix,
     )
-    slugs = sorted({r["market_slug"] for r in local["markets"]
-                    if r.get("market_slug", "").startswith(market_prefix)})
+    local_slugs = sorted({r["market_slug"] for r in local["markets"]
+                          if r.get("market_slug", "").startswith(market_prefix)})
+    public_market_sample: list[dict[str, Any]] = []
+    if public_market_universe:
+        if start is None or end is None:
+            raise ValueError("--public-market-universe requires explicit --start and --end")
+        if public_sample_per_group <= 0:
+            raise ValueError("public sample per group must be greater than zero")
+        if public_sample_per_group * 2 > max_public_markets:
+            raise ValueError("--max-public-markets must cover both requested public sample groups")
+        public_market_sample = _stratified_public_market_sample(
+            local["start"], local["end"], timezone_name=timezone_name,
+            weekday_count=public_sample_per_group, weekend_count=public_sample_per_group,
+            market_prefix=market_prefix,
+        )
+        public_slugs = [row["market_slug"] for row in public_market_sample]
+    else:
+        public_slugs = local_slugs
+    slugs = sorted(set(local_slugs) | set(public_slugs))
+    sample_by_slug = {row["market_slug"]: row for row in public_market_sample}
     public_data, warnings, diagnostics = {}, [], []
-    for index, slug in enumerate(slugs):
+    for index, slug in enumerate(public_slugs):
         cached = None if refresh_public_data else load_public_cache(cache_dir, slug)
         cache_valid = bool(cached and isinstance(cached.get("identity"), dict)
                            and cached.get("status") in {"SUCCESS_PUBLIC_HISTORY", "PARTIAL_PUBLIC_HISTORY"})
@@ -1172,7 +1405,10 @@ def generate_report(*, db_path: str, output_dir: str, days: int = 90, timezone_n
             diagnostic_data = {"identity": _market_identity_from_local(
                 slug, local["identities"].get(slug)
             ).as_dict()}
-        diagnostics.append(_public_diagnostic_row(slug, diagnostic_data, error))
+        diagnostic = _public_diagnostic_row(slug, diagnostic_data, error)
+        if slug in sample_by_slug:
+            diagnostic.update({key: value for key, value in sample_by_slug[slug].items() if key != "market_slug"})
+        diagnostics.append(diagnostic)
     public_markets, public_trades = [], []
     for slug, data in public_data.items():
         market, trades = _public_market_metrics(slug, data, timezone_name)
@@ -1228,7 +1464,14 @@ def generate_report(*, db_path: str, output_dir: str, days: int = 90, timezone_n
             ),
         })
     markets = compute_liquidity_metrics(markets)
+    for market in markets:
+        sample_row = sample_by_slug.get(market.get("market_slug"))
+        if sample_row:
+            market.update({key: value for key, value in sample_row.items() if key != "market_slug"})
     comparisons = _comparison_rows(markets, local["trades"], local["orders"])
+    week_blocked_comparisons = (
+        _week_blocked_public_comparison(markets) if public_market_sample else []
+    )
     utc_comparisons = _comparison_rows(
         markets, local["trades"], local["orders"],
         weekend_field="weekend_utc", timezone_label="UTC",
@@ -1246,6 +1489,14 @@ def generate_report(*, db_path: str, output_dir: str, days: int = 90, timezone_n
     _write_csv(out / "weekday_vs_weekend.csv", comparisons)
     _write_csv(out / "weekday_vs_weekend_utc.csv", utc_comparisons)
     _write_csv(out / "public_fetch_diagnostics.csv", diagnostics)
+    if public_market_sample:
+        _write_csv(out / "weekly_blocked_comparison.csv", week_blocked_comparisons)
+    if public_market_sample:
+        diagnostic_by_slug = {row["market_slug"]: row for row in diagnostics}
+        _write_csv(out / "public_market_sample.csv", [
+            {**sample_row, **diagnostic_by_slug.get(sample_row["market_slug"], {})}
+            for sample_row in public_market_sample
+        ])
     _write_csv(out / "time_to_resolution.csv", _time_rows(
         public_trades, [r for r in local["order_events"] if r["event_type"] == "ENTRY_EDGE_OBSERVATION"],
         timezone_name,
@@ -1253,12 +1504,15 @@ def generate_report(*, db_path: str, output_dir: str, days: int = 90, timezone_n
     _write_csv(out / "parameter_sensitivity.csv", _parameter_rows(local["strategy_events"]))
     _write_csv(out / "liquidity_regime.csv", _stratified_rows(markets, local["trades"]))
     (out / "summary.md").write_text(
-        _summary_md(local, markets, public_markets, public_trades, comparisons, diagnostics, warnings, timezone_name),
+        _summary_md(local, markets, public_markets, public_trades, comparisons, diagnostics, warnings,
+                    timezone_name, public_market_sample or None, week_blocked_comparisons or None),
         encoding="utf-8",
     )
     return {"local": local, "markets": markets, "public_markets": public_markets,
             "public_trades": public_trades, "comparisons": comparisons, "warnings": warnings,
             "public_diagnostics": diagnostics,
+            "public_market_sample": public_market_sample,
+            "week_blocked_comparisons": week_blocked_comparisons,
             "output_dir": str(out)}
 
 
@@ -1276,13 +1530,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", default="data/polymarket_history")
     parser.add_argument("--max-public-markets", type=int, default=500)
     parser.add_argument("--public-debug", action="store_true", help="Print sanitized public retrieval decisions per market")
+    parser.add_argument("--public-market-universe", action="store_true",
+                        help="Sample public BTC 15-minute markets independently of local journal slugs")
+    parser.add_argument("--public-sample-per-group", type=int, default=50,
+                        help="Markets to sample per weekday/weekend group in public-universe mode")
     args = parser.parse_args(argv)
+    if args.public_market_universe and (not args.start or not args.end):
+        parser.error("--public-market-universe requires explicit --start and --end")
+    if args.public_sample_per_group <= 0:
+        parser.error("--public-sample-per-group must be greater than zero")
     try:
         result = generate_report(
             db_path=args.db, output_dir=args.output, days=args.days, timezone_name=args.timezone,
             start=args.start, end=args.end, cache_dir=args.cache_dir, offline=args.offline,
             refresh_public_data=args.refresh_public_data, max_public_markets=args.max_public_markets,
             market_prefix=args.market_prefix, public_debug=args.public_debug,
+            public_market_universe=args.public_market_universe,
+            public_sample_per_group=args.public_sample_per_group,
         )
     except (OSError, sqlite3.Error, ValueError) as exc:
         print(f"analysis failed: {type(exc).__name__}: {exc}", file=sys.stderr)

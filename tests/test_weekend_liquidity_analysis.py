@@ -4,7 +4,7 @@ import socket
 import sqlite3
 from urllib.error import HTTPError, URLError
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from bot.analytics.weekend_liquidity import (
@@ -24,6 +24,7 @@ from bot.analytics.weekend_liquidity import (
 from scripts.analyze_weekend_liquidity import (
     load_local_journal, generate_report, _market_weekend, parse_polymarket_instrument_id,
     fetch_market_public_history, _classify_public_error, _public_market_metrics,
+    _stratified_public_market_sample, _week_blocked_public_comparison,
 )
 from scripts.record_polymarket_l2 import apply_market_event, subscription_message, _DailyParquetSink
 
@@ -48,6 +49,117 @@ def test_market_weekend_classification_uses_market_start_epoch():
     # A market opened Friday 23:59 ET stays a weekday even if an event lands Saturday.
     friday_start = int(datetime(2026, 9, 25, 23, 59, tzinfo=ZoneInfo("America/New_York")).timestamp())
     assert _market_weekend(f"btc-updown-15m-{friday_start}", "America/New_York") is False
+
+
+def test_public_market_universe_sample_covers_weekday_and_weekend_dates_evenly():
+    start = datetime.fromisoformat("2026-07-27T00:00:00-04:00").astimezone(timezone.utc)
+    end = datetime.fromisoformat("2026-09-20T23:59:59-04:00").astimezone(timezone.utc)
+    sample = _stratified_public_market_sample(
+        start, end, timezone_name="America/New_York", weekday_count=50, weekend_count=50,
+    )
+
+    assert len(sample) == 100
+    assert sum(row["sample_group"] == "weekday" for row in sample) == 50
+    assert sum(row["sample_group"] == "weekend" for row in sample) == 50
+    assert len({row["market_slug"] for row in sample}) == 100
+    assert all(row["market_start_epoch"] % 900 == 0 for row in sample)
+    assert all(row["weekend_et"] == (row["sample_group"] == "weekend") for row in sample)
+
+    per_date = {}
+    for row in sample:
+        per_date.setdefault((row["sample_group"], row["local_date"]), 0)
+        per_date[(row["sample_group"], row["local_date"])] += 1
+    weekday_counts = [count for (group, _), count in per_date.items() if group == "weekday"]
+    weekend_counts = [count for (group, _), count in per_date.items() if group == "weekend"]
+    assert len(weekday_counts) == 40
+    assert set(weekday_counts) == {1, 2}
+    assert len(weekend_counts) == 16
+    assert set(weekend_counts) == {3, 4}
+    for group in ("weekday", "weekend"):
+        bucket_counts = {
+            bucket: sum(row["sample_group"] == group and row["time_bucket"] == bucket for row in sample)
+            for bucket in ("00-06", "06-12", "12-18", "18-24")
+        }
+        assert max(bucket_counts.values()) - min(bucket_counts.values()) <= 1
+
+
+def test_public_market_pilot_sample_spans_weeks_and_time_buckets():
+    start = datetime.fromisoformat("2026-07-27T00:00:00-04:00").astimezone(timezone.utc)
+    end = datetime.fromisoformat("2026-09-20T23:59:59-04:00").astimezone(timezone.utc)
+    sample = _stratified_public_market_sample(
+        start, end, timezone_name="America/New_York", weekday_count=5, weekend_count=5,
+    )
+
+    for group in ("weekday", "weekend"):
+        rows = [row for row in sample if row["sample_group"] == group]
+        assert len(rows) == 5
+        assert len({row["week_index"] for row in rows}) >= 4
+        assert len({row["time_bucket"] for row in rows}) >= 3
+
+
+def test_week_blocked_public_comparison_uses_paired_week_averages():
+    markets = [
+        {"market_slug": "a", "sample_group": "weekday", "week_index": 0, "local_date": "d1", "public_trade_count": 10},
+        {"market_slug": "b", "sample_group": "weekday", "week_index": 0, "local_date": "d2", "public_trade_count": 12},
+        {"market_slug": "c", "sample_group": "weekend", "week_index": 0, "local_date": "d3", "public_trade_count": 14},
+        {"market_slug": "d", "sample_group": "weekend", "week_index": 0, "local_date": "d4", "public_trade_count": 16},
+        {"market_slug": "e", "sample_group": "weekday", "week_index": 1, "local_date": "d5", "public_trade_count": 20},
+        {"market_slug": "f", "sample_group": "weekday", "week_index": 1, "local_date": "d6", "public_trade_count": 22},
+        {"market_slug": "g", "sample_group": "weekend", "week_index": 1, "local_date": "d7", "public_trade_count": 18},
+        {"market_slug": "h", "sample_group": "weekend", "week_index": 1, "local_date": "d8", "public_trade_count": 20},
+    ]
+
+    result = _week_blocked_public_comparison(markets, metrics=("public_trade_count",))
+    assert result[0]["paired_weeks"] == 2
+    assert result[0]["weekday_weekly_mean"] == 16
+    assert result[0]["weekend_weekly_mean"] == 17
+    assert result[0]["weekend_minus_weekday"] == 1
+    assert result[0]["weekend_lower_weeks"] == 1
+
+
+def test_public_market_study_fetches_sample_independent_of_local_journal(tmp_path, monkeypatch):
+    from scripts import analyze_weekend_liquidity as analysis
+
+    db_path = tmp_path / "empty-journal.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            "CREATE TABLE order_events (id INTEGER PRIMARY KEY, ts TEXT, run_id TEXT, event_type TEXT, "
+            "client_order_id TEXT, side TEXT, price REAL, qty REAL, payload_json TEXT, instrument_id TEXT);"
+            "CREATE TABLE strategy_events (id INTEGER PRIMARY KEY, ts TEXT, run_id TEXT, event_type TEXT, payload_json TEXT);"
+        )
+    calls = []
+
+    def fake_fetch(slug, **_kwargs):
+        calls.append(slug)
+        epoch = int(slug.rsplit("-", 1)[-1])
+        token = "token-" + str(epoch)
+        return ({
+            "slug": slug, "identity": {"condition_id": "condition", "token_ids": [token]},
+            "identity_source": "GAMMA", "status": "SUCCESS_PUBLIC_HISTORY",
+            "trade_fetch_status": "success", "price_fetch_status": "success",
+            "trades": [{"timestamp": epoch + 10, "size": 2.0, "price": 0.5, "side": "BUY", "asset": token}],
+            "price_history": {token: [{"t": epoch + 1, "p": 0.4}, {"t": epoch + 800, "p": 0.6}]},
+            "fetch_errors": [],
+        }, None)
+
+    monkeypatch.setattr(analysis, "fetch_market_public_history", fake_fetch)
+    report = generate_report(
+        db_path=str(db_path), output_dir=str(tmp_path / "public-study"),
+        cache_dir=str(tmp_path / "cache"), start="2026-07-27T00:00:00-04:00",
+        end="2026-09-20T23:59:59-04:00", timezone_name="America/New_York",
+        public_market_universe=True, public_sample_per_group=2,
+    )
+
+    assert len(calls) == 4
+    assert set(calls) == {row["market_slug"] for row in report["public_market_sample"]}
+    assert {row["sample_group"] for row in report["public_market_sample"]} == {"weekday", "weekend"}
+    assert len(report["public_diagnostics"]) == 4
+    with (tmp_path / "public-study" / "public_market_sample.csv").open() as handle:
+        sample_csv = handle.read()
+    assert "sample_group" in sample_csv
+    assert "weekend" in sample_csv
+    assert "Public market sample" in (tmp_path / "public-study" / "summary.md").read_text()
+    assert (tmp_path / "public-study" / "weekly_blocked_comparison.csv").exists()
 
 
 def test_slug_seconds_to_resolution_and_lifecycle_bins():

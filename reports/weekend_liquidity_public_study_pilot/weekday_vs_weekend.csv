@@ -1,0 +1,19 @@
+metric,timezone,weekday_n,weekend_n,weekday_mean,weekend_mean,difference,relative_difference_pct,bootstrap_ci95,permutation_p,cliffs_delta,weekday_median,weekend_median,sample_warning
+public_trade_count,America/New_York,5,5,1121.6,758.2,-363.39999999999986,-32.40014265335234,"[-742.035, -33.750000000000114]",0.13493253373313344,-0.44,946.0,867.0,True
+public_volume_shares,America/New_York,5,5,28831.6227572,21014.020687,-7817.602070199999,-27.114679378384075,"[-16797.949506999998, 386.6755833100002]",0.14392803598200898,-0.52,28525.924044,22493.931586,True
+median_trade_size,America/New_York,5,5,9.5665832,8.618105,-0.9484782000000003,-9.914492773135557,"[-3.2038402500000003, 1.4664604000000008]",0.5147426286856571,-0.28,10.0,8.210525,True
+max_no_trade_interval_sec,America/New_York,5,5,33.2,38.4,5.199999999999996,15.662650602409625,"[-19.799999999999997, 28.8]",0.5962018990504747,0.32,21.0,27.0,True
+realized_volatility,America/New_York,4,4,0.856983356243999,0.6788887393152042,-0.1780946169287948,-20.781572434422866,"[-0.5758459369152145, 0.18593021491039646]",0.49325337331334335,-0.375,0.7967170193043116,0.6649749269558634,True
+spread,America/New_York,223,0,0.00998206278026906,,,,,,,0.01,,True
+quote_age_sec,America/New_York,223,0,1.2156374683856501,,,,,,,1.0528670999999998,,True
+depth_5c,America/New_York,33,0,221.42333333333335,,,,,,,234.29500000000002,,True
+entry_slippage,America/New_York,31,0,-0.025483870967741937,,,,,,,-0.020000000000000018,,True
+exit_slippage,America/New_York,28,0,0.03426677957084466,,,,,,,0.0,,True
+fill_rate,America/New_York,59,0,0.9954882075182692,,,,,,,1.0,,True
+submit_to_fill_sec,America/New_York,52,0,135.78634665384615,,,,,,,4.585163,,True
+pnl,America/New_York,32,0,0.19088567496763026,,,,,,,0.673949295,,True
+hold_sec,America/New_York,28,0,346.87474271428573,,,,,,,340.3129325,,True
+order_fill_probability,America/New_York,89,0,0.5842696629213483,,,,,,,,,True
+partial_fill_probability,America/New_York,89,0,0.1348314606741573,,,,,,,,,True
+cancel_probability,America/New_York,89,0,0.21348314606741572,,,,,,,,,True
+cancel_latency_sec,America/New_York,19,0,138.11083,,,,,,,,,True
