@@ -94,10 +94,12 @@ from bot.edge_state import build_edge_state
 from bot.edge_observation import build_quote_age_telemetry
 from bot.entry_decision import EntryDecision
 from bot.live_entry_research import (
+    ResearchCandidateLifecycle,
     StrikeCrossingTracker,
     build_safety_sigma,
     build_shadow_labels,
     classify_time_et,
+    edge_semantics,
 )
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -406,19 +408,36 @@ class IntegratedBTCStrategy(
             outcome_side = None
         top_depth = ask_size if ask_size is not None else ask_depth
         depth_adequate = top_depth >= quantity if top_depth is not None and quantity is not None else None
-        edge_for_shadow = directional_edge_ps
-        if edge_for_shadow is None and probability is not None and price is not None:
-            edge_for_shadow = probability - price - (fee_ps or 0.0) - (penalty_ps or 0.0)
+        entry_source = str(candidate_context.get("entry_source") or "normal_maker")
+        edge_method = (
+            "fast_follow_resolution_ev_minus_fee_minus_markout"
+            if entry_source == "outcome_fast_follow" else "maker_quote_economics"
+        )
+        edge_data = edge_semantics(
+            probability=probability, entry_price=price, fee_per_share=fee_ps,
+            execution_penalty_per_share=penalty_ps, method=edge_method,
+        )
+        # Maker quote economics is not interchangeable with Outcome's taker
+        # fee/markout formula. Keep its own values descriptive and its
+        # directional net edge unavailable rather than assuming missing costs are zero.
+        if entry_source == "normal_maker":
+            edge_data["maker_gross_probability_edge_ps"] = edge_data["gross_probability_edge_ps"]
+            edge_data["maker_robust_net_usdc"] = robust
+            edge_data["maker_expected_net_usdc"] = expected_net
+        edge_for_shadow = edge_data["net_directional_edge_ps"]
         labels = build_shadow_labels(edge_ps=edge_for_shadow, robust_net_usdc=robust,
                                      fair=probability, entry_price=price, abs_distance_bps=abs_bps,
                                      safety_sigma=sigma_payload["safety_sigma"],
                                      crossings_last_120s=crossings.get("crossings_last_120s"),
-                                     weekend=weekday_weekend == "weekend", depth_adequate=depth_adequate)
+                                     weekend=weekday_weekend == "weekend", depth_adequate=depth_adequate,
+                                     gross_edge_ps=edge_data["gross_probability_edge_ps"],
+                                     edge_cost_complete=edge_data["edge_cost_complete"])
         if hour_block == "06-12": labels["shadow_labels"].append("SHADOW_ET_06_12")
         plan_notional = price * quantity if price is not None and quantity is not None else None
         actual_multiplier = number(desired.get("size_multiplier")) if isinstance(desired, dict) else None
         return {
             "candidate_id": candidate_id, "event_semantics": "ENTRY_RESEARCH_SNAPSHOT",
+            "entry_source": str(candidate_context.get("entry_source") or "normal_maker"),
             "event_ts": now_ts, "slug": slug, "instrument_id": str(inst_id), "side": str(side).upper(),
             "outcome_side": outcome_side,
             "market_start_ts": start_ts, "market_end_ts": end_ts, "time_left_sec": time_left,
@@ -443,10 +462,13 @@ class IntegratedBTCStrategy(
             "nearby_ask_depth": ask_depth, "nearby_bid_depth": bid_depth,
             "fee_per_share": fee_ps, "fee_usdc": fee_usdc,
             "execution_penalty_per_share": penalty_ps, "execution_penalty_usdc": penalty_usdc,
+            **edge_data,
             "resolution_ev_usdc": resolution_ev,
             "resolution_ev_basis": "strong_directional_regime_calibrated_after_fee" if regime_resolution_ev is not None else "qty_times_model_fair_minus_candidate_price_before_costs",
             "robust_net_usdc": robust,
             "directional_edge_ps": edge_for_shadow, "expected_net_usdc": expected_net,
+            "maker_robust_net_usdc": robust if entry_source == "normal_maker" else None,
+            "maker_expected_net_usdc": expected_net if entry_source == "normal_maker" else None,
             "planned_quantity": quantity, "planned_notional": plan_notional,
             "final_planned_quantity": quantity, "final_notional": plan_notional,
             "actual_size_multiplier": actual_multiplier,
@@ -1983,34 +2005,40 @@ class IntegratedBTCStrategy(
         )
         payload = decision.to_payload()
         payload["decision_stage"] = "pre_submit"
-        signature = (
-            payload["slug"],
-            payload["state"],
-            payload["layer"],
-            payload["final_reason"],
-            payload["entry_mode"],
-            payload["entry_price"],
-            payload["fair"],
-            payload["robust_net_usdc"],
-            payload["settlement_ev_per_share"],
-            payload["planned_quantity"],
-        )
-        if not hasattr(self, "_last_entry_decision_trace_signature_by_inst"):
-            self._last_entry_decision_trace_signature_by_inst = {}
-            self._last_entry_decision_trace_ts_by_inst = {}
-        inst_key = str(inst_id)
-        last_signature = self._last_entry_decision_trace_signature_by_inst.get(inst_key)
-        last_ts = float(self._last_entry_decision_trace_ts_by_inst.get(inst_key, 0.0))
-        if signature == last_signature and (now_ts - last_ts) < 1.0:
-            return
-        self._last_entry_decision_trace_signature_by_inst[inst_key] = signature
-        self._last_entry_decision_trace_ts_by_inst[inst_key] = now_ts
         candidate_context = candidate_context if isinstance(candidate_context, dict) else {}
-        candidate_id = f"{payload['slug']}|{inst_key}|{int(float(now_ts) * 1_000_000)}"
+        inst_key = str(inst_id)
+        try:
+            side_value = getattr(self._side_for_instrument_id(inst_id), "value", "BUY")
+            intended_side = str(side_value or "BUY").upper()
+        except Exception:
+            intended_side = "BUY"
+        lifecycle = getattr(self, "_live_entry_research_lifecycle", None)
+        if lifecycle is None:
+            lifecycle = ResearchCandidateLifecycle()
+            self._live_entry_research_lifecycle = lifecycle
+        candidate_id, episode, terminal_states = lifecycle.candidate(
+            slug=payload["slug"], instrument_id=inst_key,
+            intended_side=intended_side, now_ts=float(now_ts),
+        )
+        for terminal_id, terminal in terminal_states:
+            try:
+                self._db_strategy_event("ENTRY_RESEARCH_CANDIDATE_TERMINAL", {
+                    "research_candidate_id": terminal_id,
+                    "slug": terminal.get("slug"),
+                    "instrument_id": terminal.get("instrument_id"),
+                    "intended_side": terminal.get("intended_side"),
+                    "candidate_status": terminal["status"],
+                    "candidate_episode_start": terminal["episode_start_ts"],
+                    "candidate_episode_end": terminal["last_seen_ts"],
+                    "candidate_update_count": terminal["update_count"],
+                })
+            except Exception:
+                pass
         desired = candidate_context.get("desired_entry")
         if isinstance(desired, dict):
             desired["research_candidate_id"] = candidate_id
         try:
+            candidate_context.setdefault("entry_source", "normal_maker")
             payload["research_snapshot"] = self._build_live_entry_research_snapshot(
                 now_ts=float(now_ts), inst_id=inst_id, side=side, fair=fair, entry_price=entry_price,
                 robust_net_usdc=robust_net_usdc, candidate_context=candidate_context,
@@ -2024,7 +2052,74 @@ class IntegratedBTCStrategy(
                 "event_semantics": "ENTRY_RESEARCH_SNAPSHOT",
                 "snapshot_unavailable_reason": type(exc).__name__,
             }
-        self._db_strategy_event("ENTRY_DECISION_TRACE", payload)
+        snapshot = payload["research_snapshot"]
+        distance = _as_float(snapshot.get("abs_distance_bps"))
+        snapshot["strike_distance_bucket"] = (
+            "unavailable" if distance is None else "<1bps" if distance < 1 else
+            "1-2bps" if distance < 2 else "2-5bps" if distance < 5 else
+            "5-10bps" if distance < 10 else ">=10bps"
+        )
+        snapshot.update({
+            "candidate_episode_start": episode["episode_start_ts"],
+            "candidate_started": episode["update_count"] == 0,
+            "candidate_status": "candidate_eligible" if should_quote else episode["status"],
+            "candidate_first_eligible_ts": episode["first_eligible_ts"] or (float(now_ts) if should_quote else None),
+            "candidate_update_count": episode["update_count"],
+        })
+        tick = candidate_context.get("quote_context")
+        tick = _as_float(getattr(tick, "tick", None)) if tick is not None else None
+        emit, current_episode = lifecycle.should_emit(
+            candidate_id, snapshot, now_ts=float(now_ts), should_quote=bool(should_quote), tick_size=tick,
+        )
+        if not emit:
+            summary = lifecycle.summary_due(float(now_ts))
+            if summary is not None:
+                try:
+                    self._db_strategy_event("ENTRY_RESEARCH_TELEMETRY_SUMMARY", summary)
+                except Exception:
+                    pass
+            return
+        snapshot["candidate_update_count"] = current_episode.get("update_count", 0)
+        snapshot["candidate_status"] = current_episode.get("status", snapshot.get("candidate_status"))
+        snapshot["candidate_started"] = current_episode.get("update_count", 0) == 1
+        payload["research_candidate_id"] = candidate_id
+        try:
+            persisted = bool(self._db_strategy_event("ENTRY_DECISION_TRACE", payload))
+        except Exception as exc:
+            # Research persistence is best-effort and must not influence live authority.
+            logger.debug(f"Live entry research write failed: {type(exc).__name__}")
+            persisted = False
+        lifecycle.record_write_result(len(repr(payload).encode("utf-8")), success=persisted)
+        summary = lifecycle.summary_due(float(now_ts))
+        if summary is not None:
+            try:
+                self._db_strategy_event("ENTRY_RESEARCH_TELEMETRY_SUMMARY", summary)
+            except Exception:
+                pass
+        if current_episode.get("status") == "candidate_invalidated":
+            self._complete_live_entry_research_candidate(candidate_id, "candidate_invalidated")
+
+    def _complete_live_entry_research_candidate(self, candidate_id: str | None,
+                                                status: str = "candidate_submitted") -> None:
+        """Close a research episode after actual submit; no trading authority."""
+        if not candidate_id:
+            return
+        lifecycle = getattr(self, "_live_entry_research_lifecycle", None)
+        terminal = lifecycle.complete(str(candidate_id), status) if lifecycle is not None else None
+        if terminal is None:
+            return
+        try:
+            self._db_strategy_event("ENTRY_RESEARCH_CANDIDATE_TERMINAL", {
+                "research_candidate_id": str(candidate_id),
+                "slug": terminal["slug"], "instrument_id": terminal["instrument_id"],
+                "intended_side": terminal["intended_side"],
+                "candidate_status": status,
+                "candidate_episode_start": terminal["episode_start_ts"],
+                "candidate_episode_end": time.time(),
+                "candidate_update_count": terminal["update_count"],
+            })
+        except Exception as exc:
+            logger.debug(f"Research candidate completion write failed: {type(exc).__name__}")
 
     async def _evaluate_quote_targets(
         self,

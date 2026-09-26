@@ -16,7 +16,7 @@ from nautilus_trader.model.objects import Price, Quantity
 
 from bot.depth_risk import ExecutionEstimate, estimate_taker_execution
 from bot.enums import ActiveSide
-from bot.live_entry_research import build_shadow_labels
+from bot.live_entry_research import build_shadow_labels, edge_semantics
 
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -269,12 +269,17 @@ class OutcomeFastFollowLive:
         if key in self._blocked_candidate_reasons:
             return
         self._blocked_candidate_reasons.add(key)
+        research_snapshot = self._research_snapshots_by_candidate.get(int(candidate.created_epoch_ns))
+        if isinstance(research_snapshot, dict):
+            research_snapshot = dict(research_snapshot)
+            research_snapshot["candidate_started"] = False
+            research_snapshot["candidate_update_count"] = max(1, int(research_snapshot.get("candidate_update_count") or 1))
         self.strategy._db_strategy_event("FAST_FOLLOW_ENTRY_BLOCKED", {
             "slug": candidate.slug,
             "reason": reason,
             "direction": candidate.decision.direction,
             "research_candidate_id": f"{candidate.slug}|{int(candidate.created_epoch_ns)}",
-            "research_snapshot": self._research_snapshots_by_candidate.get(int(candidate.created_epoch_ns)),
+            "research_snapshot": research_snapshot,
             "economics_context": getattr(self.strategy, "_last_fast_follow_economics_context", None),
             **payload,
         })
@@ -528,6 +533,7 @@ class OutcomeFastFollowLive:
                         now_ts=float(now_ts), inst_id=instrument_id, side="buy", fair=fair,
                         entry_price=best_ask, robust_net_usdc=None,
                         candidate_context={
+                            "entry_source": "outcome_fast_follow",
                             "time_left_sec": time_left,
                             "desired_entry": {"price": best_ask, "planned_quantity": None,
                                               "size_multiplier": 1.0, "should_quote": True},
@@ -536,6 +542,10 @@ class OutcomeFastFollowLive:
                         candidate_id=f"{candidate.slug}|{int(candidate.created_epoch_ns)}",
                     )
                     research_snapshot.update({
+                        "candidate_episode_start": float(candidate.created_epoch_ns) / 1_000_000_000,
+                        "candidate_started": True,
+                        "candidate_status": "candidate_active",
+                        "candidate_update_count": 1,
                         "entry_source": "outcome_fast_follow", "signal_age_ms": age_ms,
                         "outcome_side": wanted_side,
                         "best_bid": float(best_bid), "best_ask": float(best_ask),
@@ -786,8 +796,12 @@ class OutcomeFastFollowLive:
             qty_value = finite(quantity)
             fee_ps = fee_usdc / qty_value if fee_usdc is not None and qty_value else None
             penalty_ps = penalty_usdc / qty_value if penalty_usdc is not None and qty_value else None
-            edge_ps = (fair_price - float(limit_price) - fee_ps - penalty_ps
-                       if fair_price is not None and fee_ps is not None and penalty_ps is not None else None)
+            edge_data = edge_semantics(
+                probability=fair_price, entry_price=float(limit_price), fee_per_share=fee_ps,
+                execution_penalty_per_share=penalty_ps,
+                method="fast_follow_resolution_ev_minus_fee_minus_markout",
+            )
+            edge_ps = edge_data["net_directional_edge_ps"]
             research_snapshot.update({
                 "estimated_probability": fair_price,
                 "fair_probability": fair_price,
@@ -806,6 +820,7 @@ class OutcomeFastFollowLive:
                 "robust_net_usdc": expected_net,
                 "expected_net_usdc": expected_net,
                 "directional_edge_ps": edge_ps,
+                **edge_data,
                 "economics_source": "fast_follow_economics_evaluator",
                 **build_shadow_labels(
                     edge_ps=edge_ps, robust_net_usdc=expected_net,
@@ -815,6 +830,8 @@ class OutcomeFastFollowLive:
                     crossings_last_120s=research_snapshot.get("crossings_last_120s"),
                     weekend=research_snapshot.get("weekday_weekend") == "weekend",
                     depth_adequate=(ask_size is not None and float(ask_size) >= float(quantity)),
+                    gross_edge_ps=edge_data["gross_probability_edge_ps"],
+                    edge_cost_complete=edge_data["edge_cost_complete"],
                 ),
             })
         order = self.strategy.order_factory.limit(

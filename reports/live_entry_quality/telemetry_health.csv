@@ -1,0 +1,2 @@
+research_candidates,snapshot_events,updates_per_candidate_mean,updates_per_candidate_p90,submit_join_rate,fill_join_rate,orphan_submit,orphan_fill,snapshot_suppressed,estimated_event_rate_per_hour,net_edge_completeness
+0,0,,,0.0,0.0,197,108,,,

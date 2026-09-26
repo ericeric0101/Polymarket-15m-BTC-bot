@@ -61,6 +61,16 @@ def test_entry_decision_records_calibrated_settlement_ev_without_touching_gate_s
     assert decision.to_payload()["settlement_ev_observation_only"] is True
 
 
+def test_missing_fee_does_not_get_treated_as_zero_in_observational_ev():
+    decision = EntryDecision.observe(
+        slug="btc-updown-15m-test", instrument_id="inst-up", side="buy",
+        should_quote=True, fair=0.8, entry_price=0.7, fee_per_share=None,
+        planned_quantity=10,
+    )
+    assert decision.settlement_ev_per_share is None
+    assert decision.settlement_ev_usdc is None
+
+
 def test_entry_decision_records_market_age_and_binary_payoff_risk_observations():
     market_start = 1_800_000_000
     decision = EntryDecision.observe(

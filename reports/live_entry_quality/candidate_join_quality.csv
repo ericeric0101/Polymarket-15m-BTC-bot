@@ -1,0 +1,2 @@
+submit_rows,submit_rows_with_candidate_id,submitted_candidates,submit_rows_joined,orphan_submit_count,fill_rows,fill_rows_with_candidate_id,filled_candidates,fill_rows_joined,orphan_fill_count,submit_to_candidate_join_rate,fill_to_candidate_join_rate,submit_id_coverage_rate,fill_id_coverage_rate,duplicate_candidate_count,snapshot_event_count,edge_cost_comparable_candidates,edge_cost_complete_candidates,edge_cost_complete_rate,estimated_event_rate_per_hour,measurement_scope
+197,0,0,0,197,108,0,0,0,108,0.0,0.0,0.0,0.0,0,0,0,0,,,no_candidate_snapshots_historical_join_only

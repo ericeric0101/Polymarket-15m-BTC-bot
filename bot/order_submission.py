@@ -520,7 +520,11 @@ def submit_maker_quote(
             status="INTENT",
             reason="maker_quote_intent",
             expected_net_usdc=float(econ.expected_net_usdc),
-            payload={"maker": True, "submitted_instrument_id": str(instrument_id)},
+            payload={
+                "maker": True,
+                "submitted_instrument_id": str(instrument_id),
+                "research_candidate_id": (directional_snapshot or {}).get("research_candidate_id"),
+            },
         )
         if intent_persisted is False:
             logger.warning("Maker BUY blocked: durable journal intent could not be persisted")
@@ -704,6 +708,13 @@ def submit_maker_quote(
             "loss_sell_reason": loss_sell_reason if side == "sell" and loss_sell_reason else None,
         },
     )
+    if side == "buy":
+        complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
+        if callable(complete_research_candidate):
+            complete_research_candidate(
+                (directional_snapshot or {}).get("research_candidate_id"),
+                "candidate_submitted",
+            )
     strategy.rebate_reporter.record_quote(
         fee_equivalent=float(econ.fee_equivalent_usdc),
         rebate=float(econ.expected_rebate_usdc),

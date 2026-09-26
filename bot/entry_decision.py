@@ -90,12 +90,12 @@ class EntryDecision:
         p_calibrated = calibrated_probability if calibrated_probability is not None else fair
         settlement_ev_ps = None
         settlement_ev_usdc = None
-        if p_calibrated is not None and entry_price is not None:
+        if p_calibrated is not None and entry_price is not None and fee_per_share is not None:
             try:
                 settlement_ev_ps_decimal = settlement_ev_per_share(
                     calibrated_probability=Decimal(str(p_calibrated)),
                     entry_price=Decimal(str(entry_price)),
-                    fee_per_share=Decimal(str(fee_per_share or 0)),
+                    fee_per_share=Decimal(str(fee_per_share)),
                 )
                 settlement_ev_ps = float(settlement_ev_ps_decimal)
                 if planned_quantity is not None:

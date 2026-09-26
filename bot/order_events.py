@@ -536,6 +536,12 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             realized_net_usdc=realized_net_usdc,
         ),
     )
+    complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
+    if callable(complete_research_candidate):
+        complete_research_candidate(
+            filled_directional_snapshot.get("research_candidate_id"),
+            "candidate_filled",
+        )
     strategy.rebate_reporter.flush_daily_report()
     if strategy.terminal_dashboard:
         side_norm = side_for_ledger or strategy._normalize_side_text(getattr(event, "order_side", ""))

@@ -2,10 +2,186 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import defaultdict, deque
 from datetime import datetime
+from math import floor
 from typing import Any
 from zoneinfo import ZoneInfo
+
+
+class ResearchCandidateLifecycle:
+    """Bounded in-memory identity and snapshot-rate control for research only."""
+
+    TTL_SEC = 900.0
+    HEARTBEAT_SEC = 7.0
+    MATERIAL_MIN_INTERVAL_SEC = 0.5
+    SUMMARY_INTERVAL_SEC = 60.0
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._completed: dict[str, dict[str, Any]] = {}
+        self._last_summary_ts = 0.0
+        self.counters = {
+            "research_snapshots_written": 0,
+            "research_snapshots_suppressed": 0,
+            "research_snapshot_bytes_estimate": 0,
+            "research_candidates_started": 0,
+            "research_candidates_completed": 0,
+            "research_snapshot_write_failures": 0,
+        }
+
+    @staticmethod
+    def _material_signature(snapshot: dict[str, Any], *, should_quote: bool,
+                            tick_size: float | None = None) -> tuple[Any, ...]:
+        price = _finite_float(snapshot.get("entry_price"))
+        tick = _finite_float(tick_size) or 0.01
+        return (
+            floor(price / tick + 1e-9) if price is not None and tick > 0 else None,
+            snapshot.get("gross_edge_bucket"), snapshot.get("net_edge_bucket"),
+            snapshot.get("strike_distance_bucket"), snapshot.get("shadow_entry_risk_level"),
+            snapshot.get("current_leader"), snapshot.get("crossings_last_120s"),
+            bool(should_quote), snapshot.get("actual_size_multiplier"),
+        )
+
+    def candidate(self, *, slug: str, instrument_id: str, intended_side: str,
+                  now_ts: float) -> tuple[str, dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+        key = (str(slug), str(instrument_id), str(intended_side).upper())
+        expired: list[tuple[str, dict[str, Any]]] = []
+        with self._lock:
+            for old_key, old_state in tuple(self._active.items()):
+                if old_key == key:
+                    continue
+                status = None
+                if old_key[0] != key[0]:
+                    status = "market_rolled"
+                elif old_key[0] == key[0] and old_key[2] != key[2]:
+                    status = "candidate_invalidated"
+                elif now_ts - old_state["last_seen_ts"] > self.TTL_SEC:
+                    status = "candidate_expired"
+                if status:
+                    old_state["status"] = status
+                    expired.append((old_state["candidate_id"], dict(old_state)))
+                    self._active.pop(old_key, None)
+                    self.counters["research_candidates_completed"] += 1
+            state = self._active.get(key)
+            if state is not None and now_ts - state["last_seen_ts"] > self.TTL_SEC:
+                state["status"] = "candidate_expired"
+                expired.append((state["candidate_id"], dict(state)))
+                self._active.pop(key, None)
+                state = None
+                self.counters["research_candidates_completed"] += 1
+            if state is None or state.get("status") in {"candidate_submitted", "candidate_filled", "candidate_invalidated", "candidate_expired", "market_rolled"}:
+                candidate_id = f"{key[0]}|{key[1]}|{key[2]}|{time.time_ns()}"
+                state = {
+                    "candidate_id": candidate_id, "slug": key[0], "instrument_id": key[1],
+                    "intended_side": key[2], "episode_start_ts": float(now_ts),
+                    "last_seen_ts": float(now_ts), "status": "candidate_active",
+                    "update_count": 0, "first_eligible_ts": None, "last_signature": None,
+                    "last_emit_ts": 0.0,
+                }
+                self._active[key] = state
+                self.counters["research_candidates_started"] += 1
+                while len(self._active) > 512:
+                    oldest_key = min(self._active, key=lambda k: self._active[k]["last_seen_ts"])
+                    old = self._active.pop(oldest_key)
+                    old["status"] = "candidate_expired"
+                    expired.append((old["candidate_id"], dict(old)))
+                    self.counters["research_candidates_completed"] += 1
+            else:
+                state["last_seen_ts"] = float(now_ts)
+            return state["candidate_id"], dict(state), expired
+
+    def should_emit(self, candidate_id: str, snapshot: dict[str, Any], *, now_ts: float,
+                    should_quote: bool, tick_size: float | None = None) -> tuple[bool, dict[str, Any]]:
+        with self._lock:
+            state = next((s for s in self._active.values() if s["candidate_id"] == candidate_id), None)
+            if state is None:
+                return True, {"candidate_id": candidate_id, "status": "candidate_active", "update_count": 0}
+            signature = self._material_signature(snapshot, should_quote=should_quote, tick_size=tick_size)
+            first = state["last_signature"] is None
+            previously_eligible = bool(state["last_signature"] and state["last_signature"][7])
+            material = signature != state["last_signature"]
+            eligibility_changed = bool(state["last_signature"] and signature[7] != state["last_signature"][7])
+            heartbeat = now_ts - state["last_emit_ts"] >= self.HEARTBEAT_SEC
+            material_due = material and now_ts - state["last_emit_ts"] >= self.MATERIAL_MIN_INTERVAL_SEC
+            emit = first or eligibility_changed or material_due or heartbeat
+            if emit:
+                state["last_signature"] = signature
+                state["last_emit_ts"] = float(now_ts)
+                state["update_count"] += 1
+                if should_quote and state["first_eligible_ts"] is None:
+                    state["first_eligible_ts"] = float(now_ts)
+                if previously_eligible and not should_quote:
+                    state["status"] = "candidate_invalidated"
+            else:
+                self.counters["research_snapshots_suppressed"] += 1
+            enriched = dict(state)
+            enriched["last_seen_ts"] = float(now_ts)
+            return emit, enriched
+
+    def record_write_result(self, snapshot_bytes: int, *, success: bool) -> None:
+        with self._lock:
+            if success:
+                self.counters["research_snapshots_written"] += 1
+                self.counters["research_snapshot_bytes_estimate"] += max(0, int(snapshot_bytes))
+            else:
+                self.counters["research_snapshot_write_failures"] += 1
+
+    def complete(self, candidate_id: str, status: str) -> dict[str, Any] | None:
+        with self._lock:
+            for key, state in tuple(self._active.items()):
+                if state["candidate_id"] == candidate_id:
+                    if state.get("status") != "candidate_invalidated":
+                        state["status"] = str(status)
+                    self.counters["research_candidates_completed"] += 1
+                    self._active.pop(key, None)
+                    self._completed[candidate_id] = dict(state)
+                    while len(self._completed) > 512:
+                        self._completed.pop(next(iter(self._completed)))
+                    return dict(state)
+            prior = self._completed.get(candidate_id)
+            if prior is not None and status == "candidate_filled":
+                prior["status"] = status
+                return dict(prior)
+        return None
+
+    def mark_eligible(self, candidate_id: str, now_ts: float) -> None:
+        with self._lock:
+            for state in self._active.values():
+                if state["candidate_id"] == candidate_id:
+                    if state["first_eligible_ts"] is None:
+                        state["first_eligible_ts"] = float(now_ts)
+                    return
+
+    def summary_due(self, now_ts: float) -> dict[str, Any] | None:
+        with self._lock:
+            if now_ts - self._last_summary_ts < self.SUMMARY_INTERVAL_SEC:
+                return None
+            self._last_summary_ts = float(now_ts)
+            return dict(self.counters)
+
+
+def edge_semantics(*, probability: float | None, entry_price: float | None,
+                   fee_per_share: float | None, execution_penalty_per_share: float | None,
+                   method: str) -> dict[str, Any]:
+    """Calculate gross edge independently; never substitute missing costs with zero."""
+    gross = probability - entry_price if probability is not None and entry_price is not None else None
+    comparable = str(method) == "fast_follow_resolution_ev_minus_fee_minus_markout"
+    complete = bool(comparable and gross is not None and fee_per_share is not None
+                    and execution_penalty_per_share is not None)
+    net = gross - fee_per_share - execution_penalty_per_share if complete else None
+    gross_bucket = "unavailable" if gross is None else "negative" if gross <= 0 else "thin" if gross < .01 else "positive"
+    net_bucket = "unavailable" if net is None else "negative" if net <= 0 else "thin" if net < .01 else "positive"
+    return {
+        "gross_probability_edge_ps": gross,
+        "net_directional_edge_ps": net,
+        "edge_cost_complete": complete,
+        "net_edge_method": method if complete or str(method).startswith("maker_") else "incomplete",
+        "gross_edge_bucket": gross_bucket,
+        "net_edge_bucket": net_bucket,
+    }
 
 
 class StrikeCrossingTracker:
@@ -98,10 +274,13 @@ def build_shadow_labels(*, edge_ps: float | None, robust_net_usdc: float | None,
                         fair: float | None, entry_price: float | None,
                         abs_distance_bps: float | None, safety_sigma: float | None,
                         crossings_last_120s: int | None, weekend: bool | None,
-                        depth_adequate: bool | None) -> dict[str, Any]:
+                        depth_adequate: bool | None,
+                        gross_edge_ps: float | None = None,
+                        edge_cost_complete: bool | None = None) -> dict[str, Any]:
     """Transparent observational bins/components; output cannot gate a trade."""
     labels: list[str] = []
-    if edge_ps is None:
+    net_available = edge_ps is not None and edge_cost_complete is not False
+    if not net_available:
         edge_label = "SHADOW_EDGE_UNAVAILABLE"
     elif edge_ps <= 0:
         edge_label = "SHADOW_EDGE_NEGATIVE"
@@ -110,6 +289,8 @@ def build_shadow_labels(*, edge_ps: float | None, robust_net_usdc: float | None,
     else:
         edge_label = "SHADOW_EDGE_OK"
     labels.append(edge_label)
+    if gross_edge_ps is not None:
+        labels.append("SHADOW_GROSS_EDGE_POSITIVE" if gross_edge_ps > 0 else "SHADOW_GROSS_EDGE_NONPOSITIVE")
     if abs_distance_bps is not None:
         if abs_distance_bps < 1:
             labels.append("SHADOW_STRIKE_NEAR_1BPS")
@@ -134,7 +315,7 @@ def build_shadow_labels(*, edge_ps: float | None, robust_net_usdc: float | None,
         abs_distance_bps is not None and abs_distance_bps < 2,
         safety_sigma is not None and safety_sigma < 1,
         crossings_last_120s is not None and crossings_last_120s > 0,
-        edge_ps is not None and edge_ps < 0.01,
+        net_available and edge_ps < 0.01,
         fair is not None and entry_price is not None and entry_price > fair,
         depth_adequate is False,
         weekend is True,
@@ -146,7 +327,7 @@ def build_shadow_labels(*, edge_ps: float | None, robust_net_usdc: float | None,
     reject_reasons = []
     if robust_net_usdc is not None and robust_net_usdc < 0:
         reject_reasons.append("negative_robust_net")
-    if edge_ps is not None and edge_ps < 0.01:
+    if net_available and edge_ps < 0.01:
         reject_reasons.append("thin_edge")
     if abs_distance_bps is not None and abs_distance_bps < 2:
         reject_reasons.append("near_strike")
