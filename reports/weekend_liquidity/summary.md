@@ -5,7 +5,7 @@
 - Canonical journal：88,779 order rows、231,503 strategy rows；ok。
 - Local markets：412；public markets：0；public trades：0。
 - Journal 實際記錄跨 12 個 UTC 日期、412 個 slug；目前市場週末數 ET=0、UTC=0。
-- 查詢 window：2026-06-28T02:06:52.847421+00:00 — 2026-09-26T02:06:52.847421+00:00。
+- 查詢 window：2026-06-28T02:55:50.711941+00:00 — 2026-09-26T02:55:50.711941+00:00。
 - Journal 實際事件範圍：2026-09-07T11:48:10.161617+00:00 — 2026-09-25T14:51:20.391746+00:00；市場週末時區：America/New_York。
 - SELL fill missing PnL：3；excluded shadow rows：22184。
 
@@ -41,6 +41,16 @@
 - Stop-loss exits n=4, total PnL=-11.7860, P1=-3.9066; emergency exits n=0, total PnL=n/a, P1=n/a.
 - PnL uses journaled realized_net_usdc on SELL fills, FIFO-paired to observed BUY lots. Missing PnL and settlement/redemption outcomes are not imputed.
 
+## Public historical retrieval
+
+- Requested markets：412；identity resolved：412。
+- Gamma success：0；local identity used while Gamma unavailable：1；identifier mismatch：0。
+- Trade fetch success/empty/failed/not-fetched：0 / 0 / 1 / 411；matching trades：0。
+- Excluded identity-mismatched trades：0。
+- Price fetch success/empty/failed/not-fetched：0 / 0 / 1 / 411；price points：0。
+- Partial public histories：0；DNS-failed stages：3；markets with DNS failure：1；HTTP-failed stages：0。
+- API 回應成功但零筆 trade/price 會標示 empty；網路失敗、識別碼缺失或錯配會保留 structured diagnostics，不會當成零成交。
+
 ## Interpretation and limitations
 
 - Weekend is defined by America/New_York Saturday/Sunday; UTC sensitivity is included per market in market_level.csv.
@@ -50,7 +60,7 @@
 - Historical L2 is not available in this journal. Historical price/trade feeds do not reconstruct BBO/depth or fill probability; unknown fields stay empty.
 - Local depth observations come only from fill-conditioned markout payloads, so they are selected observations, not an unbiased market-time sample.
 - Parameter sensitivity reports observed STRATEGY_START config values only; no unsupported counterfactual replay or live parameter recommendation.
-- Public API warnings/not-fetched markets: 412. Cache lives in data/polymarket_history/.
+- Public retrieval warnings/not-fetched markets: 412. Structured cache lives in data/polymarket_history/.
 
 ## Outputs
 
@@ -59,6 +69,7 @@
 - execution_level.csv
 - weekday_vs_weekend.csv
 - weekday_vs_weekend_utc.csv
+- public_fetch_diagnostics.csv
 - time_to_resolution.csv
 - parameter_sensitivity.csv
 - liquidity_regime.csv
