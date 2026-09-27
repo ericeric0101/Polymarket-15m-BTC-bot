@@ -42,6 +42,7 @@ from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
 from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastFollowLive
 from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
 from bot.trend_entry_shadow import TrendEntryShadow
+from bot.forward_shadow import ForwardShadowExperiment
 
 
 def initialize_strategy_settings(
@@ -763,6 +764,10 @@ def initialize_strategy_settings(
     strategy.trend_entry_shadow = TrendEntryShadow(
         db=strategy.lead_lag_db,
         run_id=strategy.run_id,
+    )
+    weekday_only = os.getenv("FORWARD_SHADOW_WEEKDAY_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+    strategy.forward_shadow_experiment = ForwardShadowExperiment(
+        db=strategy.lead_lag_db, run_id=strategy.run_id, weekday_only=weekday_only,
     )
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode

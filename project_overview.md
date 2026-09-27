@@ -1870,3 +1870,38 @@ P1–P7 regression boundaries now belong to Phase D as follows: D.3 protects
 the strike input to P1/P2/P4; D.4 revalidates P1 economics without creating a
 second fair/sigma path; D.5 proves configuration ownership and records all
 seven boundaries. There is no new P-number or unbounded “group” backlog.
+
+## Forward Shadow Experiment
+
+- `bot/forward_shadow.py` records a prospective research-only comparison at
+  120 seconds after BTC 15-minute market start for `120_0`, `120_2`, and
+  `120_5`. Candidate direction/thresholds use the approved Chainlink/TWAP
+  reference versus the canonical market strike; production `SignalEngine`
+  side inputs are captured as comparator context. This is not a new live
+  signal and never has order, cancel, ownership, sizing, exit, or risk authority.
+- `FORWARD_SHADOW_WEEKDAY_ONLY=1` is the research/operator default. Weekday
+  candidates are the primary cohort; weekend observations continue with the
+  `WEEKEND_SHADOW_ONLY` label. Existing live weekend behavior is unchanged.
+- Candidate entry variants are best ask and depth-weighted fixed `$5` ask
+  where the observed book has enough depth. The recorder simulates only
+  `HOLD`, `TP20`, `TRAIL5`, and `TRAIL10`, marks long inventory at executable
+  best bid, tracks one full BBO per token per second plus bounded material
+  changes, depth, MFE/MAE, reversals, strike leader changes,
+  fair-value movement, and recovery-after-drawdown. Missing economics remain
+  null; noncanonical settlement outcomes do not produce settlement PnL.
+- Events use the existing asynchronous `lead_lag_db` writer. Research errors
+  are contained at the quote/settlement bridge and do not affect live paths.
+  Capture telemetry distinguishes accepted/enqueued events from committed
+  research decision rows, queue drops, and DB writer errors.
+  `scripts/forward_shadow_report.py` writes CSVs and `summary.md` beneath
+  `reports/forward_shadow/`; `--status` prints a compact collection count.
+  No report rows are synthesized before the bot has collected live forward
+  observations. Sample targets are 100 weekday `120/0`, 75 `120/2`, and 50
+  `120/5` independent candidate markets; until met, reports must say
+  `INSUFFICIENT FOR POLICY DECISION`.
+- Signal semantics caveat: the experiment thresholds signed canonical
+  strike-relative BTC return in bps, matching the historical early-entry
+  definition, and logs the live production composite/confidence and BTC EMA
+  fast/slow values beside it. It does not reinterpret the production
+  composite score as bps. Unavailable diagnostics remain null.
+- Live behavior changed? **No.**

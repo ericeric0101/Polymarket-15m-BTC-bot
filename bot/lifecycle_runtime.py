@@ -178,6 +178,22 @@ class StrategyLifecycleMixin:
                         "Trend-entry shadow settlement capture failed: "
                         f"{type(shadow_error).__name__}: {shadow_error}"
                     )
+            forward_shadow = getattr(self, "forward_shadow_experiment", None)
+            if forward_shadow is not None:
+                try:
+                    settlement_source = str(getattr(self, "latest_external_spot_source", "") or "")
+                    canonical_settlement = settlement_source.startswith("polymarket_chainlink_twap_")
+                    forward_shadow.on_settlement(
+                        slug=slug,
+                        outcome=("UP" if spot >= strike else "DOWN") if canonical_settlement else "UNKNOWN",
+                        settlement_ts=time.time(),
+                        settlement_source=settlement_source or "noncanonical_or_unavailable",
+                    )
+                except Exception as shadow_error:
+                    logger.warning(
+                        "Forward-shadow settlement capture failed: "
+                        f"{type(shadow_error).__name__}: {shadow_error}"
+                    )
 
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")

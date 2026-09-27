@@ -20,6 +20,10 @@ class LeadLagDB:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._queue: queue.Queue[tuple[str, str, int | None, int, dict[str, Any]]] = queue.Queue(maxsize=20_000)
         self._stop = threading.Event()
+        self._health_lock = threading.Lock()
+        self._queue_drops = 0
+        self._write_errors = 0
+        self._decision_rows_written = 0
         self._init_schema()
         self._thread = threading.Thread(target=self._writer, daemon=True, name="lead-lag-db-writer")
         self._thread.start()
@@ -90,8 +94,20 @@ class LeadLagDB:
         persisted_market_id = self.GLOBAL_MARKET_ID if market_id is None else int(market_id)
         self._enqueue_sql("reference", (str(run_id), str(slug), persisted_market_id, int(bucket_epoch_ms), str(source), int(price_cents), int(received_epoch_ns)))
 
-    def enqueue_decision(self, *, run_id: str, slug: str, market_id: int | None, decision_epoch_ns: int, payload: dict[str, Any]) -> None:
-        self._enqueue_sql("decision", (str(run_id), str(slug), market_id, int(decision_epoch_ns), dict(payload)))
+    def enqueue_decision(self, *, run_id: str, slug: str, market_id: int | None, decision_epoch_ns: int, payload: dict[str, Any]) -> bool:
+        try:
+            self._queue.put_nowait(("decision", (str(run_id), str(slug), market_id, int(decision_epoch_ns), dict(payload))))
+            return True
+        except queue.Full:
+            with self._health_lock:
+                self._queue_drops += 1
+            return False
+
+    def research_health(self) -> dict[str, int]:
+        with self._health_lock:
+            return {"queue_depth": self._queue.qsize(), "queue_capacity": self._queue.maxsize,
+                    "queue_drops": self._queue_drops, "write_errors": self._write_errors,
+                    "decision_rows_written": self._decision_rows_written}
 
     def enqueue_latency(self, *, run_id: str, client_order_id: str, name: str, started_monotonic_ns: int, ended_monotonic_ns: int, created_epoch_ns: int) -> None:
         self._enqueue_sql("latency", (str(run_id), str(client_order_id), str(name), int(started_monotonic_ns), int(ended_monotonic_ns), int(created_epoch_ns)))
@@ -136,8 +152,12 @@ class LeadLagDB:
                     elif kind == "markout":
                         conn.execute("INSERT OR IGNORE INTO lead_lag_markouts (run_id, slug, market_id, candidate_epoch_ns, horizon_ms, observed_epoch_ns, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)", (*row[:6], json.dumps(row[6], ensure_ascii=False)))
                 conn.commit()
+                decision_count = sum(1 for item in rows if isinstance(item, tuple) and len(item) == 2 and item[0] == "decision")
+                with self._health_lock:
+                    self._decision_rows_written += decision_count
             except Exception:
-                pass
+                with self._health_lock:
+                    self._write_errors += 1
             finally:
                 if conn is not None:
                     conn.close()
