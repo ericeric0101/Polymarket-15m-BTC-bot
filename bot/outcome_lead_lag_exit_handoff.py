@@ -866,6 +866,21 @@ class OutcomeFastFollowLive:
             "instrument_id": str(instrument_id),
             "submit_epoch_ns": time.time_ns(), "submit_monotonic_ns": time.perf_counter_ns(),
         }
+        final_decision_fn = getattr(
+            self.strategy,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        final_entry_session = final_decision_fn(time.time())
+        if not final_entry_session.allowed:
+            self._record_blocked(
+                candidate,
+                "weekend_live_entries_disabled",
+                local_time=final_entry_session.local_time.isoformat(),
+                entry_session_reason=final_entry_session.reason,
+                submission_boundary="fast_follow_pre_reservation",
+            )
+            return False
         self._attempted_slugs.add(slug)
         self._pending_order_ids[str(coid)] = metadata
         self._night_pending_entry_ids.setdefault(night, set()).add(str(coid))

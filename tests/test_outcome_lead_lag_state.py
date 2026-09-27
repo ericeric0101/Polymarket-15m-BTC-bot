@@ -10,6 +10,7 @@ from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_ingress import record_hyperliquid_btc_probe
 from bot.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
 from bot.outcome_lead_lag_types import ReferenceTick
+from bot.entry_session_policy import EntrySessionDecision
 from bot.outcome_lead_lag_exit_handoff import (
     FastFollowLiveConfig,
     OutcomeFastFollowLive,
@@ -358,6 +359,11 @@ def _live_harness(*, ask: Decimal, submit_automatically: bool = True):
         _db_strategy_event=lambda event, payload: events.append((event, payload)),
         _db_order_event=lambda **payload: events.append((payload["event_type"], payload)),
         _cancel_maker_order_side=lambda *_args, **_kwargs: None,
+        _new_buy_session_decision_fn=lambda _fresh_now: EntrySessionDecision(
+            True,
+            "test_weekday_entry_session",
+            datetime.fromtimestamp(now_ts, tz=ZoneInfo("Asia/Taipei")),
+        ),
     )
     owner = OutcomeFastFollowLive(strategy, FastFollowLiveConfig())
     decision = LeadLagDecision(
@@ -430,6 +436,45 @@ def test_fast_follow_blocks_weekend_but_keeps_candidate_observable():
         assert risk_day not in owner._night_pending_entry_ids
         assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload.get("reason") == "weekend_live_entries_disabled"
                    for event, payload in events)
+
+
+def test_fast_follow_rechecks_session_immediately_before_reservation():
+    owner, submitted, _kwargs, events = _live_harness(
+        ask=Decimal("0.60"), submit_automatically=False
+    )
+    now = datetime(2026, 8, 31, 23, 59, 59, tzinfo=ZoneInfo("Asia/Taipei"))
+    owner.strategy.current_market_slug = "session-boundary"
+    owner.strategy.current_market_end_timestamp = now.timestamp() + 600
+    owner.strategy.fast_follow_l2_update_ts_by_inst = {"UP.INST": now.timestamp()}
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(
+        LeadLagCandidate(decision, "r", "session-boundary", 1, time.time_ns())
+    )
+    weekend = EntrySessionDecision(
+        False,
+        "taipei_weekend_observation_only",
+        datetime(2026, 9, 5, 0, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+    )
+    owner.strategy._new_buy_session_decision_fn = lambda _fresh_now: weekend
+
+    assert owner.on_quote(
+        instrument_id="UP.INST",
+        best_bid=Decimal("0.59"),
+        best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"),
+        now_ts=now.timestamp(),
+    ) is False
+    assert submitted == []
+    assert owner._pending_order_ids == {}
+    assert all(not pending for pending in owner._night_pending_entry_ids.values())
+    assert any(
+        event == "FAST_FOLLOW_ENTRY_BLOCKED"
+        and payload.get("submission_boundary") == "fast_follow_pre_reservation"
+        for event, payload in events
+    )
 
 
 def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold():

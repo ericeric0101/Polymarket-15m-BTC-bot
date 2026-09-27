@@ -42,6 +42,9 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
     paths = (
         "run_bot.py",
         "bot/quote_service.py",
+        "bot/quote_runtime.py",
+        "bot/quoting.py",
+        "bot/entry_session_policy.py",
         "bot/pricing_runtime.py",
         "bot/spot_pricer.py",
         "bot/side_decision.py",
@@ -55,6 +58,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/lead_lag_observation.py",
         "bot/hyperliquid_outcome_observer.py",
         "bot/order_submission.py",
+        "bot/outcome_lead_lag_exit_handoff.py",
         "bot/adapter_overrides.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",
@@ -162,6 +166,8 @@ from bot.market_data import (
     resolve_opening_strike_from_history,
 )
 from bot.models import DecisionPhase, ExitDecisionType, MarketSnapshot, PositionState, QuoteIntentState, QuoteMode, SignalDecision
+from bot import entry_session_policy as entry_session_policy_module
+from bot.entry_session_policy import new_buy_session_decision
 from bot.quoting import (
     apply_quote_plan_guards,
 )
@@ -3733,6 +3739,7 @@ class IntegratedBTCStrategy(
                 "market_id": self.hyperliquid_outcome_observer.market_id,
             },
         )
+        entry_session = new_buy_session_decision(time.time())
         self._db_strategy_event(
             "STRATEGY_START",
             {
@@ -3743,6 +3750,10 @@ class IntegratedBTCStrategy(
                 "active_side": self.active_side.value,
                 "git_revision": self.runtime_git_revision,
                 "source_fingerprint": self.runtime_source_fingerprint,
+                "entry_session_allowed": entry_session.allowed,
+                "entry_session_reason": entry_session.reason,
+                "entry_session_local_time": entry_session.local_time.isoformat(),
+                "entry_session_policy_module": str(entry_session_policy_module.__file__),
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),

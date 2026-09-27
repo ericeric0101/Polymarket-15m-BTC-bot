@@ -9,6 +9,7 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.entry_session_policy import new_buy_session_decision
 from bot.quote_service import (
     apply_sellable_inventory_guard,
     build_active_maker_order_state,
@@ -48,6 +49,32 @@ def submit_maker_quote(
         )
         logger.info("Skip normal maker BUY: NORMAL_MAKER_BUY_ENABLED is false")
         return
+    is_dry_run = bool(strategy._is_dry_run_mode())
+    if side == "buy" and not is_dry_run:
+        decision_fn = getattr(
+            strategy,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        entry_session = decision_fn(time.time())
+        if not entry_session.allowed:
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_ENTRY_SESSION",
+                side="BUY",
+                price=float(limit_price),
+                status="SKIPPED",
+                reason=entry_session.reason,
+                payload={
+                    "instrument_id": str(instrument_id),
+                    "local_time": entry_session.local_time.isoformat(),
+                    "submission_boundary": "maker_pre_intent",
+                },
+            )
+            logger.warning(
+                "Skip maker BUY at final submission boundary: "
+                f"reason={entry_session.reason} local_time={entry_session.local_time.isoformat()}"
+            )
+            return
     recovery_stage = getattr(strategy, "recovery_exit_stage_by_inst", {}).get(inst_key)
     if side == "sell" and recovery_exit_owns_sell_reservation(recovery_stage):
         strategy._db_order_event(
@@ -411,7 +438,7 @@ def submit_maker_quote(
     token_qty = float(qty_dec)
     order_key = strategy._order_key_for(side, instrument_id)
     created_ts = time.time()
-    if strategy._is_dry_run_mode():
+    if is_dry_run:
         if side != "buy" or not hasattr(strategy, "_record_shadow_simulated_entry"):
             strategy._db_order_event(
                 event_type="ORDER_DRY_RUN_SKIP",

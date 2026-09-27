@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 from loguru import logger
 
 from bot.enums import ActiveSide, MarketPhase
+from bot.entry_session_policy import new_buy_session_decision
 from bot.quote_service import (
     build_directional_snapshot,
     compute_requote_target_version,
@@ -160,6 +161,40 @@ class QuoteRuntimeMixin:
                 self._cancel_active_maker_orders()
                 return None
 
+        decision_fn = getattr(
+            self,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        entry_session = decision_fn(time.time())
+        session_forced_sell_only = (
+            not entry_session.allowed
+            and not self._is_dry_run_mode()
+        )
+        if session_forced_sell_only:
+            for order_key, state in list(self.active_maker_orders.items()):
+                side = str(state.get("side", "") or "").lower()
+                if side == "buy" or str(order_key).lower().startswith("buy:"):
+                    self._cancel_maker_order_side(order_key, reason="entry_session_blocked")
+            now_session_ts = time.time()
+            if now_session_ts - float(getattr(self, "_last_entry_session_block_log_ts", 0.0)) >= 60.0:
+                self._last_entry_session_block_log_ts = now_session_ts
+                record_event = getattr(self, "_db_strategy_event", None)
+                if callable(record_event):
+                    record_event(
+                        "ENTRY_SESSION_BUY_BLOCKED",
+                        {
+                            "reason": entry_session.reason,
+                            "local_time": entry_session.local_time.isoformat(),
+                            "boundary": "quote_cycle_prepare",
+                            "sell_authority_preserved": True,
+                        },
+                    )
+                logger.info(
+                    "New BUY session is closed; maker remains SELL-only: "
+                    f"reason={entry_session.reason} local_time={entry_session.local_time.isoformat()}"
+                )
+
         balance_forced_sell_only = False
         regime_guard_active = False
         if not self._is_dry_run_mode():
@@ -214,6 +249,7 @@ class QuoteRuntimeMixin:
             or self._startup_rehydrated_inventory_force_sell_only
             or inventory_overage_sell_only
             or journal_forced_sell_only
+            or session_forced_sell_only
         )
 
         await self._maybe_taker_exit_positions(time.time(), is_simulation=self._is_dry_run_mode())
@@ -299,6 +335,35 @@ class QuoteRuntimeMixin:
         diag_context_by_inst: Dict[str, Dict[str, Any]],
     ) -> None:
         submitted_attempts = 0
+
+        # Final cycle-level authority check. Desired quotes are mutable as they
+        # pass through sizing and confirmation helpers, so a closed entry
+        # session must be re-applied immediately before reconcile/submission.
+        decision_fn = getattr(
+            self,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        entry_session = decision_fn(time.time())
+        if not entry_session.allowed and not self._is_dry_run_mode():
+            blocked_live_buy = False
+            for desired in desired_quotes.values():
+                if str(desired.get("side", "") or "").lower() != "buy":
+                    continue
+                blocked_live_buy = blocked_live_buy or bool(desired.get("should_quote", False))
+                desired["should_quote"] = False
+                desired["force_cancel_existing"] = True
+                desired["diag_reason"] = f"entry_session_blocked_{entry_session.reason}"
+            if blocked_live_buy:
+                self._db_strategy_event(
+                    "ENTRY_SESSION_BUY_BLOCKED",
+                    {
+                        "reason": entry_session.reason,
+                        "local_time": entry_session.local_time.isoformat(),
+                        "boundary": "maker_pre_submit_cycle",
+                        "sell_authority_preserved": True,
+                    },
+                )
 
         # Fair-edge research candidates must never influence the live order
         # book. In particular, they cannot cause an existing live quote to be

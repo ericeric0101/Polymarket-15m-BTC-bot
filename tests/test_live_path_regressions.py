@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -31,6 +32,7 @@ from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.execution_events import is_benign_cancel_reject_reason, reconcile_benign_cancel_reject
 from bot.edge_observation import build_quote_age_telemetry
 from bot.enums import ActiveSide, MarketPhase
+from bot.entry_session_policy import EntrySessionDecision, TAIPEI
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle_runtime import StrategyLifecycleMixin
@@ -306,6 +308,11 @@ def test_runtime_journal_failure_does_not_disable_normal_maker_cycle_or_protecti
             self.requote_bucket_tokens = 0.0
             self.maker_requote_max_per_sec = 1.0
             self.current_market_end_timestamp = None
+            self._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
+                allowed=True,
+                reason="test_weekday_entry_session",
+                local_time=datetime.fromtimestamp(float(now_ts), tz=TAIPEI),
+            )
 
         def _update_market_phase(self):
             return MarketPhase.ACTIVE
@@ -1213,6 +1220,11 @@ class DummyTrendSubmitStrategy:
         self.consecutive_denied_orders = 0
         self.recovery_exit_stage_by_inst = {}
         self.tail_exit_calls = []
+        self._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
+            allowed=True,
+            reason="test_weekday_entry_session",
+            local_time=datetime.fromtimestamp(float(now_ts), tz=TAIPEI),
+        )
 
     @property
     def cache(self):
@@ -4023,6 +4035,33 @@ def test_normal_maker_buy_can_be_explicitly_disabled_without_disabling_sells():
     assert strategy.submitted_orders == []
     assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_NORMAL_MAKER_BUY_DISABLED"
     assert strategy.order_events[-1]["reason"] == "normal_maker_buy_disabled"
+
+
+def test_weekend_session_is_rechecked_at_maker_venue_submission_boundary():
+    strategy = DummyTrendSubmitStrategy()
+    strategy._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
+        allowed=False,
+        reason="taipei_weekend_observation_only",
+        local_time=datetime.fromtimestamp(float(now_ts), tz=TAIPEI),
+    )
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.38"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0.38"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+    )
+
+    assert strategy.submitted_orders == []
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_ENTRY_SESSION"
+    assert strategy.order_events[-1]["reason"] == "taipei_weekend_observation_only"
+    assert strategy.order_events[-1]["payload"]["submission_boundary"] == "maker_pre_intent"
 
 
 def test_maker_buy_does_not_reach_venue_when_durable_intent_fails():
