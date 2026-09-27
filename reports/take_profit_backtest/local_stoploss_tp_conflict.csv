@@ -1,0 +1,9 @@
+slug,exit_ts,side,entry_price_vwap,open_qty_at_stop_submit,stop_submit_price,entry_ts,matched_print_count,status,tp3_hit_before_stop,tp3_hit_ts,tp5_hit_before_stop,tp5_hit_ts,tp7.5_hit_before_stop,tp7.5_hit_ts,tp10_hit_before_stop,tp10_hit_ts,interpretation
+btc-updown-15m-1789146900,2026-09-11T17:28:00.439887+00:00,DOWN,0.66,6.227273,0.01,1789147329.362625,0,JOINED_PROXY_PATH,,,,,,,,,prior proxy TP touch before protective-exit submission; not proof a live TP order would fill
+btc-updown-15m-1789395300,2026-09-14T14:28:00.429173+00:00,UP,0.68,5.367646,0.02,1789395567.836659,0,JOINED_PROXY_PATH,,,,,,,,,prior proxy TP touch before protective-exit submission; not proof a live TP order would fill
+btc-updown-15m-1790337600,2026-09-25T12:11:26.512360+00:00,,,,,,,PUBLIC_MARKET_NOT_CACHED,,,,,,,,,
+btc-updown-15m-1790337600,2026-09-25T12:11:52.524923+00:00,,,,,,,PUBLIC_MARKET_NOT_CACHED,,,,,,,,,
+btc-updown-15m-1790343000,2026-09-25T13:35:18.240115+00:00,,,,,,,PUBLIC_MARKET_NOT_CACHED,,,,,,,,,
+btc-updown-15m-1790470800,2026-09-27T01:09:49.792619+00:00,,,,,,,PUBLIC_MARKET_NOT_CACHED,,,,,,,,,
+btc-updown-15m-1790472600,2026-09-27T01:40:23.283692+00:00,,,,,,,PUBLIC_MARKET_NOT_CACHED,,,,,,,,,
+btc-updown-15m-1790474400,2026-09-27T02:09:23.307062+00:00,,,,,,,PUBLIC_MARKET_NOT_CACHED,,,,,,,,,
