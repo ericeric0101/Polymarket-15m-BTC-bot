@@ -47,4 +47,6 @@ def new_buy_session_decision(now_ts: float) -> EntrySessionDecision:
     local = when.astimezone(TAIPEI)
     if when < ENTRY_SESSION_ENFORCED_FROM_UTC:
         return EntrySessionDecision(True, "entry_session_policy_not_yet_enforced", local)
-    return EntrySessionDecision(True, "taipei_all_days_entry_session", local)
+    if local.weekday() >= 5:
+        return EntrySessionDecision(False, "taipei_weekend_observation_only", local)
+    return EntrySessionDecision(True, "taipei_weekday_entry_session", local)

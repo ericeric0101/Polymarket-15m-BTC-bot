@@ -1867,6 +1867,13 @@ def build_desired_quote_entry(
         "econ": econ,
         "should_quote": should_quote,
         "diag_reason": diag_reason,
+        # A weekend-only live-entry policy must also retire an already-resting
+        # maker BUY immediately at the session boundary; it is not a soft gate.
+        "force_cancel_existing": bool(
+            side == "buy"
+            and side_disable_reason_by_side.get(side)
+            == "entry_session_blocked_taipei_weekend_observation_only"
+        ),
         "robust_net": robust_net,
         "exec_penalty": exec_penalty,
         "directional_edge_ps": directional_edge_ps,

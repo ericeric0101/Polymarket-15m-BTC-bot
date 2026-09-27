@@ -3924,6 +3924,30 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
     ]
 
 
+def test_weekend_entry_session_gate_marks_resting_maker_buy_for_immediate_cancel():
+    desired = build_desired_quote_entry(
+        order_key="buy:inst-up", side="buy", inst_id="inst-up",
+        quote_data=(Decimal("0.60"), SimpleNamespace(expected_net_usdc=Decimal("0")), False,
+                    Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0.60"),
+                    Decimal("0"), Decimal("0"), {"cost_model_available": Decimal("1")}),
+        side_disable_reason_by_side={
+            "buy": "entry_session_blocked_taipei_weekend_observation_only",
+        },
+        reduce_only_reason=None, reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30, forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"), now_ts=1787968800.0,
+        sell_pause_until=0.0, is_dry_run_mode=False, sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5"), avg_entry=Decimal("0"),
+        emergency_window=False, high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0, high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+    )
+
+    assert desired["should_quote"] is False
+    assert desired["force_cancel_existing"] is True
+
+
 def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up",

@@ -15,6 +15,7 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
 from bot.depth_risk import ExecutionEstimate, estimate_taker_execution
+from bot.entry_session_policy import new_buy_session_decision
 from bot.enums import ActiveSide
 from bot.live_entry_research import build_shadow_labels, edge_semantics
 
@@ -517,6 +518,12 @@ class OutcomeFastFollowLive:
         if side != wanted_side:
             self._record_blocked(candidate, "signal_side_mapping_invalid", observed_side=side,
                                  wanted_side=wanted_side, instrument_id=str(instrument_id))
+            return False
+        entry_session = new_buy_session_decision(float(now_ts))
+        if not entry_session.allowed:
+            self._record_blocked(candidate, "weekend_live_entries_disabled",
+                                 local_time=entry_session.local_time.isoformat(),
+                                 entry_session_reason=entry_session.reason)
             return False
         if candidate_key not in self._quote_handoff_observed_candidates:
             self._quote_handoff_observed_candidates.add(candidate_key)

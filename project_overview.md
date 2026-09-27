@@ -1881,7 +1881,12 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   signal and never has order, cancel, ownership, sizing, exit, or risk authority.
 - `FORWARD_SHADOW_WEEKDAY_ONLY=1` is the research/operator default. Weekday
   candidates are the primary cohort; weekend observations continue with the
-  `WEEKEND_SHADOW_ONLY` label. Existing live weekend behavior is unchanged.
+  `WEEKEND_SHADOW_ONLY` label. Current live entry policy is Taipei Monday–Friday
+  all hours; Saturday/Sunday are observation-only. The weekend gate blocks new
+  maker and Outcome fast-follow BUYs, while SELL, stop-loss, emergency exit,
+  settlement, and shadow capture remain active. This supersedes the earlier
+  operator-approved all-days live-entry setting; it does not affect positions
+  already open.
 - Candidate entry variants are best ask and depth-weighted fixed `$5` ask
   where the observed book has enough depth. The recorder simulates only
   `HOLD`, `TP20`, `TRAIL5`, and `TRAIL10`, marks long inventory at executable

@@ -403,7 +403,7 @@ def test_fast_follow_allows_weekday_daytime_and_uses_local_date_risk_bucket():
     assert "2026-08-31" in owner._night_pending_entry_ids
 
 
-def test_fast_follow_allows_weekend_and_buckets_risk_by_taipei_calendar_date():
+def test_fast_follow_blocks_weekend_but_keeps_candidate_observable():
     for local in (
         datetime(2026, 8, 29, 10, 0, tzinfo=ZoneInfo("Asia/Taipei")),
         datetime(2026, 8, 30, 2, 0, tzinfo=ZoneInfo("Asia/Taipei")),
@@ -425,9 +425,11 @@ def test_fast_follow_allows_weekend_and_buckets_risk_by_taipei_calendar_date():
         assert owner.on_quote(
             instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
             ask_size=Decimal("100"), now_ts=local.timestamp(),
-        ) is True
-        assert len(submitted) == 1
-        assert risk_day in owner._night_pending_entry_ids
+        ) is False
+        assert len(submitted) == 0
+        assert risk_day not in owner._night_pending_entry_ids
+        assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" and payload.get("reason") == "weekend_live_entries_disabled"
+                   for event, payload in events)
 
 
 def test_live_fast_follow_uses_sellable_five_point_five_shares_above_threshold():
