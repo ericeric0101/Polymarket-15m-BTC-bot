@@ -21,7 +21,8 @@ OUTPUTS = (
     "tp20_results.csv", "trail5_results.csv", "trail10_results.csv", "weekday_summary.csv",
     "weekend_shadow_summary.csv", "signal_reversal_analysis.csv", "strike_cross_analysis.csv",
     "fair_deterioration.csv", "live_vs_shadow.csv", "execution_quality.csv", "data_quality.csv",
-    "shadow_events_per_hour.csv",
+    "shadow_events_per_hour.csv", "thesis_weakening_marks.csv", "loss_warnings.csv",
+    "combined180_results.csv", "combined300_results.csv",
 )
 CONFIG_NAMES = ("120_0", "120_2", "120_5")
 
@@ -128,6 +129,10 @@ def build_report(db: Path, output: Path, trade_db: Path | None = None) -> dict[s
         "signal_reversal_analysis.csv": by_type["SHADOW_SIGNAL_REVERSAL"],
         "strike_cross_analysis.csv": [r for r in marks if r.get("strike_crossed_against")],
         "fair_deterioration.csv": [r for r in marks if r.get("fair_change_from_entry") is not None],
+        "thesis_weakening_marks.csv": [r for r in marks if int(r.get("thesis_weakening_count") or 0) > 0],
+        "loss_warnings.csv": by_type["SHADOW_LOSS_WARNING"],
+        "combined180_results.csv": [r for r in summary if r["exit_policy"] == "COMBINED180"],
+        "combined300_results.csv": [r for r in summary if r["exit_policy"] == "COMBINED300"],
         "live_vs_shadow.csv": _live_join(candidates, trade_db),
         "execution_quality.csv": [{k: r.get(k) for k in ("candidate_id", "entry_config", "entry_top_ask", "entry_top_ask_fillable_notional", "research_shares", "top_level_fillable", "depth_weighted_entry_price", "depth_weighted_entry_status")} for r in candidates],
         "data_quality.csv": [{"event_type": kind, "events": len(rows)} for kind, rows in sorted(by_type.items())],
@@ -217,7 +222,7 @@ def _paired(candidates: list[dict[str, Any]], positions: list[dict[str, Any]]) -
             if a not in configs or b not in configs:
                 continue
             for variant in ("ENTRY_TOP_ASK", "ENTRY_DEPTH_WEIGHTED_5USD"):
-                for policy in ("HOLD", "TP20", "TRAIL5", "TRAIL10"):
+                for policy in ("HOLD", "TP20", "TRAIL5", "TRAIL10", "COMBINED180", "COMBINED300"):
                     pos_a = lookup.get((str(configs[a].get("candidate_id")), variant, policy))
                     pos_b = lookup.get((str(configs[b].get("candidate_id")), variant, policy))
                     rows.append({"slug": slug, "config_a": a, "config_b": b,

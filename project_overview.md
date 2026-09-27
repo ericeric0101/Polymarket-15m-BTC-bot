@@ -1,21 +1,8 @@
 # Polymarket BTC 15-Minute Trading Bot — Current Authority
 
-> Operational implementation baseline: branch `codex/db-resilience-and-stoploss-priority`,
-> repository snapshot `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`. This commit
-> added historical-research code, tests, and reports; it did not change live
-> strategy behavior or configuration. The current worktree additionally
-> contains an uncommitted, explicitly approved 2026-09-26 change opening new
-> BUY entries on all seven Taipei calendar days; fast-follow risk limits
-> remain bucketed by Taipei calendar date. Other operational statements
-> describe the implementation baseline at the cited snapshot; entries with
-> explicit historical dates remain attributable to those dates and are not
-> implied to have originated in this commit.
-> Research evidence baseline: `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`,
-> including the reproducible outputs under
-> `reports/unified_strategy_research/`. This document is the single authority
-> for current implementation interpretation, research conclusions, approved
-> next evidence, and known operational debts; historical documents remain
-> evidence until cleanup is approved and completed.
+> 實作基準：分支 `codex/db-resilience-and-stoploss-priority`，目前已提交版本
+> `b84f249adcdef47afd56b8b5093122095397929f`。台北時間週一至週五全天允許新進場；週六、週日只觀察，maker BUY 與 Outcome fast-follow BUY 均受 gate 阻擋，SELL／止損／緊急出場及資料蒐集仍運作。fast-follow 風控額度仍按台北日曆日分桶。
+> 研究證據基準仍為 `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`，可重現輸出位於 `reports/unified_strategy_research/`。本文件是目前實作解讀、研究結論、核准後續證據與已知技術債的唯一權威；歷史文件在核准清理前保留作為證據。
 
 ## Audit scope and safety status
 
@@ -429,9 +416,9 @@ does not authorize changing any of these live controls:
 
 - `FIRST_ENTRY_MAX_TIME_LEFT_SEC=780` (approximately T+120 seconds).
 - SignalEngine thresholds or entry trend thresholds.
-- A liquidity-regime gate. A weekend hard veto is not supported by this
-  research and, following explicit operator approval on 2026-09-26, weekends
-  are open for entries.
+- Weekend live-entry gate: following the explicit operator decision on
+  2026-09-27, Taipei Saturday/Sunday are observation-only. This is an operator
+  policy, not a conclusion inferred from the historical liquidity study.
 - UP/DOWN asymmetric entry gates.
 - Stop-loss removal or relaxation.
 - `HOLD_TO_REDEEM`, `TAIL_PROTECT_TP`, protective invalidation/stop-loss
@@ -439,38 +426,115 @@ does not authorize changing any of these live controls:
 - Existing economics gates.
 
 The research commit itself changed none of these settings or behaviors. The
-separate operator-approved weekend opening is recorded below; other future
-live changes require separate approval and evidence that reflects executable
-prices/costs, not just resolved direction.
+weekend-only observation policy is a separate operator-approved live change;
+other future live changes require separate approval and executable-price/cost
+evidence, not only resolved direction.
 
 ### Next evidence requirements
 
 1. **Scale public historical research:** target 1,000–3,000 BTC 15-minute
    markets over 3–6 months, preferably the full universe when API/cache limits
    permit, including multiple complete weekends.
-2. **Collect forward executable data:** at each research candidate record
+2. **Collect forward executable data:** the capture framework is implemented;
+   collecting and reviewing a sufficient live forward sample remains open.
+   At each research candidate record
    timestamp, market age, BTC return/direction, signal side, UP/DOWN BBO,
    spread, top sizes, depth near executable price, quote age, pre-entry volume
    and trade activity, and eventual settlement.
-3. **Run shadow-only candidate comparisons** for T+60/120/180 at 0 bps,
-   T+120/180 at 2 bps, and T+180 at 5 bps. Record signal, executable ask,
-   depth, 1/5/10/30-second executable markout, and settlement. Shadow must
-   never submit/cancel orders or claim entry ownership.
-4. **Build pre-entry-only liquidity features**, when available: activity and
+3. **Build pre-entry-only liquidity features**, when available: activity and
    volume since open and over the last 30 seconds, maximum pre-entry trade
    gap, recent trade-size distribution, pre-entry price jumps, BBO/spread,
    top/executable depth, and quote age. Do not use whole-market/future data.
-5. **Test incremental information:** BTC vs Polymarket agreement and
+4. **Test incremental information:** BTC vs Polymarket agreement and
    disagreement, UP vs DOWN, weekday/weekend, and ET hour blocks, with
    chronological out-of-sample evaluation and uncertainty intervals.
-6. **Accumulate naturally occurring local evidence:** research targets are
-   200–300 independent shadow/live entry opportunities, at least 100 actual
-   fills if they occur naturally, multiple complete weekends, and enough
-   naturally occurring invalidation/stop-loss outcomes. Never create trades to
-   meet a sample target.
+5. **Accumulate naturally occurring local evidence:** use the per-config
+   forward-shadow targets below and gather multiple complete weeks plus
+   naturally occurring invalidation/stop-loss outcomes. Never create trades
+   merely to meet a sample target.
 
-**Trend-entry shadow capture implementation (2026-09-26):** the six schedules
-in item 3 are now sampled from fresh Polymarket quotes by
+### 證據最貼近的完整出場候選架構（2026-09-27，研究中，未授權 live）
+
+目前最合理的研究候選不是單獨的固定停利或固定停損，而是把獲利保護、
+thesis weakening 與無條件災難停損放在同一個狀態機：
+
+1. 進場邏輯維持不變。以「相對於實際進場價的報酬率」計算研究階梯；這和
+   現有 live 部分路徑使用的每股絕對價差不是同一語意，未經另行核准不得直接
+   套成 live 參數。
+2. 獲利側：+5% 啟動保本；+10% 最低保護 +3%；+15% 保護 +5%；
+   +20% 保護 +10%；+30% 保護 +15%，並同時比較 peak 後 5% trailing。
+   一旦保護底線被跌破，研究假設是 aggressive SELL，不是假設被動 maker
+   一定成交。
+3. 虧損側：−8% 進入警戒；−10% 以下只有在至少兩個互相獨立的 thesis
+   weakening 成立時才退出。前瞻研究中的獨立成分限定為：(a) production
+   signal 反向、(b) canonical strike leader 反向、(c) 持倉 token 的 fresh
+   fair probability 較進場下降至少 5 個百分點。單純 bid 下跌不是第二個
+   thesis 成分，避免同一價格雜訊被重複計票。
+4. 進場後 180 秒與 300 秒各保留一組 forward shadow：若從未達 +5%、
+   當下未獲利且至少兩個 thesis weakening 成立，記錄 no-progress exit。
+5. `mark_pnl_usdc <= -$2` 是無條件 hard breaker；不需等待 thesis、spread
+   或被動 SELL。這是候選研究語意，不代表本段已更改 live stop-loss。
+
+#### 歷史價格回放：獲利側與虧損側已合併
+
+`scripts/backtest_profit_lock.py` 現在把三個組合策略放進與既有策略相同的
+timestamp-ordered replay：`COMBINED_LOCK_B_SL20`、
+`COMBINED_TRAIL10_SL20`、以及明確標成敏感度而非 thesis 證據的
+`COMBINED_LOCK_B_SL20_NOPROGRESS180_PRICE_PROXY`。結果輸出到
+`reports/profit_lock_backtest/combined_exit_results.csv` 與
+`combined_exit_replay.csv`。
+
+在 pessimistic 同時間排序與 1% notional fee stress 下，機械式 −20% stop
+雖降低部分平均虧損與 drawdown，卻使測試的 weekday holdout EV 轉負：
+
+| Entry / exit | N | EV / trade | PF | Max DD | Avg loss |
+|---|---:|---:|---:|---:|---:|
+| 180/5 LOCK_B（無 −20% stop） | 19 | +0.0790 | 1.141 | 6.6200 | −1.7736 |
+| 180/5 LOCK_B + −20% stop | 19 | −0.2481 | 0.568 | 5.6835 | −1.0915 |
+| 120/5 LOCK_B（無 −20% stop） | 16 | +0.3018 | 1.854 | 5.5245 | −1.1315 |
+| 120/5 LOCK_B + −20% stop | 16 | −0.1443 | 0.757 | 4.0812 | −1.0555 |
+| 120/5 + −20% stop + 180s price-only proxy | 16 | −0.0387 | 0.921 | 3.9750 | −0.8679 |
+
+因此歷史資料支持的結論是：**不能只因為停損縮小單筆虧損，就把機械式
+−20% stop 上線**；它會洗掉後來恢復的贏家。public trade prints 沒有連續
+live fair/signal/strike/BBO，所以 price-only no-progress 僅是敏感度分析，
+不能冒充 thesis weakening 回測。上述數字也不是可成交 bid 證明。
+
+#### Forward shadow：thesis weakening 驗證已開始，但樣本尚未完成
+
+`bot/forward_shadow.py` 新增 `COMBINED180` 與 `COMBINED300`，保留完整
+BBO/depth、相對報酬、MFE/MAE、三個獨立 thesis 成分、警戒事件、觸發時間、
+top-level 與 depth-weighted aggressive exit 反事實。輸出新增
+`thesis_weakening_marks.csv`、`loss_warnings.csv`、
+`combined180_results.csv` 與 `combined300_results.csv`。這些事件均為
+`research_only_no_order_or_ownership`，不會下單、取消訂單或改變 live 風控。
+新政策只會作用於修改後新建立的候選；舊 journal 不會被合成補值。目前報表
+有 27 個曾觀察市場、1,079 個 BBO snapshots 與 2 個 settlement，但沒有足夠的
+新 combined-policy settled sample，故狀態仍是 **INSUFFICIENT FOR POLICY
+DECISION**。
+
+#### Aggressive SELL adapter 驗證：目前未通過，不得宣稱已安全
+
+`scripts/verify_exit_order_semantics.py` 直接檢查目前安裝的 Nautilus
+Polymarket adapter，證據寫入 `reports/exit_execution_capability/`。結果為：
+
+- strategy 的 generic market request 雖標示 IOC，adapter market path 實際
+  強制 `FOK`；可見／可成交深度不足時，整筆 SELL 可能被拒絕。
+- limit IOC 的 converter 是 `FAK`，但靜態 mapping 不足以證明真實 venue 的
+  partial fill、cancel acknowledgement、剩餘 inventory 與 bounded retry
+  lifecycle 全部正確。
+- 目前 verdict 是 `NOT_PROVEN_MARKET_PATH_IS_FOK`；
+  `aggressive_partial_exit_proven=false`。所以完整候選架構**尚不可上線**。
+
+要關閉這個最後 blocker，必須在真實 adapter integration／受控小額 shadow
+execution 證明：使用 price-bounded limit IOC/FAK（不是 generic market FOK）、
+部分成交會正確更新 inventory、殘量仍由同一 SELL owner 管理、取消與重試不會
+重複賣出，而且深度不足只留下可追蹤殘量而不是讓整個保護退出靜默失敗。
+在這些證據完成前，權威狀態是「歷史組合回放已完成、forward 驗證進行中、
+adapter aggressive SELL 能力未證明」。
+
+**Trend-entry shadow capture implementation (2026-09-26):** the six historical
+T+60/120/180-second schedules at 0/2/5 bps are sampled from fresh Polymarket quotes by
 `bot.trend_entry_shadow.TrendEntryShadow`. Candidate rows include the BTC
 open-return signal and qualification flag, signal-side executable ask/BBO,
 top sizes, depth within 1/2/5 cents, reference/quote ages, and time left.
@@ -484,6 +548,14 @@ comes from the strategy's settlement spot versus cached strike, not a separate
 Polymarket resolution API lookup. Candidate sampling occurs on
 the first eligible fresh quote at or after each scheduled market age, so the
 recorded `schedule_lateness_sec` must be inspected when interpreting results.
+
+**Forward early-entry shadow implementation (2026-09-27):** the separate
+weekday-primary 120/0, 120/2, and 120/5-bps experiment is implemented in
+`bot.forward_shadow`; it compares HOLD, TP20, TRAIL5, and TRAIL10 using
+forward-observed quotes. `scripts/forward_shadow_report.py` summarizes the
+collected evidence. Implementation is complete, while live sample collection
+and review remain open; sample targets are not evidence that the targets have
+already been met.
 
 The future research objective is out-of-sample expected value:
 estimated resolution probability minus executable contract price and expected
@@ -620,7 +692,7 @@ flowchart TD
 |---|---|---|
 | Quote fair vs side sigma | **Resolved in current live path** by `ForecastState`; only non-live compatibility fallback remains. Risk low if isolated after tests. This is P2.2, so do not reopen it as a model behavior change. | Keep fallback until test-host protocol is redesigned; archive old claim that live paths diverge. |
 | Canonical local keys → legacy names | **Phase C complete:** `AppConfig` reads canonical keys directly and runtime no longer mutates canonical values into legacy environment names. `bot.runtime_env.CANONICAL_TO_LEGACY` is migration-only. | D.5 must prove every remaining mapping has no live reader and then either retain it solely in the migration tool or remove it with migration fixtures. |
-| `MAKER_MIN_DIRECTIONAL_EDGE_*` | Removed in Phase B. Its only receiving guard explicitly ignored it as a BUY veto; P1's common `robust_net` rule remains the only economics gate. |
+| `MAKER_MIN_DIRECTIONAL_EDGE_*` | Removed in Phase B. Its only receiving guard explicitly ignored it as a BUY veto. Current ordinary maker admission uses the maker quote expected-net/fee policy; empirical markout-adjusted `robust_net` is diagnostic and is not a maker BUY veto. |
 | `ORDER_TTL_SEC` | Name/documentation imply all orders; runtime now uses it only for loss/urgent exits. Unchanged maker BUY has no time TTL by design (queue priority). Risk medium if renamed/reworked. | Correct documentation; retain behavior and key until an explicit exit-policy naming change. |
 | `MAKER_FEE_RATE_BPS_DEFAULT` | Explicit `legacy_bps_default` fallback when live fee lookup is absent. Risk high: can affect robust_net/live entry. | Retain pending fee-failure evidence; not a safe legacy deletion. |
 | Reload-entry policy | **Removed in implemented D.2.** First fill consumes the market entry budget; no reload threshold, multiplier, helper, reader, or profile key remains. | Keep the D.1/D.2 regression coverage; do not recreate a replacement BUY path. |
@@ -662,16 +734,12 @@ It must not delete active controls merely because they appear numerous.
 | Grafana exporter and its `core/` / legacy execution sidecar | Removed in Phase B after user approval; no maker runtime reference remained. | Complete. |
 
 No long commented-out executable Python block was found by the static scan.
-The misleading comments that need correction rather than code removal are:
+The remaining source-comment debt that needs correction rather than code
+removal is:
 
 - `bot.spot_pricer._compute_fair_probability` still describes the old
   “digital option probability using parsed strike + estimated sigma” path; it
   should name shared `ForecastState` and TWAP settlement selection.
-- `docs/PHASE_2_VOLATILITY_FAIR_MODEL_AUDIT.md` lines 49 and 93–104 describe
-  the pre-P2.2 side sigma divergence, while its later status section says it
-  is complete.  This is an internally contradictory historical document.
-- `docs/pure_strategy.md` says sigma ceiling 1.20 and old raw formula/key
-  names; profile ceiling is 1.60 and shared forecast has extra transforms.
 - `execution/rebate_reporter.py` labels realized fields “placeholder” although
   it is used for current telemetry. **Unknown—ask first:** clarify whether
   this is a known limitation or stale comment before altering wording.
@@ -681,7 +749,7 @@ The misleading comments that need correction rather than code removal are:
 | Class | Scripts |
 |---|---|
 | Supported operational/manual | `inspect_env_contract.py`, `migrate_env_to_profile.py`, `check_allowance.py`, `check_positions_and_redeem.py`, `replay_journal_signals.py`, `pnl_attribution_report.py`, `execution_path_penalty_report.py`, `fast_follow_execution_report.py`, `feed_health_report.py`, `archive_lead_lag_research.py`, `invalidation_counterfactual_report.py`, `verify_exit_order_semantics.py`, `execution_penalty_report.py`, `twap_fair_calibration_report.py`, `fair_edge_bucket_shadow_report.py`, `executable_fair_edge_report.py`, `backfill_redeem_activity.py`. Evidence: README/current docs or current audit docs refer to them. |
-| Research, no CI/manual invocation | `calibration_shadow_report.py`, `pure_signal_probe.py`, `shadow_*_report.py`, `pure_probe_report.py`, `score_momentum_report.py`, `recent_buy_fill_report.py`, `realized_edge_report.py`, `pnl_reconcile_report.py`, `mirrored_down_report.py`, `hourly_attribution_report.py`, `edge_attribution_report.py`, `econ_gate_report.py`, `compare_polymarket_chainlink_vs_binance.py`, `build_smart_money_wallets.py`, `trade_db_report.py`, `live_dashboard.py`. | 
+| Research, no CI/manual invocation | `calibration_shadow_report.py`, `pure_signal_probe.py`, `shadow_*_report.py`, `pure_probe_report.py`, `score_momentum_report.py`, `recent_buy_fill_report.py`, `realized_edge_report.py`, `pnl_reconcile_report.py`, `mirrored_down_report.py`, `hourly_attribution_report.py`, `edge_attribution_report.py`, `econ_gate_report.py`, `compare_polymarket_chainlink_vs_binance.py`, `build_smart_money_wallets.py`, `trade_db_report.py`, `live_dashboard.py`, `forward_shadow_report.py`. |
 | Historical / likely obsolete research | `outcome_analysis.py`, `penalty_simulation.py`. |
 
 “Research, no CI/manual invocation” is **not** proof of deletability.  These
@@ -696,15 +764,15 @@ directory only after confirming the desired retention policy.
 The documentation audit originally used **merge** rather than immediate
 deletion because static review alone cannot establish whether an operator uses
 a historical report, and several files contained operational facts that needed
-current-code verification. The owner subsequently approved deletion of all
-`docs/` Markdown files except the Traditional Chinese README, provided current
-facts were retained here or in the English README.
+current-code verification. The owner subsequently approved deletion of
+duplicate `docs/` Markdown files, provided current facts were retained here or
+in the single Traditional Chinese root README.
 
 The retained documentation surface is deliberately small:
 
 - `project_overview.md` — the only decision authority and implementation plan.
-- `README.md` — English operator quick start.
-- `docs/readme_ZH.md` — complete Traditional Chinese translation of README.
+- `README.md` — Traditional Chinese operator quick start; the former duplicate
+  `docs/readme_ZH.md` has been removed.
 - `core/README.md` — narrow retained explanation of the non-live `core`
   dependency.
 
@@ -923,11 +991,11 @@ live policy.
   redemption continue normally. This is not an inference that a regime model
   is proven; it is an operator-approved safety boundary based on realized
   operation and avoids trapping existing inventory by shutting the bot down.
-- **Current entry-session policy (updated 2026-09-26):** following explicit
-  operator approval, new BUYs are allowed at all hours on all seven days in
-  `Asia/Taipei`. This applies consistently to normal maker and Outcome
-  fast-follow entries. All other entry gates remain active; SELL, stop-loss,
-  inventory recovery, cancellation and redemption remain available as before.
+- **Entry-session policy history:** on 2026-09-26 new BUYs were opened for all
+  Taipei calendar days. This was superseded on 2026-09-27: new BUYs are now
+  allowed Monday–Friday at all hours; Saturday/Sunday are observation-only.
+  The gate applies to normal maker and Outcome fast-follow. SELL, stop-loss,
+  inventory recovery, cancellation and redemption remain available.
   The fast-follow max-entry and max-loss settings retain their existing limits
   but are bucketed by Taipei calendar date, including weekends; legacy
   journal/dashboard field `night_key` is preserved for compatibility and
@@ -940,17 +1008,19 @@ live policy.
   historical Taipei weekday-night cohort, and first 10-second fill per market.
   At deployment the journal has 62 independent samples: winsorized-P90
   penalty **$0.03218/share** (raw mean $0.03685; cap $0.125). This single
-  penalty remains the input to `robust_net`/`econ_gate`; no weekday/weekend
-  multiplier or shorter-window profile is installed.
+  penalty was used by the historical `robust_net`/`econ_gate` maker admission
+  policy at that time. That veto was later removed from normal maker BUY
+  eligibility; retain this dated value as historical calibration evidence.
 - **Model-selection decision:** 48h remains unselected. Reconsider only after
   the 48h candidate has at least 30 independent OOS targets and the fixed
   comparison demonstrates improved or preserved realized robust outcome
   without weakening risk limits. The weekend stratum still lacks sufficient
   independent OOS data; it is now intentionally outside the entry policy.
-- **D.4 fixed fallback after journal reconstruction (2026-09-07):** The
-  execution journal can be rebuilt or unavailable before it has the minimum
-  number of current 10-second maker-BUY markouts. This must not silently turn
-  off the economics gate. Until the same eligible current-journal population
+- **D.4 fixed fallback after journal reconstruction (2026-09-07; historical
+  live-veto policy, superseded for maker eligibility on 2026-09-25):** The
+  execution journal could be rebuilt or unavailable before it had the minimum
+  number of current 10-second maker-BUY markouts. At that time this was not
+  allowed to silently turn off the economics gate. Until the same eligible current-journal population
   reaches its configured sample floor, runtime uses the frozen weekday
   **168-hour adverse-markout penalty of $0.02515/share**
   (`d4_fixed_168h_fallback`). It is derived from the last valid D.4 evidence:
@@ -1028,13 +1098,17 @@ weekday/weekend features. This remains observability-only: it does not alter
   different bot revisions and has not yet been independently reproduced as an
   A/B result. Treat its exact win rates, penalty cap, and multiplier as
   hypotheses—not deployable constants.
-- **Required single standard:** Replace the global historical penalty plus
+- **Historical proposal — not current maker admission policy:** Replace the global historical penalty plus
   separate ad-hoc regime effects with one versioned `MarketRegimeState` built
   from journaled, market-scoped data: recent realized volatility, 10s/30s
   continuation, BBO spread/depth, observed maker-fill markout, time-to-close,
   and an optional UTC weekday/weekend feature. It must produce one canonical
-  cost estimate consumed by `robust_net`/`econ_gate` and recorded with every
-  entry decision. Weekday/weekend may be a measured feature, never a separate
+  cost estimate consumed by the then-proposed `robust_net`/`econ_gate` maker
+  admission rule and recorded with every entry decision. This proposal is
+  superseded for normal maker BUY eligibility: empirical markout-adjusted
+  `robust_net` is telemetry, not a maker veto. Do not restore it as a live
+  maker gate without a separately reviewed and approved policy change.
+  Weekday/weekend may be a measured feature, never a separate
   `.env` profile or unconditional multiplier. Direction-score minimum remains
   unchanged unless separate evidence validates a change.
 - **Implementation scope and order:** After D.3, build the non-live dataset
@@ -1889,7 +1963,7 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   already open.
 - Candidate entry variants are best ask and depth-weighted fixed `$5` ask
   where the observed book has enough depth. The recorder simulates only
-  `HOLD`, `TP20`, `TRAIL5`, and `TRAIL10`, marks long inventory at executable
+  `HOLD`, `TP20`, `TRAIL5`, `TRAIL10`, `COMBINED180`, and `COMBINED300`, marks long inventory at executable
   best bid, tracks one full BBO per token per second plus bounded material
   changes, depth, MFE/MAE, reversals, strike leader changes,
   fair-value movement, and recovery-after-drawdown. Missing economics remain
@@ -1909,4 +1983,6 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   definition, and logs the live production composite/confidence and BTC EMA
   fast/slow values beside it. It does not reinterpret the production
   composite score as bps. Unavailable diagnostics remain null.
-- Live behavior changed? **No.**
+- Live behavior changed by the forward-shadow framework itself? **No.** It has
+  no order authority. The weekend-only live-entry gate is a separate policy
+  change recorded above.

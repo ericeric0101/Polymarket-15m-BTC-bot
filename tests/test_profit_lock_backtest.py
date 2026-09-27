@@ -105,3 +105,22 @@ def test_partial_b_does_not_activate_lock_floor_before_fifteen_percent_peak():
     result = _replay_exit("PARTIAL_B", .80, 100, 1000, path, "UP", "UP")
     assert result["partial_exit"] is True
     assert result["exit_kind"] == "SETTLEMENT"
+
+
+def test_combined_lock_protects_profit_and_cuts_never_profitable_loss():
+    profitable = [mark(101, .90), mark(102, .82)]
+    protected = _replay_exit("COMBINED_LOCK_B_SL20", .80, 100, 1000, profitable, "UP", "UP")
+    assert protected["exit_kind"] == "PROFIT_LOCK"
+    assert protected["exit_price"] == .82
+
+    losing = [mark(101, .70), mark(102, .63)]
+    stopped = _replay_exit("COMBINED_LOCK_B_SL20", .80, 100, 1000, losing, "UP", "DOWN")
+    assert stopped["exit_kind"] == "HARD_STOP_20"
+    assert stopped["exit_price"] == .63
+
+
+def test_price_only_no_progress_sensitivity_is_explicitly_labelled():
+    path = [mark(200, .81), mark(281, .79)]
+    result = _replay_exit("COMBINED_LOCK_B_SL20_NOPROGRESS180_PRICE_PROXY", .80, 100, 1000, path, "UP", "DOWN")
+    assert result["exit_kind"] == "NO_PROGRESS_PRICE_ONLY_PROXY"
+    assert result["exit_ts"] == 281

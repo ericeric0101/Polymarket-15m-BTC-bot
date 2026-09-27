@@ -1,4 +1,4 @@
 bucket,candidate_count,submitted_count,fill_count,fill_rate,settled_fill_count,directional_settlement_count,settlement_win_rate,mean_settlement_pnl_usdc,mean_markout_1s_ps,mean_markout_5s_ps,mean_markout_10s_ps,mean_markout_30s_ps,independent_markets
 weekday,0,0,0,,0,0,,,,,,,0
-weekend,0,0,0,,0,0,,,,,,,0
+weekend,56,27,10,0.17857142857142858,8,8,0.75,0.012187828749999997,-0.010499999999999999,-0.004999999999999999,-0.004000000000000001,-0.011000000000000001,25
 unavailable,0,0,0,,0,0,,,,,,,0

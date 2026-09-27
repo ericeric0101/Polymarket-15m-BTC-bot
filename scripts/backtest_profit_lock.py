@@ -36,7 +36,14 @@ STRATEGIES = ("HOLD_TO_SETTLEMENT", "TP5", "TP10", "TP20", "TP10_OR_SETTLEMENT",
               "LOCK_A_LOOSE", "LOCK_B_BREAKEVEN", "LOCK_C_TIGHT",
               "TRAIL_5", "TRAIL_7.5", "TRAIL_10", "TRAIL_15",
               "PARTIAL_A", "PARTIAL_B", "TIMELOCK_A", "TIMELOCK_B", "TIMELOCK_C",
+              "COMBINED_LOCK_B_SL20", "COMBINED_TRAIL10_SL20",
+              "COMBINED_LOCK_B_SL20_NOPROGRESS180_PRICE_PROXY",
               "CURRENT_180S_5BPS_HOLD")
+COMBINED_STRATEGIES = {
+    "COMBINED_LOCK_B_SL20": "LOCK_B_BREAKEVEN",
+    "COMBINED_TRAIL10_SL20": "TRAIL_10",
+    "COMBINED_LOCK_B_SL20_NOPROGRESS180_PRICE_PROXY": "LOCK_B_BREAKEVEN",
+}
 MFE_THRESHOLDS = (.03, .05, .075, .10, .15, .20, .30, .40)
 ENTRY_PRICE_BUCKETS = ((0, .60, "<0.60"), (.60, .70, "0.60-0.70"), (.70, .75, "0.70-0.75"),
                        (.75, .80, "0.75-0.80"), (.80, .85, "0.80-0.85"), (.85, .90, "0.85-0.90"),
@@ -130,12 +137,20 @@ def _sim_once(strategy: str, entry: float, entry_ts: float, market_end: float,
             group = sorted(group, key=lambda m: float(m["price"]),
                            reverse=(ambiguity_policy == "pessimistic"))
         remaining = 900.0 - (ts - (market_end - 900.0))
-        base_name = strategy
+        base_name = COMBINED_STRATEGIES.get(strategy, strategy)
         timelock = strategy in {"TIMELOCK_A", "TIMELOCK_B", "TIMELOCK_C"}
         time_boundary = 120 if strategy in {"TIMELOCK_A", "TIMELOCK_B"} else 180
         for mark in group:
             px = float(mark["price"])
             ret = px / entry - 1.0
+            peak = max(peak, ret)
+            if strategy in COMBINED_STRATEGIES and ret <= -0.20 + 1e-12:
+                exit_mark, exit_kind = mark, "HARD_STOP_20"
+                break
+            if (strategy == "COMBINED_LOCK_B_SL20_NOPROGRESS180_PRICE_PROXY"
+                    and ts - entry_ts >= 180 and peak < .05 and ret < 0):
+                exit_mark, exit_kind = mark, "NO_PROGRESS_PRICE_ONLY_PROXY"
+                break
             # Fixed TP baselines and partial first leg.
             tp = {"TP5": .05, "TP10": .10, "TP20": .20, "TP10_OR_TMINUS2M": .10,
                   "TP10_OR_SETTLEMENT": .10}.get(strategy)
@@ -150,14 +165,12 @@ def _sim_once(strategy: str, entry: float, entry_ts: float, market_end: float,
                 if strategy == "PARTIAL_A":
                     continue
                 base_name = "LOCK_A_LOOSE"
-            if strategy.startswith("TRAIL_"):
-                distance = float(strategy.split("_")[1]) / 100
-                peak = max(peak, ret)
+            if base_name.startswith("TRAIL_"):
+                distance = float(base_name.split("_")[1]) / 100
                 candidate = peak - distance if peak >= .05 else None
                 if candidate is not None:
                     floor = candidate if floor is None else max(floor, candidate)
             elif strategy in LOCK_LADDERS or base_name in LOCK_LADDERS:
-                peak = max(peak, ret)
                 if strategy == "PARTIAL_B" and sold_fraction > 0:
                     candidates=[v for activation,v in PARTIAL_B_LADDER if peak+1e-12>=activation]
                     if candidates: floor=max(floor if floor is not None else -math.inf,max(candidates))
@@ -174,7 +187,7 @@ def _sim_once(strategy: str, entry: float, entry_ts: float, market_end: float,
                         floor = max(floor if floor is not None else -math.inf, 0.0)
             if floor is not None and ret <= floor + 1e-12:
                 exit_mark, exit_kind = mark, "TIME_LOCK" if timelock and remaining <= time_boundary else (
-                    "TRAILING_STOP" if strategy.startswith("TRAIL_") else "PROFIT_LOCK")
+                    "TRAILING_STOP" if base_name.startswith("TRAIL_") else "PROFIT_LOCK")
                 break
             last_return = ret
         if exit_mark is not None:
@@ -619,6 +632,7 @@ def run(*, cache_dirs: list[Path], sample_csv: Path, btc_cache: Path, output: Pa
     trailing_results=[r for r in matrix if r["strategy"].startswith("TRAIL_")]
     partial_results=[r for r in matrix if r["strategy"].startswith("PARTIAL_")]
     time_results=[r for r in matrix if r["strategy"].startswith("TIMELOCK_")]
+    combined_results=[r for r in matrix if r["strategy"] in COMBINED_STRATEGIES]
     tail=[]
     for config in sorted({r["entry_config"] for r in entries}):
         base=next((r for r in matrix if r["entry_config"]==config and r["strategy"]=="HOLD_TO_SETTLEMENT" and r["partition"]=="all" and r["ambiguity_policy"]=="pessimistic" and r["cost_scenario"]=="existing_1pct_notional_fee_stress"),{})
@@ -633,6 +647,8 @@ def run(*, cache_dirs: list[Path], sample_csv: Path, btc_cache: Path, output: Pa
            "entry_exit_matrix.csv":matrix,"weekday_entry_exit_matrix.csv":weekday_matrix,"weekend_entry_exit_matrix.csv":weekend_matrix,
            "profit_lock_results.csv":profit_lock_results,"trailing_results.csv":trailing_results,"partial_tp_results.csv":partial_results,
            "time_lock_results.csv":time_results,"winner_retention.csv":[r for r in matrix if r["partition"] in {"all","holdout"}],
+           "combined_exit_results.csv":combined_results,
+           "combined_exit_replay.csv":[r for r in replay if r["strategy"] in COMBINED_STRATEGIES],
            "tail_loss_reduction.csv":tail,"ever_positive_then_negative.csv":strategy_positive_negative,"peak_to_exit_giveback.csv":strategy_giveback,
            "entry_price_interaction.csv":interaction,"entry_economics_decomposition.csv":decomposition,
            "development_holdout.csv":development_holdout,"bootstrap.csv":bootstrap,
@@ -666,6 +682,9 @@ def run(*, cache_dirs: list[Path], sample_csv: Path, btc_cache: Path, output: Pa
     chosen_config=best_dynamic_hold.get("entry_config","120/0")
     def mat(config,strategy,part):
         return next((r for r in matrix if r["entry_config"]==config and r["strategy"]==strategy and r["partition"]==part and r["ambiguity_policy"]=="pessimistic" and r["cost_scenario"]=="existing_1pct_notional_fee_stress"),{})
+    combined_180=mat("180/5","COMBINED_LOCK_B_SL20","holdout_weekday")
+    combined_120=mat("120/5","COMBINED_LOCK_B_SL20","holdout_weekday")
+    combined_proxy_120=mat("120/5","COMBINED_LOCK_B_SL20_NOPROGRESS180_PRICE_PROXY","holdout_weekday")
     weekend_metrics=mat(chosen_config,chosen_strategy,"weekend_only")
     weekday_metrics=mat(chosen_config,chosen_strategy,"weekday_only")
     weekend_ev=weekend_metrics.get("ev_per_trade")
@@ -697,12 +716,14 @@ def run(*, cache_dirs: list[Path], sample_csv: Path, btc_cache: Path, output: Pa
       f"8. TP10 on 180/5: hits={len(tp10_hits)}/{len(tp10_rows)}, hit rate={fmt(len(tp10_hits)/len(tp10_rows) if tp10_rows else None)}, median hit time={fmt(statistics.median([r['exit_ts']-r['entry_ts'] for r in tp10_hits]) if tp10_hits else None)}s, EV={fmt(mat('180/5','TP10','all').get('ev_per_trade'))}. On 180/5 hold, MFE-positive then settlement-negative rate={fmt(hold10_negative)}; MFE>=5/10/15/20-specific rates are in ever_positive_then_negative.csv (both total-trade and threshold-hit denominators).",
       f"9-12. Weekend MFE/MAE, giveback, positive-to-negative rates and entry-price bands are in weekday_weekend_path.csv, peak_to_exit_giveback.csv, ever_positive_then_negative.csv, and entry_price_interaction.csv.",
       f"13. Top development candidates evaluated without holdout selection: see chronological holdout lines below and bootstrap confidence intervals in bootstrap.csv.",
+      f"14. Combined profit/loss replay (LOCK_B + -20% price stop), pessimistic 1% stress, weekday holdout: 180/5 N={combined_180.get('n',0)} EV={fmt(combined_180.get('ev_per_trade'))}, PF={fmt(combined_180.get('profit_factor'))}; 120/5 N={combined_120.get('n',0)} EV={fmt(combined_120.get('ev_per_trade'))}, PF={fmt(combined_120.get('profit_factor'))}. The 120/5 price-only 180s no-progress sensitivity is EV={fmt(combined_proxy_120.get('ev_per_trade'))}, PF={fmt(combined_proxy_120.get('profit_factor'))}. These price-print proxies do not reproduce thesis weakening.",
       "",
       "## Development-selected top candidates (development and untouched holdout)","",*(top_lines or ["- Fewer than five development trades per candidate; no candidate selected."]),"",
       "## Interpretation limits","",
       "- No historical executable ask/bid or L2 is available in this public cache. Public prints may be stale, sparse, and not fillable at the displayed price.",
       "- MFE/MAE are sampled print excursions. Intratimestamp ambiguity is replayed optimistic/pessimistic or excluded; gap uncertainty is not interpolated.",
       "- The 1% notional fee and 1c/2c slippage are stress scenarios. Results are descriptive, not live PnL forecasts.",
+      "- A mechanical -20% price stop reduced average-loss severity in several partitions but made the tested holdout EV negative; historical public prints therefore do not support enabling that stop by itself. Thesis-conditioned exits require prospective shadow evidence.",
       "- Weekend is comparison-only; no weekend policy or live entry/exit/size/stop/TP parameter was changed.",
       f"- Hypothesis A — earlier cheaper entry: {verdict_a}. Lower price / accuracy / EV decomposition is in entry_economics_decomposition.csv; proxy-based retrospective evidence is not execution proof.",
       f"- Hypothesis B — dynamic profit-lock vs fixed TP: {verdict_b}. A positive point estimate in a small holdout is only suggestive, not proof of superiority.",

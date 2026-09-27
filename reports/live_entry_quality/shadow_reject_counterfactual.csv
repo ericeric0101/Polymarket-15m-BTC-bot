@@ -1,1 +1,8 @@
-status
+shadow_reject_reason,candidate_count,settled_candidate_count,priced_directional_counterfactual_count,counterfactual_direction_accuracy,gross_resolution_pnl_if_fully_filled_usdc,mean_gross_resolution_pnl_if_fully_filled_usdc,counterfactual_basis
+near_strike;recent_crossing;weekend_near_strike,1,1,0,,,,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"
+negative_robust_net,18,17,17,1.0,11.293741545144362,0.6643377379496683,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"
+negative_robust_net;near_strike;recent_crossing;weekend_near_strike,1,1,1,0.0,-3.5,-3.5,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"
+negative_robust_net;near_strike;weekend_near_strike,14,14,14,0.7142857142857143,9.026422013938959,0.6447444295670685,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"
+negative_robust_net;recent_crossing;weekend_near_strike,2,1,1,0.0,-3.1,-3.1,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"
+negative_robust_net;weekend_near_strike,15,12,12,0.9166666666666666,12.470375673826501,1.0391979728188752,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"
+recent_crossing,1,1,1,1.0,0.9705882352941178,0.9705882352941178,"settlement payout minus snapshot price times snapshot quantity; excludes fees, fill probability, queue position, impact and exits"

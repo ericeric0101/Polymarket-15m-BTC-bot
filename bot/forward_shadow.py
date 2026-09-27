@@ -12,8 +12,9 @@ from zoneinfo import ZoneInfo
 
 
 CONFIGS = (("120_0", 120, 0), ("120_2", 120, 2), ("120_5", 120, 5))
-EXIT_POLICIES = ("HOLD", "TP20", "TRAIL5", "TRAIL10")
+EXIT_POLICIES = ("HOLD", "TP20", "TRAIL5", "TRAIL10", "COMBINED180", "COMBINED300")
 NOTIONAL_USDC = 5.0
+PROFIT_LOCK_LADDER = ((.05, 0.0), (.10, .03), (.15, .05), (.20, .10), (.30, .15))
 
 
 def _num(value: Any) -> float | None:
@@ -81,9 +82,17 @@ def _production_signal_side(inputs: dict[str, Any]) -> str | None:
 class ForwardShadowExperiment:
     """Record one stable 120s opportunity per market/config and replay exits."""
 
-    def __init__(self, *, db: Any, run_id: str, weekday_only: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        db: Any,
+        run_id: str,
+        weekday_only: bool = True,
+        canonical_wait_sec: float = 15.0,
+    ) -> None:
         self.db, self.run_id = db, str(run_id)
         self.weekday_only = bool(weekday_only)
+        self.canonical_wait_sec = max(0.0, float(canonical_wait_sec))
         self._attempted: set[tuple[str, str]] = set()
         self._candidates: dict[str, dict[str, Any]] = {}
         self._tracked_tokens: set[tuple[str, str]] = set()
@@ -147,6 +156,13 @@ class ForwardShadowExperiment:
             key = (slug, config)
             if key in self._attempted or age < window:
                 continue
+            # The opening strike and canonical Chainlink/TWAP reference can
+            # become eligible a few seconds after the scheduled observation.
+            # Keep the schedule pending during a bounded grace period instead
+            # of permanently consuming it on the first incomplete quote.
+            canonical_wait_timed_out = trend_bps is None and age > window + self.canonical_wait_sec
+            if trend_bps is None and not canonical_wait_timed_out:
+                continue
             self._attempted.add(key)
             candidate_side = "UP" if trend_bps is not None and trend_bps > threshold else "DOWN" if trend_bps is not None and trend_bps < -threshold else None
             zero = trend_bps == 0
@@ -181,6 +197,9 @@ class ForwardShadowExperiment:
                 "event_type": "SHADOW_ENTRY_CANDIDATE", "candidate_id": candidate_id,
                 "slug": slug, "run_id": self.run_id, "entry_config": config,
                 "window_sec": window, "threshold_bps": threshold, "market_age_sec": age,
+                "schedule_lateness_sec": max(0.0, age - window),
+                "canonical_wait_sec": self.canonical_wait_sec,
+                "canonical_wait_timed_out": canonical_wait_timed_out,
                 "candidate_ts": now, "candidate_side": candidate_side, "signal_status": status,
                 "observation_unavailable_reason": None if trend_bps is not None else "canonical_reference_or_strike_unavailable",
                 "signal_source": "canonical_chainlink_twap_vs_official_market_strike",
@@ -249,6 +268,7 @@ class ForwardShadowExperiment:
                              "seen_drawdowns": set(), "seen_recoveries": set(), "first_cross_against_ts": None,
                              "last_leader": leader, "crossings_since_entry": 0,
                              "signal_reversed": False, "fair_entry": _num(fair_probability),
+                             "loss_warning_emitted": False,
                              "last_mark_ts": 0.0, "entry_payload": payload}
                     for policy in EXIT_POLICIES:
                         state["policy"][policy] = {"status": "open", "exit_ts": None, "exit_price": None,
@@ -357,6 +377,18 @@ class ForwardShadowExperiment:
         score = _num(signal_inputs.get("composite_score"))
         prod_side = _production_signal_side(signal_inputs)
         reversed_now = prod_side is not None and prod_side != position_side
+        probability = _num(fair)
+        fair_deterioration = (
+            state["fair_entry"] - probability
+            if probability is not None and state["fair_entry"] is not None else None
+        )
+        thesis_components = {
+            "signal_reversed": reversed_now,
+            "strike_crossed_against": leader in {"UP", "DOWN"} and leader != position_side,
+            # fair is already the held token's probability, for both UP and DOWN.
+            "fair_deteriorated_5pct": fair_deterioration is not None and fair_deterioration >= .05 - 1e-12,
+        }
+        thesis_count = sum(bool(value) for value in thesis_components.values())
         if reversed_now and not state["signal_reversed"]:
             state["signal_reversed"] = True
             self._emit(state["slug"], now, {"event_type": "SHADOW_SIGNAL_REVERSAL", "candidate_id": state["candidate_id"],
@@ -377,7 +409,6 @@ class ForwardShadowExperiment:
             or signature[5] != previous[5]
         )
         if due or (material and elapsed_since_snapshot >= 1.0):
-            probability = _num(fair)
             age_ref = max(0.0, now - reference_ts) if reference_ts else None
             self._emit(state["slug"], now, {"event_type": "SHADOW_POSITION_MARK", "candidate_id": state["candidate_id"],
                 "position_id": key, "entry_variant": state["entry_variant"],
@@ -400,10 +431,9 @@ class ForwardShadowExperiment:
                 "fair_minus_bid": probability - bid if probability is not None else None,
                 "fair_minus_ask": probability - ask if probability is not None else None,
                 "fair_change_from_entry": probability - state["fair_entry"] if probability is not None and state["fair_entry"] is not None else None,
-                "shadow_thesis_invalidated_components": {"signal_reversed": reversed_now,
-                    "strike_crossed_against": leader in {"UP", "DOWN"} and leader != position_side,
-                    "fair_deteriorated": probability is not None and state["fair_entry"] is not None and ((probability < state["fair_entry"]) if position_side == "UP" else (probability > state["fair_entry"])),
-                    "bid_collapse": ret <= -0.10},
+                "shadow_thesis_invalidated_components": thesis_components,
+                "thesis_weakening_count": thesis_count,
+                "loss_warning_active": ret <= -0.08,
                 "reference_age_sec": age_ref, "authority": "research_only_no_order_or_ownership"})
             state["last_mark_ts"] = now
             if not hasattr(self, "_last_signature"):
@@ -411,6 +441,15 @@ class ForwardShadowExperiment:
             self._last_signature[key] = signature
         else:
             self.counters["events_suppressed"] += 1
+        if ret <= -0.08 and not state["loss_warning_emitted"]:
+            state["loss_warning_emitted"] = True
+            self._emit(state["slug"], now, {"event_type": "SHADOW_LOSS_WARNING",
+                "candidate_id": state["candidate_id"], "position_id": key,
+                "entry_variant": state["entry_variant"], "mark_return_pct": ret,
+                "mark_pnl_usdc": ret * NOTIONAL_USDC,
+                "thesis_weakening_count": thesis_count,
+                "thesis_components": thesis_components, "event_ts": now,
+                "authority": "research_only_no_order_or_ownership"})
         for policy, rule in state["policy"].items():
             if rule["status"] != "open":
                 continue
@@ -422,6 +461,25 @@ class ForwardShadowExperiment:
                 trail = 0.05 if policy == "TRAIL5" else 0.10
                 if rule["peak_return"] + 1e-9 >= 0.05 and ret <= rule["peak_return"] - trail + 1e-9:
                     trigger = f"{policy.lower()}_drawdown"
+            elif policy in {"COMBINED180", "COMBINED300"}:
+                rule["peak_return"] = max(rule["peak_return"], ret)
+                active_floors = [floor for activation, floor in PROFIT_LOCK_LADDER
+                                 if rule["peak_return"] + 1e-12 >= activation]
+                profit_floor = max(active_floors) if active_floors else None
+                trailing_floor = rule["peak_return"] - .05 if rule["peak_return"] >= .05 else None
+                protected_floor = max(value for value in (profit_floor, trailing_floor) if value is not None) \
+                    if profit_floor is not None or trailing_floor is not None else None
+                age = now - state["entry_ts"]
+                no_progress_age = 180 if policy == "COMBINED180" else 300
+                if ret * NOTIONAL_USDC <= -2.0 + 1e-12:
+                    trigger = "hard_max_loss_2usdc"
+                elif ret <= -0.10 + 1e-12 and thesis_count >= 2:
+                    trigger = "thesis_weakening_loss"
+                elif (age >= no_progress_age and rule["peak_return"] < .05
+                      and ret <= 0 and thesis_count >= 2):
+                    trigger = f"no_progress_{no_progress_age}s_with_thesis_weakening"
+                elif protected_floor is not None and ret <= protected_floor + 1e-12:
+                    trigger = "profit_floor_or_peak_trail"
             if trigger:
                 weighted, filled = _weighted_price(bids, state["shares"], "bid")
                 rule.update({"status": "exited", "exit_ts": now, "exit_price": bid,
@@ -440,6 +498,8 @@ class ForwardShadowExperiment:
                     "pnl_usdc": top_pnl if rule["top_exit_fillable"] else None,
                     "depth_weighted_pnl_usdc": depth_pnl,
                     "exit_return_pct": ret,
+                    "thesis_weakening_count": thesis_count,
+                    "thesis_components": thesis_components,
                     "authority": "research_only_no_order_or_ownership"})
 
     def on_settlement(self, *, slug: str, outcome: str, settlement_ts: float,

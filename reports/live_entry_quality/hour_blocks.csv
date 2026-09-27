@@ -1,6 +1,6 @@
 bucket,candidate_count,submitted_count,fill_count,fill_rate,settled_fill_count,directional_settlement_count,settlement_win_rate,mean_settlement_pnl_usdc,mean_markout_1s_ps,mean_markout_5s_ps,mean_markout_10s_ps,mean_markout_30s_ps,independent_markets
-00-06,0,0,0,,0,0,,,,,,,0
-06-12,0,0,0,,0,0,,,,,,,0
+00-06,15,4,2,0.13333333333333333,1,1,1.0,0.0010587,0.0075,0.045,0.05,0.045,9
+06-12,9,0,0,0.0,0,0,,,,,,,7
 12-18,0,0,0,,0,0,,,,,,,0
-18-24,0,0,0,,0,0,,,,,,,0
+18-24,32,23,8,0.25,7,7,0.7142857142857143,0.013777704285714284,-0.015,-0.017499999999999998,-0.0175,-0.025,9
 unavailable,0,0,0,,0,0,,,,,,,0

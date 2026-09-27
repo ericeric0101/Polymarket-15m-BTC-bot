@@ -1,4 +1,4 @@
 bucket,candidate_count,submitted_count,fill_count,fill_rate,settled_fill_count,directional_settlement_count,settlement_win_rate,mean_settlement_pnl_usdc,mean_markout_1s_ps,mean_markout_5s_ps,mean_markout_10s_ps,mean_markout_30s_ps,independent_markets
-LOW,0,0,0,,0,0,,,,,,,0
-MEDIUM,0,0,0,,0,0,,,,,,,0
-HIGH,0,0,0,,0,0,,,,,,,0
+LOW,28,16,6,0.21428571428571427,4,4,1.0,0.026840457499999994,-0.014166666666666666,-0.006666666666666667,-0.015,-0.02,11
+MEDIUM,27,11,4,0.14814814814814814,4,4,0.5,-0.0024648000000000005,-0.005,-0.002499999999999998,0.012499999999999999,0.002499999999999998,19
+HIGH,1,0,0,0.0,0,0,,,,,,,1

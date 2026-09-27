@@ -12,7 +12,26 @@ class ResearchDB:
         self.events.append(row["payload"])
 
 
-def quote(exp, *, now, spot=100070, bid=.49, ask=.50, bid_size=100, ask_size=20, asks=None, side="UP"):
+def quote(
+    exp,
+    *,
+    now,
+    spot=100070,
+    strike=100000,
+    bid=.49,
+    ask=.50,
+    bid_size=100,
+    ask_size=20,
+    asks=None,
+    side="UP",
+    signal_score=.3,
+    fair_probability=.6,
+    spot_leader=None,
+):
+    if spot_leader == "DOWN":
+        spot = strike - 100
+    elif spot_leader == "UP":
+        spot = strike + 100
     return exp.on_quote(
         slug="btc-updown-15m-1000000000", start_ts=1_000_000_000,
         end_ts=1_000_000_900, now_ts=now, instrument_id="up-token" if side == "UP" else "down-token",
@@ -20,9 +39,10 @@ def quote(exp, *, now, spot=100070, bid=.49, ask=.50, bid_size=100, ask_size=20,
         bid_levels=[(bid, bid_size), (max(.01, bid-.01), 100)],
         ask_levels=asks or [(ask, 2), (ask + .01, 10)],
         reference_spot=spot, reference_ts=now, reference_source="polymarket_chainlink_twap_60s_ws",
-        strike=100000, strike_ts=1_000_000_000, strike_source="canonical_open",
-        signal_inputs={"composite_score": .3, "btc_trend": .2, "confidence": .3},
-        signal_ts=now, fair_probability=.6,
+        strike=strike, strike_ts=1_000_000_000 if strike is not None else None,
+        strike_source="canonical_open" if strike is not None else "",
+        signal_inputs={"composite_score": signal_score, "btc_trend": .2, "confidence": .3},
+        signal_ts=now, fair_probability=fair_probability,
         economics={"gross_probability_edge_ps": .1, "net_directional_edge_ps": None,
                    "robust_net_usdc": None, "fee_estimate": None, "execution_penalty": None},
         live_snapshot={"instrument_for_side": {"UP": "up-token", "DOWN": "down-token"},
@@ -46,6 +66,36 @@ def test_120_second_candidates_thresholds_stable_identity_and_config_overlap():
     assert rows[0]["candidate_id"] == "btc-updown-15m-1000000000|120_0"
     assert rows[0]["signal_source"] == "canonical_chainlink_twap_vs_official_market_strike"
     assert rows[0]["live_comparator"]["production_side"] == "UP"
+
+
+def test_canonical_inputs_can_arrive_during_bounded_capture_grace():
+    db = ResearchDB()
+    exp = ForwardShadowExperiment(db=db, run_id="test", canonical_wait_sec=15)
+
+    assert quote(exp, now=1_000_000_120, spot=None, strike=None) == 0
+    assert events(db, "SHADOW_ENTRY_CANDIDATE") == []
+    assert exp._attempted == set()
+
+    assert quote(exp, now=1_000_000_123, spot=100070, strike=100000) == 3
+    rows = events(db, "SHADOW_ENTRY_CANDIDATE")
+    assert len(rows) == 3
+    assert all(row["signal_status"] != "observation_unavailable" for row in rows)
+    assert all(row["schedule_lateness_sec"] == 3 for row in rows)
+
+
+def test_canonical_inputs_timeout_records_unavailable_once():
+    db = ResearchDB()
+    exp = ForwardShadowExperiment(db=db, run_id="test", canonical_wait_sec=15)
+
+    assert quote(exp, now=1_000_000_134, spot=None, strike=None) == 0
+    assert events(db, "SHADOW_ENTRY_CANDIDATE") == []
+    assert quote(exp, now=1_000_000_136, spot=None, strike=None) == 3
+    assert quote(exp, now=1_000_000_140, spot=100070, strike=100000) == 0
+
+    rows = events(db, "SHADOW_ENTRY_CANDIDATE")
+    assert len(rows) == 3
+    assert all(row["signal_status"] == "observation_unavailable" for row in rows)
+    assert all(row["canonical_wait_timed_out"] is True for row in rows)
 
 
 def test_exact_zero_is_none_and_weekend_is_shadow_only():
@@ -90,7 +140,7 @@ def test_bid_marks_mfe_mae_tp20_trails_and_recovery_are_observational():
     quote(exp, now=1_000_000_128, bid=.64, ask=.65)
     exit_rows = events(db, "SHADOW_EXIT")
     top = [row for row in exit_rows if row["entry_variant"] == "ENTRY_TOP_ASK"]
-    assert {row["exit_policy"] for row in top} == {"TP20", "TRAIL5", "TRAIL10"}
+    assert {row["exit_policy"] for row in top} == {"TP20", "TRAIL5", "TRAIL10", "COMBINED180", "COMBINED300"}
     assert all(any(abs(row["exit_best_bid"] - price) < 1e-9 for price in (.60, .67, .70, .64)) for row in top)
     marks = events(db, "SHADOW_POSITION_MARK")
     assert all("mark_return_pct" in row and row["mark_pnl_usdc"] == row["mark_return_pct"] * 5 for row in marks)
@@ -161,3 +211,41 @@ def test_exit_top_quote_is_not_counted_as_full_fill_when_top_depth_is_short():
     assert exits[0]["top_exit_fillable"] is False
     assert exits[0]["pnl_usdc"] is None
     assert exits[0]["depth_weighted_pnl_usdc"] is not None
+
+
+def test_combined_shadow_requires_two_independent_thesis_weakening_components():
+    db = ResearchDB()
+    exp = ForwardShadowExperiment(db=db, run_id="test")
+    quote(exp, now=1_000_000_120, fair_probability=.60)
+    # A 12% drawdown plus signal reversal alone is only one independent thesis component.
+    quote(exp, now=1_000_000_122, bid=.44, ask=.45, signal_score=-.3,
+          fair_probability=.60, spot_leader="UP")
+    assert not [row for row in events(db, "SHADOW_EXIT") if row["exit_policy"].startswith("COMBINED")]
+    # Fair deterioration is a second independent component, so both combined policies exit.
+    quote(exp, now=1_000_000_124, bid=.44, ask=.45, signal_score=-.3,
+          fair_probability=.50, spot_leader="UP")
+    exits = [row for row in events(db, "SHADOW_EXIT") if row["exit_policy"].startswith("COMBINED")]
+    assert {row["exit_policy"] for row in exits} == {"COMBINED180", "COMBINED300"}
+    assert all(row["exit_reason"] == "thesis_weakening_loss" for row in exits)
+    assert all(row["thesis_weakening_count"] == 2 for row in exits)
+
+
+def test_combined_shadow_hard_two_dollar_breaker_does_not_require_thesis():
+    db = ResearchDB()
+    exp = ForwardShadowExperiment(db=db, run_id="test")
+    quote(exp, now=1_000_000_120)
+    quote(exp, now=1_000_000_122, bid=.29, ask=.30)
+    exits = [row for row in events(db, "SHADOW_EXIT") if row["exit_policy"].startswith("COMBINED")]
+    assert exits
+    assert all(row["exit_reason"] == "hard_max_loss_2usdc" for row in exits)
+
+
+def test_combined_shadow_no_progress_needs_time_and_two_thesis_components():
+    db = ResearchDB()
+    exp = ForwardShadowExperiment(db=db, run_id="test")
+    quote(exp, now=1_000_000_120, fair_probability=.60)
+    quote(exp, now=1_000_000_301, bid=.49, ask=.50, signal_score=-.3,
+          fair_probability=.50, spot_leader="UP")
+    exits = [row for row in events(db, "SHADOW_EXIT") if row["exit_policy"].startswith("COMBINED")]
+    assert {row["exit_policy"] for row in exits} == {"COMBINED180"}
+    assert exits[0]["exit_reason"] == "no_progress_180s_with_thesis_weakening"

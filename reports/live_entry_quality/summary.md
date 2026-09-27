@@ -2,14 +2,17 @@
 
 **DATA QUALITY WARNING**
 
-- no research candidate snapshots are present, so post-hardening join quality is not yet measurable; legacy submits/fills remain unmatched.
+- submit-to-candidate join rate is below 95%.
+- fill-to-candidate join rate is below 95%.
+- net edge cost completeness is below 95%.
+- updates per candidate p90 is unusually high (>100).
 
 - Journal: `logs/trade_journal.db`
-- Logical research candidates: 0; snapshots: 0; unique markets: 0; submitted: 0; filled: 0; settled filled candidates: 0.
-- `ENTRY_DECISION_TRACE` rows in the selected journal: 66082.
+- Logical research candidates: 56; snapshots: 2042; unique markets: 25; submitted: 27; filled: 10; settled filled candidates: 8.
+- `ENTRY_DECISION_TRACE` rows in the selected journal: 68120.
 - This is observation-only. Shadow reject and size-down columns are counterfactual labels; they do not alter trading authority.
-- Post-hardening candidate join quality: not yet measurable; the selected journal has no research candidate snapshots. Legacy unmatched submit/fill rows=197/108.
-- Net edge completeness: not yet measurable; snapshot suppression=not yet measurable; estimated event rate/hour=None.
+- Candidate join quality: submit=0.11538461538461539; fill=0.078125; orphan submits=207; orphan fills=118.
+- Net edge completeness: 0.0; snapshot suppression=61.0; estimated event rate/hour=174.6207053110008.
 - Research review threshold: at least 30 independent markets per bucket for screening; policy review should prefer 50–100+ independent markets over multiple weeks and weekday/weekend coverage.
 - Maker fill-to-candidate attribution uses the durable research candidate ID. Historical rows without it are not force-matched. Settlement PnL is market-level settlement telemetry, not an isolated per-order realized PnL.
 - Markouts are signed per-share follow-ups where available; missing horizons remain null. Public/venue fills and BBO are not synthesized.
