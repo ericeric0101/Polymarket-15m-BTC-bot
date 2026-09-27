@@ -259,6 +259,45 @@ def test_absolute_breaker_bypasses_wide_spread_and_fresh_existing_sell():
     assert host.submissions[0]["decision_payload"]["required_confirmations"] == 0
 
 
+def test_absolute_breaker_is_not_suppressed_by_invalidation_recovery_ratio_gate():
+    host = _BreakerExitHost()
+    host.hold_to_redeem_enabled = True
+    host.taker_exit_only_after_invalidation = True
+    host.taker_exit_min_hold_sec = 60
+    host.taker_exit_max_time_left_sec = 720
+    host.taker_exit_min_bid = Decimal("0.15")
+    host.taker_exit_disable_if_bid_below = Decimal("0.10")
+    host.taker_exit_require_twap_confirmation = True
+    host.taker_exit_min_recovery_ratio = Decimal("0.50")
+    host._side_invalidation_confirmed_by_slug = {"breaker-test": True}
+    host.market_strike_cache_by_slug = {"breaker-test": Decimal("100")}
+    host.latest_external_spot = Decimal("99")
+    host.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
+    host.latest_external_spot_source_ts = 9_999.0
+    host.live_inventory_cost = {
+        "up": {"qty": Decimal("10"), "avg_entry_price": Decimal("0.69"), "opened_ts": 9_910.0}
+    }
+    host.active_maker_orders = {"sell:up": {"created_ts": 9_999.0, "pending_cancel": False}}
+    host.maker_exchange_min_shares = Decimal("5")
+    host._get_effective_sellable_qty = lambda **_kwargs: Decimal("10")
+    host._taker_exit_skip_log_ts_by_key = {}
+    host.taker_exit_skip_log_interval_sec = 0
+    host.strategy_events = []
+    host._db_strategy_event = lambda event_type, payload: host.strategy_events.append((event_type, payload))
+    host.exit_policy_engine = ExitPolicyEngine(_make_config(hold_to_redeem_enabled=True))
+
+    asyncio.run(host._maybe_taker_exit_positions(10_000.0, is_simulation=False))
+
+    assert host.strategy_events
+    recovery_skip = [payload for event, payload in host.strategy_events
+                     if event == "EXIT_POLICY_DECISION" and payload.get("reason") == "recovery_ratio_below_min"]
+    assert recovery_skip, "test setup must reproduce the rejected invalidation recovery path"
+    assert float(recovery_skip[0]["recovery_ratio"]) < 0.50
+    assert len(host.submissions) == 1, "absolute loss breaker must continue to protective execution"
+    assert host.submissions[0]["reason"] == "stop_loss"
+    assert host.submissions[0]["decision_payload"]["decision_reason"] == "absolute_max_loss_breaker"
+
+
 # =========================================================================
 # TEST 2: Feature flag disabled — same scenario, must NOT fire.
 # =========================================================================

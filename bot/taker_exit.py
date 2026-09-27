@@ -572,39 +572,45 @@ class TakerExitMixin:
                         ),
                         now_ts=now_ts,
                     )
-                    continue
-                ok = self._submit_invalidation_recovery_ladder(
-                    instrument_id=inst_id,
-                    quantity=qty_to_exit,
-                    est_net_if_exit=net_if_exit,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    fee_rate=fee_rate,
-                    time_left_sec=time_left_sec,
-                    decision_payload={
-                        "slug": self.current_market_slug or "",
-                        "decision_type": "INVALIDATION_RECOVERY_TAKER_EXIT",
-                        "decision_reason": "hold_to_redeem_side_invalidated_recovery",
-                        "avg_entry": float(avg_entry),
-                        "time_left_sec": time_left_sec,
-                        "exit_stage": exit_stage.value,
-                        "best_ask": float(best_ask),
-                        "gross_if_exit": float(exit_decision.gross_if_exit),
-                        "exit_fee_est": float(exit_decision.exit_fee_est),
-                        "exit_px_effective": float(exit_decision.exit_px_effective),
-                        "sellable_qty": float(sellable_qty),
-                        "gross_recovery": float(gross_recovery),
-                        "cost_basis": float(cost_basis),
-                        "recovery_ratio": float(recovery_ratio),
-                        "min_recovery_ratio": float(min_recovery_ratio),
-                        "locked_side_invalidated": "1",
-                        "hold_to_redeem": "1",
-                    },
-                )
-                if ok:
-                    self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
-                    self.last_taker_exit_ts_by_inst[inst_key] = now_ts
-                    continue
+                    # The recovery ratio is only an admission gate for the
+                    # invalidation-recovery ladder. It must not suppress an
+                    # independently triggered absolute-loss breaker; let the
+                    # normal protective-exit path execute in that case.
+                    if exit_decision.reason != "absolute_max_loss_breaker":
+                        continue
+                if recovery_ratio >= min_recovery_ratio:
+                    ok = self._submit_invalidation_recovery_ladder(
+                        instrument_id=inst_id,
+                        quantity=qty_to_exit,
+                        est_net_if_exit=net_if_exit,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        fee_rate=fee_rate,
+                        time_left_sec=time_left_sec,
+                        decision_payload={
+                            "slug": self.current_market_slug or "",
+                            "decision_type": "INVALIDATION_RECOVERY_TAKER_EXIT",
+                            "decision_reason": "hold_to_redeem_side_invalidated_recovery",
+                            "avg_entry": float(avg_entry),
+                            "time_left_sec": time_left_sec,
+                            "exit_stage": exit_stage.value,
+                            "best_ask": float(best_ask),
+                            "gross_if_exit": float(exit_decision.gross_if_exit),
+                            "exit_fee_est": float(exit_decision.exit_fee_est),
+                            "exit_px_effective": float(exit_decision.exit_px_effective),
+                            "sellable_qty": float(sellable_qty),
+                            "gross_recovery": float(gross_recovery),
+                            "cost_basis": float(cost_basis),
+                            "recovery_ratio": float(recovery_ratio),
+                            "min_recovery_ratio": float(min_recovery_ratio),
+                            "locked_side_invalidated": "1",
+                            "hold_to_redeem": "1",
+                        },
+                    )
+                    if ok:
+                        self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                        self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+                        continue
 
             if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
                 if hasattr(self, "position_manager"):
