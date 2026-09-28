@@ -12,6 +12,7 @@ from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.inventory import InventoryLedger
+from bot.market_data import fetch_gamma_market_by_slug_sync
 from bot.wallet_ops import (
     ensure_balance_clob_client,
     fetch_conditional_balance,
@@ -27,6 +28,94 @@ class StrategyRecoveryMixin:
     decision logic. Keeping them out of `run_bot.py` reduces blast radius for
     future changes and makes restart / recovery behavior easier to reason about.
     """
+
+    @staticmethod
+    def _resolved_gamma_winner_token_id(market: object) -> tuple[str, str] | None:
+        """Return (winner side, token id) only for an unambiguous Gamma result."""
+        if not isinstance(market, dict) or not bool(market.get("closed")):
+            return None
+        try:
+            outcomes = market.get("outcomes", [])
+            prices = market.get("outcomePrices", [])
+            tokens = market.get("clobTokenIds", [])
+            if isinstance(outcomes, str):
+                outcomes = json.loads(outcomes)
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+            if isinstance(tokens, str):
+                tokens = json.loads(tokens)
+            values = {
+                str(side).strip().upper(): (float(price), str(token))
+                for side, price, token in zip(outcomes, prices, tokens)
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        for winner, loser in (("UP", "DOWN"), ("DOWN", "UP")):
+            winner_value = values.get(winner)
+            loser_value = values.get(loser)
+            if (
+                winner_value is not None
+                and loser_value is not None
+                and winner_value[0] >= 0.99
+                and loser_value[0] <= 0.01
+                and winner_value[1]
+            ):
+                return winner, winner_value[1]
+        return None
+
+    def _reconcile_unsettled_session_cycles_on_startup(self) -> int:
+        """Apply verified, previously-missed settlement PnL exactly once.
+
+        Only already-expired current-Taipei-day markets with a Gamma-confirmed
+        winning token are eligible.  Any unavailable/ambiguous external result
+        remains unreconciled rather than being guessed as a loss.
+        """
+        db = getattr(self, "trade_db", None)
+        if db is None:
+            return 0
+        date = self._taipei_session_date()
+        finder = getattr(db, "find_unsettled_expired_session_slugs", None)
+        reconcile = getattr(db, "reconcile_startup_resolved_cycle", None)
+        if not callable(finder) or not callable(reconcile):
+            return 0
+        applied = 0
+        for slug in finder(date):
+            market = fetch_gamma_market_by_slug_sync(slug)
+            winner = self._resolved_gamma_winner_token_id(market)
+            if winner is None:
+                logger.warning(
+                    "Startup settlement reconciliation deferred: Gamma outcome is unavailable "
+                    f"or ambiguous for slug={slug}"
+                )
+                continue
+            outcome, token_id = winner
+            result = reconcile(
+                slug=slug,
+                winning_token_id=token_id,
+                settlement_source="gamma_closed_decisive_outcome",
+            )
+            if result is None:
+                continue
+            settlement_pnl = Decimal(str(result.get("settlement_pnl_usdc", 0)))
+            recorder = getattr(self, "_record_session_realized_pnl", None)
+            if callable(recorder) and settlement_pnl != 0:
+                recorder(settlement_pnl, source="startup_settlement_reconciliation")
+            self._db_strategy_event(
+                "STARTUP_SETTLEMENT_RECONCILED",
+                {
+                    "slug": slug,
+                    "outcome": outcome,
+                    "settlement_pnl_usdc": float(settlement_pnl),
+                    "cycle_combined_pnl_usdc": float(result.get("cycle_combined_pnl_usdc", 0)),
+                    "source": "gamma_closed_decisive_outcome",
+                },
+            )
+            logger.warning(
+                "Startup settlement reconciliation applied: "
+                f"slug={slug} outcome={outcome} settlement_pnl={float(settlement_pnl):+.4f}"
+            )
+            applied += 1
+        return applied
 
     def _rebuild_inventory_state_from_db(
         self,

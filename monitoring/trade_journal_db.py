@@ -1198,6 +1198,177 @@ class TradeJournalDB:
             "buy_lock_reason": "",
         }
 
+    def reconcile_startup_resolved_cycle(
+        self,
+        *,
+        slug: str,
+        winning_token_id: str,
+        settlement_source: str,
+    ) -> Optional[Dict[str, float | str | bool]]:
+        """Close one previously-unsettled market using a verified winner token.
+
+        This is deliberately limited to an expired market whose public resolver
+        supplied an exact winning token ID.  It never infers a loss from a zero
+        wallet balance, and a pre-existing cycle event makes the operation a
+        no-op so restart retries cannot double count the same cash flow.
+        """
+        slug = str(slug or "")
+        winning_token_id = str(winning_token_id or "")
+        if not slug or not winning_token_id:
+            return None
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = self._connect()
+            existing = conn.execute(
+                """SELECT 1 FROM strategy_events
+                   WHERE event_type='MARKET_CYCLE_PNL'
+                     AND json_extract(payload_json, '$.slug')=?
+                   LIMIT 1""",
+                (slug,),
+            ).fetchone()
+            if existing is not None:
+                return None
+            rows = conn.execute(
+                """SELECT run_id, side, price, qty, token_id, commission_usdc, payload_json
+                   FROM order_events
+                   WHERE event_type='ORDER_FILLED'
+                     AND json_extract(payload_json, '$.slug')=?
+                   ORDER BY id""",
+                (slug,),
+            ).fetchall()
+            if not rows:
+                return None
+
+            # Average-cost replay matches the live inventory ledger's cost
+            # semantics.  ``sell_realized`` was already applied to the session
+            # guard at each live SELL fill; startup returns only the remaining
+            # settlement component for the caller to add once.
+            lots: Dict[str, Dict[str, Decimal]] = {}
+            sell_realized = Decimal("0")
+            run_id = str(rows[-1][0] or "startup_recovery")
+            for _run_id, raw_side, raw_price, raw_qty, raw_token, raw_commission, raw_payload in rows:
+                side = str(raw_side or "").upper()
+                token_id = str(raw_token or "")
+                try:
+                    price = Decimal(str(raw_price or 0))
+                    qty = Decimal(str(raw_qty or 0))
+                    payload = json.loads(raw_payload or "{}")
+                    fee = Decimal(str(
+                        (payload.get("effective_fee_usdc") if isinstance(payload, dict) else None)
+                        or raw_commission
+                        or 0
+                    ))
+                except (ValueError, TypeError, ArithmeticError, json.JSONDecodeError):
+                    continue
+                if not token_id or price < 0 or qty <= 0:
+                    continue
+                state = lots.setdefault(token_id, {"qty": Decimal("0"), "cost": Decimal("0")})
+                if side == "BUY":
+                    state["qty"] += qty
+                    state["cost"] += price * qty + fee
+                elif side == "SELL" and state["qty"] > 0:
+                    sold = min(qty, state["qty"])
+                    cost_sold = state["cost"] * sold / state["qty"]
+                    state["qty"] -= sold
+                    state["cost"] -= cost_sold
+                    sell_realized += price * sold - fee - cost_sold
+
+            if not lots:
+                return None
+            winner = lots.get(winning_token_id, {"qty": Decimal("0"), "cost": Decimal("0")})
+            payout = max(Decimal("0"), winner["qty"])
+            remaining_cost = sum((state["cost"] for state in lots.values()), Decimal("0"))
+            settlement_pnl = payout - remaining_cost
+            cycle_combined = sell_realized + settlement_pnl
+            payload = {
+                "slug": slug,
+                "outcome_token_id": winning_token_id,
+                "settlement_source": str(settlement_source or "startup_resolved"),
+                "startup_reconciliation": True,
+                "remaining_inventory_cost_usdc": float(remaining_cost),
+                "redeem_value_usdc": float(payout),
+                "settlement_pnl_usdc": float(settlement_pnl),
+                "cycle_fill_realized_usdc": float(sell_realized),
+                "cycle_settlement_pnl_usdc": float(settlement_pnl),
+                "cycle_combined_pnl_usdc": float(cycle_combined),
+            }
+            now = _utc_now_iso()
+            conn.execute(
+                "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)",
+                (now, run_id, "MARKET_SETTLEMENT", _json_dumps(payload)),
+            )
+            conn.execute(
+                "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)",
+                (now, run_id, "MARKET_CYCLE_PNL", _json_dumps(payload)),
+            )
+            conn.commit()
+            self._schedule_backup()
+            return {
+                "settlement_pnl_usdc": float(settlement_pnl),
+                "cycle_combined_pnl_usdc": float(cycle_combined),
+                "new_cycle_pnl": True,
+            }
+        except Exception as exc:
+            self._mark_runtime_failure("startup_cycle_reconcile_failed", exc, event_type="MARKET_CYCLE_PNL")
+            logger.error(f"TradeJournalDB startup resolved-cycle reconciliation failed: {exc}")
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def find_unsettled_expired_session_slugs(
+        self,
+        session_date_taipei: str,
+        *,
+        now_ts: Optional[float] = None,
+        limit: int = 12,
+    ) -> list[str]:
+        """Return bounded, expired filled-BUY markets lacking a cycle PnL."""
+        now = time.time() if now_ts is None else float(now_ts)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT MIN(ts), json_extract(payload_json, '$.slug')
+                       FROM order_events
+                       WHERE event_type='ORDER_FILLED'
+                         AND UPPER(COALESCE(side, ''))='BUY'
+                         AND json_extract(payload_json, '$.slug') IS NOT NULL
+                       GROUP BY json_extract(payload_json, '$.slug')
+                       ORDER BY MIN(id) DESC"""
+                ).fetchall()
+                finalized = {
+                    str(row[0]) for row in conn.execute(
+                        """SELECT DISTINCT json_extract(payload_json, '$.slug')
+                           FROM strategy_events
+                           WHERE event_type='MARKET_CYCLE_PNL'
+                             AND json_extract(payload_json, '$.slug') IS NOT NULL"""
+                    ).fetchall()
+                }
+            candidates: list[str] = []
+            for raw_ts, raw_slug in rows:
+                slug = str(raw_slug or "")
+                if not slug or slug in finalized:
+                    continue
+                try:
+                    local_day = datetime.fromisoformat(str(raw_ts)).astimezone(
+                        ZoneInfo("Asia/Taipei")
+                    ).date().isoformat()
+                    start_ts = int(slug.rsplit("-", 1)[-1])
+                except (ValueError, TypeError):
+                    continue
+                # BTC 15m slugs encode their opening epoch.  Never reconcile
+                # an active window merely because the process restarted.
+                if local_day != str(session_date_taipei) or start_ts + 900 > now:
+                    continue
+                candidates.append(slug)
+                if len(candidates) >= max(1, int(limit)):
+                    break
+            return candidates
+        except Exception as exc:
+            self._mark_runtime_failure("startup_unsettled_cycle_scan_failed", exc, event_type="MARKET_CYCLE_PNL")
+            logger.error(f"TradeJournalDB startup unsettled-cycle scan failed: {exc}")
+            return []
+
     def log_order_event(
         self,
         run_id: str,

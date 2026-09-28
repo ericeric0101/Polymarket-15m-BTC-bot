@@ -9,6 +9,7 @@ import bot.market_runtime as market_runtime
 from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 
 from bot.db_runtime import StrategyDBRuntimeMixin
+from bot.recovery import StrategyRecoveryMixin
 from monitoring.trade_journal_db import TradeJournalDB
 
 
@@ -622,3 +623,102 @@ def test_reconcile_redeem_cycle_updates_existing_cycle_without_duplicate(tmp_pat
     assert len(pnl_rows) == 1
     assert '"cycle_pnl_reconciled_source": "onchain_redeem"' in pnl_rows[0][0]
     assert '"redeem_value_usdc": 9.9' in settlement[0]
+
+
+def test_startup_resolved_loss_reconciliation_writes_one_cycle_pnl(tmp_path):
+    """A restart can safely close a settled losing token that has no SELL fill."""
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-1790602200"
+    db.log_order_event(
+        run_id="run",
+        event_type="ORDER_FILLED",
+        client_order_id="buy-down",
+        side="BUY",
+        price=0.65,
+        qty=10,
+        token_id="down-token",
+        payload={"slug": slug, "effective_fee_usdc": 0.0},
+    )
+
+    reconciled = db.reconcile_startup_resolved_cycle(
+        slug=slug,
+        winning_token_id="up-token",
+        settlement_source="gamma_resolved",
+    )
+
+    assert reconciled is not None
+    assert reconciled["settlement_pnl_usdc"] == -6.5
+    assert reconciled["cycle_combined_pnl_usdc"] == -6.5
+    assert reconciled["new_cycle_pnl"] is True
+    # The operation is idempotent: a second boot cannot debit the same loss.
+    assert db.reconcile_startup_resolved_cycle(
+        slug=slug,
+        winning_token_id="up-token",
+        settlement_source="gamma_resolved",
+    ) is None
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT event_type, payload_json FROM strategy_events ORDER BY id"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["MARKET_SETTLEMENT", "MARKET_CYCLE_PNL"]
+    assert '"startup_reconciliation"' in rows[-1][1]
+
+
+def test_startup_settlement_reconciliation_applies_loss_to_persisted_profit_guard(tmp_path, monkeypatch):
+    """A missed losing settlement must lock an already-armed session after restart."""
+    class Host(StrategyRecoveryMixin, StrategyDBRuntimeMixin):
+        session_pnl_guard_enabled = True
+        session_profit_arm_usdc = 8
+        session_profit_drawdown_usdc = 4
+        session_hard_profit_lock_enabled = False
+        session_hard_profit_lock_usdc = 10
+        session_max_loss_enabled = True
+        session_max_loss_usdc = 6
+
+        def __init__(self, db):
+            self.trade_db = db
+            self.events = []
+
+        @staticmethod
+        def _taipei_session_date(now_ts=None):
+            return "2026-09-28"
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+            return True
+
+        def _block_new_buys_for_trade_db(self, reason):
+            self.block_reason = reason
+
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-1790602200"
+    db.log_order_event(
+        run_id="run", event_type="ORDER_FILLED", client_order_id="buy-down",
+        side="BUY", price=0.65, qty=10, token_id="down-token",
+        payload={"slug": slug, "effective_fee_usdc": 0.0},
+    )
+    assert db.save_session_pnl_state({
+        "session_date_taipei": "2026-09-28", "realized_pnl_usdc": 11.45,
+        "realized_high_water_usdc": 11.45, "profit_guard_armed": True,
+        "buy_lock_active": False, "buy_lock_reason": "",
+    })
+    monkeypatch.setattr(db, "find_unsettled_expired_session_slugs", lambda _date: [slug])
+    monkeypatch.setattr(
+        "bot.recovery.fetch_gamma_market_by_slug_sync",
+        lambda _slug: {
+            "closed": True,
+            "outcomes": ["Up", "Down"],
+            "outcomePrices": ["1", "0"],
+            "clobTokenIds": ["up-token", "down-token"],
+        },
+    )
+    host = Host(db)
+    host._initialize_session_pnl_guard()
+
+    assert host._reconcile_unsettled_session_cycles_on_startup() == 1
+    decision = host.session_buy_guard_decision()
+    assert not decision.allowed
+    assert decision.reason == "session_profit_drawdown_lock"
+    assert decision.realized_pnl_usdc == Decimal("4.95")
+    assert decision.realized_high_water_usdc == Decimal("11.45")
+    assert any(event == "STARTUP_SETTLEMENT_RECONCILED" for event, _ in host.events)

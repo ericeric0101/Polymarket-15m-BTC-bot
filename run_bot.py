@@ -3766,6 +3766,10 @@ class IntegratedBTCStrategy(
 
         # Recover local inventory tracking if the strategy restarted mid-market.
         self._rehydrate_inventory_state_on_startup()
+        # A process can be stopped after a filled BUY but before the expired
+        # market's lifecycle callback records settlement.  Reconcile only
+        # Gamma-confirmed prior windows before any new BUY authority is used.
+        self._reconcile_unsettled_session_cycles_on_startup()
         self._restore_market_risk_guards_from_trade_db_on_startup()
         self._recover_market_strike_from_trade_db_on_startup()
         self._run_startup_execution_calibration()
