@@ -197,10 +197,24 @@ class StrategyLifecycleMixin:
             twap_shadow = getattr(self, "twap_forward_shadow", None)
             if twap_shadow is not None:
                 try:
+                    settlement_ts = time.time()
+                    settlement_source = str(getattr(self, "latest_external_spot_source", "") or "")
+                    source_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+                    source_age = max(0.0, settlement_ts - source_ts) if source_ts > 0 else None
+                    # Only the settlement-aligned Polymarket Chainlink 60s
+                    # TWAP at the existing production freshness standard is
+                    # a canonical research settlement label.
+                    canonical = (
+                        settlement_source == "polymarket_chainlink_twap_60s_ws"
+                        and source_age is not None and source_age <= 10.0
+                    )
                     twap_shadow.finalize_market(
                         slug,
                         settlement_side=("UP" if spot >= strike else "DOWN"),
-                        settlement_ts=time.time(),
+                        settlement_ts=settlement_ts,
+                        settlement_reference_source=settlement_source,
+                        settlement_reference_is_canonical=canonical,
+                        settlement_reference_age_sec=source_age,
                     )
                 except Exception as shadow_error:
                     logger.warning(

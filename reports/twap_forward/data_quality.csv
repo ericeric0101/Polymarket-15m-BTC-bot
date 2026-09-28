@@ -1,2 +1,2 @@
-event_rows,note,summary_rows
-0,Official TWAP only; reconstructed TWAP is not persisted in this first release.,0
+canonical_twap_settlements,event_rows,noncanonical_proxy_settlements,note,summary_rows
+0,0,0,Official TWAP only; reconstructed TWAP is not persisted in this first release. INSUFFICIENT_CANONICAL_SETTLEMENT_LABELS.,0

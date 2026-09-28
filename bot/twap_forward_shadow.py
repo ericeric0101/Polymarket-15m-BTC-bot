@@ -175,20 +175,25 @@ class TwapForwardShadow:
         self._last_storage_check_ts = now_ts
         try:
             path = Path(str(getattr(self.db, "db_path", "")))
-            size_mb = path.stat().st_size / 1024 / 1024 if path.is_file() else 0.0
+            def size_mb(candidate: Path) -> float:
+                return candidate.stat().st_size / 1024 / 1024 if candidate.is_file() else 0.0
+            main_mb, wal_mb, shm_mb = size_mb(path), size_mb(Path(f"{path}-wal")), size_mb(Path(f"{path}-shm"))
+            total_mb = main_mb + wal_mb + shm_mb
             free_gb = shutil.disk_usage(path.parent if path.parent.exists() else Path(".")).free / 1024 / 1024 / 1024
-            reason = "db_size_cap" if size_mb >= self.max_db_mb else "free_disk_low" if free_gb < self.min_free_disk_gb else ""
+            reason = "db_size_cap" if total_mb >= self.max_db_mb else "free_disk_low" if free_gb < self.min_free_disk_gb else ""
             if reason and not self._storage_guard_triggered:
                 self._storage_guard_triggered, self._storage_guard_reason = True, reason
                 # This is a single compact state event, intentionally allowed
                 # before optional event suppression begins.
                 self._persist_raw("", now_ts, "RESEARCH_STORAGE_GUARD_TRIGGERED", {
-                    "db_size_mb": size_mb, "configured_max_db_mb": self.max_db_mb,
+                    "db_main_mb": main_mb, "db_wal_mb": wal_mb, "db_shm_mb": shm_mb, "db_total_disk_mb": total_mb,
+                    "db_size_mb": total_mb, "configured_max_db_mb": self.max_db_mb,
                     "disk_free_gb": free_gb, "configured_min_free_disk_gb": self.min_free_disk_gb,
                     "trigger_reason": reason, "timestamp": now_ts,
                 })
             return {"checked": True, "triggered": self._storage_guard_triggered, "reason": self._storage_guard_reason,
-                    "db_size_mb": size_mb, "disk_free_gb": free_gb}
+                    "db_main_mb": main_mb, "db_wal_mb": wal_mb, "db_shm_mb": shm_mb,
+                    "db_total_disk_mb": total_mb, "db_size_mb": total_mb, "disk_free_gb": free_gb}
         except Exception:
             return {"checked": True, "triggered": self._storage_guard_triggered}
 
@@ -246,7 +251,11 @@ class TwapForwardShadow:
             summary["projected_cross_count"] += 1
         if side not in ("UNKNOWN", "TIE"): summary["last_projected_side"] = side
 
-    def finalize_market(self, slug: str, *, settlement_side: str, settlement_ts: float | None = None) -> dict[str, Any]:
+    def finalize_market(
+        self, slug: str, *, settlement_side: str, settlement_ts: float | None = None,
+        settlement_reference_source: str = "", settlement_reference_is_canonical: bool = False,
+        settlement_reference_age_sec: float | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             summary = dict(self._summary.pop(str(slug), {"market_slug": str(slug)}))
             summary["settlement_side"] = str(settlement_side)
@@ -259,6 +268,9 @@ class TwapForwardShadow:
             self._last_emitted_projected_side.pop(str(slug), None)
         summary_ts = float(settlement_ts) if settlement_ts is not None else fallback_ts
         summary["summary_ts"] = summary_ts
+        summary["settlement_reference_source"] = str(settlement_reference_source or "unavailable")
+        summary["settlement_reference_is_canonical"] = bool(settlement_reference_is_canonical)
+        summary["settlement_reference_age_sec"] = settlement_reference_age_sec
         self._persist(str(slug), summary_ts, "MARKET_TWAP_SUMMARY", summary)
         return summary
 

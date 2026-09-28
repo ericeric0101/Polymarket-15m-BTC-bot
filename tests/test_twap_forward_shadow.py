@@ -65,10 +65,14 @@ def test_moving_away_has_no_crossing_eta_and_rollover_summarizes_then_clears():
 def test_summary_uses_settlement_timestamp_not_epoch_zero():
     db = FakeDb(); model = TwapForwardShadow(db=db, run_id="r")
     sample(model, 10, twap="100")
-    model.finalize_market("m", settlement_side="UP", settlement_ts=20.0)
+    model.finalize_market("m", settlement_side="UP", settlement_ts=20.0,
+                          settlement_reference_source="polymarket_chainlink_twap_60s_ws",
+                          settlement_reference_is_canonical=True, settlement_reference_age_sec=2.0)
     row = next(row for row in db.rows if row["payload"]["event_type"] == "MARKET_TWAP_SUMMARY")
     assert row["decision_epoch_ns"] == 20_000_000_000
     assert row["payload"]["summary_ts"] == 20.0
+    assert row["payload"]["settlement_reference_is_canonical"] is True
+    assert row["payload"]["settlement_reference_source"] == "polymarket_chainlink_twap_60s_ws"
 
 
 def test_storage_guard_suppresses_optional_events_but_keeps_summary(monkeypatch, tmp_path):
@@ -80,6 +84,21 @@ def test_storage_guard_suppresses_optional_events_but_keeps_summary(monkeypatch,
     assert any(row["payload"]["event_type"] == "RESEARCH_STORAGE_GUARD_TRIGGERED" for row in db.rows)
     model.finalize_market("m", settlement_side="DOWN", settlement_ts=102)
     assert any(row["payload"]["event_type"] == "MARKET_TWAP_SUMMARY" for row in db.rows)
+
+
+def test_storage_guard_counts_wal_and_shm_in_total_disk_usage(tmp_path):
+    db = FakeDb(); db.db_path = str(tmp_path / "research.db")
+    (tmp_path / "research.db").write_bytes(b"")
+    (tmp_path / "research.db-wal").write_bytes(b"x" * 2048)
+    (tmp_path / "research.db-shm").write_bytes(b"x" * 1024)
+    model = TwapForwardShadow(db=db, max_db_mb=0.002, min_free_disk_gb=0, storage_check_interval_sec=1)
+    sample(model, 100, twap="100")
+    status = model.storage_guard_status()
+    assert status["triggered"] is True
+    guard = next(row["payload"] for row in db.rows if row["payload"]["event_type"] == "RESEARCH_STORAGE_GUARD_TRIGGERED")
+    assert guard["db_main_mb"] == 0.0
+    assert guard["db_wal_mb"] > 0 and guard["db_shm_mb"] > 0
+    assert guard["db_total_disk_mb"] > guard["db_wal_mb"]
 
 
 def test_twap_ingress_binds_current_tick_timestamp_before_shadow_observe():

@@ -1,4 +1,33 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from bot.db_runtime import StrategyDBRuntimeMixin
 from monitoring.trade_journal_db import TradeJournalDB
+
+
+class _GuardHost(StrategyDBRuntimeMixin):
+    """Small integration host: the same runtime persistence boundary as live."""
+    session_pnl_guard_enabled = True
+    session_profit_arm_usdc = 8
+    session_profit_drawdown_usdc = 4
+    session_hard_profit_lock_enabled = False
+    session_hard_profit_lock_usdc = 10
+    session_max_loss_enabled = True
+    session_max_loss_usdc = 6
+
+    def __init__(self, db):
+        self.trade_db = db
+        self.events, self.block_reasons = [], []
+
+    def _db_strategy_event(self, event_type, payload):
+        self.events.append((event_type, payload))
+
+    def _block_new_buys_for_trade_db(self, reason):
+        self.block_reasons.append(reason)
+
+
+def _taipei_ts(day: int) -> float:
+    return datetime(2026, 9, day, 12, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
 
 
 def test_session_pnl_state_is_durable_and_does_not_require_strategy_event(tmp_path):
@@ -29,5 +58,36 @@ def test_session_pnl_reconstruction_uses_completed_cycle_events(tmp_path):
         state = db.reconstruct_session_pnl_state("2099-01-01")
         # The current UTC day will not match an arbitrary future day.
         assert state["realized_pnl_usdc"] == 0
+    finally:
+        db.stop()
+
+
+def test_session_guard_end_to_end_persists_lock_and_resets_next_taipei_day(tmp_path):
+    """BUY boundaries see the durable lock; SELL/redeem never consult it."""
+    db = TradeJournalDB(str(tmp_path / "journal.db"), backup_interval_sec=3600)
+    try:
+        host = _GuardHost(db)
+        host._initialize_session_pnl_guard(_taipei_ts(28))
+        assert host._record_session_realized_pnl(5, source="sell_fill")
+        assert host._record_session_realized_pnl(4, source="sell_fill")
+        armed = host.session_buy_guard_decision(_taipei_ts(28))
+        assert armed.allowed and armed.armed and armed.realized_high_water_usdc == 9
+        assert host._record_session_realized_pnl(-4, source="sell_fill")
+        locked = host.session_buy_guard_decision(_taipei_ts(28))
+        assert not locked.allowed and locked.reason == "session_profit_drawdown_lock"
+        # Maker, fast-follow, and re-entry all call this final new-BUY decision;
+        # sell/redeem/cancel do not call it and retain their authority.
+        assert host.session_buy_guard_decision(_taipei_ts(28)).allowed is False
+
+        restarted = _GuardHost(db)
+        restarted._initialize_session_pnl_guard(_taipei_ts(28))
+        after_restart = restarted.session_buy_guard_decision(_taipei_ts(28))
+        assert not after_restart.allowed
+        assert after_restart.reason == "session_profit_drawdown_lock"
+        assert after_restart.realized_pnl_usdc == 5 and after_restart.realized_high_water_usdc == 9
+
+        next_day = restarted.session_buy_guard_decision(_taipei_ts(29))
+        assert next_day.allowed and not next_day.armed
+        assert next_day.realized_pnl_usdc == 0 and next_day.realized_high_water_usdc == 0
     finally:
         db.stop()

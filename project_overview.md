@@ -2032,3 +2032,25 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
 - Live behavior changed by the forward-shadow framework itself? **No.** It has
   no order authority. The weekend-only live-entry gate is a separate policy
   change recorded above.
+
+## Research correctness hardening (2026-09-28)
+
+- Stop-forensics thesis votes are now limited to explicit production-signal
+  reversal, valid official-TWAP settlement trajectory, and fair deterioration.
+  `NONE`, `UNKNOWN`, stale/unavailable signal state, and leader/spot-versus-
+  strike context never manufacture a reversal or a second vote. Candidates
+  require at least two adverse votes from at least two actually available
+  components.
+- Exit-liquidity evidence is bounded: top-of-book, 1c, 2c, 5c, and full-book
+  coverage/VWAP are reported separately. The backwards-compatible generic
+  `execution_feasible` means **5c bounded feasibility**, not unlimited
+  full-book liquidity. Gross PnL applies only to filled shares; net PnL stays
+  null when fee semantics are unavailable.
+- TWAP settlement labels identify source, age, and whether the label is
+  canonical. Only a fresh Polymarket Chainlink 60-second TWAP is canonical;
+  projections reports exclude all proxy labels from their primary accuracy
+  result and report their sample count separately.
+- The current storage guard applies to **TWAP optional research writes only**;
+  other research writers may still grow the shared research database. Its size
+  accounting includes SQLite main, WAL, and SHM files. This remains research
+  only and has no live entry, stop, exit, sizing, or session-guard authority.
