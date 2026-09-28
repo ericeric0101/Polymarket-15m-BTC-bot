@@ -33,28 +33,48 @@ def main() -> int:
         parser.error(f"journal database not found: {args.db}")
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id").fetchall()
-    guards: dict[str, SessionPnlGuard] = {}
-    out = []
+    parsed = []
     for ts, raw in rows:
         payload = json.loads(raw or "{}")
-        pnl = Decimal(str(payload.get("cycle_combined_pnl_usdc", 0)))
-        local_date = datetime.fromisoformat(ts).astimezone(ZoneInfo("Asia/Taipei")).date().isoformat()
-        # Replay includes the requested +$10 optional cap even though the
-        # live default remains disabled; this makes its counterfactual visible.
-        guard = guards.setdefault(local_date, SessionPnlGuard(
-            SessionPnlGuardConfig(hard_profit_lock_enabled=True), session_date=local_date
-        ))
-        was_allowed = guard.decision().allowed
-        guard.apply_realized_delta(pnl)
-        decision = guard.decision()
-        out.append({"ts": ts, "session_date_taipei": local_date, "slug": payload.get("slug"), "cycle_pnl_usdc": float(pnl),
-                    "buy_was_allowed_before_cycle": was_allowed, "guard_allowed_after_cycle": decision.allowed,
-                    "lock_reason": decision.reason, "realized_pnl_usdc": float(decision.realized_pnl_usdc),
-                    "high_water_usdc": float(decision.realized_high_water_usdc),
-                    "drawdown_from_high_usdc": float(decision.drawdown_from_high_usdc)})
-    fields = list(out[0]) if out else ["ts", "session_date_taipei", "slug", "cycle_pnl_usdc"]
+        parsed.append((ts, payload, Decimal(str(payload.get("cycle_combined_pnl_usdc", 0))),
+                       datetime.fromisoformat(ts).astimezone(ZoneInfo("Asia/Taipei")).date().isoformat()))
+    scenarios = {
+        "NO_GUARD": SessionPnlGuardConfig(enabled=False),
+        "LIVE_DEFAULT": SessionPnlGuardConfig(),
+        "HARD_CAP_10": SessionPnlGuardConfig(hard_profit_lock_enabled=True),
+    }
+    out = []
+    for scenario, config in scenarios.items():
+        guards: dict[str, SessionPnlGuard] = {}
+        locked: dict[str, dict] = {}
+        final: dict[str, Decimal] = {}
+        avoided: dict[str, Decimal] = {}
+        counts: dict[str, list[int]] = {}
+        for ts, payload, pnl, local_date in parsed:
+            guard = guards.setdefault(local_date, SessionPnlGuard(config, session_date=local_date))
+            final[local_date] = final.get(local_date, Decimal("0")) + pnl
+            counts.setdefault(local_date, [0, 0])
+            if guard.decision().allowed:
+                counts[local_date][0] += 1
+                guard.apply_realized_delta(pnl)
+                decision = guard.decision()
+                if not decision.allowed and local_date not in locked:
+                    locked[local_date] = {"lock_ts": ts, "lock_reason": decision.reason,
+                                          "pnl_at_lock": decision.realized_pnl_usdc,
+                                          "high_water_at_lock": decision.realized_high_water_usdc}
+            else:
+                counts[local_date][1] += 1; avoided[local_date] = avoided.get(local_date, Decimal("0")) + pnl
+        for local_date in sorted(final):
+            details = locked.get(local_date, {})
+            retained = final[local_date] - avoided.get(local_date, Decimal("0"))
+            out.append({"scenario": scenario, "session_date_taipei": local_date, **details,
+                        "markets_before_lock": counts[local_date][0], "markets_after_lock": counts[local_date][1],
+                        "actual_final_pnl": float(final[local_date]), "counterfactual_avoided_market_pnl": float(avoided.get(local_date, Decimal("0"))),
+                        "counterfactual_retained_pnl": float(retained),
+                        "caveat": "descriptive_counterfactual_not_causal"})
+    fields = sorted({key for row in out for key in row}) if out else ["scenario", "session_date_taipei"]
     with open(args.output, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader(); writer.writerows(out)
     print(f"wrote {len(out)} rows: {args.output}")
     return 0

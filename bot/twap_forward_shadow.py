@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from threading import Lock
 from typing import Any
+from pathlib import Path
+import shutil
+import time
 
 
 def _f(value: Decimal | float | None) -> float | None:
@@ -38,7 +41,8 @@ class TwapForwardShadow:
     """Per-market fixed-memory official-TWAP projection experiment."""
 
     def __init__(self, *, max_samples: int = 180, trend_cap_bps: float = 25.0,
-                 db: Any = None, run_id: str = "", max_db_mb: float = 500.0) -> None:
+                 db: Any = None, run_id: str = "", max_db_mb: float = 500.0,
+                 min_free_disk_gb: float = 10.0, storage_check_interval_sec: float = 60.0) -> None:
         # Production constructs this with 180 samples; accepting a smaller
         # bound is useful for deterministic unit tests and does not alter the
         # production default.
@@ -48,10 +52,14 @@ class TwapForwardShadow:
         self._summary: dict[str, dict[str, Any]] = {}
         self._latest: dict[str, dict[str, Any]] = {}
         self.db, self.run_id, self.max_db_mb = db, str(run_id), float(max_db_mb)
+        self.min_free_disk_gb = max(0.0, float(min_free_disk_gb))
+        self.storage_check_interval_sec = max(1.0, float(storage_check_interval_sec))
         self._checkpoint_done: dict[str, set[int]] = defaultdict(set)
         self._last_emitted_sign: dict[str, int] = {}
         self._last_emitted_projected_side: dict[str, str] = {}
         self._storage_guard_triggered = False
+        self._storage_guard_reason = ""
+        self._last_storage_check_ts = 0.0
         self._lock = Lock()
 
     def sample_count(self, slug: str) -> int:
@@ -145,7 +153,11 @@ class TwapForwardShadow:
             return dict(value) if value is not None else None
 
     def _persist(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
-        if self.db is None or self._storage_guard_triggered:
+        if self.db is None:
+            return
+        # Compact settlement summaries remain permitted after a storage guard;
+        # all optional material/checkpoint traffic is suppressed.
+        if self._storage_guard_triggered and event_type != "MARKET_TWAP_SUMMARY":
             return
         try:
             self.db.enqueue_decision(run_id=self.run_id, slug=slug, market_id=None,
@@ -154,8 +166,43 @@ class TwapForwardShadow:
         except Exception:
             pass
 
+    def _storage_health(self, now_ts: float) -> dict[str, Any]:
+        """Throttle filesystem checks; storage pressure is sticky to restart."""
+        if self.db is None:
+            return {"checked": False, "triggered": False}
+        if now_ts - self._last_storage_check_ts < self.storage_check_interval_sec:
+            return {"checked": False, "triggered": self._storage_guard_triggered}
+        self._last_storage_check_ts = now_ts
+        try:
+            path = Path(str(getattr(self.db, "db_path", "")))
+            size_mb = path.stat().st_size / 1024 / 1024 if path.is_file() else 0.0
+            free_gb = shutil.disk_usage(path.parent if path.parent.exists() else Path(".")).free / 1024 / 1024 / 1024
+            reason = "db_size_cap" if size_mb >= self.max_db_mb else "free_disk_low" if free_gb < self.min_free_disk_gb else ""
+            if reason and not self._storage_guard_triggered:
+                self._storage_guard_triggered, self._storage_guard_reason = True, reason
+                # This is a single compact state event, intentionally allowed
+                # before optional event suppression begins.
+                self._persist_raw("", now_ts, "RESEARCH_STORAGE_GUARD_TRIGGERED", {
+                    "db_size_mb": size_mb, "configured_max_db_mb": self.max_db_mb,
+                    "disk_free_gb": free_gb, "configured_min_free_disk_gb": self.min_free_disk_gb,
+                    "trigger_reason": reason, "timestamp": now_ts,
+                })
+            return {"checked": True, "triggered": self._storage_guard_triggered, "reason": self._storage_guard_reason,
+                    "db_size_mb": size_mb, "disk_free_gb": free_gb}
+        except Exception:
+            return {"checked": True, "triggered": self._storage_guard_triggered}
+
+    def _persist_raw(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
+        try:
+            self.db.enqueue_decision(run_id=self.run_id, slug=slug, market_id=None,
+                                     decision_epoch_ns=int(max(0.0, ts) * 1_000_000_000),
+                                     payload={"event_type": event_type, **payload})
+        except Exception:
+            pass
+
     def _persist_material(self, result: dict[str, Any]) -> None:
         slug, ts = str(result["market_slug"]), float(result["observed_ts"])
+        self._storage_health(ts)
         value = result.get("twap_minus_strike_bps")
         sign = 1 if value is not None and value > 0 else -1 if value is not None and value < 0 else 0
         if sign and slug in self._last_emitted_sign and sign != self._last_emitted_sign[slug]:
@@ -199,14 +246,22 @@ class TwapForwardShadow:
             summary["projected_cross_count"] += 1
         if side not in ("UNKNOWN", "TIE"): summary["last_projected_side"] = side
 
-    def finalize_market(self, slug: str, *, settlement_side: str) -> dict[str, Any]:
+    def finalize_market(self, slug: str, *, settlement_side: str, settlement_ts: float | None = None) -> dict[str, Any]:
         with self._lock:
             summary = dict(self._summary.pop(str(slug), {"market_slug": str(slug)}))
             summary["settlement_side"] = str(settlement_side)
+            last_sample = self._samples.get(str(slug), deque())
+            fallback_ts = float(last_sample[-1].observed_ts) if last_sample else time.time()
             summary["raw_buffer_samples"] = len(self._samples.pop(str(slug), ()))
             self._latest.pop(str(slug), None)
             self._checkpoint_done.pop(str(slug), None)
             self._last_emitted_sign.pop(str(slug), None)
             self._last_emitted_projected_side.pop(str(slug), None)
-        self._persist(str(slug), 0.0, "MARKET_TWAP_SUMMARY", summary)
+        summary_ts = float(settlement_ts) if settlement_ts is not None else fallback_ts
+        summary["summary_ts"] = summary_ts
+        self._persist(str(slug), summary_ts, "MARKET_TWAP_SUMMARY", summary)
         return summary
+
+    def storage_guard_status(self) -> dict[str, Any]:
+        return {"triggered": self._storage_guard_triggered, "reason": self._storage_guard_reason,
+                "optional_research_writes_enabled": not self._storage_guard_triggered}

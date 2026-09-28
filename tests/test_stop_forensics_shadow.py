@@ -41,3 +41,17 @@ def test_checkpoint_never_invents_bbo_when_quote_unavailable():
     checkpoint = next(event for event in recorder.events if event["event_type"] == "STOP_SHADOW_CHECKPOINT")
     assert checkpoint["payload"]["checkpoint_quote_available"] is False
     assert checkpoint["payload"]["best_bid"] is None
+
+
+def test_missing_entry_fair_stays_unavailable_and_depth_is_explicit():
+    recorder = StopForensicsShadow()
+    base = dict(slug="s", instrument_id="i", position_side="UP", entry_price=Decimal(".6"), qty=Decimal("10"),
+                signal_side="DOWN", signal_score=Decimal("-.2"), official_strike=Decimal("100"), spot=Decimal("99"),
+                fair_probability=Decimal(".4"), fair_at_entry=None, leader_side="DOWN", best_bid=Decimal(".5"),
+                best_bid_size=Decimal("5"), time_left_sec=100.0, bid_levels=[(Decimal(".5"), Decimal("5")), (Decimal(".49"), Decimal("5"))])
+    recorder.observe(raw_adverse=True, now_ts=0, **base)
+    recorder.observe(raw_adverse=True, now_ts=5.1, **base)
+    row = next(event["payload"] for event in recorder.events if event["event_type"] == "STOP_SHADOW_CHECKPOINT")
+    assert row["fair_at_entry"] is None
+    assert row["thesis_component_availability"]["fair"] is False
+    assert row["coverage_1c"] == 1.0

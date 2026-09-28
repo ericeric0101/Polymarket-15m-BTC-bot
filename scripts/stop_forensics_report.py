@@ -32,14 +32,14 @@ def main() -> int:
     for name, items in (("stop_shadow_checkpoints.csv", checkpoints), ("stop_candidate_comparison.csv", candidates), ("post_entry_smart_money.csv", smart)):
         keys = sorted({key for item in items for key in item}) or ["observed_ts"]
         with (outdir / name).open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore")
+            writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore", lineterminator="\n")
             writer.writeheader(); writer.writerows(items)
     # The 10s file intentionally retains evidence availability rather than
     # presenting settlement-only outcomes as executable replay results.
     with (outdir / "stop_persistence_10s_review.csv").open("w", newline="", encoding="utf-8") as handle:
         rows10 = [item for item in candidates if item.get("candidate") == "STOP_SHADOW_P10"]
         keys = sorted({key for item in rows10 for key in item}) or ["observed_ts"]
-        writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore"); writer.writeheader(); writer.writerows(rows10)
+        writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore", lineterminator="\n"); writer.writeheader(); writer.writerows(rows10)
     print(f"events: checkpoints={len(checkpoints)} candidates={len(candidates)} smart={len(smart)}")
     return 0
 

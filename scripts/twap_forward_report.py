@@ -17,7 +17,7 @@ EVENTS = {"TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE", "TMINUS_CHECKPOINT"
 def write_csv(path: Path, rows: list[dict]) -> None:
     fields = sorted({key for row in rows for key in row}) or ["observed_ts"]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader(); writer.writerows(rows)
 
 
@@ -50,8 +50,16 @@ def main() -> int:
                  "projection_accuracy.csv", "stop_twap_forensics.csv", "twap_exit_urgency.csv"):
         write_csv(out / name, [])
     usage = shutil.disk_usage(db.parent)
-    health = [{"research_db": str(db), "current_db_size_mb": round(db.stat().st_size / 1024 / 1024, 3),
-               "disk_free_gb": round(usage.free / 1024 / 1024 / 1024, 3),
+    cap, min_free = 500.0, 10.0
+    db_size_mb, disk_free_gb = round(db.stat().st_size / 1024 / 1024, 3), round(usage.free / 1024 / 1024 / 1024, 3)
+    guard_rows = [r for r in rows if r.get("event_type") == "RESEARCH_STORAGE_GUARD_TRIGGERED"]
+    cap_exceeded, free_low = db_size_mb >= cap, disk_free_gb < min_free
+    effective_guard = bool(guard_rows) or cap_exceeded or free_low
+    health = [{"research_db": str(db), "current_db_size_mb": db_size_mb, "db_size_mb": db_size_mb,
+               "configured_db_cap_mb": cap, "db_cap_exceeded": cap_exceeded,
+               "disk_free_gb": disk_free_gb, "configured_min_free_gb": min_free, "free_disk_low": free_low,
+               "storage_guard_triggered": effective_guard, "guard_reason": guard_rows[-1].get("trigger_reason") if guard_rows else ("db_size_cap" if cap_exceeded else "free_disk_low" if free_low else ""),
+               "optional_research_writes_enabled": not effective_guard,
                "event_count": len(rows), "event_counts": json.dumps(Counter(r.get("event_type") for r in rows), sort_keys=True),
                "raw_retention_enabled": False}]
     write_csv(out / "storage_health.csv", health)

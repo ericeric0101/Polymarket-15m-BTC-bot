@@ -200,6 +200,7 @@ class StrategyLifecycleMixin:
                     twap_shadow.finalize_market(
                         slug,
                         settlement_side=("UP" if spot >= strike else "DOWN"),
+                        settlement_ts=time.time(),
                     )
                 except Exception as shadow_error:
                     logger.warning(

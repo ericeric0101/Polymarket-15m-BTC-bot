@@ -1,6 +1,14 @@
 from decimal import Decimal
 
 from bot.twap_forward_shadow import TwapForwardShadow
+from bot.spot_pricer import SpotPricerMixin
+import inspect
+
+
+class FakeDb:
+    db_path = "/tmp/no-such-research.db"
+    def __init__(self): self.rows = []
+    def enqueue_decision(self, **kwargs): self.rows.append(kwargs); return True
 
 
 def sample(model, ts, spot="101", twap="100", strike="100", left=60):
@@ -52,3 +60,29 @@ def test_moving_away_has_no_crossing_eta_and_rollover_summarizes_then_clears():
     summary = model.finalize_market("m", settlement_side="DOWN")
     assert summary["market_slug"] == "m"
     assert model.sample_count("m") == 0
+
+
+def test_summary_uses_settlement_timestamp_not_epoch_zero():
+    db = FakeDb(); model = TwapForwardShadow(db=db, run_id="r")
+    sample(model, 10, twap="100")
+    model.finalize_market("m", settlement_side="UP", settlement_ts=20.0)
+    row = next(row for row in db.rows if row["payload"]["event_type"] == "MARKET_TWAP_SUMMARY")
+    assert row["decision_epoch_ns"] == 20_000_000_000
+    assert row["payload"]["summary_ts"] == 20.0
+
+
+def test_storage_guard_suppresses_optional_events_but_keeps_summary(monkeypatch, tmp_path):
+    db = FakeDb(); db.db_path = str(tmp_path / "research.db"); (tmp_path / "research.db").write_bytes(b"x")
+    model = TwapForwardShadow(db=db, max_db_mb=0.0, min_free_disk_gb=0, storage_check_interval_sec=1)
+    sample(model, 100, twap="100")
+    sample(model, 101, twap="99")
+    assert model.storage_guard_status()["triggered"] is True
+    assert any(row["payload"]["event_type"] == "RESEARCH_STORAGE_GUARD_TRIGGERED" for row in db.rows)
+    model.finalize_market("m", settlement_side="DOWN", settlement_ts=102)
+    assert any(row["payload"]["event_type"] == "MARKET_TWAP_SUMMARY" for row in db.rows)
+
+
+def test_twap_ingress_binds_current_tick_timestamp_before_shadow_observe():
+    source = inspect.getsource(SpotPricerMixin._polymarket_chainlink_ws_loop)
+    block = source[source.index('if self._is_twap_spot_source(tick.source):'):]
+    assert block.index("observation_ts = chainlink_observation_ts(tick)") < block.index("twap_shadow.observe(")

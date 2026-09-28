@@ -680,6 +680,14 @@ market summaries are persisted to the research DB; raw per-second retention is
 off by default. `scripts/twap_forward_report.py` exports the compact evidence
 under `reports/twap_forward/`. Projection and any future smart-money lead/lag
 comparison are observational, not causal or executable backtests.
+
+The research writer checks its DB size and free disk on a throttled cadence.
+At `TWAP_RESEARCH_MAX_DB_MB` or below `TWAP_RESEARCH_MIN_FREE_DISK_GB`, it
+sticks in storage-guard mode until restart: optional crossing/checkpoint writes
+stop, while compact `MARKET_TWAP_SUMMARY` remains allowed. This never changes
+trading authority. Stop-forensics stores fair-at-entry only at the first BUY
+fill; unavailable entry fair remains unavailable rather than being replaced by
+the current fair value.
 | Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing high-price/weak-signal/Kelly multipliers only reduce the risk caps. | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`; `MARKET_TARGET_SHARES` remains legacy compatibility and is no longer a scale-up authority. |
 | Submission / repricing | `bot.quote_runtime._submit_quote_cycle` → `run_bot._submit_maker_quote` → `bot.order_submission.submit_maker_quote`. A maker entry is `LimitOrder` / **GTC**; `ORDER_POST_ONLY` requests post-only where adapter supports it. Existing entries are preserved if target version/hysteresis is unchanged; cancellation is handled by `bot.order_runtime`. The documented normal `ORDER_TTL_SEC` is no longer a TTL for unchanged BUYs. | `ORDER_POST_ONLY`, `MAKER_POST_ONLY_STRICT`, `ORDER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_HYSTERESIS_TICKS`, `MAX_REQUOTE_PER_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`; `ORDER_TTL_SEC` applies to exit-owned orders. |
 

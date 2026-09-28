@@ -1,2 +1,2 @@
-current_db_size_mb,disk_free_gb,event_count,event_counts,raw_retention_enabled,research_db
-910.383,20.085,0,{},False,data/research/hyperliquid_lead_lag.db
+configured_db_cap_mb,configured_min_free_gb,current_db_size_mb,db_cap_exceeded,db_size_mb,disk_free_gb,event_count,event_counts,free_disk_low,guard_reason,optional_research_writes_enabled,raw_retention_enabled,research_db,storage_guard_triggered
+500.0,10.0,910.383,True,910.383,19.461,0,{},False,db_size_cap,False,False,data/research/hyperliquid_lead_lag.db,True

@@ -770,6 +770,8 @@ def initialize_strategy_settings(
     strategy.lead_lag_db = LeadLagDB()
     strategy.twap_forward_shadow = TwapForwardShadow(
         db=strategy.lead_lag_db, run_id=strategy.run_id, max_samples=180,
+        max_db_mb=float(os.getenv("TWAP_RESEARCH_MAX_DB_MB", "500")),
+        min_free_disk_gb=float(os.getenv("TWAP_RESEARCH_MIN_FREE_DISK_GB", "10")),
     )
     # Research-only comparison of early BTC trend-entry schedules. This
     # recorder has no venue/order ownership and persists through the async DB.

@@ -225,7 +225,12 @@ class SpotPricerMixin:
                             # observation time and mandates it for freshness.
                             self._polymarket_chainlink_twap_price_ts = tick.received_at_ts
                             self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
-                            self._polymarket_chainlink_twap_observation_ts = chainlink_observation_ts(tick)
+                            # Bind the source time once to this exact tick.
+                            # A prior version assigned this after the shadow
+                            # observer, so tick N could be paired with tick
+                            # N-1's timestamp (and tick 1 raised locally).
+                            observation_ts = chainlink_observation_ts(tick)
+                            self._polymarket_chainlink_twap_observation_ts = observation_ts
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
                             twap_shadow = getattr(self, "twap_forward_shadow", None)
                             if twap_shadow is not None:
@@ -244,7 +249,6 @@ class SpotPricerMixin:
                                 except Exception as exc:
                                     logger.debug(f"TWAP forward shadow observation failed: {exc}")
                             research_observer = getattr(self, "_observe_live_strike_reference", None)
-                            observation_ts = chainlink_observation_ts(tick)
                             if callable(research_observer) and observation_ts is not None:
                                 try:
                                     research_observer(

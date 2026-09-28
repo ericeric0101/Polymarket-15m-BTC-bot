@@ -1277,6 +1277,8 @@ class IntegratedBTCStrategy(
             try:
                 current_quote = self._get_quote_for_instrument(instrument_id)
                 best_bid = current_quote[0] if current_quote is not None else None
+                book = self.cache.order_book(instrument_id) if getattr(self, "cache", None) is not None else None
+                bid_levels = book.bids() if book is not None else None
                 entry_state = getattr(self, "live_inventory_cost", {}).get(str(instrument_id), {})
                 twap_shadow = getattr(self, "twap_forward_shadow", None)
                 twap_features = twap_shadow.latest(slug) if twap_shadow is not None else None
@@ -1286,10 +1288,12 @@ class IntegratedBTCStrategy(
                         raw_adverse=invalidated, now_ts=now_ts, slug=slug, instrument_id=str(instrument_id),
                         position_side=side.value, entry_price=entry_price, qty=inventory_qty,
                         signal_side=self.active_side.value, signal_score=Decimal(str(self.side_decision_score)),
-                        official_strike=strike, spot=spot, fair_probability=fair, fair_at_entry=Decimal(str(entry_state.get("fair_at_entry", fair))),
+                        official_strike=strike, spot=spot, fair_probability=fair,
+                        fair_at_entry=(Decimal(str(entry_state["fair_at_entry"])) if entry_state.get("fair_at_entry") is not None else None),
                         leader_side=("UP" if spot > strike else "DOWN" if spot < strike else "TIE"),
                         best_bid=best_bid, best_bid_size=None, time_left_sec=float(time_left_sec or 0.0),
                         twap_features=twap_features,
+                        bid_levels=bid_levels,
                     )
             except Exception as exc:
                 logger.debug(f"Stop forensics shadow observation failed: {exc}")

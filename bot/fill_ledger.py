@@ -150,6 +150,25 @@ class FillLedgerMixin:
         )
         if realized_net is None or side_norm != "sell":
             if side_norm == "buy" and inst_key:
+                # Capture entry-time research evidence once.  It must never
+                # be replaced by a later quote, otherwise fair deterioration
+                # silently becomes zero at every adverse checkpoint.
+                state = self.live_inventory_cost.get(inst_key, {})
+                if pre_qty <= 0 and "fair_at_entry_captured" not in state:
+                    fair_at_entry = None
+                    try:
+                        side_value = getattr(self._side_for_instrument_id(instrument_id), "value", "").lower()
+                        probability = getattr(getattr(self, "last_forecast_state", None), "probability_for_outcome", None)
+                        fair_at_entry = Decimal(str(probability(side_value))) if callable(probability) and side_value else None
+                    except Exception:
+                        fair_at_entry = None
+                    state["fair_at_entry"] = fair_at_entry
+                    state["fair_at_entry_captured"] = True
+                    state["signal_score_at_entry"] = Decimal(str(getattr(self, "side_decision_score", "0")))
+                    twap = getattr(self, "twap_forward_shadow", None)
+                    features = twap.latest(str(getattr(self, "current_market_slug", "") or "")) if twap is not None else None
+                    state["twap_at_entry"] = (features or {}).get("official_current_twap")
+                    state["twap_minus_strike_bps_at_entry"] = (features or {}).get("twap_minus_strike_bps")
                 # A new winning run starts from the fresh fill price.
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
