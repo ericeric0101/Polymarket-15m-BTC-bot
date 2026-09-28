@@ -4084,10 +4084,18 @@ class IntegratedBTCStrategy(
         self._quote_stream_rollover_requested = True
         self._rollover_requested_flag = True
         self._stopping = True
-        logger.error(f"Quote stream recovery exhausted; requesting node rollover: trigger={trigger}")
+        pending = sorted(str(item) for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set()))
+        prewarm_seen = getattr(self, "quote_prewarm_first_quote_ts_by_inst", {})
+        logger.error(
+            "Quote stream recovery exhausted; requesting node rollover: "
+            f"trigger={trigger} pending={pending} prewarm_seen={prewarm_seen}"
+        )
         self._db_strategy_event(
             "QUOTE_WATCHDOG_NODE_ROLLOVER",
-            {"trigger": trigger, "instrument": str(self.instrument_id) if self.instrument_id else None, "ts": now_ts},
+            {
+                "trigger": trigger, "instrument": str(self.instrument_id) if self.instrument_id else None,
+                "pending_instruments": pending, "prewarm_first_quote_ts_by_inst": prewarm_seen, "ts": now_ts,
+            },
         )
         try:
             stop_node = getattr(self, "_request_node_stop_callback", None)
@@ -4199,7 +4207,8 @@ class IntegratedBTCStrategy(
             self.quote_recovery_started_ts = time.time()
             logger.warning(
                 "Quote watchdog resubscribed; awaiting first fresh quote: "
-                f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s"
+                f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s "
+                f"pending={sorted(str(item) for item in (getattr(self, 'quote_recovery_pending_instruments', set()) or set()))}"
             )
             self._db_strategy_event(
                 "QUOTE_WATCHDOG_RESUBSCRIBED",
@@ -4209,6 +4218,7 @@ class IntegratedBTCStrategy(
                     "grace_sec": self.quote_resubscribe_grace_sec,
                     "trigger": trigger,
                     "trigger_count": trigger_counts[trigger_source],
+                    "pending_instruments": sorted(str(item) for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set())),
                 },
             )
             self.consecutive_invalid_quote_ticks = 0

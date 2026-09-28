@@ -520,6 +520,8 @@ def initialize_strategy_settings(
     strategy.quote_recovery_started_ts = 0.0
     strategy.quote_recovery_pending_instruments = set()
     strategy.quote_recovery_attempts = 0
+    strategy.quote_prewarm_instruments = set()
+    strategy.quote_prewarm_first_quote_ts_by_inst = {}
     strategy._quote_stream_rollover_requested = False
     maker_config = MakerEngineConfig(
         maker_half_spread=strategy.maker_half_spread,

@@ -330,12 +330,45 @@ def refresh_quote_tick_subscriptions(strategy: Any) -> None:
             logger.warning(f"L2 resubscribe failed for {inst_id}: {exc}")
 
 
+def next_market_pair_instruments(
+    btc_instruments: list[dict[str, Any]],
+    *, current_slug: str, current_start_ts: int | None,
+    extract_outcome: Any,
+) -> list[InstrumentId]:
+    """Return the next distinct BTC-15m UP/DOWN pair already in cache.
+
+    This is an operational prewarm, not a trading-market selection.  Keeping
+    one future pair subscribed means a rollover does not depend on a dynamic
+    websocket subscribe command arriving at the exact market boundary.
+    """
+    current_start = int(current_start_ts or 0)
+    candidates = [
+        item for item in btc_instruments
+        if str(item.get("slug") or "") != str(current_slug)
+        and int(item.get("market_timestamp") or 0) > current_start
+    ]
+    if not candidates:
+        return []
+    next_start = min(int(item["market_timestamp"]) for item in candidates)
+    next_slug_items = [item for item in candidates if int(item.get("market_timestamp") or 0) == next_start]
+    by_outcome: dict[str, InstrumentId] = {}
+    for item in next_slug_items:
+        instrument = item.get("instrument")
+        instrument_id = getattr(instrument, "id", None)
+        outcome = str(extract_outcome(instrument) or "").lower() if instrument is not None else ""
+        if instrument_id is not None and outcome in {"up", "down"}:
+            by_outcome.setdefault(outcome, instrument_id)
+    return [by_outcome[side] for side in ("up", "down") if side in by_outcome]
+
+
 def replace_market_subscriptions(
     strategy: Any,
     previous_instrument_ids: List[Any],
     current_instrument_ids: List[Any],
+    *,
+    prewarm_instrument_ids: List[Any] | None = None,
 ) -> bool:
-    """Keep quote/L2 subscriptions bounded to the selected market pair."""
+    """Keep current plus one prewarmed future pair subscribed to quote/L2."""
     previous = {str(inst): inst for inst in previous_instrument_ids if inst is not None}
     tracked_quote = getattr(strategy, "_managed_market_quote_subscription_ids", None)
     tracked_l2 = getattr(strategy, "_managed_market_l2_subscription_ids", None)
@@ -348,6 +381,7 @@ def replace_market_subscriptions(
     else:
         tracked_l2 = set(tracked_l2)
     desired = {str(inst): inst for inst in current_instrument_ids if inst is not None}
+    desired.update({str(inst): inst for inst in (prewarm_instrument_ids or []) if inst is not None})
     healthy = True
 
     for inst_key in sorted((tracked_quote | tracked_l2) - set(desired)):
@@ -496,6 +530,13 @@ def find_btc_instrument(strategy: Any) -> bool:
             seen_market_insts.append(inst)
     strategy.current_market_instruments = seen_market_insts or [strategy._normalize_instrument_id(selection.instrument_id)]
     strategy.instrument_id = strategy._normalize_instrument_id(selection.instrument_id)
+    prewarm_instruments = next_market_pair_instruments(
+        btc_instruments,
+        current_slug=strategy.current_market_slug,
+        current_start_ts=start_ts,
+        extract_outcome=strategy._extract_outcome_from_instrument,
+    )
+    strategy.quote_prewarm_instruments = {str(inst) for inst in prewarm_instruments}
     preserve_side_state = bool(
         strategy.bi_side_enabled
         and previous_slug
@@ -550,7 +591,13 @@ def find_btc_instrument(strategy: Any) -> bool:
         strategy,
         previous_market_instruments,
         strategy.current_market_instruments,
+        prewarm_instrument_ids=prewarm_instruments,
     )
+    if prewarm_instruments:
+        logger.info(
+            "Quote prewarm subscribed for next BTC 15m pair: "
+            f"current={strategy.current_market_slug} instruments={','.join(map(str, prewarm_instruments))}"
+        )
     return True
 
 
@@ -582,6 +629,15 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         if strategy.instrument_id is not None and tick.instrument_id != strategy.instrument_id:
             allowed = {str(i) for i in (strategy.current_market_instruments or [])}
             if str(tick.instrument_id) not in allowed:
+                # A prewarmed next-market quote is intentionally not allowed
+                # to influence current-market pricing.  It is only an
+                # upstream subscription acknowledgement for rollover health.
+                if str(tick.instrument_id) in set(getattr(strategy, "quote_prewarm_instruments", set()) or set()):
+                    seen = getattr(strategy, "quote_prewarm_first_quote_ts_by_inst", None)
+                    if not isinstance(seen, dict):
+                        seen = {}
+                        strategy.quote_prewarm_first_quote_ts_by_inst = seen
+                    seen.setdefault(str(tick.instrument_id), time.time())
                 return
 
         if tick.bid_price is None and tick.ask_price is None:
@@ -759,6 +815,16 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             if not pending_instruments:
                 strategy.quote_recovery_started_ts = 0.0
                 strategy.quote_recovery_attempts = 0
+                record_handoff = getattr(strategy, "_db_strategy_event", None)
+                if callable(record_handoff):
+                    record_handoff(
+                        "QUOTE_MARKET_HANDOFF_READY",
+                        {
+                            "slug": str(getattr(strategy, "current_market_slug", "") or ""),
+                            "instruments": [str(item) for item in (strategy.current_market_instruments or [])],
+                            "received_ts": quote_received_ts,
+                        },
+                    )
         mid_price = (bid_decimal + ask_decimal) / 2
         strategy._append_real_mid_price(tick.instrument_id, mid_price)
         if hasattr(strategy, "_lead_lag_observation_on_quote"):

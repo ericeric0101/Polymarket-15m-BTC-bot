@@ -46,6 +46,7 @@ from bot.market_runtime import (
     quote_event_is_fresh,
     quote_tick_adapter_timestamp,
     quote_transport_is_fresh,
+    next_market_pair_instruments,
     refresh_quote_tick_subscriptions,
     replace_market_subscriptions,
 )
@@ -450,6 +451,54 @@ def test_market_subscription_replacement_unsubscribes_old_pair_and_avoids_duplic
         ("sub_quote", "new-up"), ("sub_l2", "new-up"),
         ("sub_quote", "new-down"), ("sub_l2", "new-down"),
     ]
+
+
+def test_market_subscription_replacement_keeps_one_future_pair_prewarmed():
+    class Strategy:
+        def __init__(self): self.calls = []
+        def unsubscribe_quote_ticks(self, inst): self.calls.append(("unsub_quote", inst))
+        def unsubscribe_order_book_deltas(self, inst): self.calls.append(("unsub_l2", inst))
+        def subscribe_quote_ticks(self, inst): self.calls.append(("sub_quote", inst))
+        def subscribe_order_book_deltas(self, inst): self.calls.append(("sub_l2", inst))
+
+    strategy = Strategy()
+    replace_market_subscriptions(strategy, [], ["current-up", "current-down"],
+                                 prewarm_instrument_ids=["next-up", "next-down"])
+    replace_market_subscriptions(strategy, ["current-up", "current-down"], ["next-up", "next-down"],
+                                 prewarm_instrument_ids=["after-up", "after-down"])
+    # The next pair was already subscribed before it became active: rollover
+    # removes only the old pair and adds the following prewarm pair.
+    assert ("unsub_quote", "current-up") in strategy.calls
+    assert ("unsub_quote", "next-up") not in strategy.calls
+    assert strategy.calls.count(("sub_quote", "next-up")) == 1
+    assert strategy.calls.count(("sub_quote", "after-up")) == 1
+
+
+def test_next_market_pair_selects_only_immediate_future_up_down_tokens():
+    def instrument(token, outcome):
+        return SimpleNamespace(id=token, info={"outcome": outcome})
+    rows = [
+        {"slug": "current", "market_timestamp": 100, "instrument": instrument("current-up", "up")},
+        {"slug": "next", "market_timestamp": 1000, "instrument": instrument("next-down", "down")},
+        {"slug": "next", "market_timestamp": 1000, "instrument": instrument("next-up", "up")},
+        {"slug": "later", "market_timestamp": 1900, "instrument": instrument("later-up", "up")},
+    ]
+    selected = next_market_pair_instruments(rows, current_slug="current", current_start_ts=100,
+                                             extract_outcome=lambda item: item.info["outcome"])
+    assert selected == ["next-up", "next-down"]
+
+
+def test_prewarm_quote_acknowledges_next_pair_without_touching_current_market_state():
+    strategy = SimpleNamespace(
+        _stopping=False,
+        instrument_id="current-up",
+        current_market_instruments=["current-up", "current-down"],
+        quote_prewarm_instruments={"next-up", "next-down"},
+    )
+    tick = SimpleNamespace(instrument_id="next-up")
+    handle_quote_tick(strategy, tick)
+    assert "next-up" in strategy.quote_prewarm_first_quote_ts_by_inst
+    assert not hasattr(strategy, "latest_quote_by_inst")
 
 
 def test_native_quote_delivery_lag_is_bounded_independently_from_feed_watchdog():
