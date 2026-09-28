@@ -945,6 +945,12 @@ def handle_stop(strategy: Any) -> None:
             lead_lag_db.stop()
         except Exception:
             logger.debug("Failed to flush Hyperliquid lead/lag observations", exc_info=True)
+    twap_research_db = getattr(strategy, "twap_research_db", None)
+    if twap_research_db is not None and twap_research_db is not lead_lag_db:
+        try:
+            twap_research_db.stop()
+        except Exception:
+            logger.debug("Failed to flush TWAP forward research observations", exc_info=True)
     stop_event_threads(
         stop_events=[
             strategy._lifecycle_stop_event,

@@ -24,10 +24,15 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="data/research/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", default="data/research/twap_forward_shadow.db")
     parser.add_argument("--output-dir", default="reports/twap_forward")
     args = parser.parse_args(); db = Path(args.db)
-    if not db.is_file() and args.db == "data/research/hyperliquid_lead_lag.db": db = Path("logs/hyperliquid_lead_lag.db")
+    # The separate DB is the live default.  Retain the old shared path only as
+    # a read-only compatibility fallback for pre-separation historical reports.
+    if not db.is_file() and args.db == "data/research/twap_forward_shadow.db":
+        db = Path("data/research/hyperliquid_lead_lag.db")
+    if not db.is_file() and args.db == "data/research/hyperliquid_lead_lag.db":
+        db = Path("logs/hyperliquid_lead_lag.db")
     if not db.is_file(): parser.error(f"research DB not found: {args.db}")
     out = Path(args.output_dir); out.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db) as conn:

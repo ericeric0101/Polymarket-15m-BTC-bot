@@ -91,3 +91,35 @@ def test_session_guard_end_to_end_persists_lock_and_resets_next_taipei_day(tmp_p
         assert next_day.realized_pnl_usdc == 0 and next_day.realized_high_water_usdc == 0
     finally:
         db.stop()
+
+
+def test_startup_reconciliation_persists_lock_derived_from_loaded_high_water(tmp_path):
+    """A stale durable row must not disagree with the in-memory BUY authority."""
+    db = TradeJournalDB(str(tmp_path / "journal.db"), backup_interval_sec=3600)
+    try:
+        # This models a prior process that persisted PnL/high-water but exited
+        # before serialising the derived sticky arm/lock flags.
+        assert db.save_session_pnl_state({
+            "session_date_taipei": "2026-09-28",
+            "realized_pnl_usdc": "1",
+            "realized_high_water_usdc": "14",
+            "profit_guard_armed": False,
+            "buy_lock_active": False,
+            "buy_lock_reason": "",
+        })
+
+        host = _GuardHost(db)
+        host._initialize_session_pnl_guard(_taipei_ts(28))
+
+        decision = host.session_buy_guard_decision(_taipei_ts(28))
+        assert not decision.allowed
+        assert decision.reason == "session_profit_drawdown_lock"
+
+        stored = db.load_session_pnl_state("2026-09-28")
+        assert stored is not None
+        assert stored["profit_guard_armed"] == 1
+        assert stored["buy_lock_active"] == 1
+        assert stored["buy_lock_reason"] == "session_profit_drawdown_lock"
+        assert any(event == "SESSION_GUARD_STATE_RECONCILED" for event, _ in host.events)
+    finally:
+        db.stop()

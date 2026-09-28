@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from bot.twap_forward_shadow import TwapForwardShadow
 from bot.spot_pricer import SpotPricerMixin
+from bot.settings import build_twap_research_db
 import inspect
 
 
@@ -105,3 +106,16 @@ def test_twap_ingress_binds_current_tick_timestamp_before_shadow_observe():
     source = inspect.getsource(SpotPricerMixin._polymarket_chainlink_ws_loop)
     block = source[source.index('if self._is_twap_spot_source(tick.source):'):]
     assert block.index("observation_ts = chainlink_observation_ts(tick)") < block.index("twap_shadow.observe(")
+
+
+def test_twap_research_uses_a_dedicated_writer_not_the_shared_lead_lag_db(monkeypatch, tmp_path):
+    path = tmp_path / "twap_forward_shadow.db"
+    monkeypatch.setenv("TWAP_RESEARCH_DB_PATH", str(path))
+
+    db = build_twap_research_db()
+    try:
+        assert db.db_path == str(path)
+        assert path.is_file()
+        assert "hyperliquid_lead_lag" not in db.db_path
+    finally:
+        db.stop()

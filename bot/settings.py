@@ -46,6 +46,20 @@ from bot.trend_entry_shadow import TrendEntryShadow
 from bot.forward_shadow import ForwardShadowExperiment
 
 
+TWAP_RESEARCH_DB_DEFAULT = "data/research/twap_forward_shadow.db"
+
+
+def build_twap_research_db() -> LeadLagDB:
+    """Create the bounded TWAP writer outside the shared Outcome research DB.
+
+    Outcome snapshots are intentionally high volume and can be much larger
+    than the compact TWAP experiment.  Keeping their SQLite files separate
+    lets the TWAP storage cap protect its own evidence collection instead of
+    disabling it because unrelated research retained historical rows.
+    """
+    return LeadLagDB(db_path=os.getenv("TWAP_RESEARCH_DB_PATH", TWAP_RESEARCH_DB_DEFAULT))
+
+
 def initialize_strategy_settings(
     strategy: Any,
     *,
@@ -770,8 +784,9 @@ def initialize_strategy_settings(
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
     strategy._lead_lag_cancel_started_ns_by_order_id = {}
     strategy.lead_lag_db = LeadLagDB()
+    strategy.twap_research_db = build_twap_research_db()
     strategy.twap_forward_shadow = TwapForwardShadow(
-        db=strategy.lead_lag_db, run_id=strategy.run_id, max_samples=180,
+        db=strategy.twap_research_db, run_id=strategy.run_id, max_samples=180,
         max_db_mb=float(os.getenv("TWAP_RESEARCH_MAX_DB_MB", "500")),
         min_free_disk_gb=float(os.getenv("TWAP_RESEARCH_MIN_FREE_DISK_GB", "10")),
     )

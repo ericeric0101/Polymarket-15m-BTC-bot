@@ -682,6 +682,10 @@ under `reports/twap_forward/`. Projection and any future smart-money lead/lag
 comparison are observational, not causal or executable backtests.
 
 The research writer checks its DB size and free disk on a throttled cadence.
+TWAP telemetry has its own bounded SQLite writer at
+`data/research/twap_forward_shadow.db` (`TWAP_RESEARCH_DB_PATH` may override
+it). It is deliberately separate from the high-volume Outcome/lead-lag
+research DB, so old Outcome history cannot exhaust the TWAP evidence budget.
 At `TWAP_RESEARCH_MAX_DB_MB` or below `TWAP_RESEARCH_MIN_FREE_DISK_GB`, it
 sticks in storage-guard mode until restart: optional crossing/checkpoint writes
 stop, while compact `MARKET_TWAP_SUMMARY` remains allowed. This never changes

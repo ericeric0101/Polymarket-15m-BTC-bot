@@ -1,1 +1,8 @@
-observed_ts
+correct,market_slug,predicted_side,settlement_reference_source,settlement_side
+True,btc-updown-15m-1790585100,UP,polymarket_chainlink_twap_60s_ws,UP
+True,btc-updown-15m-1790586000,DOWN,polymarket_chainlink_twap_60s_ws,DOWN
+True,btc-updown-15m-1790586900,DOWN,polymarket_chainlink_twap_60s_ws,DOWN
+True,btc-updown-15m-1790587800,DOWN,polymarket_chainlink_twap_60s_ws,DOWN
+True,btc-updown-15m-1790589600,UP,polymarket_chainlink_twap_60s_ws,UP
+True,btc-updown-15m-1790590500,UP,polymarket_chainlink_twap_60s_ws,UP
+True,btc-updown-15m-1790591400,UP,polymarket_chainlink_twap_60s_ws,UP

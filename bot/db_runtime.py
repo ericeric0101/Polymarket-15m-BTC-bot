@@ -118,6 +118,22 @@ class StrategyDBRuntimeMixin:
         self._session_pnl_guard_created_ts = time.time() if now_ts is None else float(now_ts)
         if getattr(self, "trade_db", None) and not loaded:
             self._persist_session_pnl_guard(event_type="SESSION_DAY_RESET")
+        elif loaded:
+            # ``SessionPnlGuard`` derives sticky arm/lock authority from the
+            # persisted PnL/high-water on construction.  Persist those derived
+            # flags immediately when an older row omitted them, so dashboards,
+            # restart diagnostics, and the live BUY boundary describe the same
+            # state.
+            loaded_armed = bool(loaded.get("profit_guard_armed", False))
+            loaded_locked = bool(loaded.get("buy_lock_active", False))
+            loaded_reason = str(loaded.get("buy_lock_reason") or "")
+            current = self._session_pnl_guard.state
+            if (
+                current.profit_guard_armed != loaded_armed
+                or current.buy_lock_active != loaded_locked
+                or current.buy_lock_reason != loaded_reason
+            ):
+                self._persist_session_pnl_guard(event_type="SESSION_GUARD_STATE_RECONCILED")
 
     def _persist_session_pnl_guard(self, *, event_type: str = "SESSION_PNL_UPDATE") -> bool:
         guard = getattr(self, "_session_pnl_guard", None)

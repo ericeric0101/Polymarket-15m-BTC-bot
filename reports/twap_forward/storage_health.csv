@@ -1,2 +1,2 @@
 configured_db_cap_mb,configured_min_free_gb,current_db_size_mb,db_cap_exceeded,db_main_mb,db_shm_mb,db_size_mb,db_total_disk_mb,db_wal_mb,disk_free_gb,event_count,event_counts,free_disk_low,guard_reason,guard_scope,optional_research_writes_enabled,raw_retention_enabled,research_db,storage_guard_triggered
-500.0,10.0,910.414,True,910.383,0.031,910.414,910.414,0.0,19.193,0,{},False,db_size_cap,TWAP_OPTIONAL_EVENTS_ONLY,False,False,data/research/hyperliquid_lead_lag.db,True
+500.0,10.0,981.486,True,977.832,0.031,981.486,981.486,3.623,18.574,9,"{""MARKET_TWAP_SUMMARY"": 9}",False,db_size_cap,TWAP_OPTIONAL_EVENTS_ONLY,False,False,data/research/hyperliquid_lead_lag.db,True
