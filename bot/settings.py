@@ -38,6 +38,7 @@ from bot.trade_telemetry import TradeTelemetry
 from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver
 from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
+from bot.twap_forward_shadow import TwapForwardShadow
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
 from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastFollowLive
 from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
@@ -742,6 +743,14 @@ def initialize_strategy_settings(
     )
     strategy.trade_db_buy_ready = bool(strategy.trade_db_health.get("ready", False))
     strategy.trade_db_health_reason = str(strategy.trade_db_health.get("reason") or "")
+    strategy.session_pnl_guard_enabled = config.operations.session_pnl_guard_enabled
+    strategy.session_profit_arm_usdc = config.operations.session_profit_arm_usdc
+    strategy.session_profit_drawdown_usdc = config.operations.session_profit_drawdown_usdc
+    strategy.session_hard_profit_lock_enabled = config.operations.session_hard_profit_lock_enabled
+    strategy.session_hard_profit_lock_usdc = config.operations.session_hard_profit_lock_usdc
+    strategy.session_max_loss_enabled = config.operations.session_max_loss_enabled
+    strategy.session_max_loss_usdc = config.operations.session_max_loss_usdc
+    strategy._initialize_session_pnl_guard()
     if not strategy.trade_db_buy_ready:
         logger.error(
             "Trade journal startup healthcheck is not ready; blocking all new BUYs: "
@@ -759,6 +768,9 @@ def initialize_strategy_settings(
     strategy._lead_lag_last_snapshot_ts_by_slug = {}
     strategy._lead_lag_cancel_started_ns_by_order_id = {}
     strategy.lead_lag_db = LeadLagDB()
+    strategy.twap_forward_shadow = TwapForwardShadow(
+        db=strategy.lead_lag_db, run_id=strategy.run_id, max_samples=180,
+    )
     # Research-only comparison of early BTC trend-entry schedules. This
     # recorder has no venue/order ownership and persists through the async DB.
     strategy.trend_entry_shadow = TrendEntryShadow(
@@ -768,6 +780,12 @@ def initialize_strategy_settings(
     weekday_only = os.getenv("FORWARD_SHADOW_WEEKDAY_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
     strategy.forward_shadow_experiment = ForwardShadowExperiment(
         db=strategy.lead_lag_db, run_id=strategy.run_id, weekday_only=weekday_only,
+    )
+    from bot.stop_forensics_shadow import StopForensicsShadow
+    # Research-only: receives raw production invalidation observations but has
+    # no execution or stop-loss authority.
+    strategy.stop_forensics_shadow = StopForensicsShadow(
+        db=strategy.lead_lag_db, run_id=strategy.run_id,
     )
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode

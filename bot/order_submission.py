@@ -75,6 +75,19 @@ def submit_maker_quote(
                 f"reason={entry_session.reason} local_time={entry_session.local_time.isoformat()}"
             )
             return
+        pnl_guard = getattr(strategy, "session_buy_guard_decision", None)
+        guard = pnl_guard(time.time()) if callable(pnl_guard) else None
+        if guard is not None and not guard.allowed:
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_SESSION_PNL_GUARD", side="BUY", price=float(limit_price),
+                status="SKIPPED", reason=guard.reason,
+                payload={"instrument_id": str(instrument_id), "session_date_taipei": guard.session_date_taipei,
+                         "realized_pnl_usdc": float(guard.realized_pnl_usdc),
+                         "high_water_usdc": float(guard.realized_high_water_usdc),
+                         "submission_boundary": "maker_pre_intent"},
+            )
+            logger.warning(f"Skip maker BUY due to session PnL guard: reason={guard.reason}")
+            return
     recovery_stage = getattr(strategy, "recovery_exit_stage_by_inst", {}).get(inst_key)
     if side == "sell" and recovery_exit_owns_sell_reservation(recovery_stage):
         strategy._db_order_event(

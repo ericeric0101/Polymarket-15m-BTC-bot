@@ -227,6 +227,22 @@ class SpotPricerMixin:
                             self._polymarket_chainlink_twap_event_ts_ms = tick.updated_at_ms
                             self._polymarket_chainlink_twap_observation_ts = chainlink_observation_ts(tick)
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
+                            twap_shadow = getattr(self, "twap_forward_shadow", None)
+                            if twap_shadow is not None:
+                                try:
+                                    slug = str(getattr(self, "current_market_slug", "") or "")
+                                    strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug)
+                                    current_end = getattr(self, "current_market_end_timestamp", None)
+                                    now_wall = time.time()
+                                    twap_shadow.observe(
+                                        slug=slug, now_ts=now_wall,
+                                        source_ts=float(observation_ts or now_wall),
+                                        fast_spot=getattr(self, "_binance_ws_price", None), official_twap=tick.price,
+                                        strike=strike,
+                                        time_left_sec=(max(0.0, float(current_end) - now_wall) if current_end else None),
+                                    )
+                                except Exception as exc:
+                                    logger.debug(f"TWAP forward shadow observation failed: {exc}")
                             research_observer = getattr(self, "_observe_live_strike_reference", None)
                             observation_ts = chainlink_observation_ts(tick)
                             if callable(research_observer) and observation_ts is not None:

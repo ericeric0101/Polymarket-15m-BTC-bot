@@ -171,11 +171,24 @@ class QuoteRuntimeMixin:
             not entry_session.allowed
             and not self._is_dry_run_mode()
         )
+        session_guard = getattr(self, "session_buy_guard_decision", None)
+        pnl_guard_decision = session_guard(time.time()) if callable(session_guard) else None
+        if pnl_guard_decision is not None and not pnl_guard_decision.allowed and not self._is_dry_run_mode():
+            session_forced_sell_only = True
+            if time.time() - float(getattr(self, "_last_session_pnl_guard_log_ts", 0.0)) >= 60.0:
+                self._last_session_pnl_guard_log_ts = time.time()
+                self._db_strategy_event("SESSION_BUY_LOCKED", {
+                    "reason": pnl_guard_decision.reason,
+                    "session_date_taipei": pnl_guard_decision.session_date_taipei,
+                    "realized_pnl_usdc": float(pnl_guard_decision.realized_pnl_usdc),
+                    "realized_high_water_usdc": float(pnl_guard_decision.realized_high_water_usdc),
+                    "boundary": "quote_cycle_prepare", "sell_authority_preserved": True,
+                })
         if session_forced_sell_only:
             for order_key, state in list(self.active_maker_orders.items()):
                 side = str(state.get("side", "") or "").lower()
                 if side == "buy" or str(order_key).lower().startswith("buy:"):
-                    self._cancel_maker_order_side(order_key, reason="entry_session_blocked")
+                    self._cancel_maker_order_side(order_key, reason="entry_session_or_session_pnl_guard_blocked")
             now_session_ts = time.time()
             if now_session_ts - float(getattr(self, "_last_entry_session_block_log_ts", 0.0)) >= 60.0:
                 self._last_entry_session_block_log_ts = now_session_ts

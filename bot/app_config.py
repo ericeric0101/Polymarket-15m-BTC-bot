@@ -495,6 +495,13 @@ class OperationsConfig:
     shadow_simulation_fill_timeout_sec: float
     shadow_simulation_max_quote_age_sec: float
     shadow_simulation_aged_quote_max_age_sec: float
+    session_pnl_guard_enabled: bool
+    session_profit_arm_usdc: Decimal
+    session_profit_drawdown_usdc: Decimal
+    session_hard_profit_lock_enabled: bool
+    session_hard_profit_lock_usdc: Decimal
+    session_max_loss_enabled: bool
+    session_max_loss_usdc: Decimal
 
 
 @dataclass(frozen=True)
@@ -1116,6 +1123,13 @@ class AppConfig:
                     0.1,
                     _env_float("SHADOW_SIMULATION_AGED_QUOTE_MAX_AGE_SEC", 30.0),
                 ),
+                session_pnl_guard_enabled=_env_bool_inverted("SESSION_PNL_GUARD_ENABLED", True),
+                session_profit_arm_usdc=max(Decimal("0"), _env_decimal("SESSION_PROFIT_ARM_USDC", "8.0")),
+                session_profit_drawdown_usdc=max(Decimal("0"), _env_decimal("SESSION_PROFIT_DRAWDOWN_USDC", "4.0")),
+                session_hard_profit_lock_enabled=_env_bool("SESSION_HARD_PROFIT_LOCK_ENABLED", False),
+                session_hard_profit_lock_usdc=max(Decimal("0"), _env_decimal("SESSION_HARD_PROFIT_LOCK_USDC", "10.0")),
+                session_max_loss_enabled=_env_bool_inverted("SESSION_MAX_LOSS_ENABLED", True),
+                session_max_loss_usdc=max(Decimal("0"), _env_decimal("SESSION_MAX_LOSS_USDC", "6.0")),
             ),
             outcome_lead_lag=OutcomeLeadLagConfig(
                 mode=_env_str("OUTCOME_LEAD_LAG_MODE", "shadow").strip().lower(),

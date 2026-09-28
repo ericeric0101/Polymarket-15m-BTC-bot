@@ -1272,6 +1272,27 @@ class IntegratedBTCStrategy(
             elif side == ActiveSide.DOWN:
                 fair_invalidates = fair <= (Decimal("1") - flip_min)
         invalidated = (not spot_supports) and fair_invalidates
+        recorder = getattr(self, "stop_forensics_shadow", None)
+        if recorder is not None and inventory_qty > 0 and spot is not None and strike is not None and fair is not None:
+            try:
+                current_quote = self._get_quote_for_instrument(instrument_id)
+                best_bid = current_quote[0] if current_quote is not None else None
+                entry_state = getattr(self, "live_inventory_cost", {}).get(str(instrument_id), {})
+                twap_shadow = getattr(self, "twap_forward_shadow", None)
+                twap_features = twap_shadow.latest(slug) if twap_shadow is not None else None
+                entry_price = Decimal(str(entry_state.get("avg_price", entry_state.get("avg_entry_price", "0"))))
+                if entry_price > 0:
+                    recorder.observe(
+                        raw_adverse=invalidated, now_ts=now_ts, slug=slug, instrument_id=str(instrument_id),
+                        position_side=side.value, entry_price=entry_price, qty=inventory_qty,
+                        signal_side=self.active_side.value, signal_score=Decimal(str(self.side_decision_score)),
+                        official_strike=strike, spot=spot, fair_probability=fair, fair_at_entry=Decimal(str(entry_state.get("fair_at_entry", fair))),
+                        leader_side=("UP" if spot > strike else "DOWN" if spot < strike else "TIE"),
+                        best_bid=best_bid, best_bid_size=None, time_left_sec=float(time_left_sec or 0.0),
+                        twap_features=twap_features,
+                    )
+            except Exception as exc:
+                logger.debug(f"Stop forensics shadow observation failed: {exc}")
         if invalidated:
             self._side_invalidation_hits_by_slug[slug] = int(self._side_invalidation_hits_by_slug.get(slug, 0)) + 1
         else:
@@ -3498,6 +3519,32 @@ class IntegratedBTCStrategy(
                                 }
                             )
                             self._db_strategy_event("SMART_MONEY_OBSERVATION", smart_money_payload)
+                        # Research-only held-position trajectory. It deliberately
+                        # uses the cached/evaluated smart-money signal and a
+                        # bounded cadence, never a new API poll or live veto.
+                        if current_inst_inventory_qty > 0:
+                            inst_key = self._instrument_key(inst_id)
+                            last_by_inst = getattr(self, "_post_entry_smart_money_last_ts_by_inst", None)
+                            if not isinstance(last_by_inst, dict):
+                                last_by_inst = {}
+                                self._post_entry_smart_money_last_ts_by_inst = last_by_inst
+                            if now_ts - float(last_by_inst.get(inst_key, 0.0)) >= 5.0:
+                                last_by_inst[inst_key] = now_ts
+                                payload = smart_money_signal.as_payload()
+                                payload.update({
+                                    "event_type": "POST_ENTRY_SMART_MONEY_SNAPSHOT",
+                                    "slug": str(self.current_market_slug or ""), "instrument_id": str(inst_id),
+                                    "held_side": side.upper(), "held_qty": float(current_inst_inventory_qty),
+                                    "best_bid": float(quote_ctx.quote[0]), "best_ask": float(quote_ctx.quote[1]),
+                                    "time_left_sec": float(time_left_sec_global) if time_left_sec_global is not None else None,
+                                })
+                                try:
+                                    self.lead_lag_db.enqueue_decision(
+                                        run_id=self.run_id, slug=str(self.current_market_slug or ""), market_id=None,
+                                        decision_epoch_ns=int(now_ts * 1_000_000_000), payload=payload,
+                                    )
+                                except Exception as exc:
+                                    logger.debug(f"Post-entry smart-money shadow persistence failed: {exc}")
                     desired_entry = apply_weak_pfair_size_adjustment(
                         desired_entry=desired_entry,
                         side=side,

@@ -642,6 +642,44 @@ overwritten by `ForecastState.probability_for_outcome`.
 | Quote cycle | `bot.quote_runtime._prepare_quote_cycle` blocks bad phases, checks balance/inventory, invokes protective exits, cancels expired exit-owned orders, then schedules `_evaluate_quote_targets`. | `MAKER_QUOTE_REFRESH_SEC`, `MARKET_MAX_POSITION_SHARES`, `MAKER_MAX_CONSECUTIVE_*`, `MAKER_GATE_BLOCK_GRACE_SEC`, balance-sync keys. |
 | Candidate/entry gates | `run_bot._evaluate_quote_targets` combines fair/book into `MakerEngine.generate_quote_plan`, then `bot.quote_service.evaluate_buy_entry_controls`, external confirmation, shadow veto, and `bot.quoting.apply_quote_plan_guards`. Inputs: fair, book, side/score, inventory and phase. Output: permitted BUY/SELL plan with reason and economics diagnostics. | `ENTRY_SCORE_MIN` → legacy score reader; `FIRST_ENTRY_SCORE_MIN`, `FIRST_ENTRY_MAX_TIME_LEFT_SEC`, `ENTRY_MIN_TIME_LEFT_SEC`, `ENTRY_MAX_FAIR_PRICE`, `MAKER_MIN_FAIR_PRICE`, external/smart-money keys, momentum keys, `MAKER_*EXPECTED_NET*`, fee/markout keys. |
 | Economics | `MakerEngine.generate_quote_plan` computes fair edge and modeled quote fees for maker BUY eligibility. Empirical adverse markout and `robust_net` remain shadow diagnostics and do not veto maker BUY. | `MAKER_MIN_EXPECTED_NET_USDC`, `MAKER_ECON_FEE_RATE_DECIMAL`, fee-cache/default keys; `EXECUTION_COST_*` remains relevant to calibration/telemetry, not the live maker veto. |
+
+### Persistent session PnL BUY guard and stop-forensics shadow (2026-09-28)
+
+`SESSION_PNL_GUARD_ENABLED=1` adds the only new live authority in this change:
+it uses finalized/realized PnL by **Asia/Taipei calendar day**, arms after
+`+$8`, locks new BUYs after a `$4` drawdown from realized high-water, and locks
+at `-$6` daily realized PnL. The optional `+$10` hard-profit lock is off by
+default. State is stored in `session_pnl_state`, survives restart/rollover,
+and is checked at maker and Outcome fast-follow final BUY boundaries. It never
+blocks SELL, stop-loss, cancellation, reconciliation, redemption, or rollover
+cleanup. Open-position executable-bid marks are telemetry only, never lock
+authority.
+
+`bot.stop_forensics_shadow.StopForensicsShadow` records the production raw
+invalidation condition from its first adverse observation, 5/10/15/20/30s
+checkpoints, and P5/P10/P15/adaptive candidates requiring two independent
+thesis-weakening signals (production reversal, canonical-strike leader adverse,
+or >=5ppt fair deterioration). It is research-only; smart-money snapshots are
+auxiliary only and rate-limited to five seconds while holding inventory. No
+candidate, smart-money observation, or shadow write can alter an exit. Use
+`scripts/replay_session_pnl_guard.py` and `scripts/stop_forensics_report.py`
+to produce descriptive reports under `reports/stop_forensics/`; settlement-only
+results must not be represented as executable backtests.
+
+### TWAP forward telemetry (research-only)
+
+`bot.twap_forward_shadow.TwapForwardShadow` maintains a bounded per-market
+ring buffer (180 observations in the live configuration) from the **official
+Polymarket RTDS Chainlink 60-second TWAP** plus existing Binance WS fast spot.
+It does not replace the official settlement reference, and it has no BUY, SELL,
+stop-loss, TP, sizing, or adapter authority. The primary fields are
+`twap_minus_strike_bps`, `spot_minus_twap_bps`, actual-span 5/10-second TWAP
+slopes, bounded flat/trend projections, projected side, and a nullable crossing
+ETA. Only material crossings, projected-side changes, T-minus checkpoints, and
+market summaries are persisted to the research DB; raw per-second retention is
+off by default. `scripts/twap_forward_report.py` exports the compact evidence
+under `reports/twap_forward/`. Projection and any future smart-money lead/lag
+comparison are observational, not causal or executable backtests.
 | Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing high-price/weak-signal/Kelly multipliers only reduce the risk caps. | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`; `MARKET_TARGET_SHARES` remains legacy compatibility and is no longer a scale-up authority. |
 | Submission / repricing | `bot.quote_runtime._submit_quote_cycle` → `run_bot._submit_maker_quote` → `bot.order_submission.submit_maker_quote`. A maker entry is `LimitOrder` / **GTC**; `ORDER_POST_ONLY` requests post-only where adapter supports it. Existing entries are preserved if target version/hysteresis is unchanged; cancellation is handled by `bot.order_runtime`. The documented normal `ORDER_TTL_SEC` is no longer a TTL for unchanged BUYs. | `ORDER_POST_ONLY`, `MAKER_POST_ONLY_STRICT`, `ORDER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_HYSTERESIS_TICKS`, `MAX_REQUOTE_PER_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`; `ORDER_TTL_SEC` applies to exit-owned orders. |
 

@@ -881,6 +881,17 @@ class OutcomeFastFollowLive:
                 submission_boundary="fast_follow_pre_reservation",
             )
             return False
+        pnl_guard = getattr(self.strategy, "session_buy_guard_decision", None)
+        guard = pnl_guard(float(now_ts)) if callable(pnl_guard) else None
+        if guard is not None and not guard.allowed:
+            self._record_blocked(
+                candidate, "session_pnl_guard_locked", session_guard_reason=guard.reason,
+                session_date_taipei=guard.session_date_taipei,
+                realized_pnl_usdc=float(guard.realized_pnl_usdc),
+                high_water_usdc=float(guard.realized_high_water_usdc),
+                submission_boundary="fast_follow_pre_reservation",
+            )
+            return False
         self._attempted_slugs.add(slug)
         self._pending_order_ids[str(coid)] = metadata
         self._night_pending_entry_ids.setdefault(night, set()).add(str(coid))

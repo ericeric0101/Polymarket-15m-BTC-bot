@@ -194,6 +194,18 @@ class StrategyLifecycleMixin:
                         "Forward-shadow settlement capture failed: "
                         f"{type(shadow_error).__name__}: {shadow_error}"
                     )
+            twap_shadow = getattr(self, "twap_forward_shadow", None)
+            if twap_shadow is not None:
+                try:
+                    twap_shadow.finalize_market(
+                        slug,
+                        settlement_side=("UP" if spot >= strike else "DOWN"),
+                    )
+                except Exception as shadow_error:
+                    logger.warning(
+                        "TWAP forward-shadow settlement capture failed: "
+                        f"{type(shadow_error).__name__}: {shadow_error}"
+                    )
 
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
@@ -234,6 +246,9 @@ class StrategyLifecycleMixin:
                         "recent_window_size": len(self.recent_market_combined_pnls),
                     },
                 )
+                # `cycle_fill_realized` has already been applied on each SELL
+                # fill.  The no-inventory branch therefore has no additional
+                # finalized settlement PnL to add to the session guard.
                 self._cycle_total_trades += 1
                 if cycle_fill_realized > 0:
                     self._cycle_total_wins += 1
@@ -292,6 +307,11 @@ class StrategyLifecycleMixin:
                     "recent_window_size": len(self.recent_market_combined_pnls),
                 },
             )
+            record_session_pnl = getattr(self, "_record_session_realized_pnl", None)
+            if callable(record_session_pnl) and Decimal(str(settlement.settlement_pnl)) != 0:
+                # Only the residual position's final payout belongs here;
+                # prior SELL fills were accounted for at fill time.
+                record_session_pnl(Decimal(str(settlement.settlement_pnl)), source="settlement")
             self._cycle_total_trades += 1
             if settlement.cycle_combined_pnl > 0:
                 self._cycle_total_wins += 1

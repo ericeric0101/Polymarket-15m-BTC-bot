@@ -4,9 +4,12 @@ import time
 import threading
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
+from bot.session_pnl_guard import SessionPnlGuard, SessionPnlGuardConfig, SessionPnlState, SessionBuyGuardDecision
 
 
 def _record_sync_journal_write_duration(
@@ -80,6 +83,86 @@ def take_sync_journal_write_report(strategy: Any) -> Optional[dict[str, Any]]:
 
 
 class StrategyDBRuntimeMixin:
+    @staticmethod
+    def _taipei_session_date(now_ts: Optional[float] = None) -> str:
+        return datetime.fromtimestamp(time.time() if now_ts is None else float(now_ts), ZoneInfo("Asia/Taipei")).date().isoformat()
+
+    def _session_guard_payload(self, decision: SessionBuyGuardDecision) -> Dict[str, Any]:
+        return {
+            "session_date_taipei": decision.session_date_taipei,
+            "realized_pnl_usdc": float(decision.realized_pnl_usdc),
+            "realized_high_water_usdc": float(decision.realized_high_water_usdc),
+            "drawdown_from_high_usdc": float(decision.drawdown_from_high_usdc),
+            "profit_guard_armed": decision.armed,
+            "buy_lock_reason": decision.reason if not decision.allowed else "",
+        }
+
+    def _initialize_session_pnl_guard(self, now_ts: Optional[float] = None) -> None:
+        config = SessionPnlGuardConfig(
+            enabled=bool(getattr(self, "session_pnl_guard_enabled", True)),
+            profit_arm_usdc=Decimal(str(getattr(self, "session_profit_arm_usdc", "8"))),
+            profit_drawdown_usdc=Decimal(str(getattr(self, "session_profit_drawdown_usdc", "4"))),
+            hard_profit_lock_enabled=bool(getattr(self, "session_hard_profit_lock_enabled", False)),
+            hard_profit_lock_usdc=Decimal(str(getattr(self, "session_hard_profit_lock_usdc", "10"))),
+            max_loss_enabled=bool(getattr(self, "session_max_loss_enabled", True)),
+            max_loss_usdc=Decimal(str(getattr(self, "session_max_loss_usdc", "6"))),
+        )
+        date = self._taipei_session_date(now_ts)
+        loaded = self.trade_db.load_session_pnl_state(date) if getattr(self, "trade_db", None) else None
+        if loaded:
+            state = SessionPnlState.from_mapping(loaded)
+        else:
+            reconstructed = self.trade_db.reconstruct_session_pnl_state(date) if getattr(self, "trade_db", None) else {"session_date_taipei": date}
+            state = SessionPnlState.from_mapping(reconstructed)
+        self._session_pnl_guard = SessionPnlGuard(config, session_date=date, state=state)
+        self._session_pnl_guard_created_ts = time.time() if now_ts is None else float(now_ts)
+        if getattr(self, "trade_db", None) and not loaded:
+            self._persist_session_pnl_guard(event_type="SESSION_DAY_RESET")
+
+    def _persist_session_pnl_guard(self, *, event_type: str = "SESSION_PNL_UPDATE") -> bool:
+        guard = getattr(self, "_session_pnl_guard", None)
+        if guard is None:
+            return False
+        state = guard.state
+        stored = {
+            "session_date_taipei": state.session_date_taipei,
+            "realized_pnl_usdc": state.realized_pnl_usdc,
+            "realized_high_water_usdc": state.realized_high_water_usdc,
+            "profit_guard_armed": state.profit_guard_armed,
+            "buy_lock_active": state.buy_lock_active,
+            "buy_lock_reason": state.buy_lock_reason,
+            "created_ts": getattr(self, "_session_pnl_guard_created_ts", time.time()),
+        }
+        if not self.trade_db or not self.trade_db.save_session_pnl_state(stored):
+            self._block_new_buys_for_trade_db("session_pnl_guard_persist_failed")
+            return False
+        self._db_strategy_event(event_type, self._session_guard_payload(guard.decision()))
+        return True
+
+    def session_buy_guard_decision(self, now_ts: Optional[float] = None) -> SessionBuyGuardDecision:
+        date = self._taipei_session_date(now_ts)
+        guard = getattr(self, "_session_pnl_guard", None)
+        if guard is None or guard.state.session_date_taipei != date:
+            self._initialize_session_pnl_guard(now_ts)
+            guard = self._session_pnl_guard
+        decision = guard.decision()
+        return decision
+
+    def _record_session_realized_pnl(self, delta_usdc: Decimal | float | str, *, source: str) -> bool:
+        guard = getattr(self, "_session_pnl_guard", None)
+        if guard is None:
+            self._initialize_session_pnl_guard()
+            guard = self._session_pnl_guard
+        before_armed, before_locked = guard.state.profit_guard_armed, guard.state.buy_lock_active
+        guard.apply_realized_delta(delta_usdc)
+        if not self._persist_session_pnl_guard():
+            return False
+        decision = guard.decision()
+        if decision.armed and not before_armed:
+            self._db_strategy_event("SESSION_PROFIT_GUARD_ARMED", {**self._session_guard_payload(decision), "source": source})
+        if not decision.allowed and not before_locked:
+            self._db_strategy_event("SESSION_BUY_LOCKED", {**self._session_guard_payload(decision), "source": source})
+        return True
     def _run_startup_execution_calibration(self) -> None:
         """Expose the synchronous startup calibration phase and its duration."""
         started = time.perf_counter()

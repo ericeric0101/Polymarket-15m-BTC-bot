@@ -299,6 +299,13 @@ class FillLedgerMixin:
         self.quote_pause_until_ts = followup.quote_pause_until_ts
         self.loss_recovery_size_multiplier = followup.loss_recovery_size_multiplier
         self.loss_recovery_min_edge_addition = followup.loss_recovery_min_edge_addition
+        # The session guard intentionally consumes realized PnL only.  A
+        # journal failure must not undo the fill/inventory update or block a
+        # protective SELL; it only closes subsequent BUY authority.
+        if fill_side_norm == "sell" and realized_net_usdc is not None:
+            record_session_pnl = getattr(self, "_record_session_realized_pnl", None)
+            if callable(record_session_pnl):
+                record_session_pnl(realized_net_usdc, source="sell_fill")
         if fill_side_norm == "buy" and self.post_fill_buy_cooldown_sec > 0:
             logger.info(
                 f"Post-fill buy cooldown activated: {self.post_fill_buy_cooldown_sec}s "

@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -72,7 +73,7 @@ class TradeJournalDB:
     - Never raises to strategy path; logs and continues
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     _REQUIRED_COLUMNS = {
         "strategy_runs": {"run_id", "started_at", "mode", "test_mode", "maker_mode"},
         "order_events": {
@@ -81,6 +82,10 @@ class TradeJournalDB:
             "expected_net_usdc", "commission_usdc", "payload_json",
         },
         "strategy_events": {"id", "ts", "run_id", "event_type", "payload_json"},
+        "session_pnl_state": {
+            "session_date_taipei", "realized_pnl_usdc", "realized_high_water_usdc",
+            "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "created_ts", "updated_ts",
+        },
     }
     # These writes are required to reconstruct live exposure or prevent a
     # duplicate entry after a restart.  Diagnostic/shadow writes must not turn
@@ -94,6 +99,7 @@ class TradeJournalDB:
     _CRITICAL_STRATEGY_EVENTS = {
         "FAST_FOLLOW_RISK_STATE", "MARKET_BUY_COUNT_UPDATED",
         "MARKET_STOP_LOSS_COUNT_UPDATED",
+        "SESSION_PNL_UPDATE", "SESSION_PROFIT_GUARD_ARMED", "SESSION_BUY_LOCKED", "SESSION_DAY_RESET",
     }
 
     def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
@@ -382,6 +388,17 @@ class TradeJournalDB:
         CREATE TABLE IF NOT EXISTS journal_schema (
             version INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS session_pnl_state (
+            session_date_taipei TEXT PRIMARY KEY,
+            realized_pnl_usdc REAL NOT NULL,
+            realized_high_water_usdc REAL NOT NULL,
+            profit_guard_armed INTEGER NOT NULL,
+            buy_lock_active INTEGER NOT NULL,
+            buy_lock_reason TEXT NOT NULL,
+            created_ts TEXT NOT NULL,
+            updated_ts TEXT NOT NULL
+        );
         """
         try:
             with self._connect() as conn:
@@ -389,6 +406,8 @@ class TradeJournalDB:
                 version = conn.execute("SELECT version FROM journal_schema LIMIT 1").fetchone()
                 if version is None:
                     conn.execute("INSERT INTO journal_schema(version) VALUES (?)", (self.SCHEMA_VERSION,))
+                elif int(version[0]) < self.SCHEMA_VERSION:
+                    conn.execute("UPDATE journal_schema SET version=?", (self.SCHEMA_VERSION,))
                 conn.commit()
         except Exception as e:
             self._schema_init_error = str(e)
@@ -1088,6 +1107,96 @@ class TradeJournalDB:
         finally:
             if conn is not None:
                 conn.close()
+
+    def load_session_pnl_state(self, session_date_taipei: str) -> Optional[Dict[str, Any]]:
+        """Load the durable BUY-guard state; read failures are explicit as None."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """SELECT session_date_taipei, realized_pnl_usdc, realized_high_water_usdc,
+                              profit_guard_armed, buy_lock_active, buy_lock_reason,
+                              created_ts, updated_ts
+                       FROM session_pnl_state WHERE session_date_taipei=?""",
+                    (str(session_date_taipei),),
+                ).fetchone()
+            if row is None:
+                return None
+            keys = ("session_date_taipei", "realized_pnl_usdc", "realized_high_water_usdc",
+                    "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "created_ts", "updated_ts")
+            return dict(zip(keys, row))
+        except Exception as exc:
+            self._mark_runtime_failure("session_pnl_state_read_failed", exc, event_type="SESSION_PNL_UPDATE")
+            return None
+
+    def save_session_pnl_state(self, state: Dict[str, Any]) -> bool:
+        """Atomically persist guard authority separate from append-only telemetry."""
+        now = _utc_now_iso()
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = self._connect()
+            conn.execute(
+                """INSERT INTO session_pnl_state(
+                       session_date_taipei, realized_pnl_usdc, realized_high_water_usdc,
+                       profit_guard_armed, buy_lock_active, buy_lock_reason, created_ts, updated_ts
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_date_taipei) DO UPDATE SET
+                       realized_pnl_usdc=excluded.realized_pnl_usdc,
+                       realized_high_water_usdc=excluded.realized_high_water_usdc,
+                       profit_guard_armed=excluded.profit_guard_armed,
+                       buy_lock_active=excluded.buy_lock_active,
+                       buy_lock_reason=excluded.buy_lock_reason,
+                       updated_ts=excluded.updated_ts""",
+                (
+                    str(state["session_date_taipei"]), float(state["realized_pnl_usdc"]),
+                    float(state["realized_high_water_usdc"]), int(bool(state["profit_guard_armed"])),
+                    int(bool(state["buy_lock_active"])), str(state.get("buy_lock_reason") or ""),
+                    str(state.get("created_ts") or now), now,
+                ),
+            )
+            conn.commit()
+            self._schedule_backup()
+            return True
+        except Exception as exc:
+            self._mark_runtime_failure("session_pnl_state_write_failed", exc, event_type="SESSION_PNL_UPDATE")
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def reconstruct_session_pnl_state(self, session_date_taipei: str) -> Dict[str, Any]:
+        """Deterministically rebuild a missing daily state from final cycle PnL.
+
+        Only `MARKET_CYCLE_PNL` is used: it is the established canonical event
+        that combines already-realized fills with final settlement.  This
+        avoids double-counting individual SELL fills during restart recovery.
+        """
+        total = Decimal("0")
+        high = Decimal("0")
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id"
+                ).fetchall()
+            for ts, raw in rows:
+                try:
+                    local_day = datetime.fromisoformat(str(ts)).astimezone(ZoneInfo("Asia/Taipei")).date().isoformat()
+                    if local_day != str(session_date_taipei):
+                        continue
+                    payload = json.loads(raw or "{}")
+                    total += Decimal(str(payload.get("cycle_combined_pnl_usdc", 0)))
+                    high = max(high, total)
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
+        except Exception as exc:
+            self._mark_runtime_failure("session_pnl_reconstruct_failed", exc, event_type="SESSION_PNL_UPDATE")
+        return {
+            "session_date_taipei": str(session_date_taipei),
+            "realized_pnl_usdc": total,
+            "realized_high_water_usdc": high,
+            "profit_guard_armed": False,
+            "buy_lock_active": False,
+            "buy_lock_reason": "",
+        }
 
     def log_order_event(
         self,
