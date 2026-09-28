@@ -76,6 +76,7 @@ def idempotent_stop_callback(stop_fn):
 # cannot form an order does not indefinitely prevent a stale-instrument refresh.
 _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES = 0.01
 _MARKET_DISCOVERY_RETRY_SEC = 15.0
+_NODE_DISCONNECT_WAIT_SEC = 15.0
 
 
 class MarketDiscoveryUnavailable(RuntimeError):
@@ -119,6 +120,59 @@ def _strategy_requested_rollover(node: Optional[TradingNode]) -> bool:
         )
     except Exception:
         return False
+
+
+def node_engines_disconnected(node: Optional[TradingNode]) -> tuple[bool, list[str]]:
+    """Return whether engines exposed by this Nautilus build finished shutdown.
+
+    The node API has differed between Nautilus releases, so absent engine
+    attributes are not treated as an error.  An engine that explicitly reports
+    ``check_disconnected() is False`` is, however, unsafe to replace: lingering
+    callbacks can otherwise publish into the next cycle's event loop.
+    """
+    if node is None:
+        return False, ["node_missing"]
+    pending: list[str] = []
+    seen: set[int] = set()
+    engine_candidates = (
+        ("DataEngine", getattr(node, "data_engine", None)),
+        ("DataEngine", getattr(node, "_data_engine", None)),
+        ("ExecEngine", getattr(node, "exec_engine", None)),
+        ("ExecEngine", getattr(node, "_exec_engine", None)),
+        # TradingNode exposes its engines through ``kernel`` in the Nautilus
+        # version used in production, rather than as public node properties.
+        ("DataEngine", getattr(getattr(node, "kernel", None), "data_engine", None)),
+        ("ExecEngine", getattr(getattr(node, "kernel", None), "exec_engine", None)),
+    )
+    for label, engine in engine_candidates:
+        if engine is None or id(engine) in seen:
+            continue
+        seen.add(id(engine))
+        checker = getattr(engine, "check_disconnected", None)
+        if not callable(checker):
+            continue
+        try:
+            if checker() is False:
+                pending.append(label)
+        except Exception as exc:
+            pending.append(f"{label}:{type(exc).__name__}")
+    return not pending, pending
+
+
+def wait_for_node_engines_disconnected(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _NODE_DISCONNECT_WAIT_SEC,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> tuple[bool, list[str]]:
+    """Give async engine shutdown a bounded chance before rebuilding a node."""
+    deadline = monotonic_fn() + max(0.0, float(timeout_sec))
+    while True:
+        clean, pending = node_engines_disconnected(node)
+        if clean or monotonic_fn() >= deadline:
+            return clean, pending
+        sleep_fn(min(0.25, max(0.0, deadline - monotonic_fn())))
 
 
 def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str]:
@@ -566,6 +620,7 @@ def run_integrated_bot(
         rollover_requested = threading.Event()
         strategy_requested_rollover = False
         node_run_returned = False
+        unsafe_engine_shutdown = False
         rollover_stop = threading.Event()
         rollover_thread: Optional[threading.Thread] = None
 
@@ -649,6 +704,18 @@ def run_integrated_bot(
                     # restart forever.
                     consecutive_failures += 1
             if node is not None:
+                engines_clean, pending_engines = wait_for_node_engines_disconnected(node)
+                if not engines_clean:
+                    unsafe_engine_shutdown = True
+                    # Do not place a second node on a loop whose previous
+                    # Data/Exec engine still owns callbacks.  This is fail
+                    # closed: it protects stale quote delivery and avoids the
+                    # closed-event-loop task race seen during watchdog rollovers.
+                    logger.error(
+                        "Node shutdown did not complete before rebuild; refusing automatic "
+                        f"next cycle: pending={pending_engines}"
+                    )
+            if node is not None:
                 try:
                     node.dispose()
                 except Exception as e:
@@ -657,6 +724,12 @@ def run_integrated_bot(
             logger.info(f"Bot cycle {cycle_idx} stopped")
 
         if user_stopped:
+            break
+        if unsafe_engine_shutdown:
+            logger.error(
+                "Automatic node rollover stopped after unclean engine shutdown; "
+                "operator restart is required after the old process has exited."
+            )
             break
         if not auto_rollover_enabled:
             break

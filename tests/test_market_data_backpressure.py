@@ -16,6 +16,8 @@ from bot.adapter_overrides import (
     enqueue_bounded_market_data,
     flush_coalesced_quote_ticks,
     cleanup_data_engine_runtime_state,
+    cancel_quote_delivery_tasks,
+    drain_cancelled_quote_delivery_tasks,
     should_publish_l2_snapshot,
     l2_publish_interval_sec,
     install_runtime_compatibility_overrides,
@@ -349,19 +351,24 @@ def test_large_data_queue_caps_optional_l2_backlog_and_keeps_latest_quote_near_f
         enqueue_bounded_market_data(engine, OrderBookDeltas(sequence))
         enqueue_bounded_market_data(engine, QuoteTick("up", sequence))
 
-    assert engine._data_queue.qsize() <= 64
+    assert engine._data_queue.qsize() <= 16
     assert engine._btc15m_backpressure["quotes"]["up"].sequence == 999
 
-    # As soon as the consumer resumes, the latest quote is admitted behind at
-    # most the bounded L2 backlog, rather than hundreds of stale updates.
+    # Do not place the latest quote behind a meaningful L2 backlog.  Releasing
+    # it at the old 32-event watermark made a fresh quote wait ~10+ seconds
+    # whenever the consumer was slow.
     engine._data_queue.get_nowait()
+    assert flush_coalesced_quote_ticks(engine, consumer_drained=True) == 0
+    assert "up" in engine._btc15m_backpressure["quotes"]
+    while engine._data_queue.qsize() > 4:
+        engine._data_queue.get_nowait()
     flush_coalesced_quote_ticks(engine, consumer_drained=True)
     contents = list(engine._data_queue._queue)
     quote_index = next(
         index for index, item in enumerate(contents)
         if type(item).__name__ == "QuoteTick"
     )
-    assert quote_index <= 63
+    assert quote_index <= 4
 
 
 def test_disposing_data_engine_rejects_new_events_and_does_not_flush_staged_quotes():
@@ -418,6 +425,51 @@ def test_dispose_cleanup_cancels_async_task_and_concurrent_future():
         engine._btc15m_sentinel_enqueue_task = future
         cleanup_data_engine_runtime_state(engine)
         assert future.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_quote_delivery_shutdown_cancels_tasks_and_discards_staged_quotes():
+    async def scenario():
+        heartbeat = asyncio.create_task(asyncio.Event().wait())
+        delivery = asyncio.create_task(asyncio.Event().wait())
+        client = SimpleNamespace(
+            _btc15m_disconnecting=False,
+            _quote_transport_heartbeat_task=heartbeat,
+            _quote_delivery_task=delivery,
+            _quote_delivery_pending={"up": object()},
+        )
+
+        cancel_quote_delivery_tasks(client)
+        await asyncio.sleep(0)
+
+        assert client._btc15m_disconnecting is True
+        assert heartbeat.cancelled()
+        assert delivery.cancelled()
+        assert client._quote_transport_heartbeat_task is None
+        assert client._quote_delivery_task is None
+        assert client._quote_delivery_pending == {}
+
+    asyncio.run(scenario())
+
+
+def test_quote_delivery_shutdown_drains_cancelled_tasks_when_loop_is_available():
+    async def scenario():
+        heartbeat = asyncio.create_task(asyncio.Event().wait())
+        delivery = asyncio.create_task(asyncio.Event().wait())
+        client = SimpleNamespace(
+            _btc15m_disconnecting=False,
+            _quote_transport_heartbeat_task=heartbeat,
+            _quote_delivery_task=delivery,
+            _quote_delivery_pending={"up": object()},
+        )
+
+        await drain_cancelled_quote_delivery_tasks(client)
+
+        assert heartbeat.done()
+        assert delivery.done()
+        assert client._btc15m_disconnecting is True
+        assert client._quote_delivery_pending == {}
 
     asyncio.run(scenario())
 

@@ -17,8 +17,12 @@ from py_clob_client_v2.exceptions import PolyApiException
 
 _QUOTE_PROVENANCE_TTL_SEC = 600.0
 _DEFAULT_L2_PUBLISH_INTERVAL_SEC = 0.25
-_MAX_MARKET_DATA_BACKLOG = 64
-_MAX_MARKET_DATA_RELEASE_BACKLOG = 32
+# Optional L2 updates must never sit ahead of a live quote long enough to
+# violate the strategy's two-second delivery-freshness contract.  The previous
+# 64/32 bounds allowed a stalled consumer to release a "latest" quote behind
+# dozens of obsolete updates (observed 14–20s delivery delay in production).
+_MAX_MARKET_DATA_BACKLOG = 16
+_MAX_MARKET_DATA_RELEASE_BACKLOG = 4
 _quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
 
 
@@ -126,13 +130,18 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
     queue = getattr(engine, "_data_queue", None)
     if not state or queue is None:
         return 0
-    if consumer_drained:
-        limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
-        release_mark = min(
-            max(1, int(limit * 0.10)), _MAX_MARKET_DATA_RELEASE_BACKLOG,
-        ) if limit else 0
-        if limit and queue.qsize() < release_mark:
-            state["l2_suppression_active"] = False
+    limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
+    release_mark = min(
+        max(1, int(limit * 0.10)), _MAX_MARKET_DATA_RELEASE_BACKLOG,
+    ) if limit else 0
+    if consumer_drained and limit:
+        # A coalesced quote is useful only if it can reach the strategy while
+        # still fresh.  Keep it staged until stale L2 events ahead of it are
+        # almost drained; merely freeing one slot used to put the quote behind
+        # 31 old messages.
+        if queue.qsize() >= release_mark:
+            return 0
+        state["l2_suppression_active"] = False
     sent = 0
     for key, quote in tuple(state["quotes"].items()):
         sampled_depth = queue.qsize()
@@ -224,6 +233,39 @@ def begin_data_engine_shutdown(engine) -> None:
     backpressure = getattr(engine, "_btc15m_backpressure", None)
     if backpressure is not None:
         backpressure.get("quotes", {}).clear()
+
+
+def cancel_quote_delivery_tasks(client) -> None:
+    """Synchronously fence client quote tasks before an event loop can close.
+
+    ``_disconnect`` is normally awaited by Nautilus.  A wedged engine can,
+    however, reach component disposal before that coroutine receives another
+    scheduling turn.  Cancelling here is deliberately synchronous so a pending
+    coalescer cannot call ``_handle_data`` against a closed loop.
+    """
+    client._btc15m_disconnecting = True
+    for name in ("_quote_transport_heartbeat_task", "_quote_delivery_task"):
+        task = getattr(client, name, None)
+        if task is not None and not task.done():
+            try:
+                task.cancel()
+            except (RuntimeError, AttributeError):
+                pass
+        setattr(client, name, None)
+    client._quote_delivery_pending = {}
+
+
+async def drain_cancelled_quote_delivery_tasks(client) -> None:
+    """Await cancelled quote tasks when a live loop is still available."""
+    current = asyncio.current_task()
+    tasks = []
+    for name in ("_quote_transport_heartbeat_task", "_quote_delivery_task"):
+        task = getattr(client, name, None)
+        if task is not None and task is not current:
+            tasks.append(task)
+    cancel_quote_delivery_tasks(client)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _quote_provenance_key(quote: object) -> tuple[object, ...]:
@@ -512,6 +554,7 @@ def _install_polymarket_data_overrides() -> None:
     original_init = cls.__init__
     original_connect = cls._connect
     original_disconnect = cls._disconnect
+    original_dispose = cls._dispose
     original_handle_raw_ws_message = cls._handle_raw_ws_message
 
     def patched_init(self, *args, **kwargs):
@@ -534,6 +577,9 @@ def _install_polymarket_data_overrides() -> None:
             self._quote_delivery_pending = {}
         if not hasattr(self, "_quote_delivery_task"):
             self._quote_delivery_task = None
+        # This is separate from WebSocket connectivity.  It is set before
+        # client teardown so late callbacks cannot revive the quote pipeline.
+        self._btc15m_disconnecting = False
         if not hasattr(self, "_quote_delivery_coalesce_sec"):
             self._quote_delivery_coalesce_sec = max(
                 0.05,
@@ -600,9 +646,13 @@ def _install_polymarket_data_overrides() -> None:
         try:
             while True:
                 await asyncio.sleep(float(self._quote_delivery_coalesce_sec))
+                if getattr(self, "_btc15m_disconnecting", False):
+                    return
                 pending = self._quote_delivery_pending
                 self._quote_delivery_pending = {}
                 for quote in pending.values():
+                    if getattr(self, "_btc15m_disconnecting", False):
+                        return
                     self._handle_data(quote)
                 if not self._quote_delivery_pending:
                     return
@@ -611,6 +661,8 @@ def _install_polymarket_data_overrides() -> None:
 
     def queue_latest_quote(self, quote) -> None:
         """Replace intermediate quotes that have not yet reached the main loop."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            return
         retain_latest_quote(self._quote_delivery_pending, quote)
         task = getattr(self, "_quote_delivery_task", None)
         if task is None or task.done():
@@ -624,6 +676,8 @@ def _install_polymarket_data_overrides() -> None:
         """
         while True:
             await asyncio.sleep(float(getattr(self, "_quote_heartbeat_sec", 5.0)))
+            if getattr(self, "_btc15m_disconnecting", False):
+                return
             is_connected = bool(self._ws_client.is_connected())
             for instrument_id, quote in tuple(getattr(self, "_last_quotes", {}).items()):
                 if instrument_id not in self.subscribed_quote_ticks():
@@ -648,22 +702,20 @@ def _install_polymarket_data_overrides() -> None:
             self._quote_transport_heartbeat_task = self.create_task(quote_transport_heartbeat(self))
 
     async def patched_disconnect(self) -> None:
-        self._btc15m_disconnecting = True
-        task = getattr(self, "_quote_transport_heartbeat_task", None)
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            self._quote_transport_heartbeat_task = None
-        delivery_task = getattr(self, "_quote_delivery_task", None)
-        if delivery_task is not None:
-            delivery_task.cancel()
-            await asyncio.gather(delivery_task, return_exceptions=True)
-            self._quote_delivery_task = None
-        self._quote_delivery_pending = {}
+        await drain_cancelled_quote_delivery_tasks(self)
         await original_disconnect(self)
+
+    def patched_dispose(self) -> None:
+        # Component disposal can run after a timeout path where Nautilus did
+        # not get to await ``_disconnect``.  Fence/cancel first so no quote
+        # coalescer survives into a replacement event loop.
+        cancel_quote_delivery_tasks(self)
+        original_dispose(self)
 
     def patched_handle_raw_ws_message(self, raw: bytes) -> None:
         """Capture ingress time before Nautilus decodes and routes a WS payload."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            return
         self._btc15m_raw_ws_received_ts = time.time()
         original_handle_raw_ws_message(self, raw)
 
@@ -738,6 +790,8 @@ def _install_polymarket_data_overrides() -> None:
 
     def patched_publish_quote(self, instrument, ws_message, *, source: str = "ws_price_change") -> None:
         """Publish the final top-of-book after all message updates are applied."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            return
         if instrument.id in self.subscribed_quote_ticks():
             now_ns = self._clock.timestamp_ns()
             local_book = self._local_books[instrument.id]
@@ -840,6 +894,7 @@ def _install_polymarket_data_overrides() -> None:
     cls.__init__ = patched_init
     cls._connect = patched_connect
     cls._disconnect = patched_disconnect
+    cls._dispose = patched_dispose
     cls._handle_raw_ws_message = patched_handle_raw_ws_message
     cls._log_drop_quote_warning_throttled = patched_log_drop_quote_warning_throttled
     cls._log_tick_size_warning_throttled = patched_log_tick_size_warning_throttled

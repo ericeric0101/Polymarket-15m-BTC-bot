@@ -57,8 +57,10 @@ from bot.launcher import (
     MarketDiscoveryUnavailable,
     _MARKET_DISCOVERY_RETRY_SEC,
     _live_exec_engine_config,
+    node_engines_disconnected,
     _strategy_requested_rollover,
     _strategy_rollover_exposure_reasons,
+    wait_for_node_engines_disconnected,
 )
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
@@ -5963,6 +5965,69 @@ def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():
     node.dispose()
     assert requested_before_dispose
     assert _strategy_requested_rollover(node) is False
+
+
+def test_rollover_rebuild_requires_data_and_execution_engines_to_disconnect():
+    class Engine:
+        def __init__(self, disconnected):
+            self.disconnected = disconnected
+
+        def check_disconnected(self):
+            return self.disconnected
+
+    node = SimpleNamespace(
+        data_engine=Engine(False),
+        exec_engine=Engine(True),
+    )
+
+    clean, pending = node_engines_disconnected(node)
+
+    assert clean is False
+    assert pending == ["DataEngine"]
+
+
+def test_rollover_rebuild_checks_engines_exposed_through_nautilus_kernel():
+    class Engine:
+        def __init__(self, disconnected):
+            self.disconnected = disconnected
+
+        def check_disconnected(self):
+            return self.disconnected
+
+    node = SimpleNamespace(kernel=SimpleNamespace(
+        data_engine=Engine(True),
+        exec_engine=Engine(False),
+    ))
+
+    clean, pending = node_engines_disconnected(node)
+
+    assert clean is False
+    assert pending == ["ExecEngine"]
+
+
+def test_rollover_rebuild_waits_for_engine_disconnect_before_declaring_clean():
+    class Engine:
+        def __init__(self):
+            self.calls = 0
+
+        def check_disconnected(self):
+            self.calls += 1
+            return self.calls >= 2
+
+    engine = Engine()
+    node = SimpleNamespace(data_engine=engine)
+    ticks = iter((0.0, 0.0, 0.1, 0.1))
+
+    clean, pending = wait_for_node_engines_disconnected(
+        node,
+        timeout_sec=1.0,
+        sleep_fn=lambda _delay: None,
+        monotonic_fn=lambda: next(ticks),
+    )
+
+    assert clean is True
+    assert pending == []
+    assert engine.calls == 2
 
 
 def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
