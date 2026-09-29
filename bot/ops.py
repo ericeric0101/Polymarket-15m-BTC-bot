@@ -147,6 +147,26 @@ def should_run_quote_watchdog(
     return stale_hit or invalid_hit, stale_for
 
 
+def quote_age_status_reason(
+    *,
+    now_ts: float,
+    last_valid_quote_ts: float,
+    stale_after_sec: float,
+) -> str | None:
+    """Return a status-only reason when the last valid market quote is stale."""
+    try:
+        last_ts = float(last_valid_quote_ts)
+        age = float(now_ts) - last_ts
+        threshold = max(0.0, float(stale_after_sec))
+    except (TypeError, ValueError):
+        return "quote_age_unavailable"
+    if last_ts <= 0:
+        return "quote_age_unavailable"
+    if age >= threshold:
+        return f"quote_stale_{max(0, int(age))}s"
+    return None
+
+
 def should_attempt_quote_watchdog_recovery(
     *,
     now_ts: float,

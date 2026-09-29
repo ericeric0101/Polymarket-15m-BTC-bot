@@ -194,6 +194,38 @@ def wait_for_node_engines_disconnected(
         sleep_fn(min(0.25, max(0.0, deadline - monotonic_fn())))
 
 
+def dispose_node_and_wait_for_engines_disconnected(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _NODE_DISCONNECT_WAIT_SEC,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> tuple[bool, list[str]]:
+    """Dispose a stopped node, then verify it no longer owns engine callbacks.
+
+    Some Nautilus builds only complete engine teardown during ``dispose()``.
+    Checking before disposal can therefore produce a false unclean-shutdown
+    result. Failure still remains fail-closed: callers must not rebuild while
+    any exposed engine reports itself connected.
+    """
+    dispose_error: str | None = None
+    if node is None:
+        return False, ["node_missing"]
+    try:
+        node.dispose()
+    except Exception as exc:
+        dispose_error = f"dispose:{type(exc).__name__}"
+    clean, pending = wait_for_node_engines_disconnected(
+        node,
+        timeout_sec=timeout_sec,
+        sleep_fn=sleep_fn,
+        monotonic_fn=monotonic_fn,
+    )
+    if dispose_error:
+        pending = [*pending, dispose_error]
+    return clean and dispose_error is None, pending
+
+
 def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str]:
     """Return exposure that makes an automatic node stop unsafe.
 
@@ -723,7 +755,10 @@ def run_integrated_bot(
                     # restart forever.
                     consecutive_failures += 1
             if node is not None:
-                engines_clean, pending_engines = wait_for_node_engines_disconnected(node)
+                # Dispose first: Nautilus versions differ on whether stop() or
+                # dispose() performs the final engine disconnect transition.
+                # Then verify before allowing another cycle to be constructed.
+                engines_clean, pending_engines = dispose_node_and_wait_for_engines_disconnected(node)
                 if not engines_clean:
                     unsafe_engine_shutdown = True
                     # Do not place a second node on a loop whose previous
@@ -734,11 +769,6 @@ def run_integrated_bot(
                         "Node shutdown did not complete before rebuild; refusing automatic "
                         f"next cycle: pending={pending_engines}"
                     )
-            if node is not None:
-                try:
-                    node.dispose()
-                except Exception as e:
-                    logger.warning(f"Node dispose raised: {e}")
             _install_fresh_main_thread_event_loop()
             logger.info(f"Bot cycle {cycle_idx} stopped")
 

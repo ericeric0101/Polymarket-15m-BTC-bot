@@ -52,7 +52,11 @@ from bot.market_runtime import (
 )
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
-from bot.ops import should_attempt_quote_watchdog_recovery, should_run_quote_watchdog
+from bot.ops import (
+    quote_age_status_reason,
+    should_attempt_quote_watchdog_recovery,
+    should_run_quote_watchdog,
+)
 from bot.launcher import (
     MarketDiscoveryUnavailable,
     _MARKET_DISCOVERY_RETRY_SEC,
@@ -62,6 +66,7 @@ from bot.launcher import (
     _strategy_requested_rollover,
     _strategy_rollover_exposure_reasons,
     wait_for_node_engines_disconnected,
+    dispose_node_and_wait_for_engines_disconnected,
 )
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
@@ -6030,6 +6035,45 @@ def test_rollover_rebuild_waits_for_engine_disconnect_before_declaring_clean():
     assert clean is True
     assert pending == []
     assert engine.calls == 2
+
+
+def test_rollover_disposes_before_waiting_for_engine_disconnect():
+    class Engine:
+        disconnected = False
+
+        def check_disconnected(self):
+            return self.disconnected
+
+    engine = Engine()
+    node = SimpleNamespace(data_engine=engine)
+
+    def dispose():
+        engine.disconnected = True
+
+    node.dispose = dispose
+    clean, pending = dispose_node_and_wait_for_engines_disconnected(
+        node,
+        timeout_sec=0.0,
+    )
+
+    assert clean is True
+    assert pending == []
+
+
+def test_quote_age_status_marks_stale_status_not_tradable():
+    assert quote_age_status_reason(
+        now_ts=1759188939.0,
+        last_valid_quote_ts=1759188864.0,
+        stale_after_sec=30.0,
+    ) == "quote_stale_75s"
+
+
+def test_quote_age_status_does_not_mark_fresh_quote_stale():
+    assert quote_age_status_reason(
+        now_ts=100.0,
+        last_valid_quote_ts=80.0,
+        stale_after_sec=30.0,
+    ) is None
 
 
 def test_watchdog_node_stop_is_scheduled_on_the_node_event_loop_thread():

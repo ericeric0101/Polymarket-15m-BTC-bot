@@ -150,6 +150,7 @@ from bot.ops import (
     handle_quote_watchdog_recovery,
     log_strategy_run_start,
     run_auto_redeem_script,
+    quote_age_status_reason,
     start_background_thread,
     should_attempt_quote_watchdog_recovery,
     should_run_quote_watchdog,
@@ -4371,6 +4372,13 @@ class IntegratedBTCStrategy(
         bid_txt = f"{float(self.latest_market_bid):.4f}" if self.latest_market_bid is not None else "None"
         ask_txt = f"{float(self.latest_market_ask):.4f}" if self.latest_market_ask is not None else "None"
         stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else -1.0
+        stale_reason = quote_age_status_reason(
+            now_ts=now_ts,
+            last_valid_quote_ts=self.last_valid_quote_ts,
+            stale_after_sec=self.quote_stale_sec,
+        )
+        if stale_reason:
+            reasons.append(stale_reason)
         active_orders = list(self.active_maker_orders.keys())
         tradable = "YES" if len(reasons) == 0 else "NO"
         reason_txt = "ok" if len(reasons) == 0 else ",".join(reasons)
