@@ -58,6 +58,7 @@ from bot.launcher import (
     _MARKET_DISCOVERY_RETRY_SEC,
     _live_exec_engine_config,
     node_engines_disconnected,
+    threadsafe_node_stop_callback,
     _strategy_requested_rollover,
     _strategy_rollover_exposure_reasons,
     wait_for_node_engines_disconnected,
@@ -5343,7 +5344,7 @@ def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
     assert out.reason == "directional_first_entry_gate"
 
 
-def test_gradual_first_entry_window_allows_candidates_after_two_minute_warmup():
+def test_first_entry_window_allows_candidates_only_after_five_minute_warmup():
     kwargs = dict(
         side="buy",
         bi_side_enabled=True,
@@ -5359,20 +5360,21 @@ def test_gradual_first_entry_window_allows_candidates_after_two_minute_warmup():
         current_slug="btc-updown-15m-test",
         inst_id="inst-up",
         market_buy_count=0,
-        time_left_sec=780.0,
+        time_left_sec=601.0,
         best_bid=Decimal("0.80"),
         fair=Decimal("0.85"),
     )
 
-    blocked_by_old_window = evaluate_buy_entry_controls(
-        first_entry_max_time_left_sec=720, **kwargs
+    blocked_before_warmup = evaluate_buy_entry_controls(
+        first_entry_max_time_left_sec=600, **kwargs
     )
-    allowed_by_gradual_window = evaluate_buy_entry_controls(
-        first_entry_max_time_left_sec=780, **kwargs
+    allowed_after_warmup = evaluate_buy_entry_controls(
+        first_entry_max_time_left_sec=600, time_left_sec=600.0,
+        **{key: value for key, value in kwargs.items() if key != "time_left_sec"},
     )
 
-    assert blocked_by_old_window.event_type == "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW"
-    assert allowed_by_gradual_window.skip is False
+    assert blocked_before_warmup.event_type == "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW"
+    assert allowed_after_warmup.skip is False
 
 
 def test_entry_quality_can_reduce_maker_size_without_changing_entry_allowance():
@@ -6028,6 +6030,37 @@ def test_rollover_rebuild_waits_for_engine_disconnect_before_declaring_clean():
     assert clean is True
     assert pending == []
     assert engine.calls == 2
+
+
+def test_watchdog_node_stop_is_scheduled_on_the_node_event_loop_thread():
+    scheduled = []
+    stops = []
+
+    class Loop:
+        def is_running(self):
+            return True
+
+        def is_closed(self):
+            return False
+
+        def call_soon_threadsafe(self, callback):
+            scheduled.append(callback)
+
+    node = SimpleNamespace(
+        kernel=SimpleNamespace(loop=Loop()),
+        stop=lambda: stops.append("stop"),
+    )
+
+    request_stop = threadsafe_node_stop_callback(node)
+
+    assert request_stop() is True
+    assert stops == []
+    assert len(scheduled) == 1
+
+    scheduled.pop()()
+
+    assert stops == ["stop"]
+    assert request_stop() is False
 
 
 def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():

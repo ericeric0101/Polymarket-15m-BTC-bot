@@ -105,7 +105,7 @@ class StrategyDBRuntimeMixin:
             hard_profit_lock_enabled=bool(getattr(self, "session_hard_profit_lock_enabled", False)),
             hard_profit_lock_usdc=Decimal(str(getattr(self, "session_hard_profit_lock_usdc", "10"))),
             max_loss_enabled=bool(getattr(self, "session_max_loss_enabled", True)),
-            max_loss_usdc=Decimal(str(getattr(self, "session_max_loss_usdc", "6"))),
+            max_loss_usdc=Decimal(str(getattr(self, "session_max_loss_usdc", "8"))),
         )
         date = self._taipei_session_date(now_ts)
         loaded = self.trade_db.load_session_pnl_state(date) if getattr(self, "trade_db", None) else None

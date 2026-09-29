@@ -1129,7 +1129,7 @@ class AppConfig:
                 session_hard_profit_lock_enabled=_env_bool("SESSION_HARD_PROFIT_LOCK_ENABLED", False),
                 session_hard_profit_lock_usdc=max(Decimal("0"), _env_decimal("SESSION_HARD_PROFIT_LOCK_USDC", "10.0")),
                 session_max_loss_enabled=_env_bool_inverted("SESSION_MAX_LOSS_ENABLED", True),
-                session_max_loss_usdc=max(Decimal("0"), _env_decimal("SESSION_MAX_LOSS_USDC", "6.0")),
+                session_max_loss_usdc=max(Decimal("0"), _env_decimal("SESSION_MAX_LOSS_USDC", "8.0")),
             ),
             outcome_lead_lag=OutcomeLeadLagConfig(
                 mode=_env_str("OUTCOME_LEAD_LAG_MODE", "shadow").strip().lower(),

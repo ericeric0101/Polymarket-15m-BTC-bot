@@ -70,6 +70,25 @@ def idempotent_stop_callback(stop_fn):
     return request_once
 
 
+def threadsafe_node_stop_callback(node: TradingNode):
+    """Return a once-only node stop request safe from watchdog worker threads.
+
+    Quote watchdog and scheduled rollover work run outside Nautilus' asyncio
+    event-loop thread.  ``TradingNode.stop()`` creates its ``stop_async`` task
+    on that loop, so calling it directly from a worker thread can leave the
+    disconnect coroutine unscheduled.  Marshal the call back to the owning
+    loop; the node then performs its normal awaited client/engine shutdown.
+    """
+    def request_stop() -> None:
+        loop = getattr(getattr(node, "kernel", None), "loop", None)
+        if loop is not None and not loop.is_closed() and loop.is_running():
+            loop.call_soon_threadsafe(node.stop)
+            return
+        node.stop()
+
+    return idempotent_stop_callback(request_stop)
+
+
 # The execution layer has a hard lower bound for nonzero balance checks, but a
 # venue SELL must also meet the strategy's configured exchange minimum (5 by
 # default).  Rollover protection uses the latter when available so dust that
@@ -603,7 +622,7 @@ def run_integrated_bot(
         # Strategies are Actors and do not have a public back-reference to the
         # TradingNode. Give lifecycle/watchdog recovery an explicit stop hook so
         # a requested rollover actually returns node.run() to this launcher.
-        strategy._request_node_stop_callback = idempotent_stop_callback(node.stop)
+        strategy._request_node_stop_callback = threadsafe_node_stop_callback(node)
         logger.info("Nautilus node built successfully")
         return node, primary_slug
 

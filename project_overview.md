@@ -36,8 +36,10 @@
   block a conflicting fast-follow entry, and a filled BUY consumes the shared
   one-entry-per-market allowance. The two modes therefore cannot intentionally
   establish independent entries in the same market.
-- Entry-risk follow-up (2026-09-25): the first-entry warm-up is now 120 seconds
-  (`FIRST_ENTRY_MAX_TIME_LEFT_SEC=780`); directional and all hard-safety gates
+- Entry-risk follow-up: the first-entry warm-up is 300 seconds
+  (`FIRST_ENTRY_MAX_TIME_LEFT_SEC=600`). The earlier 120-second setting was
+  reverted on 2026-09-29 after live results showed weaker early-window
+  direction accuracy and unfavorable realized PnL; directional and all hard-safety gates
   remain active. `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` applies the already logged
   chase-risk suggested size reduction instead of ignoring it. The absolute
   loss breaker is set to `$2.00`. It now requires a locked, strong opposite-side
@@ -414,7 +416,7 @@ stop-loss behavior.
 Evidence in research baseline `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`
 does not authorize changing any of these live controls:
 
-- `FIRST_ENTRY_MAX_TIME_LEFT_SEC=780` (approximately T+120 seconds).
+- `FIRST_ENTRY_MAX_TIME_LEFT_SEC=600` (approximately T+300 seconds).
 - SignalEngine thresholds or entry trend thresholds.
 - Weekend live-entry gate: following the explicit operator decision on
   2026-09-27, Taipei Saturday/Sunday are observation-only. This is an operator
@@ -648,7 +650,7 @@ overwritten by `ForecastState.probability_for_outcome`.
 `SESSION_PNL_GUARD_ENABLED=1` adds the only new live authority in this change:
 it uses finalized/realized PnL by **Asia/Taipei calendar day**, arms after
 `+$8`, locks new BUYs after a `$4` drawdown from realized high-water, and locks
-at `-$6` daily realized PnL. The optional `+$10` hard-profit lock is off by
+at `-$8` daily realized PnL. The optional `+$10` hard-profit lock is off by
 default. State is stored in `session_pnl_state`, survives restart/rollover,
 and is checked at maker and Outcome fast-follow final BUY boundaries. It never
 blocks SELL, stop-loss, cancellation, reconciliation, redemption, or rollover
