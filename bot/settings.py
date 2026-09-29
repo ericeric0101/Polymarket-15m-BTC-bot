@@ -302,6 +302,12 @@ def initialize_strategy_settings(
     strategy.maker_digital_sigma_time_decay_ref_sec = config.maker.digital_sigma_time_decay_ref_sec
     strategy.maker_digital_sigma_time_decay_min = config.maker.digital_sigma_time_decay_min
     strategy.taker_exit_enabled = config.exit.taker_exit_enabled
+    strategy.stop_loss_enabled = config.exit.stop_loss_enabled
+    if not strategy.stop_loss_enabled:
+        logger.warning(
+            "STOP_LOSS_ENABLED=0: loss-triggered exits are paused; positions may lose their full stake at settlement. "
+            "Profitable take-profit orders, hold-to-redeem, and redemption remain enabled."
+        )
     strategy.hold_to_redeem_enabled = config.exit.hold_to_redeem_enabled
     strategy.tail_protect_tp_enabled = config.exit.tail_protect_tp_enabled
     strategy.tail_protect_tp_price = config.exit.tail_protect_tp_price
@@ -427,6 +433,7 @@ def initialize_strategy_settings(
             absolute_max_loss_enabled=strategy.absolute_max_loss_enabled,
             absolute_max_loss_usdc=strategy.absolute_max_loss_usdc,
             absolute_max_loss_min_hold_sec=strategy.absolute_max_loss_min_hold_sec,
+            stop_loss_enabled=strategy.stop_loss_enabled,
         ),
     )
     strategy.position_manager = PositionManager(

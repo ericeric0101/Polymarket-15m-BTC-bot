@@ -334,6 +334,20 @@ def test_feature_flag_disabled_does_not_fire():
     print(f"PASS: feature disabled → {result.decision_type.value}/{result.reason} (no breaker)")
 
 
+def test_master_stop_loss_switch_disables_every_loss_exit_decision():
+    engine = ExitPolicyEngine(_make_config(stop_loss_enabled=False))
+    result = engine.evaluate(
+        _snapshot(best_bid="0.20", fair="0.21", time_left_sec=900.0),
+        _position(avg_entry="0.69", hold_sec=900, confirm_hits=5),
+        _signal(score=Decimal("-0.70"), locked=True, matches=False, active_side="DOWN"),
+    )
+
+    assert result.decision_type not in {
+        ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
+        ExitDecisionType.TAKER_STOP_LOSS,
+    }
+
+
 # =========================================================================
 # TEST 3: Loss below threshold — must NOT fire.
 # Entry=0.69, bid=0.55 → net ≈ -$0.82 (below $2.00 threshold).

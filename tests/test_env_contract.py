@@ -46,6 +46,14 @@ def test_market_entry_budget_is_hard_limited_to_one_successful_buy(monkeypatch):
     assert config.exit.market_max_buy_events_per_market == 1
 
 
+def test_stop_loss_master_switch_is_operator_configurable(monkeypatch):
+    monkeypatch.setenv("STOP_LOSS_ENABLED", "0")
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.exit.stop_loss_enabled is False
+
+
 def test_fast_follow_forecast_freshness_is_independently_configurable(monkeypatch):
     monkeypatch.setenv("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", "4.5")
 
@@ -68,6 +76,7 @@ def test_active_profile_uses_five_minute_first_entry_warmup_and_effective_loss_b
 
     assert "FIRST_ENTRY_MAX_TIME_LEFT_SEC=600" in contents
     assert "ABSOLUTE_MAX_LOSS_USDC=2.00" in contents
+    assert "STOP_LOSS_ENABLED=0" in contents
     assert "ENTRY_QUALITY_SIZE_DOWN_ENABLED=1" in contents
 
 

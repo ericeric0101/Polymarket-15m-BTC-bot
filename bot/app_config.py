@@ -391,6 +391,7 @@ class ExitConfig:
     absolute_max_loss_enabled: bool = True
     absolute_max_loss_usdc: Decimal = Decimal("2.00")
     absolute_max_loss_min_hold_sec: int = 60
+    stop_loss_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.tail_protect_tp_price <= 0 or self.tail_protect_tp_price > Decimal("1"):
@@ -1039,6 +1040,7 @@ class AppConfig:
                 absolute_max_loss_enabled=_env_bool_inverted("ABSOLUTE_MAX_LOSS_ENABLED", True),
                 absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "2.00"),
                 absolute_max_loss_min_hold_sec=max(0, _env_int("ABSOLUTE_MAX_LOSS_MIN_HOLD_SEC", 60)),
+                stop_loss_enabled=_env_bool("STOP_LOSS_ENABLED", True),
             ),
             risk=RiskConfig(
                 regime_guard_enabled=_env_bool_inverted("REGIME_GUARD_ENABLED", True),

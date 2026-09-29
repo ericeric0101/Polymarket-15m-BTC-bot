@@ -42,6 +42,7 @@ class ExitEngineConfig:
     absolute_max_loss_enabled: bool = True
     absolute_max_loss_usdc: Decimal = Decimal("2.00")
     absolute_max_loss_min_hold_sec: int = 60
+    stop_loss_enabled: bool = True
     profit_run_trailing_drawdown_ratio: Decimal = Decimal("0.45")
     profit_run_trailing_drawdown_floor_ps: Decimal = Decimal("0.04")
     profit_run_trailing_spread_multiplier: Decimal = Decimal("2.0")
@@ -321,7 +322,8 @@ class ExitPolicyEngine:
             and gross_if_exit < 0
         )
         if (
-            self.config.absolute_max_loss_enabled
+            self.config.stop_loss_enabled
+            and self.config.absolute_max_loss_enabled
             and position.hold_sec >= max(0, self.config.absolute_max_loss_min_hold_sec)
             and _price_adverse_raw
             and adverse_trend_confirmed
@@ -499,7 +501,8 @@ class ExitPolicyEngine:
             stop_loss_threshold *= max(Decimal("1"), self.config.conviction_stop_loss_multiplier)
             required_confirmations += max(0, self.config.conviction_extra_confirmations)
         catastrophic_stop_loss_candidate = (
-            self.config.catastrophic_stop_loss_enabled
+            self.config.stop_loss_enabled
+            and self.config.catastrophic_stop_loss_enabled
             and not snapshot.stop_loss_disabled_in_tail
             and position.hold_sec >= effective_min_hold_sec
             and price_adverse
@@ -512,7 +515,8 @@ class ExitPolicyEngine:
         stop_loss_candidate = (
             catastrophic_stop_loss_candidate
             or (
-                not snapshot.stop_loss_disabled_in_tail
+                self.config.stop_loss_enabled
+                and not snapshot.stop_loss_disabled_in_tail
                 and position.hold_sec >= effective_min_hold_sec
                 and price_adverse
                 and net_if_exit <= -stop_loss_threshold

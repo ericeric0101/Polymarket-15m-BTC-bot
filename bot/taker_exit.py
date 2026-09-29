@@ -118,6 +118,9 @@ class TakerExitMixin:
     async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
         if is_simulation or not self.taker_exit_enabled:
             return
+        stop_loss_enabled = bool(getattr(self, "stop_loss_enabled", True))
+        if not stop_loss_enabled:
+            return
         hold_to_redeem = bool(getattr(self, "hold_to_redeem_enabled", False))
         invalidation_recovery_enabled = bool(getattr(self, "taker_exit_only_after_invalidation", False))
         if hold_to_redeem and not invalidation_recovery_enabled:
@@ -209,7 +212,7 @@ class TakerExitMixin:
                 except Exception:
                     strike_verified = False
             endgame_decision = evaluate_endgame_twap_exit(
-                enabled=bool(getattr(self, "endgame_twap_exit_enabled", False)),
+                enabled=stop_loss_enabled and bool(getattr(self, "endgame_twap_exit_enabled", False)),
                 time_left_sec=time_left_sec,
                 max_time_left_sec=float(getattr(self, "endgame_twap_exit_max_time_left_sec", 0)),
                 twap_price=Decimal(str(reference_spot)) if reference_spot is not None else None,
@@ -332,7 +335,8 @@ class TakerExitMixin:
             hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
 
             invalidation_recovery_candidate = (
-                hold_to_redeem
+                stop_loss_enabled
+                and hold_to_redeem
                 and invalidation_recovery_enabled
                 and confirmed_locked_side_invalidated
                 # A confirmed invalidation remains a separate safeguard from a
@@ -619,7 +623,8 @@ class TakerExitMixin:
                     },
                 )
             force_offside_near_close = (
-                (
+                stop_loss_enabled
+                and (
                     confirmed_locked_side_invalidated
                     or not signal_decision.matches_position
                 )
@@ -1390,7 +1395,7 @@ class TakerExitMixin:
 
     async def _maybe_maker_urgent_exit(self, now_ts: float) -> None:
         """Evaluate and execute maker-style urgent exit for wrong-side positions."""
-        if not getattr(self, "maker_urgent_exit_enabled", False):
+        if not bool(getattr(self, "stop_loss_enabled", True)) or not getattr(self, "maker_urgent_exit_enabled", False):
             return
         # NOTE: intentionally NOT gated on taker_exit_enabled —
         # this is a maker mechanism, independent of taker exit config.

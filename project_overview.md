@@ -42,12 +42,15 @@
   direction accuracy and unfavorable realized PnL; directional and all hard-safety gates
   remain active. `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` applies the already logged
   chase-risk suggested size reduction instead of ignoring it. The absolute
-  loss breaker is set to `$2.00`. It now requires a locked, strong opposite-side
-  signal or confirmed side invalidation in addition to the loss threshold, so
-  a transient price/BBO dip while the locked thesis still matches will not
-  trigger it. This is a trend-confirmed exit trigger, not a guaranteed maximum
-  loss: losses can exceed $2 while the thesis remains supported, and gaps or
-  poor liquidity can worsen execution. `ENTRY_DECISION_TRACE` now records
+  loss breaker is set to `$2.00` when loss stops are enabled. The operator
+  switch `STOP_LOSS_ENABLED` gates loss-triggered exits as a group; the local
+  `.env` currently sets it to `0` as a temporary pause after repeated
+  stop-outs. With the switch on, the `$2.00` breaker requires a locked, strong
+  opposite-side signal or confirmed side invalidation in addition to the loss
+  threshold, so a transient price/BBO dip while the locked thesis still
+  matches will not trigger it. Disabling stops can leave a losing position
+  exposed to its full stake loss at settlement; profitable take-profit orders,
+  hold-to-redeem, and redemption remain available. `ENTRY_DECISION_TRACE` now records
   market age and binary resolution reward/full-loss ratio as observation-only
   fields. These payout ratios do not represent stop-loss risk and are not a
   new live veto; collect more closed maker/Outcome samples before adding a
