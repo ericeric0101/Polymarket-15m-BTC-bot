@@ -11,11 +11,13 @@ from typing import Any
 
 class StopForensicsShadow:
     CHECKPOINTS = (5, 10, 15, 20, 30)
+    POST_STOP_CHECKPOINTS = (5, 10, 15, 30, 60, 120)
 
     def __init__(self, *, db: Any = None, run_id: str = "") -> None:
         self.events: list[dict[str, Any]] = []
         self.db, self.run_id = db, str(run_id)
         self._episodes: dict[tuple[str, str], dict[str, Any]] = {}
+        self._post_stops: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     @staticmethod
     def _number(value: Decimal | float | None) -> float | None:
@@ -27,12 +29,106 @@ class StopForensicsShadow:
             try:
                 self.db.enqueue_decision(
                     run_id=self.run_id, slug=str(payload.get("slug") or ""), market_id=None,
-                    decision_epoch_ns=int(float(payload.get("first_adverse_ts") or payload.get("cleared_ts") or 0) * 1_000_000_000),
+                    decision_epoch_ns=int(float(
+                        payload.get("observed_ts") or payload.get("actual_stop_ts")
+                        or payload.get("settlement_ts") or payload.get("first_adverse_ts")
+                        or payload.get("cleared_ts") or 0
+                    ) * 1_000_000_000),
                     payload={"event_type": event_type, **payload},
                 )
             except Exception:
                 # Research persistence cannot affect live strategy authority.
                 pass
+
+    def record_actual_stop(
+        self, *, slug: str, instrument_id: str, client_order_id: str,
+        actual_stop_ts: float, actual_stop_price: Decimal, actual_stop_qty: Decimal,
+        actual_stop_pnl: Decimal, position_side: str, entry_price: Decimal,
+        entry_fee_usdc: Decimal = Decimal("0"), reason: str = "stop_loss",
+    ) -> None:
+        """Start a research-only continuation for the shares actually stopped."""
+        if actual_stop_qty <= 0 or entry_price <= 0:
+            return
+        key = (str(slug), str(instrument_id), str(client_order_id))
+        row = {
+            "slug": str(slug), "instrument_id": str(instrument_id),
+            "client_order_id": str(client_order_id), "actual_stop_ts": float(actual_stop_ts),
+            "actual_stop_price": float(actual_stop_price), "actual_stop_qty": float(actual_stop_qty),
+            "actual_stop_pnl": float(actual_stop_pnl), "position_side": str(position_side).upper(),
+            "entry_price": float(entry_price), "entry_fee_usdc": float(entry_fee_usdc),
+            "reason": str(reason), "emitted_checkpoints": set(),
+        }
+        self._post_stops[key] = row
+        self._emit("STOP_SHADOW_ACTUAL_STOP", {k: v for k, v in row.items() if k != "emitted_checkpoints"})
+
+    def observe_post_stop(
+        self, *, now_ts: float, slug: str, instrument_id: str,
+        best_bid: Decimal | None, bid_levels: Any = None, time_left_sec: float | None = None,
+    ) -> None:
+        """Continue the sold quantity hypothetically using subsequent live book snapshots."""
+        for row in list(self._post_stops.values()):
+            if row["slug"] != str(slug) or row["instrument_id"] != str(instrument_id):
+                continue
+            elapsed = max(0.0, float(now_ts) - row["actual_stop_ts"])
+            for checkpoint in self.POST_STOP_CHECKPOINTS:
+                if elapsed < checkpoint or checkpoint in row["emitted_checkpoints"]:
+                    continue
+                row["emitted_checkpoints"].add(checkpoint)
+                qty = Decimal(str(row["actual_stop_qty"]))
+                entry = Decimal(str(row["entry_price"]))
+                depth = self._depth_metrics(self._levels(bid_levels), best_bid, qty, entry)
+                bid_value = Decimal(str(best_bid)) if best_bid is not None else None
+                gross = (bid_value - entry) * qty if bid_value is not None else None
+                self._emit("STOP_SHADOW_POST_STOP_CHECKPOINT", {
+                    "slug": row["slug"], "instrument_id": row["instrument_id"],
+                    "client_order_id": row["client_order_id"], "actual_stop_ts": row["actual_stop_ts"],
+                    "observed_ts": float(now_ts), "elapsed_sec": elapsed,
+                    "checkpoint_sec": checkpoint, "position_side": row["position_side"],
+                    "actual_stop_price": row["actual_stop_price"], "actual_stop_pnl": row["actual_stop_pnl"],
+                    "entry_price": row["entry_price"], "qty": row["actual_stop_qty"],
+                    "best_executable_bid": float(best_bid) if best_bid is not None else None,
+                    "hypothetical_gross_pnl": float(gross) if gross is not None else None,
+                    "recovered_to_entry": (bid_value >= entry) if bid_value is not None else None,
+                    "recovered_plus5c": (bid_value >= entry + Decimal("0.05")) if bid_value is not None else None,
+                    "recovered_plus10c": (bid_value >= entry + Decimal("0.10")) if bid_value is not None else None,
+                    "time_left_sec": float(time_left_sec) if time_left_sec is not None else None,
+                    **depth,
+                })
+
+    def record_settlement(
+        self, *, slug: str, settlement_side: str, settlement_ts: float,
+        settlement_reference_source: str | None = None,
+        settlement_reference_is_canonical: bool | None = None,
+        settlement_reference_age_sec: float | None = None,
+    ) -> None:
+        outcome = str(settlement_side).upper()
+        for key, row in list(self._post_stops.items()):
+            if row["slug"] != str(slug):
+                continue
+            payout = Decimal("1") if row["position_side"] == outcome else Decimal("0")
+            qty = Decimal(str(row["actual_stop_qty"]))
+            entry = Decimal(str(row["entry_price"]))
+            entry_fee = Decimal(str(row["entry_fee_usdc"]))
+            hold_pnl = qty * (payout - entry) - entry_fee
+            actual_pnl = Decimal(str(row["actual_stop_pnl"]))
+            stop_value_vs_hold = actual_pnl - hold_pnl
+            self._emit("STOP_SHADOW_POST_STOP_SETTLEMENT", {
+                "slug": row["slug"], "instrument_id": row["instrument_id"],
+                "client_order_id": row["client_order_id"], "settlement_ts": float(settlement_ts),
+                "position_side": row["position_side"], "settlement_side": outcome,
+                "settlement_reference_source": settlement_reference_source,
+                "settlement_reference_is_canonical": settlement_reference_is_canonical,
+                "settlement_reference_age_sec": settlement_reference_age_sec,
+                "actual_stop_ts": row["actual_stop_ts"], "actual_stop_price": row["actual_stop_price"],
+                "actual_stop_pnl": float(actual_pnl), "hold_to_settlement_pnl": float(hold_pnl),
+                "stop_value_vs_hold": float(stop_value_vs_hold),
+                "stop_beneficial": stop_value_vs_hold > 0,
+                "stop_harmful": stop_value_vs_hold < 0,
+                "opportunity_cost_usdc": float(max(Decimal("0"), -stop_value_vs_hold)),
+                "entry_price": row["entry_price"], "qty": row["actual_stop_qty"],
+                "reason": row["reason"],
+            })
+            self._post_stops.pop(key, None)
 
     @staticmethod
     def _levels(levels: Any) -> list[tuple[Decimal, Decimal]]:
@@ -151,7 +247,14 @@ class StopForensicsShadow:
         reversed_signal = signal_available and normalized_signal != position
         projected_side = str((twap_features or {}).get("projected_settlement_side_trend") or "UNKNOWN").upper()
         official_twap = (twap_features or {}).get("official_current_twap")
-        twap_available = official_twap is not None and projected_side in {"UP", "DOWN"}
+        twap_source_ts = (twap_features or {}).get("source_ts")
+        twap_age_sec = max(0.0, now_ts - float(twap_source_ts)) if twap_source_ts else None
+        twap_available = (
+            official_twap is not None
+            and projected_side in {"UP", "DOWN"}
+            and twap_age_sec is not None
+            and twap_age_sec <= 5.0
+        )
         twap_adverse = twap_available and projected_side != position
         # Leader/instantaneous spot-versus-strike remains context only.  It is
         # intentionally not a thesis vote when TWAP telemetry is absent.
@@ -175,6 +278,7 @@ class StopForensicsShadow:
             "thesis_weakening_count": weakening,
             "thesis_weakening_available_count": available_count, "thesis_component_availability": components,
             "signal_available": signal_available, "twap_available": twap_available, "fair_available": fair_available,
+            "twap_source_age_sec": twap_age_sec,
             "signal_reversal": reversed_signal if signal_available else None,
             "twap_trajectory_adverse": twap_adverse if twap_available else None,
         }

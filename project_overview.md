@@ -659,14 +659,42 @@ authority.
 
 `bot.stop_forensics_shadow.StopForensicsShadow` records the production raw
 invalidation condition from its first adverse observation, 5/10/15/20/30s
-checkpoints, and P5/P10/P15/adaptive candidates requiring two independent
-thesis-weakening signals (production reversal, canonical-strike leader adverse,
-or >=5ppt fair deterioration). It is research-only; smart-money snapshots are
-auxiliary only and rate-limited to five seconds while holding inventory. No
-candidate, smart-money observation, or shadow write can alter an exit. Use
-`scripts/replay_session_pnl_guard.py` and `scripts/stop_forensics_report.py`
-to produce descriptive reports under `reports/stop_forensics/`; settlement-only
-results must not be represented as executable backtests.
+checkpoints, and P5/P10/P15/adaptive candidates. Candidate votes are limited to
+an explicit signal reversal, fresh (<=5-second source age) adverse projected
+TWAP trajectory, and fair-value deterioration; instantaneous spot/strike
+leader is context only. A candidate
+requires at least two adverse votes among at least two available components.
+These records remain shadow evidence and have no exit authority.
+
+The live `$2` absolute-loss breaker now requires the same adverse thesis to
+persist continuously for at least 15 seconds, with at least two adverse votes
+among two or more available components (including only fresh TWAP data), when more than 120 seconds remain in
+the market. At 120 seconds or less, the existing fast protective path remains
+available. This 15-second value is a provisional safety confirmation aligned
+with an existing shadow horizon, not a statistically optimized threshold: the
+2026-09-29 DOWN stop shadow reached P5 after 6.5 seconds; the actual stop order
+was submitted about 10.5 seconds after the adverse episode began and filled
+about 14 seconds after it began, then the market settled DOWN. A 10-second
+gate could therefore have submitted the same stop. The 15-second gate delays
+that decision, but the available post-stop sample is still too small to claim
+that 15 seconds is optimal or prevents all washouts. Before post-stop tracking
+was wired, the local research journal contained 17 stop candidates across five
+adverse episodes in the preceding 24 hours; the stopped market could not
+produce P10/P15 follow-through evidence. Treat these as a small, repeated-event
+sample, not 17 independent markets.
+
+Every qualifying actual stop fill now starts a research-only hypothetical
+continuation for the sold shares. Subsequent quote callbacks record executable
+bid/depth and hypothetical PnL at +5/+10/+15/+30/+60/+120 seconds; settlement
+records actual stop PnL, hold-to-settlement PnL, and `stop_value_vs_hold`
+(`actual_stop_pnl - hold_to_settlement_pnl`, positive means the stop helped).
+Settlement source and canonical status are retained so proxy outcomes are not
+mixed with canonical labels. These observations do not place orders or alter
+live exits. `scripts/stop_forensics_report.py` exports adverse episodes,
+candidates, actual stops, post-stop checkpoints, and settlement comparisons
+under `reports/stop_forensics/`; settlement-only comparisons are descriptive,
+not executable backtests. Smart-money snapshots remain auxiliary and
+rate-limited to five seconds while holding inventory.
 
 ### TWAP forward telemetry (research-only)
 

@@ -165,6 +165,31 @@ class StrategyLifecycleMixin:
                 })
                 return
 
+            stop_shadow = getattr(self, "stop_forensics_shadow", None)
+            if stop_shadow is not None:
+                try:
+                    settlement_ts = time.time()
+                    settlement_source = str(getattr(self, "latest_external_spot_source", "") or "")
+                    source_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+                    source_age = max(0.0, settlement_ts - source_ts) if source_ts > 0 else None
+                    canonical = (
+                        settlement_source == "polymarket_chainlink_twap_60s_ws"
+                        and source_age is not None and source_age <= 10.0
+                    )
+                    stop_shadow.record_settlement(
+                        slug=slug,
+                        settlement_side="UP" if spot >= strike else "DOWN",
+                        settlement_ts=settlement_ts,
+                        settlement_reference_source=settlement_source,
+                        settlement_reference_is_canonical=canonical,
+                        settlement_reference_age_sec=source_age,
+                    )
+                except Exception as shadow_error:
+                    logger.warning(
+                        "Stop continuation shadow settlement capture failed: "
+                        f"{type(shadow_error).__name__}: {shadow_error}"
+                    )
+
             trend_shadow = getattr(self, "trend_entry_shadow", None)
             if trend_shadow is not None:
                 try:

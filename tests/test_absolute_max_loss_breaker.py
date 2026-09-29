@@ -55,14 +55,14 @@ def _make_config(**overrides):
     return ExitEngineConfig(**defaults)
 
 
-def _snapshot(best_bid, fair=None):
+def _snapshot(best_bid, fair=None, time_left_sec=120.0):
     best_bid = Decimal(str(best_bid))
     fair = Decimal(str(fair)) if fair is not None else best_bid + Decimal("0.01")
     best_ask = best_bid + Decimal("0.01")
     return MarketSnapshot(
         instrument_id="test",
         phase="ACTIVE",
-        time_left_sec=120.0,
+        time_left_sec=time_left_sec,
         best_bid=best_bid,
         best_ask=best_ask,
         fee_rate=Decimal("0.02"),
@@ -202,6 +202,15 @@ class _BreakerExitHost(TakerExitMixin):
         self.last_taker_exit_ts_by_inst = {}
         self.taker_exit_stop_loss_hits_by_inst = {}
         self._stop_loss_execution_priority_by_inst = {}
+        self._stop_adverse_since_by_slug = {"breaker-test": now - 15.0}
+        self._stop_adverse_votes_by_slug = {
+            "breaker-test": {
+                "signal_adverse": True, "twap_adverse": True, "fair_deteriorated": False,
+                "weakening_count": 2, "available_count": 3,
+            }
+        }
+        self._taker_exit_skip_log_ts_by_key = {}
+        self.taker_exit_skip_log_interval_sec = 0
         self.current_market_end_timestamp = now + 300
         self.current_market_slug = "breaker-test"
         self.market_strike_cache_by_slug = {}
@@ -224,6 +233,11 @@ class _BreakerExitHost(TakerExitMixin):
         self.side_decision_score = Decimal("0.30")
         self.active_side_locked = True
         self.side_decision_reason = "healthy"
+        self.twap_forward_shadow = SimpleNamespace(latest=lambda _slug: {
+            "official_current_twap": 99.0,
+            "projected_settlement_side_trend": "DOWN",
+            "source_ts": now - 0.1,
+        })
         self.maker_profit_run_peak_bid_by_inst = {}
         self.maker_profit_run_peak_fair_by_inst = {}
         self.exit_policy = SimpleNamespace(stage=lambda _time_left: ExitStage.PASSIVE)
@@ -261,6 +275,8 @@ def test_absolute_breaker_bypasses_wide_spread_and_fresh_existing_sell():
 
 def test_absolute_breaker_is_not_suppressed_by_invalidation_recovery_ratio_gate():
     host = _BreakerExitHost()
+    host.active_side = ActiveSide.DOWN
+    host.side_decision_score = Decimal("-0.30")
     host.hold_to_redeem_enabled = True
     host.taker_exit_only_after_invalidation = True
     host.taker_exit_min_hold_sec = 60
@@ -426,6 +442,44 @@ def test_breaker_fires_immediately_no_confirmations():
         f"FAIL: confirm_hits should be 0 (immediate), got {result.confirm_hits}"
     )
     print(f"PASS: breaker fires immediately (confirm_hits=0) → {result.decision_type.value}")
+
+
+def test_absolute_breaker_waits_for_fifteen_seconds_and_two_available_adverse_votes():
+    engine = ExitPolicyEngine(_make_config())
+    common = dict(
+        snapshot=_snapshot("0.20", "0.21", time_left_sec=240.0),
+        position=_position("0.69", hold_sec=90),
+        signal=_signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
+        locked_side_invalidated=True,
+    )
+    waiting = engine.evaluate(
+        **common, adverse_persistence_sec=14.9,
+        adverse_thesis_weakening_count=2, adverse_thesis_available_count=3,
+    )
+    assert waiting.reason != "absolute_max_loss_breaker"
+
+    insufficient_votes = engine.evaluate(
+        **common, adverse_persistence_sec=18.0,
+        adverse_thesis_weakening_count=1, adverse_thesis_available_count=3,
+    )
+    assert insufficient_votes.reason != "absolute_max_loss_breaker"
+
+    confirmed = engine.evaluate(
+        **common, adverse_persistence_sec=15.0,
+        adverse_thesis_weakening_count=2, adverse_thesis_available_count=2,
+    )
+    assert confirmed.reason == "absolute_max_loss_breaker"
+
+
+def test_absolute_breaker_keeps_fast_path_inside_final_120_seconds():
+    engine = ExitPolicyEngine(_make_config())
+    result = engine.evaluate(
+        _snapshot("0.20", "0.21", time_left_sec=120.0),
+        _position("0.69", hold_sec=90),
+        _signal(score=Decimal("-0.30"), locked=True, matches=False, active_side="DOWN"),
+        locked_side_invalidated=True,
+    )
+    assert result.reason == "absolute_max_loss_breaker"
 
 
 if __name__ == "__main__":

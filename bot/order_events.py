@@ -253,6 +253,11 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             strategy.inventory_delta_shares -= fill_qty_dec
     realized_net_usdc = None
     if side_for_ledger:
+        pre_fill_state = dict(
+            getattr(strategy, "live_inventory_cost", {}).get(
+                str(strategy._instrument_key(filled_inst)), {}
+            ) or {}
+        )
         realized_net_usdc = strategy._update_live_inventory_cost_from_fill(
             instrument_id=filled_inst,
             side=side_for_ledger,
@@ -261,6 +266,36 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             fee_usdc=effective_fee_usdc_dec,
             fee_shares=effective_fee_shares_dec,
         )
+        exit_context = getattr(strategy, "taker_exit_execution_by_client_order_id", {}).get(filled_id, {})
+        stop_reason = str(taker_exit_reason or exit_context.get("reason") or "").lower()
+        decision_reason = str(exit_context.get("decision_reason") or "").lower()
+        if (
+            side_for_ledger == "sell"
+            and realized_net_usdc is not None
+            and (stop_reason == "stop_loss" or "stop" in decision_reason)
+        ):
+            try:
+                recorder = getattr(strategy, "stop_forensics_shadow", None)
+                pre_qty = Decimal(str(pre_fill_state.get("qty", "0")))
+                avg_entry = Decimal(str(
+                    pre_fill_state.get("avg_entry_price", pre_fill_state.get("avg_price", "0"))
+                ))
+                stopped_qty = min(fill_qty_dec, pre_qty)
+                entry_fee = Decimal(str(pre_fill_state.get("entry_fee_remaining", "0")))
+                allocated_entry_fee = entry_fee * (stopped_qty / pre_qty) if pre_qty > 0 else Decimal("0")
+                if recorder is not None and stopped_qty > 0 and avg_entry > 0:
+                    recorder.record_actual_stop(
+                        slug=str(exit_context.get("slug") or getattr(strategy, "current_market_slug", "") or ""),
+                        instrument_id=str(strategy._instrument_key(filled_inst)),
+                        client_order_id=filled_id, actual_stop_ts=time.time(),
+                        actual_stop_price=fill_price_dec, actual_stop_qty=stopped_qty,
+                        actual_stop_pnl=Decimal(str(realized_net_usdc)),
+                        position_side=str(exit_context.get("position_side") or strategy._side_for_instrument_id(filled_inst).value),
+                        entry_price=avg_entry, entry_fee_usdc=allocated_entry_fee,
+                        reason=decision_reason or stop_reason,
+                    )
+            except Exception as exc:
+                logger.debug(f"Stop continuation shadow start failed: {exc}")
         inst_key = strategy._instrument_key(filled_inst)
         if inst_key and hasattr(strategy, "position_manager") and hasattr(strategy, "live_inventory_cost"):
             post_state = strategy.live_inventory_cost.get(inst_key, {})

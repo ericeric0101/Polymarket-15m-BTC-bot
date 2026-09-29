@@ -265,6 +265,9 @@ class ExitPolicyEngine:
         stop_loss_pending_active: bool = False,
         locked_side_invalidated: bool = False,
         confirmed_adverse_exit_active: bool = False,
+        adverse_persistence_sec: float = 0.0,
+        adverse_thesis_weakening_count: int = 0,
+        adverse_thesis_available_count: int = 0,
     ) -> ExitDecision:
         """Evaluate exit decision for a held position.
 
@@ -323,6 +326,14 @@ class ExitPolicyEngine:
             and _price_adverse_raw
             and adverse_trend_confirmed
             and net_if_exit <= -abs(self.config.absolute_max_loss_usdc)
+            and (
+                (snapshot.time_left_sec is not None and snapshot.time_left_sec <= 120.0)
+                or (
+                    adverse_persistence_sec >= 15.0
+                    and adverse_thesis_weakening_count >= 2
+                    and adverse_thesis_available_count >= 2
+                )
+            )
         ):
             return ExitDecision(
                 decision_type=ExitDecisionType.TAKER_STOP_LOSS,
@@ -345,6 +356,12 @@ class ExitPolicyEngine:
                     "hold_sec": str(position.hold_sec),
                     "avg_entry_price": str(position.avg_entry_price),
                     "best_bid": str(snapshot.best_bid),
+                    "adverse_persistence_sec": str(max(0.0, adverse_persistence_sec)),
+                    "adverse_thesis_weakening_count": str(max(0, adverse_thesis_weakening_count)),
+                    "adverse_thesis_available_count": str(max(0, adverse_thesis_available_count)),
+                    "near_settlement_fast_path": str(
+                        snapshot.time_left_sec is not None and snapshot.time_left_sec <= 120.0
+                    ),
                 },
             )
         band = self._classify_band(snapshot, signal)

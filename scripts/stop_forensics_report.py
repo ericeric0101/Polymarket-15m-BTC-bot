@@ -22,6 +22,7 @@ def main() -> int:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT decision_epoch_ns, payload_json FROM lead_lag_decisions ORDER BY id").fetchall()
     checkpoints, candidates, smart = [], [], []
+    actual_stops, post_stop_checkpoints, post_stop_settlements = [], [], []
     for epoch_ns, raw in rows:
         payload = json.loads(raw or "{}")
         kind = payload.get("event_type")
@@ -29,7 +30,17 @@ def main() -> int:
         if kind == "STOP_SHADOW_CHECKPOINT": checkpoints.append(payload)
         elif kind == "STOP_SHADOW_CANDIDATE": candidates.append(payload)
         elif kind == "POST_ENTRY_SMART_MONEY_SNAPSHOT": smart.append(payload)
-    for name, items in (("stop_shadow_checkpoints.csv", checkpoints), ("stop_candidate_comparison.csv", candidates), ("post_entry_smart_money.csv", smart)):
+        elif kind == "STOP_SHADOW_ACTUAL_STOP": actual_stops.append(payload)
+        elif kind == "STOP_SHADOW_POST_STOP_CHECKPOINT": post_stop_checkpoints.append(payload)
+        elif kind == "STOP_SHADOW_POST_STOP_SETTLEMENT": post_stop_settlements.append(payload)
+    for name, items in (
+        ("stop_shadow_checkpoints.csv", checkpoints),
+        ("stop_candidate_comparison.csv", candidates),
+        ("post_entry_smart_money.csv", smart),
+        ("actual_stops.csv", actual_stops),
+        ("post_stop_checkpoints.csv", post_stop_checkpoints),
+        ("post_stop_settlement_comparison.csv", post_stop_settlements),
+    ):
         keys = sorted({key for item in items for key in item}) or ["observed_ts"]
         with (outdir / name).open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore", lineterminator="\n")
@@ -40,7 +51,11 @@ def main() -> int:
         rows10 = [item for item in candidates if item.get("candidate") == "STOP_SHADOW_P10"]
         keys = sorted({key for item in rows10 for key in item}) or ["observed_ts"]
         writer = csv.DictWriter(handle, fieldnames=keys, extrasaction="ignore", lineterminator="\n"); writer.writeheader(); writer.writerows(rows10)
-    print(f"events: checkpoints={len(checkpoints)} candidates={len(candidates)} smart={len(smart)}")
+    print(
+        f"events: checkpoints={len(checkpoints)} candidates={len(candidates)} "
+        f"actual_stops={len(actual_stops)} post_stop_checkpoints={len(post_stop_checkpoints)} "
+        f"post_stop_settlements={len(post_stop_settlements)} smart={len(smart)}"
+    )
     return 0
 
 

@@ -494,6 +494,88 @@ class TakerExitMixin:
                 reason=self.side_decision_reason,
                 matches_position=(self._instrument_for_side(self.active_side) == inst_id),
             )
+            slug_for_confirmation = str(self.current_market_slug or "")
+            stop_twap = getattr(self, "twap_forward_shadow", None)
+            stop_twap_features = stop_twap.latest(slug_for_confirmation) if stop_twap is not None else None
+            stop_twap_side = str((stop_twap_features or {}).get("projected_settlement_side_trend") or "").upper()
+            stop_twap_source_ts = (stop_twap_features or {}).get("source_ts")
+            stop_twap_age_sec = (
+                max(0.0, now_ts - float(stop_twap_source_ts))
+                if stop_twap_source_ts else None
+            )
+            stop_signal_side = str(signal_decision.active_side or "").upper()
+            stop_signal_available = stop_signal_side in {"UP", "DOWN"}
+            stop_twap_available = (
+                (stop_twap_features or {}).get("official_current_twap") is not None
+                and stop_twap_side in {"UP", "DOWN"}
+                and stop_twap_age_sec is not None
+                and stop_twap_age_sec <= 5.0
+            )
+            entry_fair = state.get("fair_at_entry")
+            stop_fair_available = entry_fair is not None and fair is not None
+            try:
+                stop_fair_deteriorated = (
+                    stop_fair_available
+                    and Decimal(str(entry_fair)) - Decimal(str(fair)) >= Decimal("0.05")
+                )
+            except Exception:
+                stop_fair_available = False
+                stop_fair_deteriorated = False
+            signal_threshold = Decimal(str(getattr(
+                self, "exit_stop_loss_thesis_min_score_abs", Decimal("0.2")
+            )))
+            stop_signal_adverse = bool(
+                stop_signal_available
+                and stop_signal_side != held_side
+                and signal_decision.locked
+                and abs(signal_decision.score) >= signal_threshold
+            )
+            stop_twap_adverse = bool(stop_twap_available and stop_twap_side != held_side)
+            stop_thesis_available_count = (
+                int(stop_signal_available) + int(stop_twap_available) + int(stop_fair_available)
+            )
+            stop_thesis_weakening_count = (
+                int(stop_signal_adverse) + int(stop_twap_adverse) + int(stop_fair_deteriorated)
+            )
+            stop_vote_components = {
+                "signal_adverse": stop_signal_adverse,
+                "twap_adverse": stop_twap_adverse,
+                "fair_deteriorated": bool(stop_fair_deteriorated),
+            }
+            stop_adverse_since = getattr(self, "_stop_adverse_since_by_slug", None)
+            if stop_adverse_since is None:
+                stop_adverse_since = {}
+                self._stop_adverse_since_by_slug = stop_adverse_since
+            stop_adverse_votes = getattr(self, "_stop_adverse_votes_by_slug", None)
+            if stop_adverse_votes is None:
+                stop_adverse_votes = {}
+                self._stop_adverse_votes_by_slug = stop_adverse_votes
+            prior_components = tuple(
+                name for name, adverse in stop_adverse_votes.get(slug_for_confirmation, {}).items()
+                if name.endswith("_adverse") or name == "fair_deteriorated"
+                if adverse
+            )
+            current_components = tuple(name for name, adverse in stop_vote_components.items() if adverse)
+            if (
+                qty > 0
+                and stop_thesis_available_count >= 2
+                and stop_thesis_weakening_count >= 2
+            ):
+                if prior_components != current_components or slug_for_confirmation not in stop_adverse_since:
+                    stop_adverse_since[slug_for_confirmation] = now_ts
+                stop_adverse_votes[slug_for_confirmation] = {
+                    **stop_vote_components,
+                    "weakening_count": stop_thesis_weakening_count,
+                    "available_count": stop_thesis_available_count,
+                    "twap_source_age_sec": stop_twap_age_sec,
+                }
+            else:
+                stop_adverse_since.pop(slug_for_confirmation, None)
+                stop_adverse_votes.pop(slug_for_confirmation, None)
+            adverse_persistence_sec = max(
+                0.0, now_ts - float(stop_adverse_since.get(slug_for_confirmation, now_ts))
+            ) if slug_for_confirmation in stop_adverse_since else 0.0
+            current_stop_votes = stop_adverse_votes.get(slug_for_confirmation, {})
             stop_loss_pending_active = bool(
                 self._stop_loss_execution_priority_by_inst.get(inst_key, False)
                 or int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)) > 0
@@ -505,8 +587,37 @@ class TakerExitMixin:
                 stop_loss_pending_active=stop_loss_pending_active,
                 locked_side_invalidated=confirmed_locked_side_invalidated,
                 confirmed_adverse_exit_active=confirmed_locked_side_invalidated,
+                adverse_persistence_sec=adverse_persistence_sec,
+                adverse_thesis_weakening_count=int(current_stop_votes.get("weakening_count", 0)),
+                adverse_thesis_available_count=int(current_stop_votes.get("available_count", 0)),
             )
             net_if_exit = exit_decision.net_if_exit
+            breaker_threshold = abs(Decimal(str(getattr(self, "absolute_max_loss_usdc", "2.00"))))
+            if (
+                confirmed_locked_side_invalidated
+                and net_if_exit <= -breaker_threshold
+                and exit_decision.reason != "absolute_max_loss_breaker"
+                and time_left_sec is not None
+                and time_left_sec > 120.0
+            ):
+                self._record_exit_policy_decision_throttled(
+                    inst_key=inst_key,
+                    reason_tag="absolute_loss_confirmation_pending",
+                    now_ts=now_ts,
+                    payload={
+                        "slug": str(self.current_market_slug or ""),
+                        "instrument_id": inst_key,
+                        "decision_type": "ABSOLUTE_LOSS_CONFIRMATION_PENDING",
+                        "reason": "requires_15s_and_two_thesis_votes",
+                        "time_left_sec": time_left_sec,
+                        "net_if_exit": float(net_if_exit),
+                        "absolute_max_loss_usdc": float(breaker_threshold),
+                        "adverse_persistence_sec": adverse_persistence_sec,
+                        "thesis_weakening_count": int(current_stop_votes.get("weakening_count", 0)),
+                        "thesis_available_count": int(current_stop_votes.get("available_count", 0)),
+                        "thesis_components": current_stop_votes,
+                    },
+                )
             force_offside_near_close = (
                 (
                     confirmed_locked_side_invalidated
@@ -924,7 +1035,6 @@ class TakerExitMixin:
             requested_order_kind = "market"
             venue_order_type = "FOK"
             requested_tif = "IOC"
-        self.submit_order(order)
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
         self.taker_exit_reason_by_client_order_id[str(coid)] = reason
@@ -936,7 +1046,13 @@ class TakerExitMixin:
             "requested_tif": requested_tif,
             "requested_order_kind": requested_order_kind,
             "venue_order_type": venue_order_type,
+            "slug": str((decision_payload or {}).get("slug") or self.current_market_slug or ""),
+            "reason": str(reason),
+            "decision_reason": str((decision_payload or {}).get("decision_reason") or ""),
+            "entry_price": (decision_payload or {}).get("avg_entry"),
+            "position_side": str(getattr(self._side_for_instrument_id(inst), "value", "NONE")),
         }
+        self.submit_order(order)
         if getattr(self, "terminal_dashboard", None):
             token_side = getattr(self._side_for_instrument_id(inst), "value", "NONE")
             self.terminal_dashboard.record_order_submitted(
