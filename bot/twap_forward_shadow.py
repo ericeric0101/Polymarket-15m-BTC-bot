@@ -228,10 +228,25 @@ class TwapForwardShadow:
             self._last_emitted_projected_side[slug] = side
         left = result.get("time_left_sec")
         if left is not None:
-            for checkpoint in (120, 60, 30, 15, 10, 5):
-                if float(left) <= checkpoint and checkpoint not in self._checkpoint_done[slug]:
-                    self._checkpoint_done[slug].add(checkpoint)
-                    self._persist(slug, ts, "TMINUS_CHECKPOINT", {**result, "checkpoint_sec": checkpoint})
+            try:
+                remaining = float(left)
+            except (TypeError, ValueError):
+                remaining = 0.0
+            # A T-minus observation must be strictly pre-settlement. If a
+            # delayed tick crosses multiple horizons, attach it only to the
+            # nearest still-relevant horizon and mark the skipped horizons as
+            # missed rather than fabricating one row per threshold.
+            if remaining > 0.0:
+                due = [checkpoint for checkpoint in (120, 60, 30, 15, 10, 5)
+                       if remaining <= checkpoint and checkpoint not in self._checkpoint_done[slug]]
+                if due:
+                    checkpoint = min(due, key=lambda value: (abs(value - remaining), value))
+                    self._checkpoint_done[slug].update(due)
+                    self._persist(slug, ts, "TMINUS_CHECKPOINT", {
+                        **result,
+                        "checkpoint_sec": checkpoint,
+                        "checkpoint_capture_lag_sec": max(0.0, checkpoint - remaining),
+                    })
 
     def _track_probability_summary(self, slug: str, result: dict[str, Any]) -> None:
         """Track probability/path extrema in RAM; persist threshold changes only."""

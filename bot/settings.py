@@ -640,6 +640,7 @@ def initialize_strategy_settings(
     strategy.maker_kill_switch = False
     strategy._inventory_overage_sell_only = False
     strategy.active_maker_orders = {}
+    strategy._pending_cancel_cleanup_lock = threading.Lock()
     strategy.current_token_id = None
     strategy.current_market_instruments = []
     strategy.current_up_instrument_id = None

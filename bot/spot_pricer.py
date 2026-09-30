@@ -893,6 +893,9 @@ class SpotPricerMixin:
                     "currently_dominant_side": "UNKNOWN",
                     "required_move_mode": "UNAVAILABLE",
                     "sigma_ex_market_age_sec": None, "sigma_ex_market_fresh": False,
+                    "market_bbo_up_age_sec": None, "market_bbo_down_age_sec": None,
+                    "market_bbo_up_unavailable_reason": "spot_strike_or_horizon_unavailable",
+                    "market_bbo_down_unavailable_reason": "spot_strike_or_horizon_unavailable",
                     "p_up_ex_market": None, "p_down_ex_market": None,
                     "required_move_usd": None, "required_move_bps": None, "required_move_sigma": None}
         # Match the existing approved 10-second external-spot freshness window.
@@ -918,19 +921,27 @@ class SpotPricerMixin:
         quote_ts = getattr(self, "last_quote_update_ts_by_inst", {})
         max_age = float(getattr(self, "quote_stale_sec", 3.0))
 
-        def fresh_book(inst: str) -> tuple[Decimal | None, Decimal | None]:
+        def fresh_book(inst: str) -> tuple[Decimal | None, Decimal | None, float | None, str | None]:
             if not inst:
-                return None, None
-            age = float(now_ts) - float(quote_ts.get(inst, 0.0) or 0.0)
-            if age < 0 or age > max_age:
-                return None, None
+                return None, None, None, "instrument_unavailable"
             book = quote_map.get(inst)
             if not book or book[0] is None or book[1] is None:
-                return None, None
-            return Decimal(str(book[0])), Decimal(str(book[1]))
+                return None, None, None, "quote_missing"
+            source_ts = float(quote_ts.get(inst, 0.0) or 0.0)
+            if source_ts <= 0:
+                return None, None, None, "quote_timestamp_missing"
+            age = float(now_ts) - source_ts
+            if age < 0:
+                return None, None, age, "quote_timestamp_future"
+            if age > max_age:
+                return None, None, age, "quote_stale"
+            bid, ask = Decimal(str(book[0])), Decimal(str(book[1]))
+            if bid < 0 or ask <= 0 or bid > ask:
+                return None, None, age, "quote_invalid"
+            return bid, ask, age, None
 
-        bid_up, ask_up = fresh_book(up_inst)
-        bid_down, ask_down = fresh_book(down_inst)
+        bid_up, ask_up, bbo_up_age, bbo_up_reason = fresh_book(up_inst)
+        bid_down, ask_down, bbo_down_age, bbo_down_reason = fresh_book(down_inst)
         mid_up = (bid_up + ask_up) / 2 if bid_up is not None and ask_up is not None else None
         mid_down = (bid_down + ask_down) / 2 if bid_down is not None and ask_down is not None else None
         twap_window = int(getattr(self, "_polymarket_chainlink_twap_window_sec", 60) or 60)
@@ -997,6 +1008,10 @@ class SpotPricerMixin:
                 "settlement_path_side_divergence": None,
                 "currently_dominant_side": settlement_state_side,
                 "required_future_avg_is_exact_partial_integral": False,
+                "market_bbo_up_age_sec": bbo_up_age,
+                "market_bbo_down_age_sec": bbo_down_age,
+                "market_bbo_up_unavailable_reason": bbo_up_reason,
+                "market_bbo_down_unavailable_reason": bbo_down_reason,
                 "market_mid_probability_up": float(mid_up) if mid_up is not None else None,
                 "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
                 "best_bid_up": float(bid_up) if bid_up is not None else None,
@@ -1126,6 +1141,10 @@ class SpotPricerMixin:
             "p_down_ex_market": 1.0 - float(p_ex) if p_ex is not None else None,
             "market_mid_probability_up": p_market,
             "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
+            "market_bbo_up_age_sec": bbo_up_age,
+            "market_bbo_down_age_sec": bbo_down_age,
+            "market_bbo_up_unavailable_reason": bbo_up_reason,
+            "market_bbo_down_unavailable_reason": bbo_down_reason,
             "best_bid_up": float(bid_up) if bid_up is not None else None,
             "best_ask_up": float(ask_up) if ask_up is not None else None,
             "executable_buy_probability_up": float(ask_up) if ask_up is not None else None,

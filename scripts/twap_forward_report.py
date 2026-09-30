@@ -30,6 +30,15 @@ def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict],
     canonical_candidates = []
     for row in checkpoints:
         summary = summaries.get(row.get("market_slug")) or {}
+        try:
+            checkpoint_sec = float(row.get("checkpoint_sec"))
+            time_left = float(row.get("time_left_sec"))
+        except (TypeError, ValueError):
+            # Legacy checkpoint rows without a measured positive horizon are
+            # retained in the raw event table, but cannot enter calibration.
+            continue
+        if not (0.0 < time_left <= checkpoint_sec):
+            continue
         if (summary.get("settlement_reference_is_canonical") is True
                 and row.get("sigma_ex_market_fresh") is True
                 and row.get("p_up_ex_market") is not None):
@@ -153,7 +162,15 @@ def main() -> int:
             payload["observed_ts"] = int(ts) / 1_000_000_000
             rows.append(payload)
     summaries = [r for r in rows if r.get("event_type") == "MARKET_TWAP_SUMMARY"]
-    checkpoints = [r for r in rows if r.get("event_type") == "TMINUS_CHECKPOINT"]
+    all_checkpoints = [r for r in rows if r.get("event_type") == "TMINUS_CHECKPOINT"]
+    checkpoints = []
+    for row in all_checkpoints:
+        try:
+            left, target = float(row.get("time_left_sec")), float(row.get("checkpoint_sec"))
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < left <= target:
+            checkpoints.append(row)
     crosses = [r for r in rows if r.get("event_type") == "TWAP_STRIKE_CROSS"]
     projection = [r for r in rows if r.get("event_type") == "TWAP_PROJECTED_SIDE_CHANGE"]
     write_csv(out / "market_twap_summary.csv", summaries)
@@ -171,6 +188,7 @@ def main() -> int:
         (r.get("market_slug"), int(r.get("checkpoint_sec") or 0))
         for r in checkpoints
         if (r.get("market_slug") in canonical_slugs
+            and 0.0 < float(r.get("time_left_sec") or 0.0) <= float(r.get("checkpoint_sec") or 0.0)
             and r.get("p_up_ex_market") is not None
             and r.get("sigma_ex_market_fresh") is True)
     }
@@ -216,6 +234,8 @@ def main() -> int:
     if not canonical_probability_checkpoints:
         quality_note += " INSUFFICIENT_CANONICAL_SETTLEMENT_PROBABILITY_CHECKPOINTS."
     write_csv(out / "data_quality.csv", [{"event_rows": len(rows), "summary_rows": len(summaries),
+                                           "checkpoint_rows_total": len(all_checkpoints),
+                                           "checkpoint_rows_post_settlement_or_invalid": len(all_checkpoints) - len(checkpoints),
                                            "canonical_twap_settlements": len(canonical_summaries),
                                            "noncanonical_proxy_settlements": len(proxy_summaries),
                                            "canonical_probability_checkpoint_markets": len(canonical_probability_checkpoints),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import math
 from decimal import Decimal
 from typing import Any, Dict, Protocol
 
@@ -10,6 +11,38 @@ from bot.enums import ActiveSide, MarketPhase
 from bot.lifecycle import determine_lifecycle_timer_action, select_next_market_window
 from bot.ops import handle_waiting_phase_search
 from bot.post_trade import compute_settlement_summary
+
+
+def _canonical_twap_shadow_label(
+    *, twap_price: Any, source_ts: Any, window_sec: Any, strike: Any,
+    settlement_ts: float, freshness_sec: float = 10.0,
+) -> dict[str, Any]:
+    """Describe whether the latest direct official-TWAP tick is a valid label.
+
+    This is research provenance only; it does not determine live settlement PnL.
+    """
+    try:
+        price = float(twap_price)
+        observed = float(source_ts)
+        window = int(window_sec)
+        strike_value = float(strike)
+        settled = float(settlement_ts)
+        age = settled - observed
+        values_valid = all(map(math.isfinite, (price, observed, strike_value, settled, age)))
+    except (TypeError, ValueError, OverflowError):
+        price = observed = strike_value = 0.0
+        window, age, values_valid = 0, None, False
+    source = f"polymarket_chainlink_twap_{window}s_ws" if values_valid and price > 0 and window > 0 else "unavailable"
+    canonical = bool(
+        values_valid and price > 0 and strike_value > 0 and observed > 0
+        and window == 60 and age is not None and 0.0 <= age <= float(freshness_sec)
+    )
+    return {
+        "source": source,
+        "age_sec": age,
+        "canonical": canonical,
+        "side": ("UP" if price >= strike_value else "DOWN") if canonical else None,
+    }
 
 
 class StrategyLifecycleHost(Protocol):
@@ -165,24 +198,30 @@ class StrategyLifecycleMixin:
                 })
                 return
 
+            # Shadow labels must be based on the direct Chainlink-TWAP tick
+            # clock/value, not the general-purpose spot cache (which may stop
+            # refreshing when no pricing cycle runs near market close).
+            shadow_settlement_ts = time.time()
+            shadow_label = _canonical_twap_shadow_label(
+                twap_price=getattr(self, "_polymarket_chainlink_twap_price", None),
+                source_ts=getattr(self, "_polymarket_chainlink_twap_observation_ts", None),
+                window_sec=getattr(self, "_polymarket_chainlink_twap_window_sec", None),
+                strike=strike,
+                settlement_ts=shadow_settlement_ts,
+                freshness_sec=float(getattr(self, "_RAW_SPOT_FRESHNESS_SEC", 10.0)),
+            )
+            shadow_settlement_side = shadow_label["side"] or ("UP" if spot >= strike else "DOWN")
+
             stop_shadow = getattr(self, "stop_forensics_shadow", None)
             if stop_shadow is not None:
                 try:
-                    settlement_ts = time.time()
-                    settlement_source = str(getattr(self, "latest_external_spot_source", "") or "")
-                    source_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
-                    source_age = max(0.0, settlement_ts - source_ts) if source_ts > 0 else None
-                    canonical = (
-                        settlement_source == "polymarket_chainlink_twap_60s_ws"
-                        and source_age is not None and source_age <= 10.0
-                    )
                     stop_shadow.record_settlement(
                         slug=slug,
-                        settlement_side="UP" if spot >= strike else "DOWN",
-                        settlement_ts=settlement_ts,
-                        settlement_reference_source=settlement_source,
-                        settlement_reference_is_canonical=canonical,
-                        settlement_reference_age_sec=source_age,
+                        settlement_side=shadow_settlement_side,
+                        settlement_ts=shadow_settlement_ts,
+                        settlement_reference_source=shadow_label["source"],
+                        settlement_reference_is_canonical=shadow_label["canonical"],
+                        settlement_reference_age_sec=shadow_label["age_sec"],
                     )
                 except Exception as shadow_error:
                     logger.warning(
@@ -206,13 +245,11 @@ class StrategyLifecycleMixin:
             forward_shadow = getattr(self, "forward_shadow_experiment", None)
             if forward_shadow is not None:
                 try:
-                    settlement_source = str(getattr(self, "latest_external_spot_source", "") or "")
-                    canonical_settlement = settlement_source.startswith("polymarket_chainlink_twap_")
                     forward_shadow.on_settlement(
                         slug=slug,
-                        outcome=("UP" if spot >= strike else "DOWN") if canonical_settlement else "UNKNOWN",
-                        settlement_ts=time.time(),
-                        settlement_source=settlement_source or "noncanonical_or_unavailable",
+                        outcome=shadow_label["side"] or "UNKNOWN",
+                        settlement_ts=shadow_settlement_ts,
+                        settlement_source=shadow_label["source"],
                     )
                 except Exception as shadow_error:
                     logger.warning(
@@ -222,24 +259,13 @@ class StrategyLifecycleMixin:
             twap_shadow = getattr(self, "twap_forward_shadow", None)
             if twap_shadow is not None:
                 try:
-                    settlement_ts = time.time()
-                    settlement_source = str(getattr(self, "latest_external_spot_source", "") or "")
-                    source_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
-                    source_age = max(0.0, settlement_ts - source_ts) if source_ts > 0 else None
-                    # Only the settlement-aligned Polymarket Chainlink 60s
-                    # TWAP at the existing production freshness standard is
-                    # a canonical research settlement label.
-                    canonical = (
-                        settlement_source == "polymarket_chainlink_twap_60s_ws"
-                        and source_age is not None and source_age <= 10.0
-                    )
                     twap_shadow.finalize_market(
                         slug,
-                        settlement_side=("UP" if spot >= strike else "DOWN"),
-                        settlement_ts=settlement_ts,
-                        settlement_reference_source=settlement_source,
-                        settlement_reference_is_canonical=canonical,
-                        settlement_reference_age_sec=source_age,
+                        settlement_side=shadow_settlement_side,
+                        settlement_ts=shadow_settlement_ts,
+                        settlement_reference_source=shadow_label["source"],
+                        settlement_reference_is_canonical=shadow_label["canonical"],
+                        settlement_reference_age_sec=shadow_label["age_sec"],
                     )
                 except Exception as shadow_error:
                     logger.warning(

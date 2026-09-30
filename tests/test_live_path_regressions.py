@@ -5947,6 +5947,7 @@ def test_quote_recovery_waits_for_both_binary_outcomes_before_clearing_pending_s
     assert strategy.quote_recovery_pending_instruments == set()
     assert strategy.quote_recovery_started_ts == 0.0
     assert strategy.quote_recovery_attempts == 0
+    assert strategy.last_valid_quote_ts > 0.0
 
 
 def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():

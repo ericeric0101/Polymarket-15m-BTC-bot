@@ -1853,14 +1853,18 @@ change.
   resubscription recovery previously called the all-orders cancel helper, so a
   stale feed could withdraw a live 0.97 TP before attempting recovery; the
   subsequent forced node rollover could also stop the strategy despite that
-  live SELL. Watchdog recovery now cancels stale BUYs only. If any tracked SELL
-  remains non-terminal, forced node rollover is deferred and the watchdog stays
-  alive to retry feed recovery; rollover resumes after the SELL becomes
-  terminal. This preserves venue-side exit protection at the cost of delaying
-  node replacement while an order is still live. Startup inventory recovery
-  remains a separate fallback, not a substitute for preserving the working
-  SELL during handoff. Regression coverage is in
-  `tests/test_quote_watchdog_recovery_scope.py`.
+  live SELL. Watchdog recovery now cancels stale BUYs only. A non-terminal
+  SELL on the selected current-market UP/DOWN pair still defers forced node
+  rollover; a SELL on a prior-market token cannot protect current inventory and
+  no longer wedges feed recovery. Launcher and watchdog use the same
+  fail-closed SELL exposure classifier. Stale pending-cancel reconciliation is
+  also driven by the watchdog timer, not only quote cycles; its existing ACK
+  timeout remains the sole retry authority. Eligible prior-market retirement
+  explicitly records that local tracking was retired without venue cancel
+  confirmation. On a true slug change, global STATUS bid/ask and quote-age state
+  are cleared; same-slug recovery preserves it until fresh quotes arrive.
+  Regression coverage is in `tests/test_quote_watchdog_recovery_scope.py` and
+  `tests/test_live_path_regressions.py`.
   **Zero-inventory pending-SELL cancel retirement (2026-09-19):** a venue or
   cache visibility gap can leave a cancel-requested SELL in local tracking
   after the strategy's confirmed fill ledger has reached zero. Previously its
@@ -2088,7 +2092,10 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   full-book liquidity. Gross PnL applies only to filled shares; net PnL stays
   null when fee semantics are unavailable.
 - TWAP settlement labels identify source, age, and whether the label is
-  canonical. Only a fresh Polymarket Chainlink 60-second TWAP is canonical;
+  canonical. Provenance is taken from the direct latest official-TWAP tick and
+  its source-observation timestamp, not the general external-spot cache. Future
+  timestamps are rejected rather than clamped to zero age. Only a fresh
+  Polymarket Chainlink 60-second TWAP is canonical;
   projections reports exclude all proxy labels from their primary accuracy
   result and report their sample count separately.
 - The current storage guard applies to **TWAP optional research writes only**;
@@ -2116,9 +2123,15 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   history. Missing/insufficient history leaves the required average null and
   marks `insufficient_raw_final_window_history`; the rolling TWAP is never used
   as a substitute for that partial integral.
-- Existing T−120/60/30/15/10/5 checkpoints now carry required average/move/sigma,
-  model probabilities, fresh executable BBO, and model-vs-market edges. Only
-  threshold transitions and existing checkpoints are persisted; full per-tick
+- Existing T−120/60/30/15/10/5 checkpoints carry required average/move/sigma,
+  model probabilities, fresh executable BBO, and model-vs-market edges. A
+  checkpoint must have strictly positive time remaining; a delayed observation
+  crossing multiple horizons is assigned only to the nearest still-due horizon,
+  and reports exclude legacy post-settlement/unknown-horizon checkpoint rows from
+  calibration. Per-side BBO age and unavailable reason are recorded from the
+  existing quote cache so missing mids can be attributed to absent instrument,
+  missing/stale quote, or invalid book rather than treated as market data.
+  Only threshold transitions and actual checkpoints are persisted; full per-tick
   samples remain bounded in memory. `scripts/twap_forward_report.py` exports
   checkpoint calibration, probability buckets, and model-vs-market first-observed
   threshold lead times, preserving negative lead and restricting primary

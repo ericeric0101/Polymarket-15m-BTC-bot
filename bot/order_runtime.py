@@ -8,6 +8,53 @@ from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
 
+_TERMINAL_ORDER_STATES = ("REJECTED", "FILLED", "CANCELED", "CANCELLED", "EXPIRED")
+
+
+def is_prior_market_order(strategy: Any, state: dict[str, Any]) -> bool:
+    """Classify an order as prior-market only when both identities are known."""
+    market_instruments = getattr(strategy, "current_market_instruments", None)
+    if not market_instruments:
+        return False
+    current_keys = {str(item) for item in market_instruments if item is not None}
+    order_instrument = str(state.get("instrument_id", "") or "")
+    return bool(order_instrument and current_keys and order_instrument not in current_keys)
+
+
+def classify_rollover_sell_orders(strategy: Any) -> dict[str, list[str]]:
+    """Use one conservative SELL exposure classification for all rollover paths."""
+    active_orders = getattr(strategy, "active_maker_orders", None)
+    result = {"blocking": [], "ignored_prior": [], "terminal": [], "unavailable": []}
+    if not isinstance(active_orders, dict):
+        result["blocking"].append("active_order_state_unavailable")
+        result["unavailable"].append("active_order_state_unavailable")
+        return result
+    for order_key, state in active_orders.items():
+        key = str(order_key)
+        is_sell_key = key.lower().startswith("sell:")
+        if not isinstance(state, dict):
+            # The launcher historically failed closed on any malformed active
+            # order entry; retain that behavior instead of guessing its side.
+            result["blocking"].append("active_order_state_unavailable")
+            result["unavailable"].append(key)
+            continue
+        side = str(state.get("side", "") or "").lower()
+        if side != "sell" and not is_sell_key:
+            continue
+        order = state.get("order")
+        status = str(getattr(order, "status", "") or "").upper()
+        if any(terminal in status for terminal in _TERMINAL_ORDER_STATES):
+            result["terminal"].append(key)
+        elif is_prior_market_order(strategy, state):
+            result["ignored_prior"].append(key)
+        else:
+            # Unknown market/token identity is not safe to dismiss as prior.
+            result["blocking"].append(key)
+            if not str(state.get("instrument_id", "") or "") or not getattr(strategy, "current_market_instruments", None):
+                result["unavailable"].append(key)
+    return result
+
+
 class OrderRuntimeHost(Protocol):
     active_maker_orders: dict[str, dict[str, Any]]
     maker_cancel_cooldown_sec: int
@@ -164,12 +211,7 @@ class OrderRuntimeMixin:
         cancel acknowledgement behind; it must not kill trading in the next
         market once its token is no longer part of the selected pair.
         """
-        market_instruments = getattr(self, "current_market_instruments", None)
-        if not market_instruments:
-            return False
-        current_keys = {str(item) for item in market_instruments if item is not None}
-        order_instrument = str(state.get("instrument_id", "") or "")
-        return bool(order_instrument and current_keys and order_instrument not in current_keys)
+        return is_prior_market_order(self, state)
 
     def _is_zero_inventory_pending_sell(self: OrderRuntimeHost, state: dict[str, Any]) -> bool:
         """Whether an unresolved pending SELL is provably not protecting bot inventory.
@@ -196,6 +238,14 @@ class OrderRuntimeMixin:
         return confirmed_qty <= Decimal("0.000001")
 
     def _cleanup_stale_pending_cancels(self, now_ts: float) -> None:
+        cleanup_lock = getattr(self, "_pending_cancel_cleanup_lock", None)
+        if cleanup_lock is None:
+            self._cleanup_stale_pending_cancels_locked(now_ts)
+            return
+        with cleanup_lock:
+            self._cleanup_stale_pending_cancels_locked(now_ts)
+
+    def _cleanup_stale_pending_cancels_locked(self, now_ts: float) -> None:
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
             if not state.get("pending_cancel"):
@@ -220,7 +270,8 @@ class OrderRuntimeMixin:
                         side=side.upper(),
                         status="CANCELED_STALE_MARKET",
                         reason="prior_market_cancel_ack_unavailable",
-                        payload={"instrument_id": str(state.get("instrument_id", "") or "")},
+                        payload={"instrument_id": str(state.get("instrument_id", "") or ""),
+                                 "local_tracker_retired": True, "venue_cancel_confirmed": False},
                     )
                     self.active_maker_orders.pop(order_key, None)
                     continue

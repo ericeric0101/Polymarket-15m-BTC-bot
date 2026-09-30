@@ -41,6 +41,7 @@ from bot.market_discovery import (
     resolve_primary_btc_15m_instrument_ids,
 )
 from bot.process_lock import ProcessLock
+from bot.order_runtime import classify_rollover_sell_orders
 from run_bot import (
     IntegratedBTCStrategy,
 )
@@ -253,7 +254,6 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
         return ["strategy exposure state unavailable: node has no registered strategies"]
 
     reasons: list[str] = []
-    terminal_states = ("REJECTED", "FILLED", "CANCELED", "CANCELLED")
     for index, strategy in enumerate(strategies):
         try:
             inventory_raw = getattr(strategy, "inventory_delta_shares")
@@ -275,39 +275,12 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
         if inventory + 0.000001 >= protected_min:
             reasons.append(f"strategy[{index}]:inventory={inventory:.6f}")
 
-        active_orders = getattr(strategy, "active_maker_orders", None)
-        if not isinstance(active_orders, dict):
-            reasons.append(f"strategy[{index}]:active_order_state_unavailable")
-            continue
-        for order_key, state in active_orders.items():
-            if not isinstance(state, dict):
+        sell_exposure = classify_rollover_sell_orders(strategy)
+        for order_key in sell_exposure["blocking"]:
+            if order_key == "active_order_state_unavailable":
                 reasons.append(f"strategy[{index}]:active_order_state_unavailable")
-                continue
-            side = str(state.get("side", "") or "").lower()
-            if side != "sell" and not str(order_key).lower().startswith("sell:"):
-                continue
-            order = state.get("order")
-            status = str(getattr(order, "status", "") or "").upper()
-            if any(terminal in status for terminal in terminal_states):
-                continue
-            current_instruments = getattr(strategy, "current_market_instruments", None)
-            order_instrument = str(state.get("instrument_id", "") or "")
-            current_instrument_ids = {
-                str(instrument) for instrument in (current_instruments or ()) if instrument is not None
-            }
-            is_prior_market_order = bool(
-                current_instrument_ids
-                and order_instrument
-                and order_instrument not in current_instrument_ids
-            )
-            if side == "sell" and is_prior_market_order:
-                # Once the selected market pair has moved on, an old-token
-                # SELL cannot protect inventory in the current market. Keep
-                # the normal market-transition cancel/reconcile path, but do
-                # not let an orphaned old-market tracker wedge scheduled node
-                # refresh indefinitely.
-                continue
-            reasons.append(f"strategy[{index}]:active_sell={order_key}")
+            else:
+                reasons.append(f"strategy[{index}]:active_sell={order_key}")
     return reasons
 
 

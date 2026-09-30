@@ -63,6 +63,25 @@ def test_moving_away_has_no_crossing_eta_and_rollover_summarizes_then_clears():
     assert model.sample_count("m") == 0
 
 
+def test_checkpoints_never_emit_after_settlement_or_fabricate_skipped_horizons():
+    db = FakeDb(); model = TwapForwardShadow(db=db)
+    sample(model, 100, left=0)
+    sample(model, 101, left=-1)
+    assert not [r for r in db.rows if r["payload"]["event_type"] == "TMINUS_CHECKPOINT"]
+
+    sample(model, 102, left=58)
+    first = [r["payload"] for r in db.rows if r["payload"]["event_type"] == "TMINUS_CHECKPOINT"]
+    assert len(first) == 1
+    assert first[0]["checkpoint_sec"] == 60
+    assert first[0]["time_left_sec"] == 58
+    assert first[0]["checkpoint_capture_lag_sec"] == 2
+
+    sample(model, 103, left=29)
+    checkpoints = [r["payload"]["checkpoint_sec"] for r in db.rows
+                   if r["payload"]["event_type"] == "TMINUS_CHECKPOINT"]
+    assert checkpoints == [60, 30]
+
+
 def test_summary_uses_settlement_timestamp_not_epoch_zero():
     db = FakeDb(); model = TwapForwardShadow(db=db, run_id="r")
     sample(model, 10, twap="100")
@@ -423,6 +442,73 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
     assert observed["remaining_avg_decision_boundary"] == 100.0
     assert observed["required_avg_for_up"] == observed["required_avg_for_down"] == 100.0
 
+
+def test_probability_shadow_exposes_existing_bbo_freshness_and_unavailable_reasons():
+    host = _probability_host(now=1000.0)
+    host.current_up_instrument_id = "up"
+    host.current_down_instrument_id = "down"
+    host.latest_quote_by_inst = {"up": (Decimal("0.49"), Decimal("0.51")),
+                                 "down": (Decimal("0.48"), Decimal("0.52"))}
+    host.last_quote_update_ts_by_inst = {"up": 999.0, "down": 990.0}
+    host.quote_stale_sec = 3.0
+    out = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
+    assert out["market_mid_probability_up"] == .5
+    assert out["market_bbo_up_age_sec"] == 1.0
+    assert out["market_bbo_up_unavailable_reason"] is None
+    assert out["market_mid_probability_down"] is None
+    assert out["market_bbo_down_age_sec"] == 10.0
+    assert out["market_bbo_down_unavailable_reason"] == "quote_stale"
+
+    host.current_up_instrument_id = "missing"
+    missing = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
+    assert missing["market_mid_probability_up"] is None
+    assert missing["market_bbo_up_unavailable_reason"] == "quote_missing"
+
+
+def test_canonical_twap_settlement_label_uses_direct_source_timestamp_and_rejects_stale_or_future():
+    from bot.lifecycle_runtime import _canonical_twap_shadow_label
+
+    fresh = _canonical_twap_shadow_label(
+        twap_price=99.0, source_ts=995.0, window_sec=60, strike=100.0,
+        settlement_ts=1000.0, freshness_sec=10.0)
+    assert fresh["source"] == "polymarket_chainlink_twap_60s_ws"
+    assert fresh["age_sec"] == 5.0
+    assert fresh["canonical"] is True
+    assert fresh["side"] == "DOWN"
+
+    stale = _canonical_twap_shadow_label(
+        twap_price=101.0, source_ts=765.0, window_sec=60, strike=100.0,
+        settlement_ts=1000.0, freshness_sec=10.0)
+    assert stale["age_sec"] == 235.0
+    assert stale["canonical"] is False
+    assert stale["side"] is None
+
+    future = _canonical_twap_shadow_label(
+        twap_price=101.0, source_ts=1001.0, window_sec=60, strike=100.0,
+        settlement_ts=1000.0, freshness_sec=10.0)
+    assert future["canonical"] is False
+    assert future["age_sec"] == -1.0
+
+
+def test_probability_report_excludes_post_settlement_checkpoint_rows():
+    from scripts.twap_forward_report import probability_research_rows
+
+    rows = [
+        {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "m",
+         "settlement_reference_is_canonical": True, "settlement_side": "UP"},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "m", "checkpoint_sec": 5,
+         "time_left_sec": 0, "p_up_ex_market": .99, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .95, "observed_ts": 100},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "m", "checkpoint_sec": 5,
+         "time_left_sec": 4.8, "p_up_ex_market": .8, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .7, "observed_ts": 99},
+    ]
+    metrics, buckets, leads = probability_research_rows(rows)
+    row = next(r for r in metrics if r["checkpoint_sec"] == 5)
+    assert row["canonical_n"] == 1
+    assert row["mean_p_up_ex_market"] == .8
 
 def test_probability_path_uses_fresh_binance_if_raw_chainlink_stale_and_never_twap_fallback():
     class Host(SpotPricerMixin):

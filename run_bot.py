@@ -113,7 +113,7 @@ from bot.spot_pricer import SpotPricerMixin
 from bot.taker_exit import TakerExitMixin
 from bot.fill_ledger import FillLedgerMixin
 from bot.db_runtime import StrategyDBRuntimeMixin
-from bot.order_runtime import OrderRuntimeMixin
+from bot.order_runtime import OrderRuntimeMixin, classify_rollover_sell_orders
 from bot.order_events import (
     handle_order_canceled,
     handle_order_cancel_rejected,
@@ -1884,9 +1884,9 @@ class IntegratedBTCStrategy(
         When the slug is unchanged (same-market rollover / side flip), preserve inventory
         tracking so SELL quotes are not incorrectly blocked.
         """
-        if prev_instrument_id == new_instrument_id:
-            return
         same_slug = bool(previous_slug and current_slug and previous_slug == current_slug)
+        if prev_instrument_id == new_instrument_id and (same_slug or not previous_slug or not current_slug):
+            return
         self._cancel_active_maker_orders()
         if same_slug:
             logger.info(
@@ -1900,6 +1900,16 @@ class IntegratedBTCStrategy(
             self._startup_rehydrated_inventory_force_sell_only = False
             self._inventory_overage_sell_only = False
             self.position_manager.clear_all()
+            # These globals back the STATUS line and watchdog; never let a
+            # previous market's prices/age look like current-market health.
+            self.latest_market_bid = None
+            self.latest_market_ask = None
+            self.latest_market_bid_ts = 0.0
+            self.latest_market_ask_ts = 0.0
+            self.last_valid_quote_ts = 0.0
+            prior_sell_audited = getattr(self, "_quote_watchdog_prior_sell_audited", None)
+            if isinstance(prior_sell_audited, set):
+                prior_sell_audited.clear()
         self.market_cycle_realized_net_usdc = Decimal("0")
         bind_market_cycle_state(self, MarketCycleState())
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
@@ -4097,19 +4107,49 @@ class IntegratedBTCStrategy(
         """Escalate a failed resubscribe to a clean data-client rebuild by the launcher."""
         if self._stopping or getattr(self, "_quote_stream_rollover_requested", False):
             return False
-        protective_sell_keys = IntegratedBTCStrategy._live_protective_sell_order_keys(self)
+        sell_exposure = classify_rollover_sell_orders(self)
+        protective_sell_keys = sell_exposure["blocking"]
+        ignored_prior = sell_exposure["ignored_prior"]
+        audited = getattr(self, "_quote_watchdog_prior_sell_audited", None)
+        if not isinstance(audited, set):
+            audited = set()
+            self._quote_watchdog_prior_sell_audited = audited
+        orders = getattr(self, "active_maker_orders", {})
+        current_instruments = [str(item) for item in (getattr(self, "current_market_instruments", []) or [])]
+        for order_key in ignored_prior:
+            state = orders.get(order_key, {}) if isinstance(orders, dict) else {}
+            order = state.get("order") if isinstance(state, dict) else None
+            signature = (str(getattr(self, "current_market_slug", "") or ""), order_key,
+                         str(state.get("instrument_id", "") or "") if isinstance(state, dict) else "")
+            if signature in audited:
+                continue
+            audited.add(signature)
+            self._db_strategy_event(
+                "QUOTE_WATCHDOG_PRIOR_MARKET_SELL_IGNORED",
+                {
+                    "order_key": order_key,
+                    "order_instrument": signature[2],
+                    "current_market_instruments": current_instruments,
+                    "pending_cancel": bool(state.get("pending_cancel")) if isinstance(state, dict) else None,
+                    "order_status": str(getattr(order, "status", "") or "UNKNOWN").upper(),
+                    "ts": now_ts,
+                },
+            )
         if protective_sell_keys:
             last_log_ts = float(getattr(self, "_last_protective_sell_rollover_deferred_ts", 0.0) or 0.0)
             if now_ts - last_log_ts >= 60.0:
                 self._last_protective_sell_rollover_deferred_ts = now_ts
                 logger.error(
                     "Quote stream rollover deferred to preserve live protective SELL order(s): "
-                    f"trigger={trigger} orders={','.join(protective_sell_keys)}; "
+                    f"trigger={trigger} blocking_current_sells={protective_sell_keys} "
+                    f"ignored_prior_market_sells={ignored_prior}; "
                     "watchdog will continue recovery attempts."
                 )
                 self._db_strategy_event(
                     "QUOTE_WATCHDOG_ROLLOVER_DEFERRED_PROTECTIVE_SELL",
-                    {"trigger": trigger, "orders": protective_sell_keys, "ts": now_ts},
+                    {"trigger": trigger, "orders": protective_sell_keys,
+                     "blocking_current_sells": protective_sell_keys,
+                     "ignored_prior_market_sells": ignored_prior, "ts": now_ts},
                 )
             return False
         self._quote_stream_rollover_requested = True
@@ -4142,23 +4182,8 @@ class IntegratedBTCStrategy(
             return False
 
     def _live_protective_sell_order_keys(self) -> list[str]:
-        """List tracked non-terminal SELL orders that must survive a node handoff."""
-        active_orders = getattr(self, "active_maker_orders", None)
-        if not isinstance(active_orders, dict):
-            return []
-        terminal_states = ("REJECTED", "FILLED", "CANCELED", "CANCELLED", "EXPIRED")
-        protected: list[str] = []
-        for order_key, state in active_orders.items():
-            if not isinstance(state, dict):
-                continue
-            if str(state.get("side", "") or "").lower() != "sell" and not str(order_key).lower().startswith("sell:"):
-                continue
-            order = state.get("order")
-            status = str(getattr(order, "status", "") or "").upper()
-            if any(terminal in status for terminal in terminal_states):
-                continue
-            protected.append(str(order_key))
-        return protected
+        """List tracked non-terminal current-market SELLs that protect handoff."""
+        return classify_rollover_sell_orders(self)["blocking"]
 
     def _cancel_maker_buys_for_quote_recovery(self) -> None:
         """Withdraw stale entry bids without canceling venue-side exit protection."""
@@ -4297,6 +4322,15 @@ class IntegratedBTCStrategy(
             if self._stopping:
                 return
             now_ts = time.time()
+            cleanup_pending_cancels = getattr(self, "_cleanup_stale_pending_cancels", None)
+            if callable(cleanup_pending_cancels):
+                try:
+                    # This is the sole cancel retry/reconciliation authority.
+                    # Running it on the watchdog lets eligible prior-market
+                    # state retire even while the quote callback is stalled.
+                    cleanup_pending_cancels(now_ts)
+                except Exception as cleanup_error:
+                    logger.exception(f"Watchdog pending-cancel reconciliation failed: {cleanup_error}")
             self._emit_strategy_status(now_ts)
             recovery_started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0))
             pending_instruments = getattr(self, "quote_recovery_pending_instruments", set())
@@ -4371,7 +4405,8 @@ class IntegratedBTCStrategy(
 
         bid_txt = f"{float(self.latest_market_bid):.4f}" if self.latest_market_bid is not None else "None"
         ask_txt = f"{float(self.latest_market_ask):.4f}" if self.latest_market_ask is not None else "None"
-        stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else -1.0
+        stale_for_txt = (f"{now_ts - self.last_valid_quote_ts:.1f}s"
+                         if self.last_valid_quote_ts > 0 else "unavailable")
         stale_reason = quote_age_status_reason(
             now_ts=now_ts,
             last_valid_quote_ts=self.last_valid_quote_ts,
@@ -4438,7 +4473,7 @@ class IntegratedBTCStrategy(
             f"ref_spot={ref_spot_txt} ref_src={ref_src_txt} ref_age={ref_age:.1f}s "
             f"binance_spot={binance_spot_txt} binance_age={binance_age:.1f}s "
             f"bid={bid_txt} ask={ask_txt} "
-            f"stale_for={stale_for:.1f}s invalid_ticks={self.consecutive_invalid_quote_ticks} "
+            f"stale_for={stale_for_txt} invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
             f"{fast_follow_status}"
