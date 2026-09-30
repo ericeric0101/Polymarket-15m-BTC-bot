@@ -82,9 +82,13 @@ def threadsafe_node_stop_callback(node: TradingNode):
     def request_stop() -> None:
         loop = getattr(getattr(node, "kernel", None), "loop", None)
         if loop is not None and not loop.is_closed() and loop.is_running():
+            node._btc15m_stop_requested_monotonic = time.monotonic()
             loop.call_soon_threadsafe(node.stop)
+            logger.warning("Node stop request dispatched to owning event loop")
             return
+        node._btc15m_stop_requested_monotonic = time.monotonic()
         node.stop()
+        logger.warning("Node stop request dispatched directly; owning event loop is not running")
 
     return idempotent_stop_callback(request_stop)
 
@@ -717,6 +721,12 @@ def run_integrated_bot(
             logger.info(f"Bot cycle {cycle_idx} starting...")
             node.run()
             node_run_returned = True
+            stop_requested_at = float(getattr(node, "_btc15m_stop_requested_monotonic", 0.0) or 0.0)
+            if stop_requested_at > 0:
+                logger.info(
+                    "Node run returned after stop request: "
+                    f"elapsed_sec={max(0.0, time.monotonic() - stop_requested_at):.3f}"
+                )
         except KeyboardInterrupt:
             user_stopped = True
             logger.info("Shutdown requested by user.")
@@ -770,7 +780,10 @@ def run_integrated_bot(
                         f"next cycle: pending={pending_engines}"
                     )
             _install_fresh_main_thread_event_loop()
-            logger.info(f"Bot cycle {cycle_idx} stopped")
+            logger.info(
+                f"Bot cycle {cycle_idx} stopped elapsed_sec={time.time() - cycle_started_at:.3f} "
+                f"node_run_returned={node_run_returned} rollover={rollover_requested.is_set()}"
+            )
 
         if user_stopped:
             break

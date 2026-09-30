@@ -311,19 +311,24 @@ def refresh_quote_tick_subscriptions(strategy: Any) -> None:
     """Replace quote and L2 subscriptions after a feed stall."""
     instrument_ids = list(getattr(strategy, "current_market_instruments", []) or [])
     mark_quote_subscription_pending(strategy, instrument_ids, clear_cached_quotes=True)
+    # Polymarket's WebSocket client reference-counts assets shared by quote and
+    # L2 subscriptions. Remove both references before adding either one back;
+    # interleaving unsubscribe/subscribe leaves the count above zero and sends
+    # no actual WebSocket refresh request.
     for inst_id in instrument_ids:
         try:
             strategy.unsubscribe_quote_ticks(inst_id)
         except Exception as exc:
             logger.debug(f"Quote unsubscribe skipped for {inst_id}: {exc}")
         try:
-            strategy.subscribe_quote_ticks(inst_id)
-        except Exception as exc:
-            logger.warning(f"Quote resubscribe failed for {inst_id}: {exc}")
-        try:
             strategy.unsubscribe_order_book_deltas(inst_id)
         except Exception as exc:
             logger.debug(f"L2 unsubscribe skipped for {inst_id}: {exc}")
+    for inst_id in instrument_ids:
+        try:
+            strategy.subscribe_quote_ticks(inst_id)
+        except Exception as exc:
+            logger.warning(f"Quote resubscribe failed for {inst_id}: {exc}")
         try:
             strategy.subscribe_order_book_deltas(inst_id)
         except Exception as exc:
@@ -926,7 +931,18 @@ def handle_generic_event(strategy: Any, event: Any) -> None:
 
 def handle_stop(strategy: Any) -> None:
     """Called when strategy stops."""
+    shutdown_started = time.monotonic()
+
+    def log_shutdown_stage(stage: str, stage_started: float) -> None:
+        logger.info(
+            f"Strategy shutdown stage completed: stage={stage} "
+            f"elapsed_sec={time.monotonic() - stage_started:.3f} "
+            f"total_sec={time.monotonic() - shutdown_started:.3f}"
+        )
+
     strategy._stopping = True
+    stage_started = time.monotonic()
+    logger.info("Strategy shutdown stage started: stage=outcome_observers_and_research_databases")
     outcome_observer = getattr(strategy, "hyperliquid_outcome_observer", None)
     if outcome_observer is not None:
         try:
@@ -945,6 +961,9 @@ def handle_stop(strategy: Any) -> None:
             lead_lag_db.stop()
         except Exception:
             logger.debug("Failed to flush Hyperliquid lead/lag observations", exc_info=True)
+    log_shutdown_stage("outcome_observers_and_research_databases", stage_started)
+    stage_started = time.monotonic()
+    logger.info("Strategy shutdown stage started: stage=background_threads")
     twap_research_db = getattr(strategy, "twap_research_db", None)
     if twap_research_db is not None and twap_research_db is not lead_lag_db:
         try:
@@ -974,6 +993,9 @@ def handle_stop(strategy: Any) -> None:
         ],
         join_timeout_sec=2.0,
     )
+    log_shutdown_stage("background_threads", stage_started)
+    stage_started = time.monotonic()
+    logger.info("Strategy shutdown stage started: stage=orders_and_final_journal_events")
     smart_money_tracker = getattr(strategy, "smart_money_tracker", None)
     if smart_money_tracker is not None:
         try:
@@ -1002,12 +1024,16 @@ def handle_stop(strategy: Any) -> None:
         final_inventory_shares=strategy.inventory_delta_shares,
         market_cycle_realized_net_usdc=strategy.market_cycle_realized_net_usdc,
     )
+    log_shutdown_stage("orders_and_final_journal_events", stage_started)
+    stage_started = time.monotonic()
+    logger.info("Strategy shutdown stage started: stage=trade_journal_final_backup")
     trade_db = getattr(strategy, "trade_db", None)
     if trade_db is not None:
         try:
             trade_db.stop()
         except Exception:
             logger.debug("Failed to flush trade journal backup during shutdown", exc_info=True)
+    log_shutdown_stage("trade_journal_final_backup", stage_started)
 
     if strategy.terminal_dashboard:
         try:

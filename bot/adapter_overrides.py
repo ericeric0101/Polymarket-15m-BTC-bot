@@ -45,6 +45,19 @@ def bounded_l2_depth(value: object | None = None) -> int:
         return 10
 
 
+def should_enqueue_trade_tick(engine, tick) -> bool:
+    """Avoid queueing Polymarket prints when no DataEngine consumer requested them."""
+    subscribed = getattr(engine, "subscribed_trade_ticks", None)
+    if not callable(subscribed):
+        # Unknown engine API: preserve data rather than infer that it is unused.
+        return True
+    try:
+        instrument_id = str(getattr(tick, "instrument_id", ""))
+        return any(str(item) == instrument_id for item in subscribed())
+    except Exception:
+        return True
+
+
 def build_bounded_order_book_snapshot(*, instrument_id, book, depth: int, ts_event: int, ts_init: int):
     """Build a CLEAR + top-N snapshot so deep stale levels cannot survive in cache."""
     from nautilus_trader.model.data import BookOrder, OrderBookDelta, OrderBookDeltas
@@ -962,6 +975,11 @@ def _install_live_data_engine_observability_override() -> None:
         # draining them. This also prevents late feed callbacks from reviving
         # observability/backpressure state after cleanup.
         if getattr(self, "_btc15m_disposing", False):
+            return
+        if type(data).__name__ == "TradeTick" and not should_enqueue_trade_tick(self, data):
+            self._btc15m_unrequested_trade_ticks_dropped = int(
+                getattr(self, "_btc15m_unrequested_trade_ticks_dropped", 0)
+            ) + 1
             return
         try:
             queue_depth = self.data_qsize()

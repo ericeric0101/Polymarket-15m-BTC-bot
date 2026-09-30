@@ -23,8 +23,10 @@ from bot.adapter_overrides import (
     install_runtime_compatibility_overrides,
     record_quote_provenance,
     record_quote_data_engine_latency,
+    should_enqueue_trade_tick,
 )
 import bot.adapter_overrides as adapter_overrides
+from bot.market_runtime import refresh_quote_tick_subscriptions
 
 
 def _instrument() -> InstrumentId:
@@ -197,6 +199,86 @@ def test_saturated_data_queue_coalesces_quotes_and_suppresses_l2_without_queuefu
     assert latest_by_instrument == {"up": 127, "down": 127}
     assert engine._btc15m_backpressure["l2_suppressed_total"] > 0
     assert engine._btc15m_backpressure["quote_coalesced_total"] > 0
+
+
+def test_unsubscribed_trade_ticks_are_not_allowed_to_fill_data_engine_queue():
+    class TradeTick:
+        instrument_id = "up"
+
+    engine = SimpleNamespace(subscribed_trade_ticks=lambda: set())
+    assert should_enqueue_trade_tick(engine, TradeTick()) is False
+
+    engine.subscribed_trade_ticks = lambda: {"up"}
+    assert should_enqueue_trade_tick(engine, TradeTick()) is True
+
+    # If the installed DataEngine does not expose the subscription query, keep
+    # the event rather than silently dropping potentially requested data.
+    assert should_enqueue_trade_tick(SimpleNamespace(), TradeTick()) is True
+
+    class Engine:
+        _btc15m_disposing = False
+        _btc15m_unrequested_trade_ticks_dropped = 0
+        subscribed_trade_ticks = staticmethod(lambda: set())
+
+    install_runtime_compatibility_overrides()
+    from nautilus_trader.live.data_engine import LiveDataEngine
+    engine = Engine()
+    LiveDataEngine.process(engine, TradeTick())
+    assert engine._btc15m_unrequested_trade_ticks_dropped == 1
+
+
+def test_watchdog_resubscribes_only_after_both_quote_and_l2_refs_are_removed():
+    calls = []
+    inst = "token-up"
+    strategy = SimpleNamespace(
+        current_market_instruments=[inst],
+        unsubscribe_quote_ticks=lambda item: calls.append(("unsubscribe_quote", item)),
+        unsubscribe_order_book_deltas=lambda item: calls.append(("unsubscribe_l2", item)),
+        subscribe_quote_ticks=lambda item: calls.append(("subscribe_quote", item)),
+        subscribe_order_book_deltas=lambda item: calls.append(("subscribe_l2", item)),
+    )
+
+    refresh_quote_tick_subscriptions(strategy)
+
+    assert calls == [
+        ("unsubscribe_quote", inst),
+        ("unsubscribe_l2", inst),
+        ("subscribe_quote", inst),
+        ("subscribe_l2", inst),
+    ]
+
+    # Exercise the installed adapter's actual reference-counted behavior. The
+    # unsubscribe reaches zero once, causing a wire unsubscribe, then the first
+    # subscribe emits a wire subscribe; the second ref is only local accounting.
+    from nautilus_trader.adapters.polymarket.websocket.client import PolymarketWebSocketClient
+
+    async def exercise_websocket_reference_counts():
+        client = PolymarketWebSocketClient.__new__(PolymarketWebSocketClient)
+        client._lock = asyncio.Lock()
+        client._log = SimpleNamespace(debug=lambda *_args: None, warning=lambda *_args: None)
+        client._max_subscriptions_per_connection = 200
+        client._subscriptions = [inst, "another-token"]
+        client._subscription_counts = {inst: 2, "another-token": 1}
+        client._client_subscriptions = {0: [inst, "another-token"]}
+        client._clients = {0: SimpleNamespace(is_active=lambda: True)}
+        client._is_connecting = {0: False}
+        wire_messages = []
+        client._send = lambda _client_id, message: _append_async(wire_messages, message)
+        client._create_dynamic_subscribe_msg = lambda *, subs: ("subscribe", tuple(subs))
+        client._create_dynamic_unsubscribe_msg = lambda *, subs: ("unsubscribe", tuple(subs))
+        async def run_calls():
+            for name, token in calls:
+                operation = client.unsubscribe if name.startswith("unsubscribe") else client.subscribe
+                await operation(token)
+        await run_calls()
+        return wire_messages, client._subscription_counts[inst]
+
+    async def _append_async(destination, value):
+        destination.append(value)
+
+    wire_messages, reference_count = asyncio.run(exercise_websocket_reference_counts())
+    assert wire_messages == [("unsubscribe", (inst,)), ("subscribe", (inst,))]
+    assert reference_count == 2
 
 
 def test_l2_rate_limit_coalesces_reconnect_snapshot_bursts():
