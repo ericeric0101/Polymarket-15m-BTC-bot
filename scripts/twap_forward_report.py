@@ -24,13 +24,15 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
-    """Build checkpoint calibration, calibration buckets, and model/market lead."""
+    """Build provenance-strict checkpoint calibration, buckets, and lead rows."""
     summaries = {r.get("market_slug"): r for r in rows if r.get("event_type") == "MARKET_TWAP_SUMMARY"}
     checkpoints = [r for r in rows if r.get("event_type") == "TMINUS_CHECKPOINT"]
     canonical_candidates = []
     for row in checkpoints:
         summary = summaries.get(row.get("market_slug")) or {}
-        if summary.get("settlement_reference_is_canonical") is True:
+        if (summary.get("settlement_reference_is_canonical") is True
+                and row.get("sigma_ex_market_fresh") is True
+                and row.get("p_up_ex_market") is not None):
             canonical_candidates.append({**row, "settlement_side": summary.get("settlement_side")})
     # A market contributes at most once to a given horizon. If duplicated
     # checkpoint events exist, retain the sample nearest its target T-minus;
@@ -85,20 +87,39 @@ def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict],
                                 "mean_predicted": sum(float(r["p_up_ex_market"]) for r in group)/len(group) if group else None,
                                 "actual_up_rate": sum(r["settlement_side"] == "UP" for r in group)/len(group) if group else None,
                                 "descriptive_only": True})
+    # Threshold lead is reconstructed from threshold events, not legacy
+    # summary timestamps, because old summaries have no sigma freshness proof.
+    threshold_events = [r for r in rows if r.get("event_type") == "SETTLEMENT_PATH_THRESHOLD_CROSS"]
     lead_rows = []
     for slug, summary in summaries.items():
         if summary.get("settlement_reference_is_canonical") is not True or summary.get("settlement_side") not in {"UP", "DOWN"}:
             continue
         is_up = summary["settlement_side"] == "UP"
         for threshold in (.90, .95, .975):
-            high_label = f"p{threshold*100:g}".replace(".", "")
-            low_pct = f"{(1-threshold)*100:g}".replace(".", "")
-            if (1-threshold) < .10:
-                low_pct = low_pct.zfill(3 if (1-threshold) < .05 else 2)
-            low_label = f"p{low_pct}"
-            model_key = f"first_{high_label}_up_ts" if is_up else f"first_{low_label}_down_ts"
-            market_key = f"first_market_{high_label}_up_ts" if is_up else f"first_market_{low_label}_down_ts"
-            model_ts, market_ts = summary.get(model_key), summary.get(market_key)
+            crossing_threshold = threshold if is_up else 1.0 - threshold
+
+            def first_fresh_cross(measure: str, *, require_fresh: bool) -> float | None:
+                candidates = []
+                for event in threshold_events:
+                    if event.get("market_slug") != slug or event.get("measure") != measure:
+                        continue
+                    if require_fresh and event.get("sigma_ex_market_fresh") is not True:
+                        continue
+                    value_key = "p_up_ex_market" if measure == "p_up_ex_market" else "market_mid_probability_up"
+                    if event.get(value_key) is None:
+                        continue
+                    try:
+                        event_threshold = float(event.get("threshold"))
+                        observed_ts = float(event.get("observed_ts"))
+                    except (TypeError, ValueError):
+                        continue
+                    if (abs(event_threshold - crossing_threshold) <= 1e-9
+                            and event.get("crossing_direction") in {"first_observed_beyond", "entered"}):
+                        candidates.append(observed_ts)
+                return min(candidates) if candidates else None
+
+            model_ts = first_fresh_cross("p_up_ex_market", require_fresh=True)
+            market_ts = first_fresh_cross("market_mid_probability_up", require_fresh=False)
             if model_ts is None and market_ts is None:
                 continue
             lead_rows.append({"market_slug": slug, "settlement_side": summary["settlement_side"],
@@ -149,7 +170,9 @@ def main() -> int:
     canonical_probability_checkpoints = {
         (r.get("market_slug"), int(r.get("checkpoint_sec") or 0))
         for r in checkpoints
-        if r.get("market_slug") in canonical_slugs and r.get("p_up_ex_market") is not None
+        if (r.get("market_slug") in canonical_slugs
+            and r.get("p_up_ex_market") is not None
+            and r.get("sigma_ex_market_fresh") is True)
     }
     # Accuracy needs observed outcome labels and is intentionally restricted to
     # canonical Chainlink-60s settlement references.  Do not turn a Binance or

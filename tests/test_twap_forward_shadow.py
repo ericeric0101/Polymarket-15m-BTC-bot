@@ -151,7 +151,7 @@ def test_probability_path_only_persists_material_thresholds_and_enriches_checkpo
         "market_mid_probability_up": .90, "best_bid_up": .89, "best_ask_up": .91,
         "model_minus_market_mid_up": .06, "model_minus_best_ask_up": .05,
         "required_future_avg_to_flip": 101.0, "required_move_sigma": 2.2,
-        "probability_model_mode": "PRE_FINAL_WINDOW_APPROX",
+        "probability_model_mode": "PRE_FINAL_WINDOW_APPROX", "sigma_ex_market_fresh": True,
     }
     sample(model, 100, left=121)
     observed = model.observe(slug="m", now_ts=101, source_ts=101, fast_spot=Decimal("101"),
@@ -177,6 +177,29 @@ def test_probability_path_only_persists_material_thresholds_and_enriches_checkpo
     assert summary["first_market_p90_up_ts"] == 101.0
 
 
+def test_unavailable_probability_does_not_emit_fake_threshold_exit_or_reentry():
+    db = FakeDb(); model = TwapForwardShadow(db=db)
+    base = {"p_up_ex_market": .96, "market_mid_probability_up": .9,
+            "sigma_ex_market_fresh": True}
+    sample(model, 100, left=121)
+    model.observe(slug="m", now_ts=101, source_ts=101, fast_spot=Decimal("101"),
+                  official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=119,
+                  settlement_diagnostics=base)
+    initial = [r["payload"] for r in db.rows if r["payload"]["event_type"] == "SETTLEMENT_PATH_THRESHOLD_CROSS"
+               and r["payload"].get("measure") == "p_up_ex_market"]
+    unavailable = {**base, "p_up_ex_market": None, "sigma_ex_market_fresh": False}
+    model.observe(slug="m", now_ts=102, source_ts=102, fast_spot=Decimal("101"),
+                  official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=118,
+                  settlement_diagnostics=unavailable)
+    model.observe(slug="m", now_ts=103, source_ts=103, fast_spot=Decimal("101"),
+                  official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=117,
+                  settlement_diagnostics=base)
+    final = [r["payload"] for r in db.rows if r["payload"]["event_type"] == "SETTLEMENT_PATH_THRESHOLD_CROSS"
+             and r["payload"].get("measure") == "p_up_ex_market"]
+    assert len(final) == len(initial)
+    assert all(row["crossing_direction"] != "left" for row in final)
+
+
 def test_probability_report_uses_canonical_labels_and_retains_negative_lead():
     from scripts.twap_forward_report import probability_research_rows
 
@@ -186,21 +209,127 @@ def test_probability_report_uses_canonical_labels_and_retains_negative_lead():
         {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "proxy", "settlement_reference_is_canonical": False,
          "settlement_side": "DOWN"},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
-         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 59, "observed_ts": 101},
+         "p_up_ex_market": .8, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .7, "time_left_sec": 59, "observed_ts": 101},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 120,
-         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 119, "observed_ts": 102},
+         "p_up_ex_market": .8, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .7, "time_left_sec": 119, "observed_ts": 102},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 30,
-         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 29, "observed_ts": 103},
+         "p_up_ex_market": .8, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .7, "time_left_sec": 29, "observed_ts": 103},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
-         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 58, "observed_ts": 104},
+         "p_up_ex_market": .8, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .7, "time_left_sec": 58, "observed_ts": 104},
+        # Stale and legacy rows do not enter provenance-strict calibration.
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
+         "p_up_ex_market": .99, "sigma_ex_market_fresh": False, "time_left_sec": 60, "observed_ts": 105},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
+         "p_up_ex_market": .99, "time_left_sec": 60, "observed_ts": 106},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "proxy", "checkpoint_sec": 60,
-         "p_up_ex_market": .1, "market_mid_probability_up": .2},
+         "p_up_ex_market": .1, "sigma_ex_market_fresh": True, "market_mid_probability_up": .2},
+        {"event_type": "SETTLEMENT_PATH_THRESHOLD_CROSS", "market_slug": "canonical", "observed_ts": 120,
+         "measure": "p_up_ex_market", "threshold": .9, "p_up_ex_market": .96,
+         "crossing_direction": "first_observed_beyond", "sigma_ex_market_fresh": True},
+        {"event_type": "SETTLEMENT_PATH_THRESHOLD_CROSS", "market_slug": "canonical", "observed_ts": 110,
+         "measure": "market_mid_probability_up", "threshold": .9, "market_mid_probability_up": .91,
+         "crossing_direction": "first_observed_beyond", "sigma_ex_market_fresh": False},
     ]
     metrics, buckets, leads = probability_research_rows(rows)
     assert next(row for row in metrics if row["checkpoint_sec"] == 60)["canonical_n"] == 1
     assert sum(row["n_markets"] for row in buckets if row["probability_low"] == .75 and row["probability_high"] == .9) == 3
     assert {row["checkpoint_sec"] for row in buckets if row["n_markets"]} == {30, 60, 120}
     assert leads[0]["model_lead_sec"] == -10.0
+    assert leads[0]["model_first_observed_ts"] == 120.0
+
+
+def _probability_host(now=1000.0):
+    class Host(SpotPricerMixin):
+        pass
+    host = Host()
+    host._polymarket_chainlink_twap_window_sec = 60
+    host._polymarket_chainlink_twap_price = Decimal("100")
+    host.current_market_end_timestamp = now + 121
+    host._binance_ws_price = Decimal("100")
+    host._binance_ws_price_ts = now - 1
+    host._polymarket_chainlink_price = Decimal("102")
+    host._polymarket_chainlink_price_ts = now - 1
+    host._polymarket_chainlink_price_observation_ts = now - 1
+    host.polymarket_chainlink_history = [(now-30, Decimal("99")), (now-20, Decimal("101")), (now-1, Decimal("100"))]
+    host.maker_digital_vol_min_points = 3
+    host.maker_digital_vol_window = 30
+    host.maker_digital_sigma_default = Decimal("0.05")
+    host.maker_digital_vol_scale = Decimal("1")
+    host.maker_digital_sigma_floor = Decimal("0.05")
+    host.maker_digital_sigma_ceiling = Decimal("2")
+    host.maker_digital_sigma_time_decay_enabled = False
+    host.maker_digital_sigma_time_decay_ref_sec = 600
+    host.maker_digital_sigma_time_decay_min = .3
+    host.maker_implied_sigma_enabled = False
+    host.latest_quote_by_inst = {}
+    host.last_quote_update_ts_by_inst = {}
+    return host
+
+
+def test_stale_raw_sigma_fails_closed_even_with_fresh_binance_path_spot():
+    host = _probability_host()
+    host.polymarket_chainlink_history = [(970.0, Decimal("99")), (975.0, Decimal("101")), (980.0, Decimal("100"))]
+    out = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("99"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
+    assert out["path_spot_source"] == "polymarket_chainlink_spot"
+    assert out["sigma_ex_market"] is not None
+    assert out["sigma_ex_market_age_sec"] == 20.0
+    assert out["sigma_ex_market_fresh"] is False
+    assert out["p_up_ex_market"] is None and out["p_down_ex_market"] is None
+    assert out["required_move_sigma"] is None
+    assert out["model_minus_market_mid_up"] is None
+    assert out["data_quality"] == "stale_raw_spot_sigma"
+    assert out["p_up_market_conditioned"] is not None
+
+
+def test_fresh_raw_sigma_has_age_freshness_and_ex_market_probability():
+    host = _probability_host()
+    out = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("99"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
+    assert out["sigma_ex_market_age_sec"] == 1.0
+    assert out["sigma_ex_market_fresh"] is True
+    assert out["p_up_ex_market"] is not None
+    assert out["required_move_sigma"] is not None
+
+
+def test_settlement_state_and_path_spot_sides_are_distinct_and_alias_is_settlement():
+    host = _probability_host()
+    # Raw Chainlink path spot is UP of strike while official TWAP remains DOWN.
+    out = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("99"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
+    assert out["settlement_state_side"] == "DOWN"
+    assert out["path_spot_side"] == "UP"
+    assert out["settlement_path_side_divergence"] is True
+    assert out["currently_dominant_side"] == out["settlement_state_side"]
+    host._polymarket_chainlink_price = Decimal("98")
+    reverse = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("101"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
+    assert reverse["settlement_state_side"] == "UP"
+    assert reverse["path_spot_side"] == "DOWN"
+    assert reverse["settlement_path_side_divergence"] is True
+
+
+def test_required_move_modes_distinguish_exact_proxy_and_unavailable():
+    host = _probability_host()
+    prefinal = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=1000.0)
+    assert prefinal["required_move_mode"] == "PRE_FINAL_STRIKE_PROXY"
+    assert prefinal["path_boundary_proxy"] == 101.0
+    assert prefinal["remaining_avg_decision_boundary"] is None
+    assert prefinal["required_future_avg_to_flip"] is None
+    host.current_market_end_timestamp = 1030.0
+    host.polymarket_chainlink_history = []
+    final_missing = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=30, now_ts=1000.0)
+    assert final_missing["required_move_mode"] == "UNAVAILABLE"
+    assert final_missing["required_move_usd"] is None
+    assert final_missing["required_move_bps"] is None
+    assert final_missing["required_move_sigma"] is None
+    assert final_missing["required_future_avg_to_flip"] is None
 
 
 def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
@@ -289,6 +418,7 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
     )
     assert observed["observed_final_window_avg"] == 100.0
     assert observed["observed_final_window_sec"] == 20.0
+    assert observed["required_move_mode"] == "EXACT_FINAL_WINDOW_BOUNDARY"
     assert observed["required_future_avg_to_flip"] == 100.0
     assert observed["remaining_avg_decision_boundary"] == 100.0
     assert observed["required_avg_for_up"] == observed["required_avg_for_down"] == 100.0

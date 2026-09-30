@@ -2148,3 +2148,19 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   one observation per market and checkpoint, selecting the observation nearest
   the target horizon (ties choose the latest observed event). Different
   checkpoints are not pooled into a market-count bucket.
+- Settlement-state side is explicitly official current Chainlink TWAP versus
+  strike; path-spot side is raw underlying spot versus strike. Their divergence
+  is research context only. The deprecated `currently_dominant_side` field is
+  retained as a compatibility alias for settlement-state side.
+- Ex-market probability requires raw Chainlink sigma whose latest included
+  observation is fresh under the existing 10-second raw/external spot freshness
+  window. Stale sigma remains descriptive, but ex-market probabilities,
+  standardized required move, and model-vs-market edges are unavailable. The
+  market-conditioned diagnostic remains independently available where valid.
+- `required_move_mode` distinguishes `EXACT_FINAL_WINDOW_BOUNDARY` (valid
+  observed partial integral), `PRE_FINAL_STRIKE_PROXY` (pre-final strike proxy),
+  and `UNAVAILABLE` (final-window integral unavailable); final-window missing
+  history never falls back to the strike proxy. Calibration and model threshold
+  lead times include only canonical settlement labels and observations with
+  `sigma_ex_market_fresh=true`; legacy rows without explicit freshness proof
+  are excluded. All fields remain shadow-only.
