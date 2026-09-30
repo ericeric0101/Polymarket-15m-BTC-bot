@@ -136,6 +136,39 @@ def test_twap_probability_uses_observed_window_average_near_settlement():
     assert probability > Decimal("0.5")
 
 
+def test_twap_diagnostics_expose_single_source_required_remaining_average():
+    at_30 = MakerEngine.twap_settlement_diagnostics(
+        98, 100, .5, 30, 60, observed_window_avg=98, observed_window_sec=30
+    )
+    at_59 = MakerEngine.twap_settlement_diagnostics(
+        98, 100, .5, 1, 60, observed_window_avg=98, observed_window_sec=59
+    )
+    assert at_30["mode"] == "FINAL_WINDOW_PARTIAL_INTEGRAL"
+    assert at_30["remaining_window_sec"] == 30
+    assert at_30["required_remaining_avg_for_up"] == 102
+    assert at_59["remaining_window_sec"] == 1
+    assert at_59["required_remaining_avg_for_up"] == 218
+    assert at_30["required_remaining_avg_for_down"] == at_30["required_remaining_avg_for_up"]
+    assert MakerEngine.twap_settlement_up_probability(
+        98, 100, .5, 30, 60, observed_window_avg=98, observed_window_sec=30
+    ) == at_30["p_up"]
+
+
+def test_twap_diagnostics_do_not_fabricate_path_without_final_window_integral():
+    no_observation = MakerEngine.twap_settlement_diagnostics(101, 100, .5, 120, 60)
+    full_window_up = MakerEngine.twap_settlement_diagnostics(
+        101, 100, .5, 0, 60, observed_window_avg=101, observed_window_sec=60
+    )
+    full_window_down = MakerEngine.twap_settlement_diagnostics(
+        99, 100, .5, 0, 60, observed_window_avg=99, observed_window_sec=60
+    )
+    assert no_observation["required_remaining_avg_for_up"] is None
+    assert no_observation["mode"] == "PRE_FINAL_WINDOW_APPROX"
+    assert full_window_up["p_up"] == Decimal("1")
+    assert full_window_down["p_up"] == Decimal("0")
+    assert full_window_up["required_remaining_avg_for_up"] is None
+
+
 def test_fractional_kelly_sizing_preserves_an_existing_high_price_reduction():
     entry = apply_fractional_kelly_sizing(
         desired_entry={

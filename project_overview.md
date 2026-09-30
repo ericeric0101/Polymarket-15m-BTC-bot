@@ -2091,3 +2091,35 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   other research writers may still grow the shared research database. Its size
   accounting includes SQLite main, WAL, and SHM files. This remains research
   only and has no live entry, stop, exit, sizing, or session-guard authority.
+
+## Settlement Probability / Required Path Shadow (2026-09-30)
+
+- `TwapForwardShadow` is extended with event-driven settlement-path diagnostics;
+  it reuses the official Chainlink TWAP tick, bounded raw Chainlink history and
+  `_final_twap_observation()`, existing Binance spot, fresh cached UP/DOWN BBO,
+  `ForecastState`, `MakerEngine.twap_settlement_diagnostics()`, and the existing
+  `build_safety_sigma()` helper. No new feed, rolling TWAP engine, database, or
+  probability/sigma pipeline is introduced.
+- The existing shared `ForecastState.twap_average_up_probability` remains the
+  market-conditioned forecast when the configured implied-sigma floor is active.
+  The shadow also emits `p_up_ex_market` / `p_down_ex_market` using the same
+  shared forecast transforms with market-derived implied sigma disabled. The
+  conditioning flag is recorded explicitly; market prices are not fed back into
+  the independent probability.
+- Outside the final 60-second settlement window, required path is a strike-boundary
+  approximation and is labeled `PRE_FINAL_WINDOW_APPROX`. Inside that window,
+  the exact observed partial average is calculated only from raw Chainlink
+  history. Missing/insufficient history leaves the required average null and
+  marks `insufficient_raw_final_window_history`; the rolling TWAP is never used
+  as a substitute for that partial integral.
+- Existing T−120/60/30/15/10/5 checkpoints now carry required average/move/sigma,
+  model probabilities, fresh executable BBO, and model-vs-market edges. Only
+  threshold transitions and existing checkpoints are persisted; full per-tick
+  samples remain bounded in memory. `scripts/twap_forward_report.py` exports
+  checkpoint calibration, probability buckets, and model-vs-market first-observed
+  threshold lead times, preserving negative lead and restricting primary
+  accuracy to canonical Chainlink settlement labels.
+- These fields and reports are descriptive research only. They do not alter
+  entry, T+300, stop, take-profit, sizing, or order routing, and have no live
+  trading authority. Probability calibration/lead results remain provisional
+  until adequate forward samples exist.

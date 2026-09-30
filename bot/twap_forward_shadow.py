@@ -35,6 +35,7 @@ class TwapSample:
     best_ask: Decimal | None
     strike: Decimal | None
     time_left_sec: float | None
+    settlement_diagnostics: dict[str, Any] | None = None
 
 
 class TwapForwardShadow:
@@ -57,6 +58,7 @@ class TwapForwardShadow:
         self._checkpoint_done: dict[str, set[int]] = defaultdict(set)
         self._last_emitted_sign: dict[str, int] = {}
         self._last_emitted_projected_side: dict[str, str] = {}
+        self._last_threshold_state: dict[str, dict[str, dict[float, bool]]] = defaultdict(dict)
         self._storage_guard_triggered = False
         self._storage_guard_reason = ""
         self._last_storage_check_ts = 0.0
@@ -90,8 +92,9 @@ class TwapForwardShadow:
 
     def observe(self, *, slug: str, now_ts: float, source_ts: float, fast_spot: Decimal | None,
                 official_twap: Decimal | None, strike: Decimal | None, time_left_sec: float | None,
-                best_bid: Decimal | None = None, best_ask: Decimal | None = None) -> dict[str, Any]:
-        sample = TwapSample(float(now_ts), float(source_ts), fast_spot, official_twap, best_bid, best_ask, strike, time_left_sec)
+                best_bid: Decimal | None = None, best_ask: Decimal | None = None,
+                settlement_diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+        sample = TwapSample(float(now_ts), float(source_ts), fast_spot, official_twap, best_bid, best_ask, strike, time_left_sec, settlement_diagnostics)
         with self._lock:
             samples = self._samples[str(slug)]
             history = list(samples)
@@ -141,6 +144,8 @@ class TwapForwardShadow:
             "projected_settlement_side_trend": _side(projected_trend, strike),
             "projected_crossing_eta_sec": eta, "crossing_eta_confidence": confidence,
         }
+        if settlement_diagnostics:
+            result.update(settlement_diagnostics)
         self._update_summary(str(slug), result)
         with self._lock:
             self._latest[str(slug)] = dict(result)
@@ -208,6 +213,7 @@ class TwapForwardShadow:
     def _persist_material(self, result: dict[str, Any]) -> None:
         slug, ts = str(result["market_slug"]), float(result["observed_ts"])
         self._storage_health(ts)
+        self._track_probability_summary(slug, result)
         value = result.get("twap_minus_strike_bps")
         sign = 1 if value is not None and value > 0 else -1 if value is not None and value < 0 else 0
         if sign and slug in self._last_emitted_sign and sign != self._last_emitted_sign[slug]:
@@ -226,6 +232,56 @@ class TwapForwardShadow:
                 if float(left) <= checkpoint and checkpoint not in self._checkpoint_done[slug]:
                     self._checkpoint_done[slug].add(checkpoint)
                     self._persist(slug, ts, "TMINUS_CHECKPOINT", {**result, "checkpoint_sec": checkpoint})
+
+    def _track_probability_summary(self, slug: str, result: dict[str, Any]) -> None:
+        """Track probability/path extrema in RAM; persist threshold changes only."""
+        summary = self._summary.setdefault(slug, {"market_slug": slug})
+        p = result.get("p_up_ex_market")
+        market = result.get("market_mid_probability_up")
+        required_sigma = result.get("required_move_sigma")
+        if p is not None:
+            p = float(p)
+            summary["max_p_up_ex_market"] = p if summary.get("max_p_up_ex_market") is None else max(summary["max_p_up_ex_market"], p)
+            summary["min_p_up_ex_market"] = p if summary.get("min_p_up_ex_market") is None else min(summary["min_p_up_ex_market"], p)
+            self._emit_threshold_crossings(slug, result, "p_up_ex_market", p, (.025, .05, .10, .25, .50, .75, .90, .95, .975))
+        if market is not None:
+            market = float(market)
+            summary["max_market_mid_probability_up"] = market if summary.get("max_market_mid_probability_up") is None else max(summary["max_market_mid_probability_up"], market)
+            summary["min_market_mid_probability_up"] = market if summary.get("min_market_mid_probability_up") is None else min(summary["min_market_mid_probability_up"], market)
+            self._emit_threshold_crossings(slug, result, "market_mid_probability_up", market, (.025, .05, .10, .25, .50, .75, .90, .95, .975))
+        if required_sigma is not None:
+            value = float(required_sigma)
+            summary["max_required_move_sigma_to_flip"] = value if summary.get("max_required_move_sigma_to_flip") is None else max(summary["max_required_move_sigma_to_flip"], value)
+            summary["min_required_move_sigma_to_flip"] = value if summary.get("min_required_move_sigma_to_flip") is None else min(summary["min_required_move_sigma_to_flip"], value)
+            self._emit_threshold_crossings(slug, result, "required_move_sigma", value, (1, 2, 3, 4))
+        if result.get("probability_model_mode") == "FINAL_WINDOW_PARTIAL_INTEGRAL" and result.get("required_future_avg_to_flip") is not None:
+            summary.setdefault("final_window_first_valid_required_avg_ts", result.get("observed_ts"))
+
+    def _emit_threshold_crossings(self, slug: str, result: dict[str, Any], measure: str,
+                                  value: float, thresholds: tuple[float, ...]) -> None:
+        state = self._last_threshold_state[slug].setdefault(measure, {})
+        for threshold in thresholds:
+            is_probability = measure != "required_move_sigma"
+            qualifies = (value <= threshold) if is_probability and threshold <= .10 else value >= threshold
+            previous = state.get(threshold)
+            if previous is None and qualifies:
+                self._persist(slug, float(result["observed_ts"]), "SETTLEMENT_PATH_THRESHOLD_CROSS",
+                              {**result, "measure": measure, "threshold": threshold, "crossing_direction": "first_observed_beyond"})
+            elif previous is not None and previous != qualifies:
+                self._persist(slug, float(result["observed_ts"]), "SETTLEMENT_PATH_THRESHOLD_CROSS",
+                              {**result, "measure": measure, "threshold": threshold,
+                               "crossing_direction": "entered" if qualifies else "left"})
+            state[threshold] = qualifies
+            if qualifies:
+                prefix = "first" if measure == "p_up_ex_market" else "first_market"
+                if measure in {"p_up_ex_market", "market_mid_probability_up"}:
+                    pct_label = f"{threshold * 100:g}".replace(".", "")
+                    if threshold < .10:
+                        pct_label = pct_label.zfill(3 if threshold < .05 else 2)
+                    label = f"p{pct_label}"
+                    side = "down" if threshold <= .10 else "up"
+                    summary = self._summary.setdefault(slug, {"market_slug": slug})
+                    summary.setdefault(f"{prefix}_{label}_{side}_ts", result.get("observed_ts"))
 
     def _update_summary(self, slug: str, result: dict[str, Any]) -> None:
         summary = self._summary.setdefault(slug, {"market_slug": slug, "twap_cross_count": 0, "projected_cross_count": 0,
@@ -266,11 +322,13 @@ class TwapForwardShadow:
             self._checkpoint_done.pop(str(slug), None)
             self._last_emitted_sign.pop(str(slug), None)
             self._last_emitted_projected_side.pop(str(slug), None)
+            self._last_threshold_state.pop(str(slug), None)
         summary_ts = float(settlement_ts) if settlement_ts is not None else fallback_ts
         summary["summary_ts"] = summary_ts
         summary["settlement_reference_source"] = str(settlement_reference_source or "unavailable")
         summary["settlement_reference_is_canonical"] = bool(settlement_reference_is_canonical)
         summary["settlement_reference_age_sec"] = settlement_reference_age_sec
+        summary["canonical_settlement_side"] = str(settlement_side) if settlement_reference_is_canonical else None
         self._persist(str(slug), summary_ts, "MARKET_TWAP_SUMMARY", summary)
         return summary
 

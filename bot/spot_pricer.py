@@ -239,12 +239,18 @@ class SpotPricerMixin:
                                     strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug)
                                     current_end = getattr(self, "current_market_end_timestamp", None)
                                     now_wall = time.time()
+                                    shadow_inputs = self._settlement_probability_shadow_inputs(
+                                        slug=slug, spot=tick.price, strike=strike,
+                                        time_left_sec=(max(0.0, float(current_end) - now_wall) if current_end else None),
+                                        now_ts=now_wall,
+                                    )
                                     twap_shadow.observe(
                                         slug=slug, now_ts=now_wall,
                                         source_ts=float(observation_ts or now_wall),
                                         fast_spot=getattr(self, "_binance_ws_price", None), official_twap=tick.price,
                                         strike=strike,
                                         time_left_sec=(max(0.0, float(current_end) - now_wall) if current_end else None),
+                                        settlement_diagnostics=shadow_inputs,
                                     )
                                 except Exception as exc:
                                     logger.debug(f"TWAP forward shadow observation failed: {exc}")
@@ -818,6 +824,145 @@ class SpotPricerMixin:
             min_points=self.maker_digital_vol_min_points,
             digital_vol_window=self.maker_digital_vol_window,
         )
+
+    def _settlement_probability_shadow_inputs(
+        self, *, slug: str, spot: Decimal, strike: Decimal | None,
+        time_left_sec: float | None, now_ts: float,
+    ) -> dict[str, Any]:
+        """Build research-only settlement/path diagnostics from existing state.
+
+        This intentionally does not assign ``last_forecast_state`` and never
+        enters the quote/order decision path.
+        """
+        from bot.live_entry_research import build_safety_sigma
+
+        if strike is None or strike <= 0 or time_left_sec is None:
+            return {"probability_model_version": "existing_twap_average_approx_v1",
+                    "probability_model_mode": "UNAVAILABLE", "data_quality": "spot_strike_or_horizon_unavailable"}
+        up_inst = str(getattr(self, "current_up_instrument_id", "") or "")
+        down_inst = str(getattr(self, "current_down_instrument_id", "") or "")
+        quote_map = getattr(self, "latest_quote_by_inst", {})
+        quote_ts = getattr(self, "last_quote_update_ts_by_inst", {})
+        max_age = float(getattr(self, "quote_stale_sec", 3.0))
+
+        def fresh_book(inst: str) -> tuple[Decimal | None, Decimal | None]:
+            if not inst:
+                return None, None
+            age = float(now_ts) - float(quote_ts.get(inst, 0.0) or 0.0)
+            if age < 0 or age > max_age:
+                return None, None
+            book = quote_map.get(inst)
+            if not book or book[0] is None or book[1] is None:
+                return None, None
+            return Decimal(str(book[0])), Decimal(str(book[1]))
+
+        bid_up, ask_up = fresh_book(up_inst)
+        bid_down, ask_down = fresh_book(down_inst)
+        mid_up = (bid_up + ask_up) / 2 if bid_up is not None and ask_up is not None else None
+        mid_down = (bid_down + ask_down) / 2 if bid_down is not None and ask_down is not None else None
+        twap_window = int(getattr(self, "_polymarket_chainlink_twap_window_sec", 60) or 60)
+        observed_avg, observed_sec = (None, 0.0)
+        if float(time_left_sec) <= twap_window:
+            end_ts = getattr(self, "current_market_end_timestamp", None)
+            observed_avg, observed_sec = self._final_twap_observation(
+                now_ts=now_ts, end_ts=float(end_ts) if end_ts is not None else now_ts + float(time_left_sec),
+                window_sec=twap_window,
+            )
+        raw_sigma = self._estimate_external_spot_sigma_annualized()
+        common = dict(
+            spot=spot, strike=strike, time_left_sec=float(time_left_sec),
+            reference_source=f"polymarket_chainlink_twap_{twap_window}s_ws",
+            outcome="up", sigma_default=self.maker_digital_sigma_default,
+            sigma_raw_realized=raw_sigma, sigma_scale=self.maker_digital_vol_scale,
+            sigma_floor=self.maker_digital_sigma_floor, sigma_ceiling=self.maker_digital_sigma_ceiling,
+            time_decay_enabled=bool(self.maker_digital_sigma_time_decay_enabled),
+            time_decay_ref_sec=float(self.maker_digital_sigma_time_decay_ref_sec),
+            time_decay_min=float(self.maker_digital_sigma_time_decay_min),
+            twap_window_sec=twap_window, observed_twap_average=observed_avg,
+            observed_twap_seconds=observed_sec,
+            source_observed_ts=float(getattr(self, "_polymarket_chainlink_twap_observation_ts", now_ts) or now_ts),
+            source_age_sec=max(0.0, now_ts - float(getattr(self, "_polymarket_chainlink_twap_observation_ts", now_ts) or now_ts)),
+        )
+        from bot.forecast_state import build_forecast_state
+        conditioned = build_forecast_state(
+            **common, market_mid=mid_up if mid_up is not None else Decimal("0.5"),
+            implied_sigma_enabled=bool(getattr(self, "maker_implied_sigma_enabled", False) and mid_up is not None),
+        )
+        p_cond = (conditioned.twap_average_up_probability
+                  if conditioned.twap_average_up_probability is not None else conditioned.standard_up_probability)
+        # sigma_after_time_decay is upstream of the implied-market floor, so it
+        # is the already-computed market-independent sigma for this same state.
+        math_diag = MakerEngine.twap_settlement_diagnostics(
+            spot=float(spot), strike=float(strike), sigma_annual=float(conditioned.sigma_after_time_decay),
+            time_left_sec=float(time_left_sec), twap_window_sec=twap_window,
+            observed_window_avg=float(observed_avg) if observed_avg is not None else None,
+            observed_window_sec=observed_sec,
+        )
+        p_ex = math_diag["p_up"]
+        final_window = float(time_left_sec) <= twap_window
+        data_quality = "ok"
+        if final_window and (observed_avg is None or observed_sec <= 0):
+            data_quality = "insufficient_raw_final_window_history"
+        elif observed_avg is None and not final_window:
+            data_quality = "pre_final_window_approximation"
+        dominant = "UP" if float(spot) >= float(strike) else "DOWN"
+        required_avg = math_diag["required_remaining_avg_for_up"] if final_window and data_quality == "ok" else (
+            None if final_window else float(strike)
+        )
+        target = required_avg if required_avg is not None else float(strike)
+        fast_spot = getattr(self, "_binance_ws_price", None)
+        path_spot = float(fast_spot) if fast_spot is not None and Decimal(str(fast_spot)) > 0 else float(spot)
+        move_sigma = build_safety_sigma(
+            spot=path_spot, strike=target, sigma_annual=float(conditioned.sigma_after_time_decay),
+            time_left_sec=(max(1.0, twap_window - observed_sec) if final_window and data_quality == "ok" else float(time_left_sec)),
+            sigma_source="forecast_sigma_after_time_decay_ex_market",
+        )
+        move_usd = target - path_spot if target is not None else None
+        move_bps = move_usd / path_spot * 10000 if move_usd is not None and path_spot > 0 else None
+        p_market = float(mid_up) if mid_up is not None else None
+        result = {
+            "probability_model_version": "existing_twap_average_approx_v1",
+            "probability_model_mode": ("FINAL_WINDOW_PARTIAL_INTEGRAL" if data_quality == "ok" and final_window else
+                                       "FINAL_WINDOW_APPROX_FALLBACK" if final_window else "PRE_FINAL_WINDOW_APPROX"),
+            "data_quality": data_quality, "official_current_twap": float(getattr(self, "_polymarket_chainlink_twap_price", spot) or spot),
+            "observed_final_window_avg": float(observed_avg) if observed_avg is not None else None,
+            "observed_final_window_sec": observed_sec,
+            "remaining_final_window_sec": max(0.0, twap_window - observed_sec) if final_window else None,
+            "required_future_avg_to_flip": required_avg,
+            "required_future_avg_basis": "raw_chainlink_partial_integral" if final_window and data_quality == "ok" else "strike_boundary_approximation" if not final_window else "unavailable",
+            "fast_spot": path_spot,
+            "required_avg_for_up": math_diag["required_remaining_avg_for_up"] if final_window and data_quality == "ok" else (float(strike) if not final_window else None),
+            "required_avg_for_down": math_diag["required_remaining_avg_for_down"] if final_window and data_quality == "ok" else (float(strike) if not final_window else None),
+            "currently_dominant_side": dominant,
+            "required_move_usd": move_usd, "required_move_bps": move_bps,
+            "required_move_sigma": move_sigma["safety_sigma"],
+            "sigma_final": float(conditioned.sigma_final), "sigma_after_time_decay_ex_market": float(conditioned.sigma_after_time_decay),
+            "sigma_implied_floor_applied": bool(conditioned.implied_sigma_floor_applied),
+            "p_up_market_conditioned": float(p_cond), "p_down_market_conditioned": 1.0 - float(p_cond),
+            "p_up_ex_market": float(p_ex), "p_down_ex_market": 1.0 - float(p_ex),
+            "market_mid_probability_up": p_market,
+            "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
+            "best_bid_up": float(bid_up) if bid_up is not None else None,
+            "best_ask_up": float(ask_up) if ask_up is not None else None,
+            "executable_buy_probability_up": float(ask_up) if ask_up is not None else None,
+            "executable_sell_probability_up": float(bid_up) if bid_up is not None else None,
+            "best_bid_down": float(bid_down) if bid_down is not None else None,
+            "best_ask_down": float(ask_down) if ask_down is not None else None,
+            "executable_buy_probability_down": float(ask_down) if ask_down is not None else None,
+            "executable_sell_probability_down": float(bid_down) if bid_down is not None else None,
+            "model_minus_market_mid_up": float(p_ex) - p_market if p_market is not None else None,
+            "model_minus_best_ask_up": float(p_ex) - float(ask_up) if ask_up is not None else None,
+            "model_minus_best_bid_up": float(p_ex) - float(bid_up) if bid_up is not None else None,
+            "model_minus_market_mid_down": (1.0 - float(p_ex)) - float(mid_down) if mid_down is not None else None,
+            "model_minus_best_ask_down": (1.0 - float(p_ex)) - float(ask_down) if ask_down is not None else None,
+            "model_minus_best_bid_down": (1.0 - float(p_ex)) - float(bid_down) if bid_down is not None else None,
+            "market_bbo_age_sec": max(
+                [now_ts - float(quote_ts[k]) for k in (up_inst, down_inst) if k and quote_ts.get(k)]
+            ) if any(k and quote_ts.get(k) for k in (up_inst, down_inst)) else None,
+            "twap_required_path_math_mode": (math_diag["mode"] if data_quality == "ok" or not final_window
+                                             else "FINAL_WINDOW_RAW_UNAVAILABLE"),
+        }
+        return result
 
     # ------------------------------------------------------------------
     # Strike status logging

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -12,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 
-EVENTS = {"TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE", "TMINUS_CHECKPOINT", "MARKET_TWAP_SUMMARY"}
+EVENTS = {"TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE", "TMINUS_CHECKPOINT", "MARKET_TWAP_SUMMARY", "SETTLEMENT_PATH_THRESHOLD_CROSS", "RESEARCH_STORAGE_GUARD_TRIGGERED"}
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -20,6 +21,75 @@ def write_csv(path: Path, rows: list[dict]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
         writer.writeheader(); writer.writerows(rows)
+
+
+def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """Build checkpoint calibration, calibration buckets, and model/market lead."""
+    summaries = {r.get("market_slug"): r for r in rows if r.get("event_type") == "MARKET_TWAP_SUMMARY"}
+    checkpoints = [r for r in rows if r.get("event_type") == "TMINUS_CHECKPOINT"]
+    canonical = []
+    for row in checkpoints:
+        summary = summaries.get(row.get("market_slug")) or {}
+        if summary.get("settlement_reference_is_canonical") is True:
+            canonical.append({**row, "settlement_side": summary.get("settlement_side")})
+    metric_rows = []
+    for checkpoint in (120, 60, 30, 15, 10, 5):
+        group = [r for r in canonical if int(r.get("checkpoint_sec") or 0) == checkpoint
+                 and r.get("settlement_side") in {"UP", "DOWN"} and r.get("p_up_ex_market") is not None]
+        outcomes = [1.0 if r["settlement_side"] == "UP" else 0.0 for r in group]
+        probs = [min(1 - 1e-12, max(1e-12, float(r["p_up_ex_market"]))) for r in group]
+        market_pairs = [(min(1 - 1e-12, max(1e-12, float(r["market_mid_probability_up"]))), y)
+                        for r, y in zip(group, outcomes) if r.get("market_mid_probability_up") is not None]
+        def scores(pairs):
+            if not pairs:
+                return None, None, None
+            brier = sum((p - y) ** 2 for p, y in pairs) / len(pairs)
+            logloss = -sum(y * math.log(p) + (1-y) * math.log(1-p) for p, y in pairs) / len(pairs)
+            accuracy = sum((p >= .5) == bool(y) for p, y in pairs) / len(pairs)
+            return brier, logloss, accuracy
+        brier, logloss, accuracy = scores(list(zip(probs, outcomes)))
+        mbrier, mlogloss, maccuracy = scores(market_pairs)
+        metric_rows.append({"checkpoint_sec": checkpoint, "canonical_n": len(group),
+                            "brier_ex_market": brier, "logloss_ex_market": logloss,
+                            "direction_accuracy_ex_market": accuracy,
+                            "mean_p_up_ex_market": sum(probs)/len(probs) if probs else None,
+                            "actual_up_rate": sum(outcomes)/len(outcomes) if outcomes else None,
+                            "market_n": len(market_pairs), "brier_market_mid": mbrier,
+                            "logloss_market_mid": mlogloss, "direction_accuracy_market_mid": maccuracy,
+                            "descriptive_only": True})
+    buckets = ((0, .10), (.10, .25), (.25, .40), (.40, .60), (.60, .75), (.75, .90), (.90, .95), (.95, .975), (.975, 1.000001))
+    complete = [r for r in canonical if r.get("settlement_side") in {"UP", "DOWN"} and r.get("p_up_ex_market") is not None]
+    bucket_rows = []
+    for low, high in buckets:
+        group = [r for r in complete if low <= float(r["p_up_ex_market"]) < high]
+        bucket_rows.append({"probability_low": low, "probability_high": high,
+                            "n_checkpoint_observations": len(group),
+                            "mean_predicted": sum(float(r["p_up_ex_market"]) for r in group)/len(group) if group else None,
+                            "actual_up_rate": sum(r["settlement_side"] == "UP" for r in group)/len(group) if group else None,
+                            "descriptive_only": True})
+    lead_rows = []
+    for slug, summary in summaries.items():
+        if summary.get("settlement_reference_is_canonical") is not True or summary.get("settlement_side") not in {"UP", "DOWN"}:
+            continue
+        is_up = summary["settlement_side"] == "UP"
+        for threshold in (.90, .95, .975):
+            high_label = f"p{threshold*100:g}".replace(".", "")
+            low_pct = f"{(1-threshold)*100:g}".replace(".", "")
+            if (1-threshold) < .10:
+                low_pct = low_pct.zfill(3 if (1-threshold) < .05 else 2)
+            low_label = f"p{low_pct}"
+            model_key = f"first_{high_label}_up_ts" if is_up else f"first_{low_label}_down_ts"
+            market_key = f"first_market_{high_label}_up_ts" if is_up else f"first_market_{low_label}_down_ts"
+            model_ts, market_ts = summary.get(model_key), summary.get(market_key)
+            if model_ts is None and market_ts is None:
+                continue
+            lead_rows.append({"market_slug": slug, "settlement_side": summary["settlement_side"],
+                              "probability_threshold": threshold, "model_first_observed_ts": model_ts,
+                              "market_first_observed_ts": market_ts,
+                              "model_lead_sec": float(market_ts)-float(model_ts) if model_ts is not None and market_ts is not None else None,
+                              "lead_interpretation": "positive=model earlier; negative=model later; null=one side unavailable",
+                              "descriptive_only": True})
+    return metric_rows, bucket_rows, lead_rows
 
 
 def main() -> int:
@@ -51,8 +121,15 @@ def main() -> int:
     write_csv(out / "twap_checkpoints.csv", checkpoints)
     write_csv(out / "twap_cross_events.csv", crosses)
     write_csv(out / "twap_projection_events.csv", projection)
+    probability_metrics, probability_buckets, probability_lead = probability_research_rows(rows)
+    write_csv(out / "settlement_probability_calibration.csv", probability_metrics)
+    write_csv(out / "settlement_probability_buckets.csv", probability_buckets)
+    write_csv(out / "settlement_probability_lead_lag.csv", probability_lead)
     canonical_summaries = [r for r in summaries if r.get("settlement_reference_is_canonical") is True]
     proxy_summaries = [r for r in summaries if r not in canonical_summaries]
+    canonical_slugs = {r.get("market_slug") for r in canonical_summaries}
+    canonical_probability_checkpoints = [r for r in checkpoints
+                                         if r.get("market_slug") in canonical_slugs and r.get("p_up_ex_market") is not None]
     # Accuracy needs observed outcome labels and is intentionally restricted to
     # canonical Chainlink-60s settlement references.  Do not turn a Binance or
     # generic external fallback into a primary accuracy observation.
@@ -92,13 +169,17 @@ def main() -> int:
     quality_note = "Official TWAP only; reconstructed TWAP is not persisted in this first release."
     if len(canonical_summaries) == 0:
         quality_note += " INSUFFICIENT_CANONICAL_SETTLEMENT_LABELS."
+    if not canonical_probability_checkpoints:
+        quality_note += " INSUFFICIENT_CANONICAL_SETTLEMENT_PROBABILITY_CHECKPOINTS."
     write_csv(out / "data_quality.csv", [{"event_rows": len(rows), "summary_rows": len(summaries),
                                            "canonical_twap_settlements": len(canonical_summaries),
-                                           "noncanonical_proxy_settlements": len(proxy_summaries), "note": quality_note}])
+                                           "noncanonical_proxy_settlements": len(proxy_summaries),
+                                           "canonical_probability_checkpoint_rows": len(canonical_probability_checkpoints),
+                                           "note": quality_note}])
     (out / "summary.md").write_text(
         "# TWAP forward research\n\n"
         "This is event-driven, shadow-only telemetry. Official current TWAP is Polymarket RTDS Chainlink 60s TWAP; "
-        "the flat/trend settlement projections are estimates and have no live authority. "
+        "the flat/trend settlement projections are estimates and have no live authority. Settlement-probability results use only canonical labels; all metrics are descriptive, not causal. "
         f"Captured events: {len(rows)}; summaries: {len(summaries)}; canonical labels: {len(canonical_summaries)}; "
         f"noncanonical proxy labels: {len(proxy_summaries)}.\n", encoding="utf-8")
     print(f"wrote {len(rows)} TWAP events to {out}")

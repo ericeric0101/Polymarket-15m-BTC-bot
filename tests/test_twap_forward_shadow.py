@@ -119,3 +119,120 @@ def test_twap_research_uses_a_dedicated_writer_not_the_shared_lead_lag_db(monkey
         assert "hyperliquid_lead_lag" not in db.db_path
     finally:
         db.stop()
+
+
+def test_probability_path_only_persists_material_thresholds_and_enriches_checkpoints():
+    db = FakeDb(); model = TwapForwardShadow(db=db)
+    diagnostics = {
+        "p_up_ex_market": .96, "p_down_ex_market": .04,
+        "p_up_market_conditioned": .95, "p_down_market_conditioned": .05,
+        "market_mid_probability_up": .90, "best_bid_up": .89, "best_ask_up": .91,
+        "model_minus_market_mid_up": .06, "model_minus_best_ask_up": .05,
+        "required_future_avg_to_flip": 101.0, "required_move_sigma": 2.2,
+        "probability_model_mode": "PRE_FINAL_WINDOW_APPROX",
+    }
+    sample(model, 100, left=121)
+    observed = model.observe(slug="m", now_ts=101, source_ts=101, fast_spot=Decimal("101"),
+                             official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=119,
+                             settlement_diagnostics=diagnostics)
+    checkpoint = next(row["payload"] for row in db.rows if row["payload"]["event_type"] == "TMINUS_CHECKPOINT")
+    assert checkpoint["p_up_ex_market"] == .96
+    assert checkpoint["market_mid_probability_up"] == .90
+    assert checkpoint["required_move_sigma"] == 2.2
+    assert any(row["payload"]["event_type"] == "SETTLEMENT_PATH_THRESHOLD_CROSS" for row in db.rows)
+    # Identical follow-up values add no threshold-cross event or per-tick row.
+    before = len([row for row in db.rows if row["payload"]["event_type"] == "SETTLEMENT_PATH_THRESHOLD_CROSS"])
+    model.observe(slug="m", now_ts=102, source_ts=102, fast_spot=Decimal("101"),
+                  official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=118,
+                  settlement_diagnostics=diagnostics)
+    after = len([row for row in db.rows if row["payload"]["event_type"] == "SETTLEMENT_PATH_THRESHOLD_CROSS"])
+    assert after == before
+    summary = model.finalize_market("m", settlement_side="UP", settlement_ts=103,
+                                    settlement_reference_is_canonical=True)
+    assert summary["max_p_up_ex_market"] == .96
+    assert summary["canonical_settlement_side"] == "UP"
+    assert summary["first_p90_up_ts"] == 101.0
+    assert summary["first_market_p90_up_ts"] == 101.0
+
+
+def test_probability_report_uses_canonical_labels_and_retains_negative_lead():
+    from scripts.twap_forward_report import probability_research_rows
+
+    rows = [
+        {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "canonical", "settlement_reference_is_canonical": True,
+         "settlement_side": "UP", "first_p90_up_ts": 120.0, "first_market_p90_up_ts": 110.0},
+        {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "proxy", "settlement_reference_is_canonical": False,
+         "settlement_side": "DOWN"},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
+         "p_up_ex_market": .8, "market_mid_probability_up": .7},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "proxy", "checkpoint_sec": 60,
+         "p_up_ex_market": .1, "market_mid_probability_up": .2},
+    ]
+    metrics, buckets, leads = probability_research_rows(rows)
+    assert next(row for row in metrics if row["checkpoint_sec"] == 60)["canonical_n"] == 1
+    assert sum(row["n_checkpoint_observations"] for row in buckets) == 1
+    assert leads[0]["model_lead_sec"] == -10.0
+
+
+def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
+    from types import SimpleNamespace
+
+    class ShadowHost(SpotPricerMixin):
+        pass
+
+    host = ShadowHost()
+    now = 1000.0
+    host.current_up_instrument_id = "up"
+    host.current_down_instrument_id = "down"
+    host.latest_quote_by_inst = {"up": (Decimal("0.09"), Decimal("0.11")),
+                                 "down": (Decimal("0.89"), Decimal("0.91"))}
+    host.last_quote_update_ts_by_inst = {"up": now - .1, "down": now - .2}
+    host.quote_stale_sec = 3.0
+    host._polymarket_chainlink_twap_window_sec = 60
+    host._polymarket_chainlink_twap_observation_ts = now - .1
+    host.current_market_end_timestamp = now + 121
+    host._binance_ws_price = Decimal("100.002")
+    host.external_spot_history = []
+    host.maker_digital_vol_min_points = 3
+    host.maker_digital_vol_window = 30
+    host.maker_digital_sigma_default = Decimal("0.05")
+    host.maker_digital_vol_scale = Decimal("1")
+    host.maker_digital_sigma_floor = Decimal("0.05")
+    host.maker_digital_sigma_ceiling = Decimal("2")
+    host.maker_digital_sigma_time_decay_enabled = False
+    host.maker_digital_sigma_time_decay_ref_sec = 600
+    host.maker_digital_sigma_time_decay_min = .3
+    host.maker_implied_sigma_enabled = True
+    host.last_forecast_state = SimpleNamespace(marker="must remain live-owned")
+    original_state = host.last_forecast_state
+
+    first = host._settlement_probability_shadow_inputs(
+        slug="m", spot=Decimal("100.001"), strike=Decimal("100"), time_left_sec=121, now_ts=now
+    )
+    host.latest_quote_by_inst["up"] = (Decimal("0.89"), Decimal("0.91"))
+    second = host._settlement_probability_shadow_inputs(
+        slug="m", spot=Decimal("100.001"), strike=Decimal("100"), time_left_sec=121, now_ts=now
+    )
+    assert first["market_mid_probability_up"] == .1
+    assert first["best_ask_up"] == .11
+    assert first["p_down_ex_market"] == 1 - first["p_up_ex_market"]
+    assert first["p_up_ex_market"] == second["p_up_ex_market"]
+    assert first["p_up_market_conditioned"] != second["p_up_market_conditioned"]
+    assert first["sigma_implied_floor_applied"] is True
+    assert host.last_forecast_state is original_state
+
+    host.current_market_end_timestamp = now + 30
+    no_raw = host._settlement_probability_shadow_inputs(
+        slug="m", spot=Decimal("100.001"), strike=Decimal("100"), time_left_sec=30, now_ts=now
+    )
+    assert no_raw["data_quality"] == "insufficient_raw_final_window_history"
+    assert no_raw["required_future_avg_to_flip"] is None
+
+    host.current_market_end_timestamp = 1060
+    host.polymarket_chainlink_history = [(999.0, Decimal("99")), (1010.0, Decimal("101"))]
+    observed = host._settlement_probability_shadow_inputs(
+        slug="m", spot=Decimal("100.5"), strike=Decimal("100"), time_left_sec=40, now_ts=1020
+    )
+    assert observed["observed_final_window_avg"] == 100.0
+    assert observed["observed_final_window_sec"] == 20.0
+    assert observed["required_future_avg_to_flip"] == 100.0
