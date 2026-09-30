@@ -27,11 +27,27 @@ def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict],
     """Build checkpoint calibration, calibration buckets, and model/market lead."""
     summaries = {r.get("market_slug"): r for r in rows if r.get("event_type") == "MARKET_TWAP_SUMMARY"}
     checkpoints = [r for r in rows if r.get("event_type") == "TMINUS_CHECKPOINT"]
-    canonical = []
+    canonical_candidates = []
     for row in checkpoints:
         summary = summaries.get(row.get("market_slug")) or {}
         if summary.get("settlement_reference_is_canonical") is True:
-            canonical.append({**row, "settlement_side": summary.get("settlement_side")})
+            canonical_candidates.append({**row, "settlement_side": summary.get("settlement_side")})
+    # A market contributes at most once to a given horizon. If duplicated
+    # checkpoint events exist, retain the sample nearest its target T-minus;
+    # ties resolve to the latest observed source row deterministically.
+    deduped = {}
+    for row in canonical_candidates:
+        try:
+            checkpoint = int(row.get("checkpoint_sec") or 0)
+            distance = abs(float(row.get("time_left_sec", checkpoint)) - checkpoint)
+            observed = float(row.get("observed_ts") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        key = (row.get("market_slug"), checkpoint)
+        rank = (distance, -observed)
+        if key not in deduped or rank < deduped[key][0]:
+            deduped[key] = (rank, row)
+    canonical = [item[1] for item in deduped.values()]
     metric_rows = []
     for checkpoint in (120, 60, 30, 15, 10, 5):
         group = [r for r in canonical if int(r.get("checkpoint_sec") or 0) == checkpoint
@@ -60,13 +76,15 @@ def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict],
     buckets = ((0, .10), (.10, .25), (.25, .40), (.40, .60), (.60, .75), (.75, .90), (.90, .95), (.95, .975), (.975, 1.000001))
     complete = [r for r in canonical if r.get("settlement_side") in {"UP", "DOWN"} and r.get("p_up_ex_market") is not None]
     bucket_rows = []
-    for low, high in buckets:
-        group = [r for r in complete if low <= float(r["p_up_ex_market"]) < high]
-        bucket_rows.append({"probability_low": low, "probability_high": high,
-                            "n_checkpoint_observations": len(group),
-                            "mean_predicted": sum(float(r["p_up_ex_market"]) for r in group)/len(group) if group else None,
-                            "actual_up_rate": sum(r["settlement_side"] == "UP" for r in group)/len(group) if group else None,
-                            "descriptive_only": True})
+    for checkpoint in (120, 60, 30, 15, 10, 5):
+        checkpoint_rows = [r for r in complete if int(r.get("checkpoint_sec") or 0) == checkpoint]
+        for low, high in buckets:
+            group = [r for r in checkpoint_rows if low <= float(r["p_up_ex_market"]) < high]
+            bucket_rows.append({"checkpoint_sec": checkpoint, "probability_low": low, "probability_high": high,
+                                "n_markets": len(group),
+                                "mean_predicted": sum(float(r["p_up_ex_market"]) for r in group)/len(group) if group else None,
+                                "actual_up_rate": sum(r["settlement_side"] == "UP" for r in group)/len(group) if group else None,
+                                "descriptive_only": True})
     lead_rows = []
     for slug, summary in summaries.items():
         if summary.get("settlement_reference_is_canonical") is not True or summary.get("settlement_side") not in {"UP", "DOWN"}:
@@ -128,8 +146,11 @@ def main() -> int:
     canonical_summaries = [r for r in summaries if r.get("settlement_reference_is_canonical") is True]
     proxy_summaries = [r for r in summaries if r not in canonical_summaries]
     canonical_slugs = {r.get("market_slug") for r in canonical_summaries}
-    canonical_probability_checkpoints = [r for r in checkpoints
-                                         if r.get("market_slug") in canonical_slugs and r.get("p_up_ex_market") is not None]
+    canonical_probability_checkpoints = {
+        (r.get("market_slug"), int(r.get("checkpoint_sec") or 0))
+        for r in checkpoints
+        if r.get("market_slug") in canonical_slugs and r.get("p_up_ex_market") is not None
+    }
     # Accuracy needs observed outcome labels and is intentionally restricted to
     # canonical Chainlink-60s settlement references.  Do not turn a Binance or
     # generic external fallback into a primary accuracy observation.
@@ -174,7 +195,7 @@ def main() -> int:
     write_csv(out / "data_quality.csv", [{"event_rows": len(rows), "summary_rows": len(summaries),
                                            "canonical_twap_settlements": len(canonical_summaries),
                                            "noncanonical_proxy_settlements": len(proxy_summaries),
-                                           "canonical_probability_checkpoint_rows": len(canonical_probability_checkpoints),
+                                           "canonical_probability_checkpoint_markets": len(canonical_probability_checkpoints),
                                            "note": quality_note}])
     (out / "summary.md").write_text(
         "# TWAP forward research\n\n"

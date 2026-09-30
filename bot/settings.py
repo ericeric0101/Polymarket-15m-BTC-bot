@@ -579,6 +579,7 @@ def initialize_strategy_settings(
     strategy.external_spot_history_max = config.market_data.external_spot_history_max
     strategy.polymarket_chainlink_history = []
     strategy.polymarket_chainlink_history_max = config.market_data.polymarket_chainlink_history_max
+    strategy.polymarket_chainlink_receipt_history = []
     strategy.polymarket_chainlink_twap_enabled = config.market_data.polymarket_chainlink_twap_enabled
     strategy.polymarket_chainlink_twap_window_sec = config.market_data.polymarket_chainlink_twap_window_sec
     strategy.polymarket_chainlink_twap_symbol = config.market_data.polymarket_chainlink_twap_symbol

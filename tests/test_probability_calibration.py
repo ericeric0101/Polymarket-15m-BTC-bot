@@ -145,6 +145,7 @@ def test_twap_diagnostics_expose_single_source_required_remaining_average():
     )
     assert at_30["mode"] == "FINAL_WINDOW_PARTIAL_INTEGRAL"
     assert at_30["remaining_window_sec"] == 30
+    assert at_30["remaining_avg_decision_boundary"] == 102
     assert at_30["required_remaining_avg_for_up"] == 102
     assert at_59["remaining_window_sec"] == 1
     assert at_59["required_remaining_avg_for_up"] == 218
@@ -163,6 +164,7 @@ def test_twap_diagnostics_do_not_fabricate_path_without_final_window_integral():
         99, 100, .5, 0, 60, observed_window_avg=99, observed_window_sec=60
     )
     assert no_observation["required_remaining_avg_for_up"] is None
+    assert no_observation["remaining_avg_decision_boundary"] is None
     assert no_observation["mode"] == "PRE_FINAL_WINDOW_APPROX"
     assert full_window_up["p_up"] == Decimal("1")
     assert full_window_down["p_up"] == Decimal("0")

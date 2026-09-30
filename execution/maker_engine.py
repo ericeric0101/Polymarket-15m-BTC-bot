@@ -147,7 +147,7 @@ class MakerEngine:
 
     @staticmethod
     def twap_settlement_diagnostics(
-        spot: float,
+        spot: Optional[float],
         strike: float,
         sigma_annual: float,
         time_left_sec: float,
@@ -169,6 +169,7 @@ class MakerEngine:
         required_avg = None
         mode = "PRE_FINAL_WINDOW_APPROX"
         effective_horizon = horizon
+        p_up = None
         if observed_avg is not None and observed_sec > 0:
             mode = "FINAL_WINDOW_PARTIAL_INTEGRAL"
             if remaining_sec <= 0:
@@ -177,27 +178,30 @@ class MakerEngine:
             else:
                 required_avg = (window * float(strike) - observed_sec * observed_avg) / remaining_sec
                 effective_horizon = max(1.0, remaining_sec / 3.0)
-                p_up = MakerEngine.digital_up_probability(
-                    spot=spot, strike=required_avg, sigma_annual=sigma_annual,
-                    time_left_sec=effective_horizon,
-                )
+                if spot is not None:
+                    p_up = MakerEngine.digital_up_probability(
+                        spot=spot, strike=required_avg, sigma_annual=sigma_annual,
+                        time_left_sec=effective_horizon,
+                    )
         else:
             if horizon > window:
                 effective_horizon = max(1.0, horizon - (2.0 * window / 3.0))
-            p_up = MakerEngine.digital_up_probability(
-                spot=spot, strike=strike, sigma_annual=sigma_annual,
-                time_left_sec=effective_horizon,
-            )
+            if spot is not None:
+                p_up = MakerEngine.digital_up_probability(
+                    spot=spot, strike=strike, sigma_annual=sigma_annual,
+                    time_left_sec=effective_horizon,
+                )
         return {
             "p_up": p_up,
             "mode": mode,
             "observed_window_avg": observed_avg,
             "observed_window_sec": observed_sec,
             "remaining_window_sec": remaining_sec,
+            "remaining_avg_decision_boundary": required_avg,
             "required_remaining_avg_for_up": required_avg,
             "required_remaining_avg_for_down": required_avg,
             "effective_probability_horizon_sec": effective_horizon,
-            "current_spot": float(spot),
+            "current_spot": float(spot) if spot is not None else None,
             "strike": float(strike),
         }
 

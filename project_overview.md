@@ -2123,3 +2123,28 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   entry, T+300, stop, take-profit, sizing, or order routing, and have no live
   trading authority. Probability calibration/lead results remain provisional
   until adequate forward samples exist.
+- Research correctness note: the official 60-second Chainlink TWAP is the
+  settlement-state input only. Future-path calculations use a fresh raw
+  Polymarket Chainlink spot tick, falling back only to a fresh Binance WS spot;
+  they never substitute the TWAP for raw spot. The ex-market realized sigma is
+  calculated only from the bounded raw Chainlink spot history. `external_spot_history`
+  remains mixed (normally TWAP, with Binance/Coinbase fallback observations),
+  so it is not a valid raw ex-market volatility source. If raw spot or adequate
+  raw history is unavailable, corresponding path probability/sigma fields stay
+  null rather than silently using TWAP-smoothed volatility.
+- Research raw Chainlink history stores Chainlink source observation
+  timestamps, not local receipt timestamps. The research final-window
+  integration uses that source clock; points with missing/invalid timestamps
+  or a source time later than receipt are rejected. The pre-existing live
+  `ForecastState` and opening-strike anchor retain their bounded receipt-clock
+  history path so this telemetry correction does not change live entry pricing
+  or strike-anchor behavior. In
+  pre-final mode `path_boundary_proxy=strike` is only an
+  approximation; `remaining_avg_decision_boundary` and
+  `required_future_avg_to_flip` remain null until an observed partial integral
+  makes an exact remaining-average boundary available. The legacy
+  `required_avg_for_up/down` fields are aliases of the same exact boundary.
+- Probability calibration buckets are checkpoint-specific and count at most
+  one observation per market and checkpoint, selecting the observation nearest
+  the target horizon (ties choose the latest observed event). Different
+  checkpoints are not pooled into a market-count bucket.

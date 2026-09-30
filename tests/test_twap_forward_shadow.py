@@ -108,6 +108,28 @@ def test_twap_ingress_binds_current_tick_timestamp_before_shadow_observe():
     assert block.index("observation_ts = chainlink_observation_ts(tick)") < block.index("twap_shadow.observe(")
 
 
+def test_raw_chainlink_history_uses_source_clock_and_rejects_invalid_timestamps():
+    class Host(SpotPricerMixin):
+        pass
+    host = Host()
+    host.polymarket_chainlink_history = []
+    host.polymarket_chainlink_history_max = 20
+    assert host._record_polymarket_chainlink_observation(Decimal("100"), 100.0, received_ts=100.1)
+    assert host._record_polymarket_chainlink_observation(Decimal("110"), 101.0, received_ts=101.8)
+    assert host._record_polymarket_chainlink_observation(Decimal("100"), 102.0, received_ts=102.2)
+    assert not host._record_polymarket_chainlink_observation(Decimal("999"), None, received_ts=102.3)
+    assert not host._record_polymarket_chainlink_observation(Decimal("999"), 103.0, received_ts=102.2)
+    average, seconds = host._final_twap_observation(now_ts=102.0, end_ts=103.0, window_sec=3)
+    assert average == Decimal("105")
+    assert seconds == 2.0
+    assert [ts for ts, _ in host.polymarket_chainlink_history] == [100.0, 101.0, 102.0]
+    receipt_average, _ = host._final_twap_observation(
+        now_ts=102.2, end_ts=103.0, window_sec=3,
+        history=[(99.9, Decimal("100")), (100.1, Decimal("100")), (101.8, Decimal("110")), (102.2, Decimal("100"))],
+    )
+    assert receipt_average != average
+
+
 def test_twap_research_uses_a_dedicated_writer_not_the_shared_lead_lag_db(monkeypatch, tmp_path):
     path = tmp_path / "twap_forward_shadow.db"
     monkeypatch.setenv("TWAP_RESEARCH_DB_PATH", str(path))
@@ -164,13 +186,20 @@ def test_probability_report_uses_canonical_labels_and_retains_negative_lead():
         {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "proxy", "settlement_reference_is_canonical": False,
          "settlement_side": "DOWN"},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
-         "p_up_ex_market": .8, "market_mid_probability_up": .7},
+         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 59, "observed_ts": 101},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 120,
+         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 119, "observed_ts": 102},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 30,
+         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 29, "observed_ts": 103},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "canonical", "checkpoint_sec": 60,
+         "p_up_ex_market": .8, "market_mid_probability_up": .7, "time_left_sec": 58, "observed_ts": 104},
         {"event_type": "TMINUS_CHECKPOINT", "market_slug": "proxy", "checkpoint_sec": 60,
          "p_up_ex_market": .1, "market_mid_probability_up": .2},
     ]
     metrics, buckets, leads = probability_research_rows(rows)
     assert next(row for row in metrics if row["checkpoint_sec"] == 60)["canonical_n"] == 1
-    assert sum(row["n_checkpoint_observations"] for row in buckets) == 1
+    assert sum(row["n_markets"] for row in buckets if row["probability_low"] == .75 and row["probability_high"] == .9) == 3
+    assert {row["checkpoint_sec"] for row in buckets if row["n_markets"]} == {30, 60, 120}
     assert leads[0]["model_lead_sec"] == -10.0
 
 
@@ -192,7 +221,13 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
     host._polymarket_chainlink_twap_observation_ts = now - .1
     host.current_market_end_timestamp = now + 121
     host._binance_ws_price = Decimal("100.002")
-    host.external_spot_history = []
+    host._binance_ws_price_ts = now - .1
+    host._polymarket_chainlink_price = Decimal("102")
+    host._polymarket_chainlink_price_ts = now - .1
+    host._polymarket_chainlink_price_observation_ts = now - .1
+    host._polymarket_chainlink_twap_price = Decimal("100")
+    host.polymarket_chainlink_history = [(now - 3, Decimal("99.9")), (now - 2, Decimal("100.1")), (now - 1, Decimal("99.8"))]
+    host.external_spot_history = [(997.0, Decimal("100")), (998.0, Decimal("102")), (999.0, Decimal("99"))]
     host.maker_digital_vol_min_points = 3
     host.maker_digital_vol_window = 30
     host.maker_digital_sigma_default = Decimal("0.05")
@@ -207,32 +242,90 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
     original_state = host.last_forecast_state
 
     first = host._settlement_probability_shadow_inputs(
-        slug="m", spot=Decimal("100.001"), strike=Decimal("100"), time_left_sec=121, now_ts=now
+        slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now
     )
     host.latest_quote_by_inst["up"] = (Decimal("0.89"), Decimal("0.91"))
     second = host._settlement_probability_shadow_inputs(
-        slug="m", spot=Decimal("100.001"), strike=Decimal("100"), time_left_sec=121, now_ts=now
+        slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now
     )
     assert first["market_mid_probability_up"] == .1
     assert first["best_ask_up"] == .11
     assert first["p_down_ex_market"] == 1 - first["p_up_ex_market"]
+    assert first["official_current_twap"] == 100
+    assert first["fast_spot"] == 102
+    assert first["path_spot_source"] == "polymarket_chainlink_spot"
+    assert first["sigma_ex_market_source"] == "polymarket_chainlink_spot_history"
+    assert first["sigma_ex_market"] == float(host._estimate_polymarket_raw_spot_sigma_annualized())
+    assert first["sigma_ex_market"] != float(host._estimate_external_spot_sigma_annualized())
+    assert first["remaining_avg_decision_boundary"] is None
+    assert first["required_future_avg_to_flip"] is None
+    assert first["path_boundary_proxy"] == 101.0
     assert first["p_up_ex_market"] == second["p_up_ex_market"]
-    assert first["p_up_market_conditioned"] != second["p_up_market_conditioned"]
-    assert first["sigma_implied_floor_applied"] is True
+    host._polymarket_chainlink_price = Decimal("100.5")
+    path_changed = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now
+    )
+    assert path_changed["p_up_ex_market"] != first["p_up_ex_market"]
+    assert first["market_mid_probability_up"] != second["market_mid_probability_up"]
+    assert first["sigma_ex_market_available"] is True
     assert host.last_forecast_state is original_state
 
     host.current_market_end_timestamp = now + 30
     no_raw = host._settlement_probability_shadow_inputs(
-        slug="m", spot=Decimal("100.001"), strike=Decimal("100"), time_left_sec=30, now_ts=now
+        slug="m", official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=30, now_ts=now
     )
     assert no_raw["data_quality"] == "insufficient_raw_final_window_history"
     assert no_raw["required_future_avg_to_flip"] is None
 
     host.current_market_end_timestamp = 1060
     host.polymarket_chainlink_history = [(999.0, Decimal("99")), (1010.0, Decimal("101"))]
+    host._polymarket_chainlink_price = Decimal("100")
+    host._polymarket_chainlink_price_ts = 1019.9
+    host._polymarket_chainlink_price_observation_ts = 1019.9
+    host._binance_ws_price_ts = 1019.9
     observed = host._settlement_probability_shadow_inputs(
-        slug="m", spot=Decimal("100.5"), strike=Decimal("100"), time_left_sec=40, now_ts=1020
+        slug="m", official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=40, now_ts=1020,
+        source_observed_ts=1020,
     )
     assert observed["observed_final_window_avg"] == 100.0
     assert observed["observed_final_window_sec"] == 20.0
     assert observed["required_future_avg_to_flip"] == 100.0
+    assert observed["remaining_avg_decision_boundary"] == 100.0
+    assert observed["required_avg_for_up"] == observed["required_avg_for_down"] == 100.0
+
+
+def test_probability_path_uses_fresh_binance_if_raw_chainlink_stale_and_never_twap_fallback():
+    class Host(SpotPricerMixin):
+        pass
+    host = Host()
+    now = 1000.0
+    host._polymarket_chainlink_twap_window_sec = 60
+    host._polymarket_chainlink_twap_price = Decimal("100")
+    host._polymarket_chainlink_price = Decimal("102")
+    host._polymarket_chainlink_price_ts = now - 20
+    host._polymarket_chainlink_price_observation_ts = now - 20
+    host._binance_ws_price = Decimal("103")
+    host._binance_ws_price_ts = now - 1
+    host.polymarket_chainlink_history = []
+    host.maker_digital_vol_min_points = 3
+    host.maker_digital_vol_window = 30
+    host.maker_digital_sigma_default = Decimal("0.05")
+    host.maker_digital_vol_scale = Decimal("1")
+    host.maker_digital_sigma_floor = Decimal("0.05")
+    host.maker_digital_sigma_ceiling = Decimal("2")
+    host.maker_digital_sigma_time_decay_enabled = False
+    host.maker_digital_sigma_time_decay_ref_sec = 600
+    host.maker_digital_sigma_time_decay_min = .3
+    host.maker_implied_sigma_enabled = False
+    host.latest_quote_by_inst = {}
+    host.last_quote_update_ts_by_inst = {}
+    out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now)
+    assert out["path_spot_source"] == "binance_ws"
+    assert out["fast_spot"] == 103
+    assert out["p_up_ex_market"] is None
+    assert out["required_move_sigma"] is None
+    host._binance_ws_price_ts = now - 20
+    out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now)
+    assert out["path_spot_source"] == "unavailable"
+    assert out["fast_spot"] is None
+    assert out["p_up_ex_market"] is None

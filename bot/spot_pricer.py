@@ -207,8 +207,13 @@ class SpotPricerMixin:
                         # Preserve the raw Chainlink stream separately.  The
                         # TWAP stream remains the trading reference.
                         if not self._is_twap_spot_source(tick.source):
+                            raw_source_ts = chainlink_observation_ts(tick)
                             self._polymarket_chainlink_price = tick.price
                             self._polymarket_chainlink_price_ts = tick.received_at_ts
+                            self._polymarket_chainlink_price_observation_ts = raw_source_ts
+                            self._record_polymarket_chainlink_receipt_observation(
+                                tick.price, tick.received_at_ts,
+                            )
                             self._polymarket_chainlink_event_ts_ms = tick.updated_at_ms
                             self._update_btc_trend_price(
                                 tick.price,
@@ -240,9 +245,9 @@ class SpotPricerMixin:
                                     current_end = getattr(self, "current_market_end_timestamp", None)
                                     now_wall = time.time()
                                     shadow_inputs = self._settlement_probability_shadow_inputs(
-                                        slug=slug, spot=tick.price, strike=strike,
+                                        slug=slug, official_twap=tick.price, strike=strike,
                                         time_left_sec=(max(0.0, float(current_end) - now_wall) if current_end else None),
-                                        now_ts=now_wall,
+                                        now_ts=now_wall, source_observed_ts=observation_ts,
                                     )
                                     twap_shadow.observe(
                                         slug=slug, now_ts=now_wall,
@@ -288,7 +293,8 @@ class SpotPricerMixin:
                         if not self._is_twap_spot_source(tick.source):
                             self._record_polymarket_chainlink_observation(
                                 tick.price,
-                                tick.received_at_ts,
+                                chainlink_observation_ts(tick),
+                                received_ts=tick.received_at_ts,
                             )
             except Exception as exc:
                 disconnected_monotonic = time.monotonic()
@@ -592,16 +598,40 @@ class SpotPricerMixin:
             price=price,
         )
 
-    def _record_polymarket_chainlink_observation(self, price: Decimal, ts: float) -> None:
+    def _record_polymarket_chainlink_observation(
+        self, price: Decimal, ts: float | None, *, received_ts: float | None = None,
+    ) -> bool:
+        """Store raw Chainlink spot against its source clock, never receipt time."""
         history = getattr(self, "polymarket_chainlink_history", None)
-        if history is None:
+        try:
+            source_ts = float(ts) if ts is not None else 0.0
+            received = float(received_ts) if received_ts is not None else 0.0
+            if history is None or price is None or Decimal(str(price)) <= 0:
+                return False
+            if not source_ts > 0 or not source_ts < float("inf") or not received > 0 or source_ts > received:
+                return False
+        except (TypeError, ValueError, ArithmeticError):
+            return False
+        history.append((source_ts, Decimal(str(price))))
+        max_len = int(getattr(self, "polymarket_chainlink_history_max", 1200) or 1200)
+        if len(history) > max_len:
+            history.pop(0)
+        return True
+
+    def _record_polymarket_chainlink_receipt_observation(self, price: Decimal, received_ts: float) -> None:
+        """Keep bounded receipt-clock samples solely for unchanged live pricing."""
+        history = getattr(self, "polymarket_chainlink_receipt_history", None)
+        if history is None or price is None or Decimal(str(price)) <= 0 or received_ts <= 0:
             return
-        history.append((ts, price))
+        history.append((float(received_ts), Decimal(str(price))))
         max_len = int(getattr(self, "polymarket_chainlink_history_max", 1200) or 1200)
         if len(history) > max_len:
             history.pop(0)
 
-    def _final_twap_observation(self, *, now_ts: float, end_ts: float, window_sec: int) -> tuple[Optional[Decimal], float]:
+    def _final_twap_observation(
+        self, *, now_ts: float, end_ts: float, window_sec: int,
+        history: Optional[list[tuple[float, Decimal]]] = None,
+    ) -> tuple[Optional[Decimal], float]:
         """Return the observed partial final-window average from raw ticks.
 
         The result is intentionally unavailable until the final resolution
@@ -612,10 +642,11 @@ class SpotPricerMixin:
         start_ts = float(end_ts) - window
         if now_ts <= start_ts:
             return None, 0.0
+        selected_history = history if history is not None else getattr(self, "polymarket_chainlink_history", [])
         records = sorted(
             (
                 (float(ts), Decimal(str(price)))
-                for ts, price in getattr(self, "polymarket_chainlink_history", [])
+                for ts, price in selected_history
                 if float(ts) <= now_ts and Decimal(str(price)) > 0
             ),
             key=lambda item: item[0],
@@ -664,7 +695,12 @@ class SpotPricerMixin:
 
     def _resolve_opening_strike_from_polymarket_history(self, start_ts: int) -> Optional[tuple]:
         return resolve_opening_strike_from_history(
-            external_spot_history=getattr(self, "polymarket_chainlink_history", []),
+            # Keep the existing live strike-anchor timestamp behavior; the
+            # source-clock series is reserved for shadow research integrals.
+            external_spot_history=getattr(
+                self, "polymarket_chainlink_receipt_history",
+                getattr(self, "polymarket_chainlink_history", []),
+            ),
             start_ts=start_ts,
             max_lag_sec=float(self.market_strike_anchor_max_lag_sec),
             near_window_sec=float(self.market_strike_anchor_near_sec),
@@ -825,9 +861,17 @@ class SpotPricerMixin:
             digital_vol_window=self.maker_digital_vol_window,
         )
 
+    def _estimate_polymarket_raw_spot_sigma_annualized(self) -> Optional[Decimal]:
+        """Shadow volatility from raw Chainlink spot history only."""
+        return estimate_external_spot_sigma_annualized(
+            external_spot_history=list(getattr(self, "polymarket_chainlink_history", [])),
+            min_points=self.maker_digital_vol_min_points,
+            digital_vol_window=self.maker_digital_vol_window,
+        )
+
     def _settlement_probability_shadow_inputs(
-        self, *, slug: str, spot: Decimal, strike: Decimal | None,
-        time_left_sec: float | None, now_ts: float,
+        self, *, slug: str, official_twap: Decimal, strike: Decimal | None,
+        time_left_sec: float | None, now_ts: float, source_observed_ts: float | None = None,
     ) -> dict[str, Any]:
         """Build research-only settlement/path diagnostics from existing state.
 
@@ -838,7 +882,27 @@ class SpotPricerMixin:
 
         if strike is None or strike <= 0 or time_left_sec is None:
             return {"probability_model_version": "existing_twap_average_approx_v1",
-                    "probability_model_mode": "UNAVAILABLE", "data_quality": "spot_strike_or_horizon_unavailable"}
+                    "probability_model_mode": "UNAVAILABLE", "data_quality": "spot_strike_or_horizon_unavailable",
+                    "official_current_twap": float(official_twap), "path_spot": None,
+                    "path_spot_source": "unavailable", "path_spot_age_sec": None,
+                    "p_up_ex_market": None, "p_down_ex_market": None, "required_move_sigma": None}
+        # Match the existing approved 10-second external-spot freshness window.
+        # Official TWAP is settlement state and is never a future-path fallback.
+        path_spot: Decimal | None = None
+        path_spot_source, path_spot_age = "unavailable", None
+        raw_price = getattr(self, "_polymarket_chainlink_price", None)
+        raw_ts = float(getattr(self, "_polymarket_chainlink_price_observation_ts", 0.0) or 0.0)
+        if raw_price is not None and raw_ts > 0:
+            age = float(now_ts) - raw_ts
+            if 0.0 <= age < 10.0 and Decimal(str(raw_price)) > 0:
+                path_spot, path_spot_source, path_spot_age = Decimal(str(raw_price)), "polymarket_chainlink_spot", age
+        if path_spot is None:
+            binance_price = getattr(self, "_binance_ws_price", None)
+            binance_ts = float(getattr(self, "_binance_ws_price_ts", 0.0) or 0.0)
+            if binance_price is not None and binance_ts > 0:
+                age = float(now_ts) - binance_ts
+                if 0.0 <= age < 10.0 and Decimal(str(binance_price)) > 0:
+                    path_spot, path_spot_source, path_spot_age = Decimal(str(binance_price)), "binance_ws", age
         up_inst = str(getattr(self, "current_up_instrument_id", "") or "")
         down_inst = str(getattr(self, "current_down_instrument_id", "") or "")
         quote_map = getattr(self, "latest_quote_by_inst", {})
@@ -862,15 +926,56 @@ class SpotPricerMixin:
         mid_down = (bid_down + ask_down) / 2 if bid_down is not None and ask_down is not None else None
         twap_window = int(getattr(self, "_polymarket_chainlink_twap_window_sec", 60) or 60)
         observed_avg, observed_sec = (None, 0.0)
+        raw_history = list(getattr(self, "polymarket_chainlink_history", []))
+        try:
+            candidate_integral_ts = float(source_observed_ts or 0.0)
+        except (TypeError, ValueError):
+            candidate_integral_ts = 0.0
+        integral_ts = (candidate_integral_ts if 0 < candidate_integral_ts <= float(now_ts)
+                       else float(raw_history[-1][0]) if raw_history else 0.0)
         if float(time_left_sec) <= twap_window:
             end_ts = getattr(self, "current_market_end_timestamp", None)
-            observed_avg, observed_sec = self._final_twap_observation(
-                now_ts=now_ts, end_ts=float(end_ts) if end_ts is not None else now_ts + float(time_left_sec),
-                window_sec=twap_window,
-            )
-        raw_sigma = self._estimate_external_spot_sigma_annualized()
+            if integral_ts > 0:
+                observed_avg, observed_sec = self._final_twap_observation(
+                    now_ts=integral_ts, end_ts=float(end_ts) if end_ts is not None else integral_ts + float(time_left_sec),
+                    window_sec=twap_window,
+                )
+        raw_sigma = self._estimate_polymarket_raw_spot_sigma_annualized()
+        sigma_history = raw_history[-int(getattr(self, "maker_digital_vol_window", 30) or 30):]
+        sigma_window_sec = float(sigma_history[-1][0]) - float(sigma_history[0][0]) if len(sigma_history) > 1 else None
+        if path_spot is None:
+            return {
+                "probability_model_version": "existing_twap_average_approx_v1",
+                "probability_model_mode": "UNAVAILABLE", "data_quality": "raw_path_spot_unavailable",
+                "official_current_twap": float(official_twap), "path_spot": None,
+                "fast_spot": None, "path_spot_source": "unavailable", "path_spot_age_sec": None,
+                "sigma_ex_market": float(raw_sigma) if raw_sigma is not None else None,
+                "sigma_ex_market_source": "polymarket_chainlink_spot_history" if raw_sigma is not None else "unavailable",
+                "sigma_ex_market_available": raw_sigma is not None,
+                "sigma_ex_market_sample_count": len(sigma_history),
+                "sigma_ex_market_window_sec": sigma_window_sec,
+                "p_up_ex_market": None, "p_down_ex_market": None,
+                "p_up_market_conditioned": None, "p_down_market_conditioned": None,
+                "required_move_usd": None, "required_move_bps": None, "required_move_sigma": None,
+                "required_future_avg_basis": "unavailable",
+                "observed_final_window_avg": float(observed_avg) if observed_avg is not None else None,
+                "observed_final_window_sec": observed_sec,
+                "final_window_integral_source": "polymarket_chainlink_raw_spot_history" if observed_avg is not None else "unavailable",
+                "final_window_integral_clock": "chainlink_source_observation_ts",
+                "remaining_avg_decision_boundary": None, "required_future_avg_to_flip": None,
+                "path_boundary_proxy": float(strike) if float(time_left_sec) > twap_window else None,
+                "path_boundary_proxy_source": "strike" if float(time_left_sec) > twap_window else None,
+                "required_future_avg_is_exact_partial_integral": False,
+                "market_mid_probability_up": float(mid_up) if mid_up is not None else None,
+                "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
+                "best_bid_up": float(bid_up) if bid_up is not None else None,
+                "best_ask_up": float(ask_up) if ask_up is not None else None,
+                "best_bid_down": float(bid_down) if bid_down is not None else None,
+                "best_ask_down": float(ask_down) if ask_down is not None else None,
+                "required_path_mode": "UNAVAILABLE",
+            }
         common = dict(
-            spot=spot, strike=strike, time_left_sec=float(time_left_sec),
+            spot=path_spot, strike=strike, time_left_sec=float(time_left_sec),
             reference_source=f"polymarket_chainlink_twap_{twap_window}s_ws",
             outcome="up", sigma_default=self.maker_digital_sigma_default,
             sigma_raw_realized=raw_sigma, sigma_scale=self.maker_digital_vol_scale,
@@ -880,8 +985,8 @@ class SpotPricerMixin:
             time_decay_min=float(self.maker_digital_sigma_time_decay_min),
             twap_window_sec=twap_window, observed_twap_average=observed_avg,
             observed_twap_seconds=observed_sec,
-            source_observed_ts=float(getattr(self, "_polymarket_chainlink_twap_observation_ts", now_ts) or now_ts),
-            source_age_sec=max(0.0, now_ts - float(getattr(self, "_polymarket_chainlink_twap_observation_ts", now_ts) or now_ts)),
+            source_observed_ts=float(source_observed_ts or now_ts),
+            source_age_sec=max(0.0, now_ts - float(source_observed_ts or now_ts)),
         )
         from bot.forecast_state import build_forecast_state
         conditioned = build_forecast_state(
@@ -893,53 +998,73 @@ class SpotPricerMixin:
         # sigma_after_time_decay is upstream of the implied-market floor, so it
         # is the already-computed market-independent sigma for this same state.
         math_diag = MakerEngine.twap_settlement_diagnostics(
-            spot=float(spot), strike=float(strike), sigma_annual=float(conditioned.sigma_after_time_decay),
+            spot=float(path_spot),
+            strike=float(strike), sigma_annual=float(conditioned.sigma_after_time_decay),
             time_left_sec=float(time_left_sec), twap_window_sec=twap_window,
             observed_window_avg=float(observed_avg) if observed_avg is not None else None,
             observed_window_sec=observed_sec,
         )
-        p_ex = math_diag["p_up"]
+        p_ex = math_diag["p_up"] if raw_sigma is not None else None
         final_window = float(time_left_sec) <= twap_window
         data_quality = "ok"
         if final_window and (observed_avg is None or observed_sec <= 0):
             data_quality = "insufficient_raw_final_window_history"
         elif observed_avg is None and not final_window:
             data_quality = "pre_final_window_approximation"
-        dominant = "UP" if float(spot) >= float(strike) else "DOWN"
-        required_avg = math_diag["required_remaining_avg_for_up"] if final_window and data_quality == "ok" else (
-            None if final_window else float(strike)
-        )
+        dominant = "UP" if float(path_spot) >= float(strike) else "DOWN"
+        integral_available = observed_avg is not None and observed_sec > 0
+        required_avg = math_diag["remaining_avg_decision_boundary"] if final_window and integral_available else None
         target = required_avg if required_avg is not None else float(strike)
-        fast_spot = getattr(self, "_binance_ws_price", None)
-        path_spot = float(fast_spot) if fast_spot is not None and Decimal(str(fast_spot)) > 0 else float(spot)
+        path_spot_float = float(path_spot)
         move_sigma = build_safety_sigma(
-            spot=path_spot, strike=target, sigma_annual=float(conditioned.sigma_after_time_decay),
+            spot=path_spot_float, strike=target, sigma_annual=float(conditioned.sigma_after_time_decay),
             time_left_sec=(max(1.0, twap_window - observed_sec) if final_window and data_quality == "ok" else float(time_left_sec)),
             sigma_source="forecast_sigma_after_time_decay_ex_market",
-        )
-        move_usd = target - path_spot if target is not None else None
-        move_bps = move_usd / path_spot * 10000 if move_usd is not None and path_spot > 0 else None
+        ) if raw_sigma is not None else {"safety_sigma": None}
+        move_usd = target - path_spot_float if target is not None else None
+        move_bps = move_usd / path_spot_float * 10000 if move_usd is not None and path_spot_float > 0 else None
         p_market = float(mid_up) if mid_up is not None else None
         result = {
             "probability_model_version": "existing_twap_average_approx_v1",
-            "probability_model_mode": ("FINAL_WINDOW_PARTIAL_INTEGRAL" if data_quality == "ok" and final_window else
+            "probability_model_mode": ("FINAL_WINDOW_PARTIAL_INTEGRAL" if integral_available and final_window else
                                        "FINAL_WINDOW_APPROX_FALLBACK" if final_window else "PRE_FINAL_WINDOW_APPROX"),
-            "data_quality": data_quality, "official_current_twap": float(getattr(self, "_polymarket_chainlink_twap_price", spot) or spot),
+            "data_quality": ("raw_path_spot_unavailable" if path_spot is None else
+                             data_quality if final_window and (observed_avg is None or observed_sec <= 0) else
+                             "raw_spot_sigma_unavailable" if raw_sigma is None else data_quality),
+            "official_current_twap": float(official_twap),
+            "path_spot": path_spot_float, "path_spot_source": path_spot_source,
+            "path_spot_age_sec": path_spot_age,
+            "sigma_ex_market": float(raw_sigma) if raw_sigma is not None else None,
+            "sigma_ex_market_source": "polymarket_chainlink_spot_history" if raw_sigma is not None else "unavailable",
+            "sigma_ex_market_available": raw_sigma is not None,
+            "sigma_ex_market_sample_count": len(sigma_history),
+            "sigma_ex_market_window_sec": sigma_window_sec,
+            "final_window_integral_source": "polymarket_chainlink_raw_spot_history" if observed_avg is not None else "unavailable",
+            "final_window_integral_clock": "chainlink_source_observation_ts",
+            "required_path_mode": ("FINAL_WINDOW_PARTIAL_INTEGRAL" if final_window and observed_avg is not None
+                                    else "PRE_FINAL_WINDOW_APPROX" if not final_window else "UNAVAILABLE"),
             "observed_final_window_avg": float(observed_avg) if observed_avg is not None else None,
             "observed_final_window_sec": observed_sec,
             "remaining_final_window_sec": max(0.0, twap_window - observed_sec) if final_window else None,
             "required_future_avg_to_flip": required_avg,
-            "required_future_avg_basis": "raw_chainlink_partial_integral" if final_window and data_quality == "ok" else "strike_boundary_approximation" if not final_window else "unavailable",
-            "fast_spot": path_spot,
-            "required_avg_for_up": math_diag["required_remaining_avg_for_up"] if final_window and data_quality == "ok" else (float(strike) if not final_window else None),
-            "required_avg_for_down": math_diag["required_remaining_avg_for_down"] if final_window and data_quality == "ok" else (float(strike) if not final_window else None),
+            "required_future_avg_is_exact_partial_integral": bool(final_window and integral_available),
+            "required_future_avg_basis": "raw_chainlink_partial_integral" if final_window and integral_available else "unavailable",
+            "remaining_avg_decision_boundary": required_avg,
+            "path_boundary_proxy": float(strike) if not final_window else None,
+            "path_boundary_proxy_source": "strike" if not final_window else None,
+            "fast_spot": path_spot_float,
+            "required_avg_for_up": required_avg,
+            "required_avg_for_down": required_avg,
             "currently_dominant_side": dominant,
             "required_move_usd": move_usd, "required_move_bps": move_bps,
             "required_move_sigma": move_sigma["safety_sigma"],
-            "sigma_final": float(conditioned.sigma_final), "sigma_after_time_decay_ex_market": float(conditioned.sigma_after_time_decay),
+            "sigma_final": float(conditioned.sigma_final),
+            "sigma_after_time_decay_ex_market": float(conditioned.sigma_after_time_decay) if raw_sigma is not None else None,
             "sigma_implied_floor_applied": bool(conditioned.implied_sigma_floor_applied),
-            "p_up_market_conditioned": float(p_cond), "p_down_market_conditioned": 1.0 - float(p_cond),
-            "p_up_ex_market": float(p_ex), "p_down_ex_market": 1.0 - float(p_ex),
+            "p_up_market_conditioned": float(p_cond),
+            "p_down_market_conditioned": 1.0 - float(p_cond),
+            "p_up_ex_market": float(p_ex) if p_ex is not None else None,
+            "p_down_ex_market": 1.0 - float(p_ex) if p_ex is not None else None,
             "market_mid_probability_up": p_market,
             "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
             "best_bid_up": float(bid_up) if bid_up is not None else None,
@@ -950,16 +1075,16 @@ class SpotPricerMixin:
             "best_ask_down": float(ask_down) if ask_down is not None else None,
             "executable_buy_probability_down": float(ask_down) if ask_down is not None else None,
             "executable_sell_probability_down": float(bid_down) if bid_down is not None else None,
-            "model_minus_market_mid_up": float(p_ex) - p_market if p_market is not None else None,
-            "model_minus_best_ask_up": float(p_ex) - float(ask_up) if ask_up is not None else None,
-            "model_minus_best_bid_up": float(p_ex) - float(bid_up) if bid_up is not None else None,
-            "model_minus_market_mid_down": (1.0 - float(p_ex)) - float(mid_down) if mid_down is not None else None,
-            "model_minus_best_ask_down": (1.0 - float(p_ex)) - float(ask_down) if ask_down is not None else None,
-            "model_minus_best_bid_down": (1.0 - float(p_ex)) - float(bid_down) if bid_down is not None else None,
+            "model_minus_market_mid_up": float(p_ex) - p_market if p_market is not None and p_ex is not None else None,
+            "model_minus_best_ask_up": float(p_ex) - float(ask_up) if ask_up is not None and p_ex is not None else None,
+            "model_minus_best_bid_up": float(p_ex) - float(bid_up) if bid_up is not None and p_ex is not None else None,
+            "model_minus_market_mid_down": (1.0 - float(p_ex)) - float(mid_down) if mid_down is not None and p_ex is not None else None,
+            "model_minus_best_ask_down": (1.0 - float(p_ex)) - float(ask_down) if ask_down is not None and p_ex is not None else None,
+            "model_minus_best_bid_down": (1.0 - float(p_ex)) - float(bid_down) if bid_down is not None and p_ex is not None else None,
             "market_bbo_age_sec": max(
                 [now_ts - float(quote_ts[k]) for k in (up_inst, down_inst) if k and quote_ts.get(k)]
             ) if any(k and quote_ts.get(k) for k in (up_inst, down_inst)) else None,
-            "twap_required_path_math_mode": (math_diag["mode"] if data_quality == "ok" or not final_window
+            "twap_required_path_math_mode": (math_diag["mode"] if integral_available or not final_window
                                              else "FINAL_WINDOW_RAW_UNAVAILABLE"),
         }
         return result
@@ -1273,6 +1398,7 @@ class SpotPricerMixin:
                 now_ts=now,
                 end_ts=float(end_ts) if end_ts is not None else now + time_left_sec,
                 window_sec=twap_window_sec,
+                history=getattr(self, "polymarket_chainlink_receipt_history", []),
             )
         state = build_forecast_state(
             spot=spot,
