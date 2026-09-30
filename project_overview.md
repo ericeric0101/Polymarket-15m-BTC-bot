@@ -119,7 +119,7 @@
   `source_observed_ts`, and `source_age_sec`; `fast_follow_source_stale` cannot
   fall back to a recently-created cached forecast.
 - Runtime journal health is checked again before every fast-follow entry,
-  including reuse of an already-loaded Taipei calendar-day risk cache; a cached day
+  including reuse of an already-loaded Taipei session risk cache; a cached session
   can never bypass the BUY gate. The pending fast-follow reservation must be
   persisted successfully and leave the journal healthy before its FOK is sent.
   A persistence failure (explicit false result or exception, including an
@@ -648,17 +648,21 @@ overwritten by `ForecastState.probability_for_outcome`.
 | Candidate/entry gates | `run_bot._evaluate_quote_targets` combines fair/book into `MakerEngine.generate_quote_plan`, then `bot.quote_service.evaluate_buy_entry_controls`, external confirmation, shadow veto, and `bot.quoting.apply_quote_plan_guards`. Inputs: fair, book, side/score, inventory and phase. Output: permitted BUY/SELL plan with reason and economics diagnostics. | `ENTRY_SCORE_MIN` → legacy score reader; `FIRST_ENTRY_SCORE_MIN`, `FIRST_ENTRY_MAX_TIME_LEFT_SEC`, `ENTRY_MIN_TIME_LEFT_SEC`, `ENTRY_MAX_FAIR_PRICE`, `MAKER_MIN_FAIR_PRICE`, external/smart-money keys, momentum keys, `MAKER_*EXPECTED_NET*`, fee/markout keys. |
 | Economics | `MakerEngine.generate_quote_plan` computes fair edge and modeled quote fees for maker BUY eligibility. Empirical adverse markout and `robust_net` remain shadow diagnostics and do not veto maker BUY. | `MAKER_MIN_EXPECTED_NET_USDC`, `MAKER_ECON_FEE_RATE_DECIMAL`, fee-cache/default keys; `EXECUTION_COST_*` remains relevant to calibration/telemetry, not the live maker veto. |
 
-### Persistent session PnL BUY guard and stop-forensics shadow (2026-09-28)
+### Persistent session PnL BUY guard and stop-forensics shadow (2026-09-28; overnight window updated 2026-09-30)
 
 `SESSION_PNL_GUARD_ENABLED=1` adds the only new live authority in this change:
-it uses finalized/realized PnL by **Asia/Taipei calendar day**, arms after
+it uses finalized/realized PnL by the **Asia/Taipei 19:30–07:30 overnight session**,
+keyed by the date on which the session starts. It arms after
 `+$8`, locks new BUYs after a `$4` drawdown from realized high-water, and locks
 at `-$8` daily realized PnL. The optional `+$10` hard-profit lock is off by
 default. State is stored in `session_pnl_state`, survives restart/rollover,
 and is checked at maker and Outcome fast-follow final BUY boundaries. It never
 blocks SELL, stop-loss, cancellation, reconciliation, redemption, or rollover
 cleanup. Open-position executable-bid marks are telemetry only, never lock
-authority.
+authority. The session resets at 19:30 Taipei and ends at 07:30 the following
+morning; if the bot is unexpectedly run from 07:30 to 19:30, that period is
+tracked under a separate `-day` session key and is not mixed into the overnight
+guard. This defines PnL accounting only; it does not itself schedule bot uptime.
 
 `bot.stop_forensics_shadow.StopForensicsShadow` records the production raw
 invalidation condition from its first adverse observation, 5/10/15/20/30s

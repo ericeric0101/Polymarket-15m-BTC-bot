@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date as calendar_date, datetime, time as datetime_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from pathlib import Path
@@ -1164,23 +1164,39 @@ class TradeJournalDB:
                 conn.close()
 
     def reconstruct_session_pnl_state(self, session_date_taipei: str) -> Dict[str, Any]:
-        """Deterministically rebuild a missing daily state from final cycle PnL.
+        """Rebuild a missing guard session from final cycle PnL.
 
         Only `MARKET_CYCLE_PNL` is used: it is the established canonical event
         that combines already-realized fills with final settlement.  This
         avoids double-counting individual SELL fills during restart recovery.
+        ISO dates identify the 19:30–07:30 Taipei overnight session beginning
+        on that date; a `-day` suffix identifies the separate 07:30–19:30
+        daytime session used only if the bot is unexpectedly active then.
         """
         total = Decimal("0")
         high = Decimal("0")
         try:
+            is_day_session = str(session_date_taipei).endswith("-day")
+            raw_date = str(session_date_taipei)[:-4] if is_day_session else str(session_date_taipei)
+            session_day = calendar_date.fromisoformat(raw_date)
+            local_zone = ZoneInfo("Asia/Taipei")
+            if is_day_session:
+                start_local = datetime.combine(session_day, datetime_time(7, 30), tzinfo=local_zone)
+                end_local = datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone)
+            else:
+                start_local = datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone)
+                end_local = datetime.combine(session_day + timedelta(days=1), datetime_time(7, 30), tzinfo=local_zone)
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id"
                 ).fetchall()
             for ts, raw in rows:
                 try:
-                    local_day = datetime.fromisoformat(str(ts)).astimezone(ZoneInfo("Asia/Taipei")).date().isoformat()
-                    if local_day != str(session_date_taipei):
+                    event_time = datetime.fromisoformat(str(ts))
+                    if event_time.tzinfo is None:
+                        event_time = event_time.replace(tzinfo=timezone.utc)
+                    event_time = event_time.astimezone(local_zone)
+                    if not (start_local <= event_time < end_local):
                         continue
                     payload = json.loads(raw or "{}")
                     total += Decimal(str(payload.get("cycle_combined_pnl_usdc", 0)))

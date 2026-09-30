@@ -73,8 +73,8 @@ class SessionPnlGuard:
             changed = True
         # On restart reconstruction current PnL can already have retraced
         # below the arm threshold while the durable/reconstructed high-water
-        # proves the session did arm.  The arm is explicitly sticky for the
-        # entire Taipei day.
+        # proves the session did arm. The arm is sticky for the current guard
+        # session (the configured Taipei overnight window in live runtime).
         if self.config.enabled and not state.profit_guard_armed and (
             state.realized_pnl_usdc >= self.config.profit_arm_usdc
             or state.realized_high_water_usdc >= self.config.profit_arm_usdc

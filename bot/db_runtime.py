@@ -4,7 +4,7 @@ import time
 import threading
 from decimal import Decimal
 from typing import Any, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -85,7 +85,19 @@ def take_sync_journal_write_report(strategy: Any) -> Optional[dict[str, Any]]:
 class StrategyDBRuntimeMixin:
     @staticmethod
     def _taipei_session_date(now_ts: Optional[float] = None) -> str:
-        return datetime.fromtimestamp(time.time() if now_ts is None else float(now_ts), ZoneInfo("Asia/Taipei")).date().isoformat()
+        local = datetime.fromtimestamp(
+            time.time() if now_ts is None else float(now_ts), ZoneInfo("Asia/Taipei")
+        )
+        minute_of_day = local.hour * 60 + local.minute
+        if minute_of_day >= 19 * 60 + 30:
+            # Night session starts at 19:30 and is keyed by its start date.
+            return local.date().isoformat()
+        if minute_of_day < 7 * 60 + 30:
+            # After midnight, retain the previous evening's session key.
+            return (local.date() - timedelta(days=1)).isoformat()
+        # If the bot is unexpectedly run during the day, isolate that PnL from
+        # the overnight session rather than mixing it into the next night.
+        return f"{local.date().isoformat()}-day"
 
     def _session_guard_payload(self, decision: SessionBuyGuardDecision) -> Dict[str, Any]:
         return {

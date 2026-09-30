@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit, audited reset of one Taipei-day BUY-only session guard.
+"""Explicit, audited reset of one Taipei session BUY-only guard.
 
 This does not alter orders, fills, inventory, or historical strategy events.
 It only establishes a fresh guard baseline after an operator explicitly opts in.
@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,14 +26,20 @@ if str(REPO_ROOT) not in sys.path:
 from monitoring.trade_journal_db import TradeJournalDB
 
 
-def _today_taipei() -> str:
-    return datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
+def _current_session_key() -> str:
+    local = datetime.now(ZoneInfo("Asia/Taipei"))
+    minute_of_day = local.hour * 60 + local.minute
+    if minute_of_day >= 19 * 60 + 30:
+        return local.date().isoformat()
+    if minute_of_day < 7 * 60 + 30:
+        return (local.date() - timedelta(days=1)).isoformat()
+    return f"{local.date().isoformat()}-day"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Reset one Taipei-day session PnL BUY guard with an audit event.")
+    parser = argparse.ArgumentParser(description="Reset one Taipei session PnL BUY guard with an audit event.")
     parser.add_argument("--db", default="logs/trade_journal.db", help="Trade-journal SQLite path")
-    parser.add_argument("--date", default=_today_taipei(), help="Taipei calendar date (YYYY-MM-DD)")
+    parser.add_argument("--date", default=_current_session_key(), help="Taipei session key (night: YYYY-MM-DD; day: YYYY-MM-DD-day)")
     parser.add_argument(
         "--reason",
         required=True,

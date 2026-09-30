@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from bot.db_runtime import StrategyDBRuntimeMixin
@@ -27,7 +27,49 @@ class _GuardHost(StrategyDBRuntimeMixin):
 
 
 def _taipei_ts(day: int) -> float:
-    return datetime(2026, 9, day, 12, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    return datetime(2026, 9, day, 20, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+
+def _taipei_at(day: int, hour: int, minute: int = 0) -> float:
+    return datetime(2026, 9, day, hour, minute, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+
+
+def test_session_key_uses_taipei_overnight_window():
+    assert StrategyDBRuntimeMixin._taipei_session_date(_taipei_at(30, 19, 29)) == "2026-09-30-day"
+    assert StrategyDBRuntimeMixin._taipei_session_date(_taipei_at(30, 19, 30)) == "2026-09-30"
+    next_day_midnight = datetime(2026, 10, 1, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    next_day_before_end = datetime(2026, 10, 1, 7, 29, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    next_day_end = datetime(2026, 10, 1, 7, 30, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    assert StrategyDBRuntimeMixin._taipei_session_date(next_day_midnight) == "2026-09-30"
+    assert StrategyDBRuntimeMixin._taipei_session_date(next_day_before_end) == "2026-09-30"
+    assert StrategyDBRuntimeMixin._taipei_session_date(next_day_end) == "2026-10-01-day"
+
+
+def test_overnight_reconstruction_includes_only_1930_to_next_day_0730(tmp_path):
+    db = TradeJournalDB(str(tmp_path / "journal.db"), backup_interval_sec=3600)
+    try:
+        for timestamp, pnl in [
+            (_taipei_at(30, 19, 29), 100),
+            (_taipei_at(30, 19, 30), 5),
+            (datetime(2026, 10, 1, 7, 29, tzinfo=ZoneInfo("Asia/Taipei")).timestamp(), 4),
+            (datetime(2026, 10, 1, 7, 30, tzinfo=ZoneInfo("Asia/Taipei")).timestamp(), 200),
+        ]:
+            assert db.log_strategy_event(
+                "run", "MARKET_CYCLE_PNL", {"cycle_combined_pnl_usdc": pnl, "test_ts": timestamp}
+            )
+            # Use an explicit ISO timestamp to exercise the same timestamp source
+            # the journal reconstruction consumes.
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE strategy_events SET ts=? WHERE id=(SELECT MAX(id) FROM strategy_events)",
+                    (datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),),
+                )
+                conn.commit()
+        state = db.reconstruct_session_pnl_state("2026-09-30")
+        assert state["realized_pnl_usdc"] == 9
+        assert state["realized_high_water_usdc"] == 9
+    finally:
+        db.stop()
 
 
 def test_session_pnl_state_is_durable_and_does_not_require_strategy_event(tmp_path):
