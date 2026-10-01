@@ -1,0 +1,13 @@
+brier_analytic_p_up,brier_market_mid_probability_up,brier_p_up_empirical,brier_p_up_empirical_vol_conditioned,checkpoint_sec,mode,n_analytic_p_up,n_market_mid_probability_up,n_p_up_empirical,n_p_up_empirical_vol_conditioned,paired_ci_high_p_up_empirical_vol_conditioned_vs_analytic_p_up,paired_ci_high_p_up_empirical_vol_conditioned_vs_market_mid_probability_up,paired_ci_high_p_up_empirical_vs_analytic_p_up,paired_ci_high_p_up_empirical_vs_market_mid_probability_up,paired_ci_low_p_up_empirical_vol_conditioned_vs_analytic_p_up,paired_ci_low_p_up_empirical_vol_conditioned_vs_market_mid_probability_up,paired_ci_low_p_up_empirical_vs_analytic_p_up,paired_ci_low_p_up_empirical_vs_market_mid_probability_up,paired_delta_p_up_empirical_vol_conditioned_vs_analytic_p_up,paired_delta_p_up_empirical_vol_conditioned_vs_market_mid_probability_up,paired_delta_p_up_empirical_vs_analytic_p_up,paired_delta_p_up_empirical_vs_market_mid_probability_up
+0.0013595575282857083,,0.008074602323243864,0.0007278458293953292,120,PRE_FINAL_PROXY,11,0,11,11,6.810893530074867e-05,,0.011111298796841,,-0.0019659327628026527,,0.002693905729105724,,-0.000631711698890379,,0.006715044794958156,
+,,,,120,EXACT_FINAL_WINDOW,0,0,0,0,,,,,,,,,,,,
+,,,,60,PRE_FINAL_PROXY,0,0,0,0,,,,,,,,,,,,
+,,,,60,EXACT_FINAL_WINDOW,0,0,0,0,,,,,,,,,,,,
+,,,,30,PRE_FINAL_PROXY,0,0,0,0,,,,,,,,,,,,
+1.0061953177998218e-05,,,,30,EXACT_FINAL_WINDOW,11,0,0,0,,,,,,,,,,,,
+,,,,15,PRE_FINAL_PROXY,0,0,0,0,,,,,,,,,,,,
+8.389053682250452e-09,,,,15,EXACT_FINAL_WINDOW,11,0,0,0,,,,,,,,,,,,
+,,,,10,PRE_FINAL_PROXY,0,0,0,0,,,,,,,,,,,,
+3.3110261752972283e-18,,,,10,EXACT_FINAL_WINDOW,11,0,0,0,,,,,,,,,,,,
+,,,,5,PRE_FINAL_PROXY,0,0,0,0,,,,,,,,,,,,
+9.99987933740671e-25,,,,5,EXACT_FINAL_WINDOW,11,0,0,0,,,,,,,,,,,,
