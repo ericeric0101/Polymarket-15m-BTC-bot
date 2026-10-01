@@ -13,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 
-EVENTS = {"TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE", "TMINUS_CHECKPOINT", "MARKET_TWAP_SUMMARY", "SETTLEMENT_PATH_THRESHOLD_CROSS", "RESEARCH_STORAGE_GUARD_TRIGGERED"}
+EVENTS = {"TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE", "TMINUS_CHECKPOINT", "MARKET_TWAP_SUMMARY", "MARKET_OPENING_TWAP_SAMPLE", "SETTLEMENT_PATH_THRESHOLD_CROSS", "RESEARCH_STORAGE_GUARD_TRIGGERED"}
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:
@@ -162,6 +162,7 @@ def main() -> int:
             payload["observed_ts"] = int(ts) / 1_000_000_000
             rows.append(payload)
     summaries = [r for r in rows if r.get("event_type") == "MARKET_TWAP_SUMMARY"]
+    opening_samples = [r for r in rows if r.get("event_type") == "MARKET_OPENING_TWAP_SAMPLE"]
     all_checkpoints = [r for r in rows if r.get("event_type") == "TMINUS_CHECKPOINT"]
     checkpoints = []
     for row in all_checkpoints:
@@ -174,6 +175,7 @@ def main() -> int:
     crosses = [r for r in rows if r.get("event_type") == "TWAP_STRIKE_CROSS"]
     projection = [r for r in rows if r.get("event_type") == "TWAP_PROJECTED_SIDE_CHANGE"]
     write_csv(out / "market_twap_summary.csv", summaries)
+    write_csv(out / "market_opening_twap_samples.csv", opening_samples)
     write_csv(out / "twap_checkpoints.csv", checkpoints)
     write_csv(out / "twap_cross_events.csv", crosses)
     write_csv(out / "twap_projection_events.csv", projection)
@@ -192,6 +194,9 @@ def main() -> int:
             and r.get("p_up_ex_market") is not None
             and r.get("sigma_ex_market_fresh") is True)
     }
+    opening_summaries = [r for r in summaries if "opening_20s_observation_count" in r]
+    first_open_ages = [float(r["first_observed_market_age_sec"]) for r in opening_summaries
+                       if r.get("first_observed_market_age_sec") is not None]
     # Accuracy needs observed outcome labels and is intentionally restricted to
     # canonical Chainlink-60s settlement references.  Do not turn a Binance or
     # generic external fallback into a primary accuracy observation.
@@ -239,13 +244,23 @@ def main() -> int:
                                            "canonical_twap_settlements": len(canonical_summaries),
                                            "noncanonical_proxy_settlements": len(proxy_summaries),
                                            "canonical_probability_checkpoint_markets": len(canonical_probability_checkpoints),
+                                           "markets_with_opening_20s_telemetry": len(opening_summaries),
+                                           "markets_missing_opening_20s_telemetry_legacy": len(summaries) - len(opening_summaries),
+                                           "markets_with_opening_20s_observations": len({r.get("market_slug") for r in opening_samples}),
+                                           "opening_20s_sample_events": len(opening_samples),
+                                           "opening_20s_observation_count_total": sum(int(r.get("opening_20s_observation_count") or 0) for r in opening_summaries),
+                                           "first_observation_market_age_mean_sec": (sum(first_open_ages) / len(first_open_ages) if first_open_ages else None),
                                            "note": quality_note}])
     (out / "summary.md").write_text(
         "# TWAP forward research\n\n"
         "This is event-driven, shadow-only telemetry. Official current TWAP is Polymarket RTDS Chainlink 60s TWAP; "
         "the flat/trend settlement projections are estimates and have no live authority. Settlement-probability results use only canonical labels; all metrics are descriptive, not causal. "
         f"Captured events: {len(rows)}; summaries: {len(summaries)}; canonical labels: {len(canonical_summaries)}; "
-        f"noncanonical proxy labels: {len(proxy_summaries)}.\n", encoding="utf-8")
+        f"noncanonical proxy labels: {len(proxy_summaries)}; markets with opening-window observations: "
+        f"{len({r.get('market_slug') for r in opening_samples})} markets with {len(opening_samples)} durable opening samples; "
+        f"summary telemetry available for {len(opening_summaries)}/{len(summaries)} markets; legacy summaries without opening-window fields: "
+        f"{len(summaries) - len(opening_summaries)}; opening-window observations: "
+        f"{sum(int(r.get('opening_20s_observation_count') or 0) for r in opening_summaries)}.\n", encoding="utf-8")
     print(f"wrote {len(rows)} TWAP events to {out}")
     return 0
 

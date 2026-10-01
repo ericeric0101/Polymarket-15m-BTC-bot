@@ -144,6 +144,13 @@ class TwapForwardShadow:
             "projected_settlement_side_trend": _side(projected_trend, strike),
             "projected_crossing_eta_sec": eta, "crossing_eta_confidence": confidence,
         }
+        try:
+            market_start = int(str(slug).rsplit("-", 1)[-1])
+            result["market_start_ts"] = market_start
+            result["market_age_source_sec"] = float(source_ts) - market_start
+            result["market_age_receive_sec"] = float(now_ts) - market_start
+        except (TypeError, ValueError):
+            pass
         if settlement_diagnostics:
             result.update(settlement_diagnostics)
         self._update_summary(str(slug), result)
@@ -214,6 +221,14 @@ class TwapForwardShadow:
         slug, ts = str(result["market_slug"]), float(result["observed_ts"])
         self._storage_health(ts)
         self._track_probability_summary(slug, result)
+        try:
+            opening_source_age = float(result.get("market_age_source_sec"))
+        except (TypeError, ValueError):
+            opening_source_age = -1.0
+        if 0.0 <= opening_source_age <= 20.0:
+            # A compact opening-window trace is useful to diagnose missed
+            # coverage and early source movement; no per-tick writes after it.
+            self._persist(slug, ts, "MARKET_OPENING_TWAP_SAMPLE", result)
         value = result.get("twap_minus_strike_bps")
         sign = 1 if value is not None and value > 0 else -1 if value is not None and value < 0 else 0
         if sign and slug in self._last_emitted_sign and sign != self._last_emitted_sign[slug]:
@@ -303,6 +318,34 @@ class TwapForwardShadow:
                                                   "min_twap_minus_strike_bps": None, "max_twap_minus_strike_bps": None,
                                                   "max_positive_twap_slope": None, "max_negative_twap_slope": None,
                                                   "min_crossing_eta_sec": None, "last_twap_sign": None, "last_projected_side": None})
+        try:
+            market_start = int(str(slug).rsplit("-", 1)[-1])
+            receive_age = float(result.get("observed_ts")) - market_start
+            source_age = float(result.get("source_ts")) - market_start
+        except (TypeError, ValueError):
+            market_start, receive_age, source_age = None, None, None
+        if market_start is not None:
+            summary["market_start_ts"] = market_start
+            if summary.get("first_observed_market_age_sec") is None:
+                summary["first_observed_market_age_sec"] = receive_age
+            if source_age is not None and 0.0 <= source_age <= 20.0:
+                summary["opening_20s_observation_count"] = int(summary.get("opening_20s_observation_count", 0)) + 1
+                summary["opening_20s_first_age_sec"] = (
+                    source_age if summary.get("opening_20s_first_age_sec") is None
+                    else min(summary["opening_20s_first_age_sec"], source_age)
+                )
+                summary["opening_20s_last_age_sec"] = (
+                    source_age if summary.get("opening_20s_last_age_sec") is None
+                    else max(summary["opening_20s_last_age_sec"], source_age)
+                )
+                summary["opening_20s_first_receive_age_sec"] = (
+                    receive_age if summary.get("opening_20s_first_receive_age_sec") is None
+                    else min(summary["opening_20s_first_receive_age_sec"], receive_age)
+                )
+                summary["opening_20s_last_receive_age_sec"] = (
+                    receive_age if summary.get("opening_20s_last_receive_age_sec") is None
+                    else max(summary["opening_20s_last_receive_age_sec"], receive_age)
+                )
         value = result.get("twap_minus_strike_bps")
         if value is not None:
             summary["min_twap_minus_strike_bps"] = value if summary["min_twap_minus_strike_bps"] is None else min(summary["min_twap_minus_strike_bps"], value)
@@ -340,6 +383,14 @@ class TwapForwardShadow:
             self._last_threshold_state.pop(str(slug), None)
         summary_ts = float(settlement_ts) if settlement_ts is not None else fallback_ts
         summary["summary_ts"] = summary_ts
+        opening_count = int(summary.get("opening_20s_observation_count", 0))
+        first_age = summary.get("opening_20s_first_age_sec")
+        last_age = summary.get("opening_20s_last_age_sec")
+        summary["opening_20s_capture_observed"] = bool(opening_count)
+        summary["opening_20s_coverage_span_sec"] = (
+            max(0.0, float(last_age) - float(first_age))
+            if first_age is not None and last_age is not None else 0.0
+        )
         summary["settlement_reference_source"] = str(settlement_reference_source or "unavailable")
         summary["settlement_reference_is_canonical"] = bool(settlement_reference_is_canonical)
         summary["settlement_reference_age_sec"] = settlement_reference_age_sec

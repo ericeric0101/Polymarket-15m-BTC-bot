@@ -23,6 +23,7 @@ from bot.adapter_overrides import (
     install_runtime_compatibility_overrides,
     record_quote_provenance,
     record_quote_data_engine_latency,
+    record_data_engine_queue_telemetry,
     should_enqueue_trade_tick,
 )
 import bot.adapter_overrides as adapter_overrides
@@ -199,6 +200,44 @@ def test_saturated_data_queue_coalesces_quotes_and_suppresses_l2_without_queuefu
     assert latest_by_instrument == {"up": 127, "down": 127}
     assert engine._btc15m_backpressure["l2_suppressed_total"] > 0
     assert engine._btc15m_backpressure["quote_coalesced_total"] > 0
+    assert engine._btc15m_backpressure["l2_suppressed_by_instrument"]["up"]["count_total"] > 0
+    assert engine._btc15m_backpressure["l2_suppressed_by_instrument"]["down"]["count_total"] > 0
+
+
+def test_l2_suppression_gap_is_attributed_and_recovery_requires_fresh_processed_snapshot():
+    class OrderBookDeltas:
+        def __init__(self, instrument_id, ts_event):
+            self.instrument_id = instrument_id
+            self.ts_event = ts_event
+
+    class Engine:
+        def __init__(self):
+            self._data_queue = asyncio.Queue(maxsize=8)
+            self._config = SimpleNamespace(qsize=8)
+
+    engine = Engine()
+    # 25% of capacity is the pressure threshold: only the admitted event
+    # before that threshold is queued; subsequent events expose the gap.
+    engine._data_queue.put_nowait("backlog-1")
+    engine._data_queue.put_nowait("backlog-2")
+    assert not enqueue_bounded_market_data(engine, OrderBookDeltas("up", 100))
+    gap = engine._btc15m_backpressure["l2_gap_by_instrument"]["up"]
+    assert gap["last_suppressed_event_ts"] == 100
+
+    # An older queued snapshot is not proof of recovery.
+    old = OrderBookDeltas("up", 99)
+    record_data_engine_queue_telemetry(engine, old, 1, now_ts=100.0, phase="process")
+    assert "up" in engine._btc15m_backpressure["l2_gap_by_instrument"]
+    report = record_data_engine_queue_telemetry(engine, old, 1, now_ts=110.1, phase="process")
+    assert report["l2_open_gaps_by_instrument"]["up"]["suppressed_count"] == 1
+    assert report["l2_suppressed_by_instrument"]["up"]["count_total"] == 1
+
+    fresh = OrderBookDeltas("up", 101)
+    adapter_overrides._record_l2_gap_recovery(engine, fresh, time.monotonic())
+    assert "up" not in engine._btc15m_backpressure["l2_gap_by_instrument"]
+    recovered = engine._btc15m_backpressure["l2_suppressed_by_instrument"]["up"]
+    assert recovered["recovered_gaps"] == 1
+    assert recovered["last_recovery_event_ts"] == 101
 
 
 def test_unsubscribed_trade_ticks_are_not_allowed_to_fill_data_engine_queue():

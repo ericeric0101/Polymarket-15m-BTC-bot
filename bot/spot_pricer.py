@@ -55,6 +55,32 @@ class SpotPricerMixin:
     # Existing freshness window used by the external/raw spot path diagnostics.
     _RAW_SPOT_FRESHNESS_SEC = 10.0
 
+    @staticmethod
+    def _twap_research_market_context(
+        now_ts: float, *, current_slug: str | None, current_end: float | None,
+    ) -> tuple[str, float]:
+        """Attribute research ticks to the wall-clock 15-minute market.
+
+        Market discovery/subscription can lag a boundary. Research sampling is
+        independent of that lifecycle, so a stale runtime slug must not move
+        opening ticks into the prior market. This context is shadow-only.
+        """
+        market_start = int(float(now_ts) // 900) * 900
+        wall_slug = f"btc-updown-15m-{market_start}"
+        runtime_slug = str(current_slug or "")
+        try:
+            runtime_start = int(runtime_slug.rsplit("-", 1)[-1])
+        except (TypeError, ValueError):
+            runtime_start = None
+        if runtime_slug == wall_slug and runtime_start == market_start:
+            try:
+                end = float(current_end)
+            except (TypeError, ValueError):
+                end = float(market_start + 900)
+            if market_start < end <= market_start + 900:
+                return runtime_slug, end
+        return wall_slug, float(market_start + 900)
+
     def _is_twap_spot_source(self, source: str) -> bool:
         return str(source or "").startswith("polymarket_chainlink_twap_")
 
@@ -243,21 +269,54 @@ class SpotPricerMixin:
                             twap_shadow = getattr(self, "twap_forward_shadow", None)
                             if twap_shadow is not None:
                                 try:
-                                    slug = str(getattr(self, "current_market_slug", "") or "")
-                                    strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug)
-                                    current_end = getattr(self, "current_market_end_timestamp", None)
                                     now_wall = time.time()
-                                    shadow_inputs = self._settlement_probability_shadow_inputs(
-                                        slug=slug, official_twap=tick.price, strike=strike,
-                                        time_left_sec=(max(0.0, float(current_end) - now_wall) if current_end else None),
-                                        now_ts=now_wall, source_observed_ts=observation_ts,
+                                    runtime_slug = str(getattr(self, "current_market_slug", "") or "")
+                                    slug, research_market_end = self._twap_research_market_context(
+                                        float(observation_ts or now_wall),
+                                        current_slug=runtime_slug,
+                                        current_end=getattr(self, "current_market_end_timestamp", None),
                                     )
+                                    strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug)
+                                    time_left = max(0.0, research_market_end - now_wall)
+                                    if runtime_slug == slug:
+                                        shadow_inputs = self._settlement_probability_shadow_inputs(
+                                            slug=slug, official_twap=tick.price, strike=strike,
+                                            time_left_sec=time_left,
+                                            now_ts=now_wall, source_observed_ts=observation_ts,
+                                        )
+                                    else:
+                                        # Until the CLOB market pair rolls over,
+                                        # the current quote cache belongs to the
+                                        # old market. Never attach it to this
+                                        # market's opening research observations.
+                                        shadow_inputs = {
+                                            "probability_model_version": "existing_twap_average_approx_v1",
+                                            "probability_model_mode": "UNAVAILABLE",
+                                            "data_quality": "market_runtime_rollover_pending",
+                                            "official_current_twap": float(tick.price),
+                                            "path_spot": None, "path_spot_source": "unavailable",
+                                            "path_spot_age_sec": None,
+                                            "settlement_state_side": "UNKNOWN",
+                                            "path_spot_side": "UNKNOWN",
+                                            "settlement_path_side_divergence": None,
+                                            "currently_dominant_side": "UNKNOWN",
+                                            "required_move_mode": "UNAVAILABLE",
+                                            "sigma_ex_market_age_sec": None,
+                                            "sigma_ex_market_fresh": False,
+                                            "market_bbo_up_age_sec": None,
+                                            "market_bbo_down_age_sec": None,
+                                            "market_bbo_up_unavailable_reason": "market_runtime_rollover_pending",
+                                            "market_bbo_down_unavailable_reason": "market_runtime_rollover_pending",
+                                            "p_up_ex_market": None, "p_down_ex_market": None,
+                                            "required_move_usd": None, "required_move_bps": None,
+                                            "required_move_sigma": None,
+                                        }
                                     twap_shadow.observe(
                                         slug=slug, now_ts=now_wall,
                                         source_ts=float(observation_ts or now_wall),
                                         fast_spot=getattr(self, "_binance_ws_price", None), official_twap=tick.price,
                                         strike=strike,
-                                        time_left_sec=(max(0.0, float(current_end) - now_wall) if current_end else None),
+                                        time_left_sec=time_left,
                                         settlement_diagnostics=shadow_inputs,
                                     )
                                 except Exception as exc:

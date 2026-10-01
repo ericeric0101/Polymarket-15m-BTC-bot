@@ -93,6 +93,7 @@ def enqueue_bounded_market_data(engine, data) -> bool:
         state = {
             "quotes": {}, "l2_suppression_active": False,
             "l2_suppressed_window": 0, "l2_suppressed_total": 0,
+            "l2_suppressed_by_instrument": {}, "l2_gap_by_instrument": {},
             "quote_coalesced_window": 0, "quote_coalesced_total": 0,
         }
         engine._btc15m_backpressure = state
@@ -104,11 +105,11 @@ def enqueue_bounded_market_data(engine, data) -> bool:
     # absolute event count as well as by the configured queue size.
     pressure_mark = min(max(1, int(limit * 0.25)), _MAX_MARKET_DATA_BACKLOG) if limit else 0
     if kind == "OrderBookDeltas" and state["l2_suppression_active"]:
-        _record_backpressure(engine, "l2_suppressed")
+        _record_l2_suppression(engine, data)
         return False
     if kind == "OrderBookDeltas" and limit and depth >= pressure_mark:
         state["l2_suppression_active"] = True
-        _record_backpressure(engine, "l2_suppressed")
+        _record_l2_suppression(engine, data)
         return False
     if kind == "QuoteTick" and (queue.full() or (limit and depth >= pressure_mark)):
         if limit and depth >= pressure_mark:
@@ -134,6 +135,71 @@ def _record_backpressure(engine, counter: str) -> None:
     total_key = f"{counter}_total"
     state[window_key] = int(state.get(window_key, 0)) + 1
     state[total_key] = int(state.get(total_key, 0)) + 1
+
+
+def _record_l2_suppression(engine, data) -> None:
+    """Keep bounded per-instrument suppression and unrecovered-gap evidence."""
+    _record_backpressure(engine, "l2_suppressed")
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        return
+    by_instrument = state.setdefault("l2_suppressed_by_instrument", {})
+    gaps = state.setdefault("l2_gap_by_instrument", {})
+    instrument = str(getattr(data, "instrument_id", "") or "unknown")
+    now = time.monotonic()
+    try:
+        event_ts = int(getattr(data, "ts_event", None))
+    except (TypeError, ValueError):
+        event_ts = None
+    if instrument not in by_instrument and len(by_instrument) >= 32:
+        evicted = next(iter(by_instrument))
+        by_instrument.pop(evicted, None)
+        gaps.pop(evicted, None)
+    totals = by_instrument.setdefault(instrument, {
+        "count_total": 0, "count_window": 0, "recovered_gaps": 0,
+    })
+    totals["count_total"] += 1
+    totals["count_window"] += 1
+    gap = gaps.setdefault(instrument, {
+        "first_suppressed_monotonic": now,
+        "last_suppressed_monotonic": now,
+        "first_suppressed_event_ts": event_ts,
+        "last_suppressed_event_ts": event_ts,
+        "suppressed_count": 0,
+    })
+    gap["last_suppressed_monotonic"] = now
+    gap["last_suppressed_event_ts"] = event_ts
+    gap["suppressed_count"] += 1
+
+
+def _record_l2_gap_recovery(engine, data, now: float) -> None:
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        return
+    instrument = str(getattr(data, "instrument_id", "") or "unknown")
+    gaps = state.setdefault("l2_gap_by_instrument", {})
+    gap = gaps.get(instrument)
+    if gap is None:
+        return
+    try:
+        event_ts = int(getattr(data, "ts_event"))
+    except (TypeError, ValueError):
+        return
+    last_suppressed_ts = gap.get("last_suppressed_event_ts")
+    # Only a snapshot sourced after the last dropped update proves recovery;
+    # an older item already queued before the gap is insufficient.
+    if last_suppressed_ts is None or event_ts <= int(last_suppressed_ts):
+        return
+    totals = state.setdefault("l2_suppressed_by_instrument", {}).setdefault(
+        instrument, {"count_total": 0, "count_window": 0, "recovered_gaps": 0},
+    )
+    totals["recovered_gaps"] += 1
+    totals["last_recovery_event_ts"] = event_ts
+    totals["last_recovery_latency_sec"] = max(
+        0.0, now - float(gap["last_suppressed_monotonic"]),
+    )
+    totals["last_gap_suppressed_count"] = int(gap["suppressed_count"])
+    gaps.pop(instrument, None)
 
 
 def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> int:
@@ -188,6 +254,15 @@ def emit_data_engine_queue_report(engine, report) -> None:
         f"{kind}={count}/high={report['high_water'].get(kind, 0)}"
         for kind, count in sorted(report["counts"].items())
     )
+    l2_by_instrument = ",".join(
+        f"{key}:window={value.get('count_window', 0)}/total={value.get('count_total', 0)}/"
+        f"recovered={value.get('recovered_gaps', 0)}"
+        for key, value in sorted(report.get("l2_suppressed_by_instrument", {}).items())
+    ) or "none"
+    l2_open_gaps = ",".join(
+        f"{key}:{value.get('suppressed_count', 0)}"
+        for key, value in sorted(report.get("l2_open_gaps_by_instrument", {}).items())
+    ) or "none"
     message = (
         "DataEngine queue telemetry: "
         f"depth={report['queue_depth']}/{queue_limit or 'unknown'} "
@@ -198,6 +273,7 @@ def emit_data_engine_queue_report(engine, report) -> None:
         f"enqueue_rate={report['enqueue_rate']:.1f}/s process_rate={report['process_rate']:.1f}/s "
         f"throughput_delta={report['throughput_delta']} "
         f"l2_suppressed={report['l2_suppressed_window']}(total={report['l2_suppressed_total']}) "
+        f"l2_by_instrument=[{l2_by_instrument}] l2_open_gaps=[{l2_open_gaps}] "
         f"quote_coalesced={report['quote_coalesced_window']}(total={report['quote_coalesced_total']}) "
         f"quote_latency_ms=p50:{report.get('quote_latency_p50_ms', 0):.1f}/"
         f"p95:{report.get('quote_latency_p95_ms', 0):.1f}/"
@@ -493,6 +569,18 @@ def record_data_engine_queue_telemetry(engine, data, queue_depth: int, *, now_ts
         report[f"{counter}_window"] = int(pressure.get(window_key, 0))
         report[f"{counter}_total"] = int(pressure.get(total_key, 0))
         pressure[window_key] = 0
+    report["l2_suppressed_by_instrument"] = {
+        key: dict(value) for key, value in pressure.get("l2_suppressed_by_instrument", {}).items()
+    }
+    report["l2_open_gaps_by_instrument"] = {
+        key: {
+            "suppressed_count": int(value.get("suppressed_count", 0)),
+            "last_suppressed_event_ts": value.get("last_suppressed_event_ts"),
+        }
+        for key, value in pressure.get("l2_gap_by_instrument", {}).items()
+    }
+    for value in pressure.get("l2_suppressed_by_instrument", {}).values():
+        value["count_window"] = 0
     state.update(
         started=now, counts={}, high_water={}, enqueued=0, processed=0,
         peak=int(queue_depth), window_start_depth=int(queue_depth), quote_latency_samples=[],
@@ -1038,6 +1126,10 @@ def _install_live_data_engine_observability_override() -> None:
         except Exception:
             pass
         original_handle_data(self, data)
+        if type(data).__name__ == "OrderBookDeltas":
+            # Recovery is evidence only after the original DataEngine handler
+            # has accepted the replacing snapshot without raising.
+            _record_l2_gap_recovery(self, data, time.monotonic())
         flush_coalesced_quote_ticks(self, consumer_drained=True)
 
     def patched_dispose(self) -> None:

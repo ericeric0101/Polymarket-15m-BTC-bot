@@ -127,6 +127,53 @@ def test_twap_ingress_binds_current_tick_timestamp_before_shadow_observe():
     assert block.index("observation_ts = chainlink_observation_ts(tick)") < block.index("twap_shadow.observe(")
 
 
+def test_twap_research_market_context_uses_wall_clock_market_during_rollover_gap():
+    # Runtime market selection can lag the 15-minute boundary. Research must
+    # still attribute the first incoming ticks to the market actually open.
+    assert SpotPricerMixin._twap_research_market_context(
+        1_790_812_815.0, current_slug="btc-updown-15m-1790811900",
+        current_end=1_790_812_800.0,
+    ) == ("btc-updown-15m-1790812800", 1_790_813_700.0)
+
+
+def test_twap_research_market_context_keeps_matching_runtime_market():
+    assert SpotPricerMixin._twap_research_market_context(
+        1_790_812_815.0, current_slug="btc-updown-15m-1790812800",
+        current_end=1_790_813_700.0,
+    ) == ("btc-updown-15m-1790812800", 1_790_813_700.0)
+
+
+def test_opening_twenty_second_observation_coverage_is_in_market_summary():
+    db = FakeDb()
+    model = TwapForwardShadow(db=db)
+    start = 1_790_812_800
+    for age in (1.0, 8.0, 18.0, 22.0):
+        model.observe(
+            slug=f"btc-updown-15m-{start}", now_ts=start + age,
+            source_ts=start + age - 1.0, fast_spot=Decimal("101"),
+            official_twap=Decimal("100"), strike=None,
+            time_left_sec=900.0 - age,
+        )
+    summary = model.finalize_market(
+        f"btc-updown-15m-{start}", settlement_side="DOWN", settlement_ts=start + 900,
+    )
+    assert summary["opening_20s_observation_count"] == 3
+    assert summary["opening_20s_first_age_sec"] == 0.0
+    assert summary["opening_20s_last_age_sec"] == 17.0
+    assert summary["opening_20s_first_receive_age_sec"] == 1.0
+    assert summary["opening_20s_last_receive_age_sec"] == 18.0
+    assert summary["opening_20s_coverage_span_sec"] == 17.0
+    assert summary["opening_20s_capture_observed"] is True
+    stored = db.rows[-1]["payload"]
+    assert stored["event_type"] == "MARKET_TWAP_SUMMARY"
+    assert stored["opening_20s_observation_count"] == 3
+    opening_rows = [row["payload"] for row in db.rows
+                    if row["payload"].get("event_type") == "MARKET_OPENING_TWAP_SAMPLE"]
+    assert len(opening_rows) == 3
+    assert [row["market_age_source_sec"] for row in opening_rows] == [0.0, 7.0, 17.0]
+    assert all(row["market_age_receive_sec"] - row["market_age_source_sec"] == 1.0 for row in opening_rows)
+
+
 def test_raw_chainlink_history_uses_source_clock_and_rejects_invalid_timestamps():
     class Host(SpotPricerMixin):
         pass
