@@ -94,6 +94,24 @@ def threadsafe_node_stop_callback(node: TradingNode):
     return idempotent_stop_callback(request_stop)
 
 
+def request_auto_rollover_stop(node: TradingNode) -> bool:
+    """Request node shutdown through a strategy's event-loop-safe callback."""
+    try:
+        strategies = list(node.trader.strategies())
+    except Exception:
+        strategies = []
+    for strategy in strategies:
+        callback = getattr(strategy, "_request_node_stop_callback", None)
+        if callable(callback):
+            callback()
+            return True
+    # Alternate node construction paths may not attach the callback to a
+    # strategy. Use the same event-loop-safe fallback rather than calling stop
+    # from the rollover worker directly.
+    threadsafe_node_stop_callback(node)()
+    return True
+
+
 # The execution layer has a hard lower bound for nonzero balance checks, but a
 # venue SELL must also meet the strategy's configured exchange minimum (5 by
 # default).  Rollover protection uses the latter when available so dust that
@@ -683,7 +701,7 @@ def run_integrated_bot(
                         )
                         try:
                             if node is not None:
-                                strategy._request_node_stop_callback()
+                                request_auto_rollover_stop(node)
                         except Exception as e:
                             logger.error(f"Failed to stop node during auto rollover: {e}")
                         return

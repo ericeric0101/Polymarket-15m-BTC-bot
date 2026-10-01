@@ -406,6 +406,7 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
 
     host = ShadowHost()
     now = 1000.0
+    host.current_market_slug = "m"
     host.current_up_instrument_id = "up"
     host.current_down_instrument_id = "down"
     host.latest_quote_by_inst = {"up": (Decimal("0.09"), Decimal("0.11")),
@@ -492,6 +493,7 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
 
 def test_probability_shadow_exposes_existing_bbo_freshness_and_unavailable_reasons():
     host = _probability_host(now=1000.0)
+    host.current_market_slug = "m"
     host.current_up_instrument_id = "up"
     host.current_down_instrument_id = "down"
     host.latest_quote_by_inst = {"up": (Decimal("0.49"), Decimal("0.51")),
@@ -506,6 +508,30 @@ def test_probability_shadow_exposes_existing_bbo_freshness_and_unavailable_reaso
     assert out["market_mid_probability_down"] is None
     assert out["market_bbo_down_age_sec"] == 10.0
     assert out["market_bbo_down_unavailable_reason"] == "quote_stale"
+
+
+def test_opening_shadow_keeps_fresh_bbo_when_strike_is_not_ready():
+    host = _probability_host(now=1000.0)
+    host.current_market_slug = "m"
+    host.current_up_instrument_id = "up"
+    host.current_down_instrument_id = "down"
+    host.latest_quote_by_inst = {
+        "up": (Decimal("0.49"), Decimal("0.51")),
+        "down": (Decimal("0.48"), Decimal("0.52")),
+    }
+    host.last_quote_update_ts_by_inst = {"up": 999.9, "down": 999.8}
+    host.quote_stale_sec = 3.0
+
+    out = host._settlement_probability_shadow_inputs(
+        slug="m", official_twap=Decimal("100"), strike=None,
+        time_left_sec=899.0, now_ts=1000.0,
+    )
+
+    assert out["probability_model_mode"] == "UNAVAILABLE"
+    assert out["p_up_ex_market"] is None
+    assert out["best_bid_up"] == .49
+    assert out["best_ask_up"] == .51
+    assert abs(out["market_bbo_up_age_sec"] - .1) < 1e-9
 
     host.current_up_instrument_id = "missing"
     missing = host._settlement_probability_shadow_inputs(

@@ -278,7 +278,10 @@ class SpotPricerMixin:
                                     )
                                     strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug)
                                     time_left = max(0.0, research_market_end - now_wall)
-                                    if runtime_slug == slug:
+                                    research_pair = self._research_market_quote_instruments(
+                                        slug=slug, runtime_slug=runtime_slug,
+                                    )
+                                    if research_pair is not None:
                                         shadow_inputs = self._settlement_probability_shadow_inputs(
                                             slug=slug, official_twap=tick.price, strike=strike,
                                             time_left_sec=time_left,
@@ -942,21 +945,6 @@ class SpotPricerMixin:
         """
         from bot.live_entry_research import build_safety_sigma
 
-        if strike is None or strike <= 0 or time_left_sec is None:
-            return {"probability_model_version": "existing_twap_average_approx_v1",
-                    "probability_model_mode": "UNAVAILABLE", "data_quality": "spot_strike_or_horizon_unavailable",
-                    "official_current_twap": float(official_twap), "path_spot": None,
-                    "path_spot_source": "unavailable", "path_spot_age_sec": None,
-                    "settlement_state_side": "UNKNOWN", "path_spot_side": "UNKNOWN",
-                    "settlement_path_side_divergence": None,
-                    "currently_dominant_side": "UNKNOWN",
-                    "required_move_mode": "UNAVAILABLE",
-                    "sigma_ex_market_age_sec": None, "sigma_ex_market_fresh": False,
-                    "market_bbo_up_age_sec": None, "market_bbo_down_age_sec": None,
-                    "market_bbo_up_unavailable_reason": "spot_strike_or_horizon_unavailable",
-                    "market_bbo_down_unavailable_reason": "spot_strike_or_horizon_unavailable",
-                    "p_up_ex_market": None, "p_down_ex_market": None,
-                    "required_move_usd": None, "required_move_bps": None, "required_move_sigma": None}
         # Match the existing approved 10-second external-spot freshness window.
         # Official TWAP is settlement state and is never a future-path fallback.
         path_spot: Decimal | None = None
@@ -974,8 +962,11 @@ class SpotPricerMixin:
                 age = float(now_ts) - binance_ts
                 if 0.0 <= age < self._RAW_SPOT_FRESHNESS_SEC and Decimal(str(binance_price)) > 0:
                     path_spot, path_spot_source, path_spot_age = Decimal(str(binance_price)), "binance_ws", age
-        up_inst = str(getattr(self, "current_up_instrument_id", "") or "")
-        down_inst = str(getattr(self, "current_down_instrument_id", "") or "")
+        quote_instruments = self._research_market_quote_instruments(
+            slug=slug,
+            runtime_slug=str(getattr(self, "current_market_slug", "") or ""),
+        )
+        up_inst, down_inst = quote_instruments or ("", "")
         quote_map = getattr(self, "latest_quote_by_inst", {})
         quote_ts = getattr(self, "last_quote_update_ts_by_inst", {})
         max_age = float(getattr(self, "quote_stale_sec", 3.0))
@@ -1003,6 +994,35 @@ class SpotPricerMixin:
         bid_down, ask_down, bbo_down_age, bbo_down_reason = fresh_book(down_inst)
         mid_up = (bid_up + ask_up) / 2 if bid_up is not None and ask_up is not None else None
         mid_down = (bid_down + ask_down) / 2 if bid_down is not None and ask_down is not None else None
+        if strike is None or strike <= 0 or time_left_sec is None:
+            return {
+                "probability_model_version": "existing_twap_average_approx_v1",
+                "probability_model_mode": "UNAVAILABLE",
+                "data_quality": "spot_strike_or_horizon_unavailable",
+                "official_current_twap": float(official_twap),
+                "path_spot": None, "path_spot_source": "unavailable", "path_spot_age_sec": None,
+                "settlement_state_side": "UNKNOWN", "path_spot_side": "UNKNOWN",
+                "settlement_path_side_divergence": None, "currently_dominant_side": "UNKNOWN",
+                "required_move_mode": "UNAVAILABLE",
+                "sigma_ex_market_age_sec": None, "sigma_ex_market_fresh": False,
+                "market_bbo_up_age_sec": bbo_up_age,
+                "market_bbo_down_age_sec": bbo_down_age,
+                "market_bbo_up_unavailable_reason": bbo_up_reason,
+                "market_bbo_down_unavailable_reason": bbo_down_reason,
+                "market_mid_probability_up": float(mid_up) if mid_up is not None else None,
+                "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
+                "best_bid_up": float(bid_up) if bid_up is not None else None,
+                "best_ask_up": float(ask_up) if ask_up is not None else None,
+                "best_bid_down": float(bid_down) if bid_down is not None else None,
+                "best_ask_down": float(ask_down) if ask_down is not None else None,
+                "market_bbo_age_sec": max(
+                    [float(now_ts) - float(quote_ts[k]) for k in (up_inst, down_inst)
+                     if k and quote_ts.get(k)]
+                ) if any(k and quote_ts.get(k) for k in (up_inst, down_inst)) else None,
+                "p_up_ex_market": None, "p_down_ex_market": None,
+                "required_move_usd": None, "required_move_bps": None,
+                "required_move_sigma": None,
+            }
         twap_window = int(getattr(self, "_polymarket_chainlink_twap_window_sec", 60) or 60)
         observed_avg, observed_sec = (None, 0.0)
         raw_history = list(getattr(self, "polymarket_chainlink_history", []))
@@ -1225,6 +1245,21 @@ class SpotPricerMixin:
                                              else "FINAL_WINDOW_RAW_UNAVAILABLE"),
         }
         return result
+
+    def _research_market_quote_instruments(
+        self, *, slug: str, runtime_slug: str,
+    ) -> tuple[str, str] | None:
+        """Resolve target-market quote IDs without borrowing a stale pair."""
+        by_slug = getattr(self, "research_market_instruments_by_slug", {})
+        pair = by_slug.get(str(slug)) if isinstance(by_slug, dict) else None
+        if isinstance(pair, dict) and (pair.get("UP") or pair.get("DOWN")):
+            return str(pair.get("UP") or ""), str(pair.get("DOWN") or "")
+        if str(slug) == str(runtime_slug):
+            return (
+                str(getattr(self, "current_up_instrument_id", "") or ""),
+                str(getattr(self, "current_down_instrument_id", "") or ""),
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Strike status logging

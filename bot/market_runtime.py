@@ -366,6 +366,31 @@ def next_market_pair_instruments(
     return [by_outcome[side] for side in ("up", "down") if side in by_outcome]
 
 
+def market_pair_instruments_by_slug(
+    btc_instruments: list[dict[str, Any]], *, extract_outcome: Any,
+) -> dict[str, dict[str, str]]:
+    """Index cached BTC market outcome instruments for research-time joins.
+
+    This is metadata only: quote freshness is still checked at the point of
+    use, so an unsubscribed future market cannot inherit an old BBO.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for item in btc_instruments:
+        slug = str(item.get("slug") or "")
+        instrument = item.get("instrument")
+        instrument_id = getattr(instrument, "id", None) if instrument is not None else None
+        if not slug or instrument_id is None:
+            continue
+        try:
+            side = str(extract_outcome(instrument) or "").strip().upper()
+        except Exception:
+            continue
+        if side not in {"UP", "DOWN"}:
+            continue
+        result.setdefault(slug, {}).setdefault(side, str(instrument_id))
+    return result
+
+
 def replace_market_subscriptions(
     strategy: Any,
     previous_instrument_ids: List[Any],
@@ -460,6 +485,13 @@ def find_btc_instrument(strategy: Any) -> bool:
     if not btc_instruments:
         logger.error("NO BTC 15-MIN INSTRUMENTS FOUND!")
         return False
+
+    # Index current and cached future markets for research joins. Freshness is
+    # validated when a quote is consumed; this never authorizes trading.
+    strategy.research_market_instruments_by_slug = market_pair_instruments_by_slug(
+        btc_instruments,
+        extract_outcome=strategy._extract_outcome_from_instrument,
+    )
 
     preferred_slug = None
     phase_value = str(getattr(getattr(strategy, "current_phase", None), "value", "") or "")

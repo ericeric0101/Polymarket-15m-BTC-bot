@@ -729,6 +729,11 @@ exports them to `market_opening_twap_samples.csv`; this does not enable raw
 per-second retention for the rest of a market. These fields measure capture; they do not synthesize missing ticks or
 claim complete CLOB quote/depth coverage. If the process or RTDS feed itself
 was unavailable at the boundary, that lost interval remains missing.
+For quote joins during a market handoff, research resolves UP/DOWN instrument
+IDs by the source-time market slug and reads the existing quote cache with the
+normal freshness check; it never borrows the prior market's BBO. Fresh BBO can
+be retained even while strike/path inputs are unavailable, but such rows do
+not receive a model probability.
 
 The research writer checks its DB size and free disk on a throttled cadence.
 TWAP telemetry has its own bounded SQLite writer at
@@ -1916,6 +1921,9 @@ change.
   the failure so recovery can be retried. A watchdog rollover still requires
   the configured quote-recovery timeout; this does not weaken stale-quote
   gating or alter trading signals.
+  Scheduled auto-rollover resolves that callback from the node's registered
+  strategy (with the same event-loop-safe node-stop fallback); it does not
+  depend on a strategy variable outside the node-build scope.
   **P5 loss-path audit (2026-08-22 through 2026-08-26):** the canonical
   journal contains 15 settled negative cycles (aggregate **-$67.97**, before
   treating fee dust as a meaningful position). Six exited at $0.001–$0.08 and
