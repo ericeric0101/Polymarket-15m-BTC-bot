@@ -4,6 +4,38 @@
 > `b84f249adcdef47afd56b8b5093122095397929f`。台北時間週一至週五全天允許新進場；週六、週日只觀察，maker BUY 與 Outcome fast-follow BUY 均受 gate 阻擋，SELL／止損／緊急出場及資料蒐集仍運作。fast-follow 風控額度仍按台北日曆日分桶。
 > 研究證據基準仍為 `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`，可重現輸出位於 `reports/unified_strategy_research/`。本文件是目前實作解讀、研究結論、核准後續證據與已知技術債的唯一權威；歷史文件在核准清理前保留作為證據。
 
+## Offline empirical probability study (2026-10-01)
+
+- `scripts/empirical_probability_research.py` is an offline-only comparison of
+  the existing analytic `p_up_ex_market`, a rolling historical BTC forward-
+  return empirical CDF, a volatility-conditioned empirical CDF, and Polymarket
+  mid probability. It reads `data/research/twap_forward_shadow.db` read-only
+  and reuses cached Binance BTCUSDT one-minute OHLCV in `data/btc_history/`;
+  it does not fetch data or write to a runtime database.
+- The cache covers 2026-07-27 through 2026-09-20. Each estimate uses only
+  historical samples strictly earlier than its evaluation timestamp, within a
+  rolling 56-day window. Resampling for paired confidence intervals is by
+  `market_slug`, not checkpoint row.
+- One-minute closes support only coarse 60s and 120s forward-return horizons.
+  5/10/15/30s estimates are unavailable. A return endpoint is only a proxy for
+  final settlement direction; it does not reconstruct the official final
+  60-second Chainlink TWAP path. In particular, `EXACT_FINAL_WINDOW_BOUNDARY`
+  rows are kept separate and excluded from empirical CDF scoring because the
+  available OHLCV cannot reconstruct the remaining average path.
+- `PRE_FINAL_STRIKE_PROXY` rows are scored separately. The current local DB
+  has only eight canonical, fresh-sigma, 120-second proxy observations with an
+  empirical estimate: two settled UP and six DOWN. Apparent direction accuracy
+  is not meaningful evidence at this sample size; paired intervals are
+  correspondingly unstable.
+  See generated `reports/empirical_probability/summary.md` and CSV outputs.
+- Market mid is a non-executable reference, not an executable edge or PnL
+  estimate. No standalone alpha is established. `ML_JUSTIFIED` remains
+  `INSUFFICIENT_DATA`; collect more prospective canonical checkpoints and
+  obtain sub-minute BTC history before reconsidering finer horizons or ML.
+- This research script/report grants no live authority and changes no live
+  entry, exit, stop, sizing, order-routing, session-guard, or TWAP runtime
+  behavior.
+
 ## Audit scope and safety status
 
 - The 2026-09-24 lifecycle hardening pass changes quote freshness handling,
