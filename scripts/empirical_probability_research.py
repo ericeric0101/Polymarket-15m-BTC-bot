@@ -26,6 +26,17 @@ ROLLING_DAYS = 56
 EPS = 1e-12
 
 
+def market_quote_is_fresh(row: dict) -> bool:
+    """Require explicit source/receive ages within the recorded quote limit."""
+    try:
+        max_age = float(row["market_bbo_max_age_sec"])
+        source_age = float(row["market_bbo_up_source_age_sec"])
+        received_age = float(row["market_bbo_up_received_age_sec"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= source_age <= max_age and 0.0 <= received_age <= max_age
+
+
 def empirical_cdf_probability(returns_bps: Iterable[float], required_move_bps: float,
                               current_side: str) -> float | None:
     """Estimate terminal-UP proxy probability from a signed required move.
@@ -191,6 +202,7 @@ def estimate_row(row: dict, summary: dict, candles: list[dict], samples_by_h: di
     horizon = horizon_seconds(cp)
     output = {**row, "settlement_side": summary.get("settlement_side"),
               "settlement_reference_is_canonical": summary.get("settlement_reference_is_canonical"),
+              "market_quote_fresh_for_research": market_quote_is_fresh(row),
               "required_move_mode_group": "EXACT_FINAL_WINDOW" if mode == "EXACT_FINAL_WINDOW_BOUNDARY" else "PRE_FINAL_PROXY" if mode == "PRE_FINAL_STRIKE_PROXY" else "UNAVAILABLE",
               "historical_horizon_sec": horizon, "empirical_sample_count": 0,
               "empirical_window_start": None, "empirical_window_end": None,
@@ -273,7 +285,8 @@ def _metric_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
                      and r.get("settlement_side") in {"UP", "DOWN"}]
             for source in sources:
                 pairs = [(float(r[source]), int(r["settlement_side"] == "UP"), r) for r in group
-                         if r.get(source) is not None and math.isfinite(float(r[source]))]
+                         if r.get(source) is not None and math.isfinite(float(r[source]))
+                         and (source != "market_mid_probability_up" or market_quote_is_fresh(r))]
                 scores = [score_probability(p, y) for p, y, _ in pairs]
                 metrics.append({"checkpoint_sec": cp, "required_move_mode_group": mode,
                                 "source": source, "n_markets": len({r["market_slug"] for _, _, r in pairs}),
@@ -295,6 +308,8 @@ def _metric_rows(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
                     deltas = []
                     for slug, erow in estimator_rows.items():
                         brow = next((r for r in group if r["market_slug"] == slug and r.get(baseline) is not None), None)
+                        if baseline == "market_mid_probability_up" and brow is not None and not market_quote_is_fresh(brow):
+                            brow = None
                         if brow is None:
                             continue
                         y = int(erow["settlement_side"] == "UP")
@@ -336,7 +351,8 @@ def _regime_metric_rows(rows: list[dict]) -> list[dict]:
         for bucket, group in groups.items():
             for source in ("p_up_empirical", "p_up_empirical_vol_conditioned", "analytic_p_up", "market_mid_probability_up"):
                 pairs = [(float(r[source]), int(r["settlement_side"] == "UP")) for r in group
-                         if r.get(source) is not None and r.get("settlement_side") in {"UP", "DOWN"}]
+                         if r.get(source) is not None and r.get("settlement_side") in {"UP", "DOWN"}
+                         and (source != "market_mid_probability_up" or market_quote_is_fresh(r))]
                 scores = [score_probability(p, y) for p, y in pairs]
                 output.append({"checkpoint_sec": 120, "mode": "PRE_FINAL_PROXY",
                                "regime_dimension": dimension, "regime": bucket, "source": source,
@@ -422,6 +438,14 @@ def main() -> int:
             n = row.get("n_analytic_p_up", 0) or 0
             lines.append(f"| T−{cp} | {mode} | {n} | {show('brier_analytic_p_up')} | {show('brier_p_up_empirical')} | {show('brier_p_up_empirical_vol_conditioned')} | {show('brier_market_mid_probability_up')} |")
     valid_emp = sum(row.get("p_up_empirical") is not None for row in estimated)
+    fresh_market_mid_rows = sum(
+        row.get("market_mid_probability_up") is not None and market_quote_is_fresh(row)
+        for row in estimated
+    )
+    unproven_market_mid_rows = sum(
+        row.get("market_mid_probability_up") is not None and not market_quote_is_fresh(row)
+        for row in estimated
+    )
     exact_rows = [row for row in estimated if row["required_move_mode_group"] == "EXACT_FINAL_WINDOW"]
     proxy_rows = [row for row in estimated if row["required_move_mode_group"] == "PRE_FINAL_PROXY"]
     up_count = sum(row.get("settlement_side") == "UP" for row in proxy_rows if row.get("p_up_empirical") is not None)
@@ -437,6 +461,7 @@ def main() -> int:
     lines += ["", "## Interpretation", "",
               f"Usable empirical predictions: {valid_emp} of {len(estimated)} selected checkpoint rows; {sum(r.get('p_up_empirical') is not None for r in proxy_rows)} are pre-final proxy rows and {sum(r.get('p_up_empirical') is not None for r in exact_rows)} exact-boundary rows.",
               f"Selected mode rows: PRE_FINAL_PROXY={len(proxy_rows)}, EXACT_FINAL_WINDOW={len(exact_rows)}, UNAVAILABLE={len(estimated)-len(proxy_rows)-len(exact_rows)}.",
+              f"Freshness-proven market-mid checkpoint rows: {fresh_market_mid_rows}; market-mid rows excluded as stale or missing explicit source/receive ages: {unproven_market_mid_rows}.",
               f"Empirical-evaluable outcomes: UP={up_count}, DOWN={down_count}; hit rate is not stable evidence at this sample size.",
               paired_text("p_up_empirical", "analytic_p_up"), paired_text("p_up_empirical", "market_mid_probability_up"),
               paired_text("p_up_empirical_vol_conditioned", "analytic_p_up"),

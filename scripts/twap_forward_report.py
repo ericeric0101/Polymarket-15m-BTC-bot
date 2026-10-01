@@ -16,6 +16,17 @@ from pathlib import Path
 EVENTS = {"TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE", "TMINUS_CHECKPOINT", "MARKET_TWAP_SUMMARY", "MARKET_OPENING_TWAP_SAMPLE", "SETTLEMENT_PATH_THRESHOLD_CROSS", "RESEARCH_STORAGE_GUARD_TRIGGERED"}
 
 
+def _fresh_market_quote(row: dict) -> bool:
+    """Only use market-mid rows with explicit, in-limit source and receive ages."""
+    try:
+        max_age = float(row["market_bbo_max_age_sec"])
+        source_age = float(row["market_bbo_up_source_age_sec"])
+        received_age = float(row["market_bbo_up_received_age_sec"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= source_age <= max_age and 0.0 <= received_age <= max_age
+
+
 def write_csv(path: Path, rows: list[dict]) -> None:
     fields = sorted({key for row in rows for key in row}) or ["observed_ts"]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -66,7 +77,8 @@ def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict],
         outcomes = [1.0 if r["settlement_side"] == "UP" else 0.0 for r in group]
         probs = [min(1 - 1e-12, max(1e-12, float(r["p_up_ex_market"]))) for r in group]
         market_pairs = [(min(1 - 1e-12, max(1e-12, float(r["market_mid_probability_up"]))), y)
-                        for r, y in zip(group, outcomes) if r.get("market_mid_probability_up") is not None]
+                        for r, y in zip(group, outcomes)
+                        if r.get("market_mid_probability_up") is not None and _fresh_market_quote(r)]
         def scores(pairs):
             if not pairs:
                 return None, None, None
@@ -113,6 +125,8 @@ def probability_research_rows(rows: list[dict]) -> tuple[list[dict], list[dict],
                     if event.get("market_slug") != slug or event.get("measure") != measure:
                         continue
                     if require_fresh and event.get("sigma_ex_market_fresh") is not True:
+                        continue
+                    if measure == "market_mid_probability_up" and not _fresh_market_quote(event):
                         continue
                     value_key = "p_up_ex_market" if measure == "p_up_ex_market" else "market_mid_probability_up"
                     if event.get(value_key) is None:

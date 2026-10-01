@@ -304,6 +304,7 @@ def mark_quote_subscription_pending(
         getattr(strategy, "latest_quote_by_inst", {}).pop(inst_key, None)
         getattr(strategy, "latest_quote_depth_by_inst", {}).pop(inst_key, None)
         getattr(strategy, "last_quote_update_ts_by_inst", {}).pop(inst_key, None)
+        getattr(strategy, "last_quote_source_ts_by_inst", {}).pop(inst_key, None)
         getattr(strategy, "last_quote_received_ts_by_inst", {}).pop(inst_key, None)
 
 
@@ -729,6 +730,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
 
         quote_received_ts = time.time()
         quote_event_ts = quote_tick_event_timestamp(tick, quote_received_ts)
+        quote_source_ts = quote_tick_event_timestamp(tick, 0.0)
         provenance = quote_provenance_for_tick(tick)
         quote_source = str(provenance.get("source") or "unknown")
         adapter_emitted_ts = quote_tick_adapter_timestamp(tick, quote_received_ts)
@@ -779,6 +781,10 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
 
         strategy.latest_quote_depth_by_inst[str(tick.instrument_id)] = (bid_size_decimal, ask_size_decimal)
         getattr(strategy, "latest_quote_by_inst", {})[str(tick.instrument_id)] = (bid_decimal, ask_decimal)
+        if quote_source_ts > 0:
+            getattr(strategy, "last_quote_source_ts_by_inst", {})[str(tick.instrument_id)] = quote_source_ts
+        else:
+            getattr(strategy, "last_quote_source_ts_by_inst", {}).pop(str(tick.instrument_id), None)
         # Quote plans need the local time at which a current CLOB book was
         # emitted, not the book's last internal market-update timestamp.
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = adapter_emitted_ts

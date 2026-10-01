@@ -984,30 +984,38 @@ class SpotPricerMixin:
         )
         up_inst, down_inst = quote_instruments or ("", "")
         quote_map = getattr(self, "latest_quote_by_inst", {})
-        quote_ts = getattr(self, "last_quote_update_ts_by_inst", {})
-        max_age = float(getattr(self, "quote_stale_sec", 3.0))
+        quote_ts = getattr(self, "last_quote_source_ts_by_inst", {})
+        quote_received_ts = getattr(self, "last_quote_received_ts_by_inst", {})
+        quote_update_ts = getattr(self, "last_quote_update_ts_by_inst", {})
+        max_age = max(0.1, float(getattr(self, "quote_max_delivery_delay_sec", 2.0)))
 
-        def fresh_book(inst: str) -> tuple[Decimal | None, Decimal | None, float | None, str | None]:
+        def fresh_book(inst: str) -> tuple[Decimal | None, Decimal | None, float | None, float | None, str | None]:
             if not inst:
-                return None, None, None, "instrument_unavailable"
+                return None, None, None, None, "instrument_unavailable"
             book = quote_map.get(inst)
             if not book or book[0] is None or book[1] is None:
-                return None, None, None, "quote_missing"
+                return None, None, None, None, "quote_missing"
             source_ts = float(quote_ts.get(inst, 0.0) or 0.0)
-            if source_ts <= 0:
-                return None, None, None, "quote_timestamp_missing"
-            age = float(now_ts) - source_ts
-            if age < 0:
-                return None, None, age, "quote_timestamp_future"
-            if age > max_age:
-                return None, None, age, "quote_stale"
+            received_ts = float(quote_received_ts.get(inst, 0.0) or 0.0)
+            if source_ts <= 0 or received_ts <= 0:
+                return None, None, None, None, "quote_timestamp_missing"
+            source_age = float(now_ts) - source_ts
+            received_age = float(now_ts) - received_ts
+            if source_age < 0 or received_age < 0:
+                return None, None, source_age, received_age, "quote_timestamp_future"
+            if source_age > max_age or received_age > max_age:
+                return None, None, source_age, received_age, "quote_stale"
             bid, ask = Decimal(str(book[0])), Decimal(str(book[1]))
             if bid < 0 or ask <= 0 or bid > ask:
-                return None, None, age, "quote_invalid"
-            return bid, ask, age, None
+                return None, None, source_age, received_age, "quote_invalid"
+            return bid, ask, source_age, received_age, None
 
-        bid_up, ask_up, bbo_up_age, bbo_up_reason = fresh_book(up_inst)
-        bid_down, ask_down, bbo_down_age, bbo_down_reason = fresh_book(down_inst)
+        bid_up, ask_up, bbo_up_source_age, bbo_up_received_age, bbo_up_reason = fresh_book(up_inst)
+        bid_down, ask_down, bbo_down_source_age, bbo_down_received_age, bbo_down_reason = fresh_book(down_inst)
+        bbo_up_age = (float(now_ts) - float(quote_update_ts[up_inst])
+                      if up_inst in quote_update_ts else None)
+        bbo_down_age = (float(now_ts) - float(quote_update_ts[down_inst])
+                        if down_inst in quote_update_ts else None)
         mid_up = (bid_up + ask_up) / 2 if bid_up is not None and ask_up is not None else None
         mid_down = (bid_down + ask_down) / 2 if bid_down is not None and ask_down is not None else None
         if strike is None or strike <= 0 or time_left_sec is None:
@@ -1023,6 +1031,11 @@ class SpotPricerMixin:
                 "sigma_ex_market_age_sec": None, "sigma_ex_market_fresh": False,
                 "market_bbo_up_age_sec": bbo_up_age,
                 "market_bbo_down_age_sec": bbo_down_age,
+                "market_bbo_up_source_age_sec": bbo_up_source_age,
+                "market_bbo_down_source_age_sec": bbo_down_source_age,
+                "market_bbo_up_received_age_sec": bbo_up_received_age,
+                "market_bbo_down_received_age_sec": bbo_down_received_age,
+                "market_bbo_max_age_sec": max_age,
                 "market_bbo_up_unavailable_reason": bbo_up_reason,
                 "market_bbo_down_unavailable_reason": bbo_down_reason,
                 "market_mid_probability_up": float(mid_up) if mid_up is not None else None,
@@ -1105,6 +1118,11 @@ class SpotPricerMixin:
                 "required_future_avg_is_exact_partial_integral": False,
                 "market_bbo_up_age_sec": bbo_up_age,
                 "market_bbo_down_age_sec": bbo_down_age,
+                "market_bbo_up_source_age_sec": bbo_up_source_age,
+                "market_bbo_down_source_age_sec": bbo_down_source_age,
+                "market_bbo_up_received_age_sec": bbo_up_received_age,
+                "market_bbo_down_received_age_sec": bbo_down_received_age,
+                "market_bbo_max_age_sec": max_age,
                 "market_bbo_up_unavailable_reason": bbo_up_reason,
                 "market_bbo_down_unavailable_reason": bbo_down_reason,
                 "market_mid_probability_up": float(mid_up) if mid_up is not None else None,
@@ -1238,6 +1256,11 @@ class SpotPricerMixin:
             "market_mid_probability_down": float(mid_down) if mid_down is not None else None,
             "market_bbo_up_age_sec": bbo_up_age,
             "market_bbo_down_age_sec": bbo_down_age,
+            "market_bbo_up_source_age_sec": bbo_up_source_age,
+            "market_bbo_down_source_age_sec": bbo_down_source_age,
+            "market_bbo_up_received_age_sec": bbo_up_received_age,
+            "market_bbo_down_received_age_sec": bbo_down_received_age,
+            "market_bbo_max_age_sec": max_age,
             "market_bbo_up_unavailable_reason": bbo_up_reason,
             "market_bbo_down_unavailable_reason": bbo_down_reason,
             "best_bid_up": float(bid_up) if bid_up is not None else None,

@@ -5486,6 +5486,7 @@ def test_quote_watchdog_refresh_clears_stale_cache_and_replaces_subscriptions():
             self.latest_quote_by_inst = {"up-token": (Decimal("0.60"), Decimal("0.61"))}
             self.latest_quote_depth_by_inst = {"up-token": (Decimal("1"), Decimal("1"))}
             self.last_quote_update_ts_by_inst = {"up-token": 1.0}
+            self.last_quote_source_ts_by_inst = {"up-token": 1.0}
             self.last_quote_received_ts_by_inst = {"up-token": 1.0}
             self.unsubscribed = []
             self.subscribed = []
@@ -5503,6 +5504,7 @@ def test_quote_watchdog_refresh_clears_stale_cache_and_replaces_subscriptions():
     assert strategy.subscribed == ["up-token", "down-token"]
     assert strategy.latest_quote_by_inst == {}
     assert strategy.last_quote_update_ts_by_inst == {}
+    assert strategy.last_quote_source_ts_by_inst == {}
     assert strategy.quote_recovery_pending_instruments == {"up-token", "down-token"}
     assert strategy.quote_recovery_attempts == 0
 
@@ -5825,6 +5827,7 @@ def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_
         def __init__(self):
             self.last_quote_received_ts_by_inst = {}
             self.last_quote_update_ts_by_inst = {}
+            self.last_quote_source_ts_by_inst = {}
             self.latest_quote_by_inst = {}
             self.latest_quote_depth_by_inst = {}
             self.price_history = []
@@ -5864,6 +5867,7 @@ def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_
 
     assert strategy.latest_quote_by_inst["up-token"] == (Decimal("0.60"), Decimal("0.61"))
     assert abs(strategy.last_quote_update_ts_by_inst["up-token"] - now_ts) < 0.01
+    assert abs(strategy.last_quote_source_ts_by_inst["up-token"] - (now_ts - 90.0)) < 0.01
     assert strategy.events[-1][1]["quote_is_fresh"] is True
     assert len(shadow_calls) == 1
     called_strategy, shadow_kwargs = shadow_calls[0]

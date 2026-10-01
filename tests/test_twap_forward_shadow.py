@@ -298,7 +298,9 @@ def test_probability_report_uses_canonical_labels_and_retains_negative_lead():
          "crossing_direction": "first_observed_beyond", "sigma_ex_market_fresh": True},
         {"event_type": "SETTLEMENT_PATH_THRESHOLD_CROSS", "market_slug": "canonical", "observed_ts": 110,
          "measure": "market_mid_probability_up", "threshold": .9, "market_mid_probability_up": .91,
-         "crossing_direction": "first_observed_beyond", "sigma_ex_market_fresh": False},
+         "crossing_direction": "first_observed_beyond", "sigma_ex_market_fresh": False,
+         "market_bbo_up_source_age_sec": .4, "market_bbo_up_received_age_sec": .2,
+         "market_bbo_max_age_sec": 2.0},
     ]
     metrics, buckets, leads = probability_research_rows(rows)
     assert next(row for row in metrics if row["checkpoint_sec"] == 60)["canonical_n"] == 1
@@ -333,6 +335,8 @@ def _probability_host(now=1000.0):
     host.maker_implied_sigma_enabled = False
     host.latest_quote_by_inst = {}
     host.last_quote_update_ts_by_inst = {}
+    host.last_quote_source_ts_by_inst = {}
+    host.last_quote_received_ts_by_inst = {}
     return host
 
 
@@ -412,6 +416,8 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
     host.latest_quote_by_inst = {"up": (Decimal("0.09"), Decimal("0.11")),
                                  "down": (Decimal("0.89"), Decimal("0.91"))}
     host.last_quote_update_ts_by_inst = {"up": now - .1, "down": now - .2}
+    host.last_quote_source_ts_by_inst = {"up": now - .1, "down": now - .2}
+    host.last_quote_received_ts_by_inst = {"up": now - .1, "down": now - .2}
     host.quote_stale_sec = 3.0
     host._polymarket_chainlink_twap_window_sec = 60
     host._polymarket_chainlink_twap_observation_ts = now - .1
@@ -499,6 +505,8 @@ def test_probability_shadow_exposes_existing_bbo_freshness_and_unavailable_reaso
     host.latest_quote_by_inst = {"up": (Decimal("0.49"), Decimal("0.51")),
                                  "down": (Decimal("0.48"), Decimal("0.52"))}
     host.last_quote_update_ts_by_inst = {"up": 999.0, "down": 990.0}
+    host.last_quote_source_ts_by_inst = {"up": 999.0, "down": 990.0}
+    host.last_quote_received_ts_by_inst = {"up": 999.0, "down": 990.0}
     host.quote_stale_sec = 3.0
     out = host._settlement_probability_shadow_inputs(
         slug="m", official_twap=Decimal("100"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
@@ -520,6 +528,8 @@ def test_opening_shadow_keeps_fresh_bbo_when_strike_is_not_ready():
         "down": (Decimal("0.48"), Decimal("0.52")),
     }
     host.last_quote_update_ts_by_inst = {"up": 999.9, "down": 999.8}
+    host.last_quote_source_ts_by_inst = {"up": 999.9, "down": 999.8}
+    host.last_quote_received_ts_by_inst = {"up": 999.9, "down": 999.8}
     host.quote_stale_sec = 3.0
 
     out = host._settlement_probability_shadow_inputs(
@@ -582,6 +592,36 @@ def test_probability_report_excludes_post_settlement_checkpoint_rows():
     row = next(r for r in metrics if r["checkpoint_sec"] == 5)
     assert row["canonical_n"] == 1
     assert row["mean_p_up_ex_market"] == .8
+
+
+def test_probability_report_excludes_stale_or_unproven_market_mid_quotes():
+    from scripts.twap_forward_report import probability_research_rows
+
+    rows = [
+        {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "stale",
+         "settlement_reference_is_canonical": True, "settlement_side": "UP"},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "stale", "checkpoint_sec": 30,
+         "time_left_sec": 29.5, "p_up_ex_market": .7, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .65, "market_bbo_up_source_age_sec": 30.0,
+         "market_bbo_up_received_age_sec": .2, "market_bbo_max_age_sec": 2.0, "observed_ts": 100},
+        {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "fresh",
+         "settlement_reference_is_canonical": True, "settlement_side": "DOWN"},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "fresh", "checkpoint_sec": 30,
+         "time_left_sec": 29.5, "p_up_ex_market": .3, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .35, "market_bbo_up_source_age_sec": .8,
+         "market_bbo_up_received_age_sec": .2, "market_bbo_max_age_sec": 2.0, "observed_ts": 101},
+        {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": "legacy",
+         "settlement_reference_is_canonical": True, "settlement_side": "UP"},
+        {"event_type": "TMINUS_CHECKPOINT", "market_slug": "legacy", "checkpoint_sec": 30,
+         "time_left_sec": 29.5, "p_up_ex_market": .6, "sigma_ex_market_fresh": True,
+         "market_mid_probability_up": .55, "observed_ts": 102},
+    ]
+
+    metrics, _, _ = probability_research_rows(rows)
+    row = next(item for item in metrics if item["checkpoint_sec"] == 30)
+    assert row["canonical_n"] == 3
+    assert row["market_n"] == 1
+    assert row["brier_market_mid"] == .35 ** 2
 
 def test_probability_path_uses_fresh_binance_if_raw_chainlink_stale_and_never_twap_fallback():
     class Host(SpotPricerMixin):

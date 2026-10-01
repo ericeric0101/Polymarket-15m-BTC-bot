@@ -418,31 +418,54 @@ class SideDecisionMixin:
     # Helper: get UP token mid-price from cache
     # ------------------------------------------------------------------
 
-    def _get_up_token_mid_for_side_decision(self) -> Optional[Decimal]:
-        """Fetch the UP token mid-price from the instrument cache.
-
-        Returns None if unavailable.
-        """
+    def _get_up_token_mid_for_side_decision(
+        self, *, now_ts: float | None = None, diagnostics: Dict[str, Any] | None = None,
+    ) -> Optional[Decimal]:
+        """Return a timestamp-verified UP mid, or None when its quote is stale."""
+        diagnostics = diagnostics if diagnostics is not None else {}
+        now_ts = float(now_ts if now_ts is not None else time.time())
         up_inst = getattr(self, 'current_up_instrument_id', None)
         if up_inst is None:
             up_inst = self._primary_instrument_for_market()
         if up_inst is None:
+            diagnostics["market_mid_unavailable_reason"] = "instrument_unavailable"
+            return None
+        inst_key = str(up_inst)
+        quote = getattr(self, "latest_quote_by_inst", {}).get(inst_key)
+        if not quote or quote[0] is None or quote[1] is None:
+            diagnostics["market_mid_unavailable_reason"] = "quote_missing"
+            return None
+        source_ts = getattr(self, "last_quote_source_ts_by_inst", {}).get(inst_key)
+        received_ts = getattr(self, "last_quote_received_ts_by_inst", {}).get(inst_key)
+        if source_ts is None or received_ts is None:
+            diagnostics["market_mid_unavailable_reason"] = "quote_timestamp_missing"
+            return None
+        source_age = now_ts - float(source_ts)
+        receive_age = now_ts - float(received_ts)
+        max_age = max(0.1, float(getattr(self, "quote_max_delivery_delay_sec", 2.0)))
+        diagnostics.update({
+            "market_mid_source_age_sec": source_age,
+            "market_mid_received_age_sec": receive_age,
+            "market_mid_max_age_sec": max_age,
+        })
+        if source_age < 0 or source_age > max_age:
+            diagnostics["market_mid_unavailable_reason"] = "source_quote_stale"
+            return None
+        if receive_age < 0 or receive_age > max_age:
+            diagnostics["market_mid_unavailable_reason"] = "received_quote_stale"
             return None
         try:
-            quote = self.cache.quote_tick(up_inst)
-            if quote and quote.bid_price and quote.ask_price:
-                mid = (quote.bid_price + quote.ask_price) / 2
-                if Decimal("0.01") < mid < Decimal("0.99"):
-                    return mid
+            bid, ask = Decimal(str(quote[0])), Decimal(str(quote[1]))
+            if bid <= 0 or ask < bid or ask >= 1:
+                diagnostics["market_mid_unavailable_reason"] = "quote_invalid"
+                return None
+            mid = (bid + ask) / 2
+            if Decimal("0.01") < mid < Decimal("0.99"):
+                diagnostics["market_mid_unavailable_reason"] = None
+                return mid
         except Exception:
             pass
-        # Fallback: last recorded real price
-        inst_key = str(up_inst)
-        history = self.real_price_history_by_inst.get(inst_key)
-        if history and len(history) > 0:
-            return history[-1]
-        if self.real_price_history:
-            return self.real_price_history[-1]
+        diagnostics["market_mid_unavailable_reason"] = "quote_invalid"
         return None
 
     # ------------------------------------------------------------------
@@ -492,7 +515,9 @@ class SideDecisionMixin:
         inputs["time_left_sec"] = time_left_sec
 
         # --- Get market mid-price ---
-        market_mid = self._get_up_token_mid_for_side_decision()
+        mid_diagnostics: Dict[str, Any] = {}
+        market_mid = self._get_up_token_mid_for_side_decision(now_ts=now_ts, diagnostics=mid_diagnostics)
+        inputs.update(mid_diagnostics)
         inputs["market_mid"] = float(market_mid) if market_mid is not None else None
 
         # Quote pricing and side selection use one forecast builder.  The

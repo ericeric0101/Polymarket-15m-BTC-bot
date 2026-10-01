@@ -30,6 +30,7 @@ class MarketCycleState:
     # Event timestamps are the source-of-truth for quote freshness; receipt
     # timestamps remain available to diagnose transport latency separately.
     last_quote_update_ts_by_inst: dict[str, float] = field(default_factory=dict)
+    last_quote_source_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_quote_received_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_edge_observation_signature_by_inst: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     last_edge_observation_ts_by_inst: dict[str, float] = field(default_factory=dict)
@@ -73,6 +74,7 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy.latest_quote_depth_by_inst = state.latest_quote_depth_by_inst
     strategy.latest_quote_by_inst = state.latest_quote_by_inst
     strategy.last_quote_update_ts_by_inst = state.last_quote_update_ts_by_inst
+    strategy.last_quote_source_ts_by_inst = state.last_quote_source_ts_by_inst
     strategy.last_quote_received_ts_by_inst = state.last_quote_received_ts_by_inst
     strategy._last_edge_observation_signature_by_inst = state.last_edge_observation_signature_by_inst
     strategy._last_edge_observation_ts_by_inst = state.last_edge_observation_ts_by_inst

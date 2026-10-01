@@ -2213,9 +2213,15 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   checkpoint must have strictly positive time remaining; a delayed observation
   crossing multiple horizons is assigned only to the nearest still-due horizon,
   and reports exclude legacy post-settlement/unknown-horizon checkpoint rows from
-  calibration. Per-side BBO age and unavailable reason are recorded from the
-  existing quote cache so missing mids can be attributed to absent instrument,
-  missing/stale quote, or invalid book rather than treated as market data.
+  calibration. Side-decision and probability-research market mids now require
+  explicit quote source and local-receipt timestamps, each within the existing
+  `QUOTE_MAX_DELIVERY_DELAY_SEC` freshness limit (default 2 seconds). A stale or
+  untimestamped quote is unavailable: it cannot update market consensus or the
+  market-mid EMA, and stale/legacy market-mid rows without freshness proof are
+  excluded from probability comparisons. Per-side BBO age and unavailable
+  reason are recorded from the existing quote cache so missing mids can be
+  attributed to absent instrument, missing/stale quote, or invalid book rather
+  than treated as market data.
   Only threshold transitions and actual checkpoints are persisted; full per-tick
   samples remain bounded in memory. `scripts/twap_forward_report.py` exports
   checkpoint calibration, probability buckets, and model-vs-market first-observed

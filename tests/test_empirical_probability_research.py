@@ -5,6 +5,7 @@ from scripts.empirical_probability_research import (
     rolling_history,
     estimate_row,
     MIN_EMPIRICAL_SAMPLES,
+    _metric_rows,
 )
 
 
@@ -82,3 +83,32 @@ def test_exact_final_boundary_is_not_faked_from_minute_close_returns():
     result = estimate_row(row, {"settlement_reference_is_canonical": True, "settlement_side": "UP"}, [], {})
     assert result["p_up_empirical"] is None
     assert "cannot_reconstruct_remaining_average" in result["empirical_resolution_note"]
+
+
+def test_empirical_report_excludes_stale_and_legacy_market_mid_quotes():
+    rows = [
+        {"market_slug": "stale", "checkpoint_sec": 120,
+         "required_move_mode_group": "PRE_FINAL_PROXY", "settlement_side": "UP",
+         "analytic_p_up": .5, "p_up_empirical": .8,
+         "market_mid_probability_up": .7, "market_bbo_up_source_age_sec": 30,
+         "market_bbo_up_received_age_sec": .1, "market_bbo_max_age_sec": 2},
+        {"market_slug": "fresh", "checkpoint_sec": 120,
+         "required_move_mode_group": "PRE_FINAL_PROXY", "settlement_side": "DOWN",
+         "analytic_p_up": .5, "p_up_empirical": .2,
+         "market_mid_probability_up": .3, "market_bbo_up_source_age_sec": .5,
+         "market_bbo_up_received_age_sec": .2, "market_bbo_max_age_sec": 2},
+        {"market_slug": "legacy", "checkpoint_sec": 120,
+         "required_move_mode_group": "PRE_FINAL_PROXY", "settlement_side": "UP",
+         "analytic_p_up": .5, "p_up_empirical": .8,
+         "market_mid_probability_up": .7},
+    ]
+
+    metrics, _, paired = _metric_rows(rows)
+    market = next(row for row in metrics if row["checkpoint_sec"] == 120
+                  and row["required_move_mode_group"] == "PRE_FINAL_PROXY"
+                  and row["source"] == "market_mid_probability_up")
+    assert market["n_markets"] == 1
+    assert market["n_observations"] == 1
+    market_pairs = [row for row in paired if row["checkpoint_sec"] == 120
+                    and row["empirical_minus_baseline"] == "market_mid_probability_up"]
+    assert market_pairs and market_pairs[0]["n_paired_markets"] == 1
