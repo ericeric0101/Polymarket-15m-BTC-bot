@@ -4207,6 +4207,47 @@ class IntegratedBTCStrategy(
             return True
         return bool(getattr(self, "active_maker_orders", {}))
 
+    def _has_fresh_quote_on_recovered_market_leg(self, now_ts: float) -> bool:
+        """Return whether any non-pending current outcome has a fresh post-recovery quote.
+
+        A binary outcome can remain quiet without indicating a dead WebSocket. Do
+        not tear down the whole node when the sibling outcome is actively
+        delivering current quotes; the pending outcome remains unavailable to
+        pricing/entry until its own valid quote arrives.
+        """
+        # Do not use a healthy sibling as sufficient recovery when there is
+        # open exposure or an order that may depend on the missing outcome.
+        try:
+            if Decimal(str(getattr(self, "inventory_delta_shares", "0") or "0")) > 0:
+                return False
+        except (ArithmeticError, TypeError, ValueError):
+            return False
+        if getattr(self, "active_maker_orders", {}):
+            return False
+        started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0) or 0.0)
+        stale_after = max(0.0, float(getattr(self, "quote_stale_sec", 0.0) or 0.0))
+        pending = {
+            str(item)
+            for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set())
+        }
+        current = {
+            str(item)
+            for item in (getattr(self, "current_market_instruments", []) or [])
+        }
+        last_update = getattr(self, "last_quote_update_ts_by_inst", {})
+        if not isinstance(last_update, dict):
+            return False
+        for instrument_id in current - pending:
+            try:
+                updated_ts = float(last_update.get(instrument_id, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if updated_ts < started_ts:
+                continue
+            if 0.0 <= float(now_ts) - updated_ts < stale_after:
+                return True
+        return False
+
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
@@ -4342,6 +4383,33 @@ class IntegratedBTCStrategy(
                 recovery_age = now_ts - recovery_started_ts
                 if recovery_age >= float(self.quote_resubscribe_grace_sec):
                     if int(getattr(self, "quote_recovery_attempts", 0)) >= 1:
+                        if self._has_fresh_quote_on_recovered_market_leg(now_ts):
+                            # Keep the healthy sibling's quote cache and live
+                            # connection. A quiet/missing outcome is not proof
+                            # that the entire quote stream has failed.
+                            self.quote_recovery_started_ts = now_ts
+                            last_notice_ts = float(
+                                getattr(self, "_last_partial_quote_recovery_notice_ts", 0.0) or 0.0
+                            )
+                            if now_ts - last_notice_ts >= 60.0:
+                                self._last_partial_quote_recovery_notice_ts = now_ts
+                                pending = sorted(str(item) for item in pending_instruments)
+                                logger.warning(
+                                    "Quote recovery degraded but market stream is active; "
+                                    f"keeping node alive pending={pending}"
+                                )
+                                self._db_strategy_event(
+                                    "QUOTE_WATCHDOG_PARTIAL_MARKET_DATA",
+                                    {
+                                        "pending_instruments": pending,
+                                        "current_market_instruments": sorted(
+                                            str(item)
+                                            for item in (getattr(self, "current_market_instruments", []) or [])
+                                        ),
+                                        "ts": now_ts,
+                                    },
+                                )
+                            continue
                         if self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts):
                             return
                         # A protected SELL still lives at the venue. Keep the

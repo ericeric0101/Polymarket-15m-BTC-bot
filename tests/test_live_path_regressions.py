@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -46,6 +47,7 @@ from bot.market_runtime import (
     quote_event_is_fresh,
     quote_tick_adapter_timestamp,
     quote_transport_is_fresh,
+    promote_prewarm_quotes_to_current_market,
     next_market_pair_instruments,
     refresh_quote_tick_subscriptions,
     replace_market_subscriptions,
@@ -502,11 +504,92 @@ def test_prewarm_quote_acknowledges_next_pair_without_touching_current_market_st
         instrument_id="current-up",
         current_market_instruments=["current-up", "current-down"],
         quote_prewarm_instruments={"next-up", "next-down"},
+        quote_stale_sec=30.0,
+        quote_max_delivery_delay_sec=2.0,
+        quote_event_clock_skew_tolerance_sec=Decimal("0.25"),
+        stale_quote_synth_max_age_sec=10.0,
     )
-    tick = SimpleNamespace(instrument_id="next-up")
+    now_ts = time.time()
+    class Price:
+        def __init__(self, value): self.value = Decimal(value)
+        def as_decimal(self): return self.value
+    tick = SimpleNamespace(
+        instrument_id="next-up", bid_price=Price("0.50"), ask_price=Price("0.51"),
+        bid_size=Price("12"), ask_size=Price("13"),
+        ts_event=int(now_ts * 1_000_000_000), ts_init=int(now_ts * 1_000_000_000),
+    )
     handle_quote_tick(strategy, tick)
     assert "next-up" in strategy.quote_prewarm_first_quote_ts_by_inst
+    assert strategy.quote_prewarm_latest_by_inst["next-up"]["bid"] == Decimal("0.50")
+    assert strategy.quote_prewarm_latest_by_inst["next-up"]["ask"] == Decimal("0.51")
     assert not hasattr(strategy, "latest_quote_by_inst")
+
+
+def test_promotion_uses_only_fresh_prewarm_quotes_and_leaves_missing_leg_pending():
+    now_ts = 200.0
+    strategy = SimpleNamespace(
+        current_market_slug="next-market",
+        current_market_instruments=["next-up", "next-down"],
+        instrument_id="next-up",
+        active_side=ActiveSide.UP,
+        quote_stale_sec=30.0,
+        quote_recovery_started_ts=190.0,
+        quote_recovery_attempts=0,
+        quote_recovery_pending_instruments={"next-up", "next-down"},
+        quote_prewarm_latest_by_inst={
+            "next-up": {
+                "bid": Decimal("0.50"), "ask": Decimal("0.51"),
+                "bid_size": Decimal("12"), "ask_size": Decimal("13"),
+                "received_ts": 195.0, "source_ts": 194.9, "adapter_emitted_ts": 195.0,
+            },
+            "next-down": {
+                "bid": Decimal("0.48"), "ask": Decimal("0.49"),
+                "bid_size": Decimal("10"), "ask_size": Decimal("11"),
+                "received_ts": 150.0, "source_ts": 149.9, "adapter_emitted_ts": 150.0,
+            },
+        },
+        latest_quote_by_inst={}, latest_quote_depth_by_inst={},
+        last_quote_update_ts_by_inst={}, last_quote_source_ts_by_inst={},
+        last_quote_received_ts_by_inst={},
+        latest_market_bid=None, latest_market_ask=None,
+        latest_market_bid_ts=0.0, latest_market_ask_ts=0.0,
+        last_valid_quote_ts=0.0,
+    )
+
+    promote_prewarm_quotes_to_current_market(strategy, now_ts=now_ts)
+
+    assert strategy.latest_quote_by_inst == {"next-up": (Decimal("0.50"), Decimal("0.51"))}
+    assert strategy.latest_quote_depth_by_inst["next-up"] == (Decimal("12"), Decimal("13"))
+    assert strategy.quote_recovery_pending_instruments == {"next-down"}
+    assert strategy.last_valid_quote_ts == 195.0
+
+
+def test_market_selection_calls_are_serialized(monkeypatch):
+    import bot.market_runtime as runtime
+    import threading
+    import time as time_module
+
+    active = 0
+    maximum_active = 0
+    counter_lock = threading.Lock()
+
+    def fake_select(_strategy):
+        nonlocal active, maximum_active
+        with counter_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time_module.sleep(0.02)
+        with counter_lock:
+            active -= 1
+        return True
+
+    monkeypatch.setattr(runtime, "_find_btc_instrument_unlocked", fake_select)
+    strategy = SimpleNamespace()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: runtime.find_btc_instrument(strategy), range(2)))
+
+    assert results == [True, True]
+    assert maximum_active == 1
 
 
 def test_native_quote_delivery_lag_is_bounded_independently_from_feed_watchdog():

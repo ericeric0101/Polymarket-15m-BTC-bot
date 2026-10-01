@@ -545,6 +545,8 @@ def initialize_strategy_settings(
     strategy.quote_recovery_attempts = 0
     strategy.quote_prewarm_instruments = set()
     strategy.quote_prewarm_first_quote_ts_by_inst = {}
+    strategy.quote_prewarm_latest_by_inst = {}
+    strategy._market_selection_lock = threading.RLock()
     strategy._quote_stream_rollover_requested = False
     maker_config = MakerEngineConfig(
         maker_half_spread=strategy.maker_half_spread,

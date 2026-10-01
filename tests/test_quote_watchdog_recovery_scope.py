@@ -1,6 +1,7 @@
 from decimal import Decimal
 from types import SimpleNamespace
 import time
+import pytest
 
 from run_bot import IntegratedBTCStrategy
 from bot.launcher import idempotent_stop_callback
@@ -32,6 +33,96 @@ def test_quote_watchdog_keeps_recovery_for_inventory_or_active_market():
 
     assert IntegratedBTCStrategy._quote_watchdog_recovery_is_needed(active) is True
     assert IntegratedBTCStrategy._quote_watchdog_recovery_is_needed(held) is True
+
+
+def test_pending_quiet_outcome_does_not_roll_node_when_sibling_has_fresh_quote(monkeypatch):
+    monkeypatch.setattr("run_bot.time.time", lambda: 113.0)
+    class StopEvent:
+        calls = 0
+
+        def wait(self, _seconds):
+            self.calls += 1
+            return self.calls > 1
+
+    events = []
+    strategy = SimpleNamespace(
+        _stopping=False,
+        _quote_watchdog_stop_event=StopEvent(),
+        quote_healthcheck_interval_sec=1.0,
+        quote_recovery_pending_instruments={"down"},
+        quote_recovery_started_ts=100.0,
+        quote_recovery_attempts=1,
+        quote_resubscribe_grace_sec=12.0,
+        quote_stale_sec=30.0,
+        current_market_instruments=["up", "down"],
+        last_quote_update_ts_by_inst={"up": 109.0},
+        _emit_strategy_status=lambda _now: None,
+        _cleanup_stale_pending_cancels=lambda _now: None,
+        _quote_watchdog_recovery_is_needed=lambda: True,
+        _request_quote_stream_node_rollover=lambda *args: pytest.fail(
+            "a current fresh quote from either outcome keeps the market stream alive"
+        ),
+        _db_strategy_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+    strategy._has_fresh_quote_on_recovered_market_leg = (
+        lambda now_ts: IntegratedBTCStrategy._has_fresh_quote_on_recovered_market_leg(strategy, now_ts)
+    )
+
+    IntegratedBTCStrategy._start_quote_watchdog_timer(strategy)
+
+    assert strategy.quote_recovery_pending_instruments == {"down"}
+    assert strategy.quote_recovery_started_ts == 113.0
+    assert any(event == "QUOTE_WATCHDOG_PARTIAL_MARKET_DATA" for event, _ in events)
+
+
+def test_pending_quotes_without_any_fresh_market_data_still_escalate(monkeypatch):
+    monkeypatch.setattr("run_bot.time.time", lambda: 113.0)
+    class StopEvent:
+        calls = 0
+
+        def wait(self, _seconds):
+            self.calls += 1
+            return self.calls > 1
+
+    rollovers = []
+    strategy = SimpleNamespace(
+        _stopping=False,
+        _quote_watchdog_stop_event=StopEvent(),
+        quote_healthcheck_interval_sec=1.0,
+        quote_recovery_pending_instruments={"up", "down"},
+        quote_recovery_started_ts=100.0,
+        quote_recovery_attempts=1,
+        quote_resubscribe_grace_sec=12.0,
+        quote_stale_sec=30.0,
+        current_market_instruments=["up", "down"],
+        last_quote_update_ts_by_inst={},
+        _emit_strategy_status=lambda _now: None,
+        _cleanup_stale_pending_cancels=lambda _now: None,
+        _quote_watchdog_recovery_is_needed=lambda: True,
+        _request_quote_stream_node_rollover=lambda *args: rollovers.append(args) or True,
+        _db_strategy_event=lambda *_args: None,
+    )
+    strategy._has_fresh_quote_on_recovered_market_leg = (
+        lambda now_ts: IntegratedBTCStrategy._has_fresh_quote_on_recovered_market_leg(strategy, now_ts)
+    )
+
+    IntegratedBTCStrategy._start_quote_watchdog_timer(strategy)
+
+    assert rollovers == [("quote_resubscribe_timeout", 113.0)]
+
+
+def test_fresh_sibling_does_not_suppress_recovery_when_inventory_exists():
+    strategy = SimpleNamespace(
+        inventory_delta_shares=Decimal("5"),
+        active_maker_orders={},
+        quote_recovery_started_ts=100.0,
+        quote_recovery_pending_instruments={"down"},
+        current_market_instruments=["up", "down"],
+        last_quote_update_ts_by_inst={"up": 109.0},
+        quote_stale_sec=30.0,
+    )
+
+    assert IntegratedBTCStrategy._has_fresh_quote_on_recovered_market_leg(strategy, 113.0) is False
 
 
 def test_quote_watchdog_rollover_uses_launcher_node_stop_callback():

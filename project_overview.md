@@ -237,6 +237,25 @@
   during node startup is an expected provider warm-up
   state and is logged at debug level; startup/reload callers retain their
   bounded retry and report failure if the cache never becomes ready.
+  **Partial-outcome quote recovery:** a watchdog resubscribe still requires a
+  fresh executable quote for each token before that token's pricing/depth can
+  be used. However, when there is no inventory or tracked order, a fresh quote
+  from one current-market outcome proves that the market stream is still
+  delivering; a quiet sibling token alone no longer triggers whole-node
+  rollover. The unresolved token remains pending and is not treated as
+  executable, while the watchdog keeps the node alive as long as at least one
+  current-market leg continues delivering fresh quotes. With exposure/orders,
+  or when no current-market leg recovers, the existing recovery escalation
+  remains in force. This avoids
+  restarting the full data client merely because one binary outcome's book did
+  not emit a changed quote; it does not bypass the missing leg's quote/depth
+  gates. Fresh quotes captured for the prewarmed pair are promoted into current
+  quote state on handoff without replaying trading callbacks; stale/missing legs
+  remain pending. Market selection is serialized across lifecycle, fallback
+  reload, and watchdog callers, and subscription API failures are reported as
+  an unsuccessful selection so callers retry instead of treating it as ready.
+  Regression coverage is in `tests/test_quote_watchdog_recovery_scope.py` and
+  `tests/test_live_path_regressions.py`.
 - Fast-follow records a durable `ORDER_FAST_FOLLOW_INTENT` after risk-state
   reservation and before the FOK reaches the venue. Intent is crash-recovery
   evidence, not venue acceptance or a fill: it cannot create inventory, quota,

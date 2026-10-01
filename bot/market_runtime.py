@@ -449,6 +449,86 @@ def replace_market_subscriptions(
     return healthy
 
 
+def promote_prewarm_quotes_to_current_market(strategy: Any, *, now_ts: float | None = None) -> set[str]:
+    """Promote only still-fresh BBOs captured while the next pair was prewarmed.
+
+    Promotion updates quote state only; it does not replay a tick through
+    signal, shadow, fast-follow, or order-submission callbacks. Missing/stale
+    legs remain pending and continue to fail their normal quote/depth gates.
+    """
+    now = time.time() if now_ts is None else float(now_ts)
+    stale_after = max(0.0, float(getattr(strategy, "quote_stale_sec", 0.0) or 0.0))
+    prewarmed = getattr(strategy, "quote_prewarm_latest_by_inst", {})
+    if not isinstance(prewarmed, dict):
+        prewarmed = {}
+    pending = getattr(strategy, "quote_recovery_pending_instruments", set())
+    if not isinstance(pending, set):
+        pending = set(pending or ())
+        strategy.quote_recovery_pending_instruments = pending
+    promoted: set[str] = set()
+    preferred = None
+    try:
+        preferred = strategy._instrument_for_side(strategy.active_side)
+    except Exception:
+        preferred = None
+    if preferred is None:
+        preferred = getattr(strategy, "instrument_id", None)
+    preferred_key = str(preferred) if preferred is not None else None
+
+    for instrument in list(getattr(strategy, "current_market_instruments", []) or []):
+        key = str(instrument)
+        quote = prewarmed.pop(key, None)
+        if not isinstance(quote, dict):
+            continue
+        try:
+            received_ts = float(quote.get("received_ts", 0.0) or 0.0)
+            bid = Decimal(str(quote["bid"]))
+            ask = Decimal(str(quote["ask"]))
+        except (KeyError, ArithmeticError, TypeError, ValueError):
+            continue
+        age = now - received_ts
+        if received_ts <= 0 or age < 0 or age >= stale_after or bid <= 0 or ask <= 0 or bid > ask:
+            continue
+
+        strategy.latest_quote_by_inst[key] = (bid, ask)
+        strategy.latest_quote_depth_by_inst[key] = (
+            quote.get("bid_size"), quote.get("ask_size"),
+        )
+        strategy.last_quote_received_ts_by_inst[key] = received_ts
+        strategy.last_quote_update_ts_by_inst[key] = float(
+            quote.get("adapter_emitted_ts", received_ts) or received_ts
+        )
+        source_ts = float(quote.get("source_ts", 0.0) or 0.0)
+        if source_ts > 0:
+            strategy.last_quote_source_ts_by_inst[key] = source_ts
+        pending.discard(key)
+        promoted.add(key)
+        if key == preferred_key:
+            strategy.latest_market_bid = bid
+            strategy.latest_market_ask = ask
+            strategy.latest_market_bid_ts = received_ts
+            strategy.latest_market_ask_ts = received_ts
+            strategy.last_valid_quote_ts = received_ts
+            strategy.last_quote_update_ts = strategy.last_quote_update_ts_by_inst[key]
+
+    strategy.quote_prewarm_latest_by_inst = prewarmed
+    if not pending:
+        strategy.quote_recovery_started_ts = 0.0
+        strategy.quote_recovery_attempts = 0
+        if promoted:
+            record_handoff = getattr(strategy, "_db_strategy_event", None)
+            if callable(record_handoff):
+                record_handoff(
+                    "QUOTE_MARKET_HANDOFF_PREWARM_READY",
+                    {
+                        "slug": str(getattr(strategy, "current_market_slug", "") or ""),
+                        "instruments": sorted(promoted),
+                        "received_ts": now,
+                    },
+                )
+    return promoted
+
+
 def handle_order_book_deltas(strategy: Any, deltas: Any) -> None:
     """Stamp fresh native L2 delivery for fast-follow's FOK precheck.
 
@@ -466,6 +546,16 @@ def handle_order_book_deltas(strategy: Any, deltas: Any) -> None:
 
 
 def find_btc_instrument(strategy: Any) -> bool:
+    """Serialize market selection because lifecycle, reload, and watchdog share it."""
+    lock = getattr(strategy, "_market_selection_lock", None)
+    if lock is None:
+        lock = threading.RLock()
+        strategy._market_selection_lock = lock
+    with lock:
+        return _find_btc_instrument_unlocked(strategy)
+
+
+def _find_btc_instrument_unlocked(strategy: Any) -> bool:
     """Find the current active BTC 15-min instrument."""
     instruments = strategy.cache.instruments()
     if strategy.startup_verbose:
@@ -625,12 +715,26 @@ def find_btc_instrument(strategy: Any) -> bool:
             strategy.current_market_instruments,
             clear_cached_quotes=True,
         )
-    replace_market_subscriptions(
+        promoted = promote_prewarm_quotes_to_current_market(strategy)
+        if promoted:
+            logger.info(
+                "Promoted fresh prewarm quotes at market handoff: "
+                f"slug={strategy.current_market_slug} instruments={sorted(promoted)} "
+                f"pending={sorted(strategy.quote_recovery_pending_instruments)}"
+            )
+    subscriptions_healthy = replace_market_subscriptions(
         strategy,
         previous_market_instruments,
         strategy.current_market_instruments,
         prewarm_instrument_ids=prewarm_instruments,
     )
+    if not subscriptions_healthy:
+        logger.error(
+            "Market selection is incomplete because one or more quote/L2 subscriptions failed: "
+            f"slug={strategy.current_market_slug} instruments="
+            f"{[str(item) for item in strategy.current_market_instruments]}"
+        )
+        return False
     if prewarm_instruments:
         logger.info(
             "Quote prewarm subscribed for next BTC 15m pair: "
@@ -658,6 +762,74 @@ def wait_for_btc_instrument(strategy: Any, timeout_sec: int = 60, poll_interval_
     return False
 
 
+def _capture_fresh_prewarm_quote(strategy: Any, tick: QuoteTick) -> None:
+    """Keep a bounded latest BBO for the one prewarmed market pair only."""
+    instrument_key = str(getattr(tick, "instrument_id", "") or "")
+    allowed = {str(item) for item in (getattr(strategy, "quote_prewarm_instruments", set()) or set())}
+    if not instrument_key or instrument_key not in allowed:
+        return
+    try:
+        bid_raw = getattr(tick, "bid_price", None)
+        ask_raw = getattr(tick, "ask_price", None)
+        if bid_raw is None or ask_raw is None:
+            return
+        bid = bid_raw.as_decimal() if hasattr(bid_raw, "as_decimal") else Decimal(str(bid_raw))
+        ask = ask_raw.as_decimal() if hasattr(ask_raw, "as_decimal") else Decimal(str(ask_raw))
+        if bid <= 0 or ask <= 0 or bid > ask:
+            return
+    except (ArithmeticError, TypeError, ValueError):
+        return
+
+    received_ts = time.time()
+    event_ts = quote_tick_event_timestamp(tick, received_ts)
+    adapter_ts = quote_tick_adapter_timestamp(tick, received_ts)
+    provenance = quote_provenance_for_tick(tick)
+    source = str(provenance.get("source") or "unknown")
+    tolerance = getattr(strategy, "quote_event_clock_skew_tolerance_sec", Decimal("0.25"))
+    if source in {"ws_price_change", "ws_snapshot"}:
+        fresh = quote_delivery_is_fresh(
+            received_ts=received_ts,
+            adapter_emitted_ts=adapter_ts,
+            max_delivery_delay_sec=float(
+                getattr(strategy, "quote_max_delivery_delay_sec", strategy.quote_stale_sec)
+            ),
+            clock_skew_tolerance_sec=tolerance,
+        )
+    else:
+        fresh = source != "transport_heartbeat" and quote_event_is_fresh(
+            received_ts=received_ts,
+            event_ts=event_ts,
+            max_age_sec=float(strategy.quote_stale_sec),
+            clock_skew_tolerance_sec=tolerance,
+        )
+    if not fresh:
+        return
+
+    def size_decimal(name: str) -> Decimal | None:
+        raw = getattr(tick, name, None)
+        if raw is None:
+            return None
+        try:
+            return raw.as_decimal() if hasattr(raw, "as_decimal") else Decimal(str(raw))
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+
+    quotes = getattr(strategy, "quote_prewarm_latest_by_inst", None)
+    if not isinstance(quotes, dict):
+        quotes = {}
+        strategy.quote_prewarm_latest_by_inst = quotes
+    quotes[instrument_key] = {
+        "bid": bid,
+        "ask": ask,
+        "bid_size": size_decimal("bid_size"),
+        "ask_size": size_decimal("ask_size"),
+        "received_ts": received_ts,
+        "source_ts": quote_tick_event_timestamp(tick, 0.0),
+        "adapter_emitted_ts": adapter_ts,
+        "source": source,
+    }
+
+
 def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
     """Handle quote tick updates."""
     if strategy._stopping:
@@ -676,6 +848,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                         seen = {}
                         strategy.quote_prewarm_first_quote_ts_by_inst = seen
                     seen.setdefault(str(tick.instrument_id), time.time())
+                    _capture_fresh_prewarm_quote(strategy, tick)
                 return
 
         if tick.bid_price is None and tick.ask_price is None:
