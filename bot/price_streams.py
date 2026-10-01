@@ -38,6 +38,8 @@ class PriceTick:
     received_at_ts: float
     window_seconds: Optional[int] = None
     raw_summary: str = ""
+    exchange_trade_ts_ms: Optional[int] = None
+    quantity: Optional[Decimal] = None
 
 
 def rtds_application_heartbeat_due(*, now_monotonic: float, last_sent_monotonic: float) -> bool:
@@ -143,12 +145,16 @@ def extract_binance_aggtrade_tick(raw: Any) -> Optional[PriceTick]:
     if px is None or px <= 0:
         return None
     updated_ms = to_epoch_ms(payload.get("E"))
+    trade_ts_ms = to_epoch_ms(payload.get("T"))
+    quantity = to_decimal(payload.get("q"))
     return PriceTick(
         source="binance_ws",
         price=px,
         updated_at_ms=updated_ms,
         received_at_ts=time.time(),
         raw_summary=str(payload)[:180],
+        exchange_trade_ts_ms=trade_ts_ms,
+        quantity=quantity if quantity is not None and quantity >= 0 else None,
     )
 
 

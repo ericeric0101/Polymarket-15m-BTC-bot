@@ -451,6 +451,21 @@ class SpotPricerMixin:
         self._binance_ws_thread.start()
         logger.info("Binance WebSocket thread started")
 
+    def _observe_btc_1s_history(self, tick: Any) -> None:
+        """Passively forward an aggTrade to history capture; never raise to live feed."""
+        collector = getattr(self, "btc_1s_history_collector", None)
+        if collector is None:
+            return
+        try:
+            collector.observe_aggtrade(
+                price=tick.price,
+                source_ts_ms=getattr(tick, "exchange_trade_ts_ms", None) or tick.updated_at_ms,
+                received_ts=tick.received_at_ts,
+                quantity=getattr(tick, "quantity", None),
+            )
+        except Exception as exc:
+            logger.debug(f"BTC 1s history observer skipped: {exc}")
+
     def _binance_ws_loop(self) -> None:
         """
         Persistent WebSocket connection to Binance Spot for BTC/USDT aggTrade.
@@ -511,6 +526,7 @@ class SpotPricerMixin:
                                     tick.received_at_ts,
                                     source="binance_ws",
                                 )
+                                self._observe_btc_1s_history(tick)
                                 publish_strategy_tick(self, source="binance", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         except Exception as exc:
                             logger.warning(f"Binance WS tick processing failed: {exc}")

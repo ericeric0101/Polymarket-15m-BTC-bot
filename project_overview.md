@@ -36,6 +36,39 @@
   entry, exit, stop, sizing, order-routing, session-guard, or TWAP runtime
   behavior.
 
+## BTC 1-second historical research data
+
+- The observer-only `BTC1sHistoryCollector` passively reuses the existing
+  Binance Spot `btcusdt@aggTrade` connection. It does not create another
+  WebSocket and has no entry, exit, risk, pricing, or order authority. Its
+  enable/disable and storage settings are `BTC_1S_HISTORY_ENABLED`,
+  `BTC_1S_HISTORY_DIR`, and `BTC_1S_HISTORY_MIN_FREE_DISK_GB`.
+- Data is written as Zstandard-compressed Parquet parts under
+  `data/btc_history_1s/`, named
+  `BTCUSDT_1s_YYYY-MM-DD_part-NNNNN.parquet`. The date is UTC. `ts_sec` is an
+  integer UTC epoch second; source/receive timestamp columns are epoch
+  milliseconds. A row is assigned to the Binance trade-time (`T`) second,
+  falling back to Binance event time (`E`) only if trade time is absent.
+- Each bar stores OHLC, quantity volume, aggTrade-message count, and quantity-
+  weighted VWAP when available. `trade_count` means aggTrade messages, not the
+  individual executions combined inside an aggregate event. For sources that
+  lack quantities, volume/VWAP remain null. Missing seconds are not filled.
+- A bounded callback-side aggregator feeds a bounded nonblocking queue; a
+  background worker batches and atomically publishes immutable Parquet part
+  files. Restarts allocate new part numbers and never overwrite earlier
+  parts. Offline loading sorts and deduplicates by `ts_sec`, choosing the row
+  with the greatest `last_source_ts`, then the lexically later part on ties.
+- Low disk or any collector/write error disables only this history writer and
+  logs a warning; the live feed and trading continue. `data/` is already
+  ignored by Git, so these market-data files are not committed. Maximum
+  theoretical coverage is about 86,400 rows per UTC day; actual rows are lower
+  when the feed has gaps. No daily compressed-size estimate is asserted until
+  representative live data is measured.
+- Validate a UTC day with `python scripts/validate_btc_1s_history.py --date
+  YYYY-MM-DD`. Use `load_btc_1s_history(start_ts, end_ts)` from the offline
+  collector module for downstream research. This storage layer does not
+  change the empirical probability estimator or any live probability logic.
+
 ## Audit scope and safety status
 
 - The 2026-09-24 lifecycle hardening pass changes quote freshness handling,

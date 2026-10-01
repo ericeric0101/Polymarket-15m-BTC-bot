@@ -44,6 +44,7 @@ from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastF
 from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
 from bot.trend_entry_shadow import TrendEntryShadow
 from bot.forward_shadow import ForwardShadowExperiment
+from bot.btc_1s_history import BTC1sHistoryCollector
 
 
 TWAP_RESEARCH_DB_DEFAULT = "data/research/twap_forward_shadow.db"
@@ -726,6 +727,21 @@ def initialize_strategy_settings(
     strategy._btc_trend_source_price = None
     strategy._binance_ws_stop_event = threading.Event()
     strategy._binance_ws_thread = None
+    history_enabled = os.getenv("BTC_1S_HISTORY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    strategy.btc_1s_history_collector = None
+    if history_enabled:
+        try:
+            strategy.btc_1s_history_collector = BTC1sHistoryCollector(
+                data_dir=os.getenv("BTC_1S_HISTORY_DIR", "data/btc_history_1s"),
+                min_free_disk_gb=float(os.getenv("BTC_1S_HISTORY_MIN_FREE_DISK_GB", "5")),
+                queue_rows=300,
+                batch_rows=300,
+            )
+            strategy.btc_1s_history_collector.start()
+        except Exception as exc:
+            # Observer initialization is isolated from all strategy authority.
+            strategy.btc_1s_history_collector = None
+            logger.warning(f"BTC 1s history collector unavailable; live strategy continues: {exc}")
     strategy._polymarket_chainlink_price = None
     strategy._polymarket_chainlink_price_ts = 0.0
     strategy._polymarket_chainlink_event_ts_ms = None

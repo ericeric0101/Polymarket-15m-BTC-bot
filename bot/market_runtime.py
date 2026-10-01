@@ -1025,6 +1025,12 @@ def handle_stop(strategy: Any) -> None:
         ],
         join_timeout_sec=2.0,
     )
+    history_collector = getattr(strategy, "btc_1s_history_collector", None)
+    if history_collector is not None:
+        try:
+            history_collector.stop(timeout_sec=5.0)
+        except Exception:
+            logger.debug("Failed to stop BTC 1s history collector; live shutdown continues", exc_info=True)
     log_shutdown_stage("background_threads", stage_started)
     stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=orders_and_final_journal_events")
