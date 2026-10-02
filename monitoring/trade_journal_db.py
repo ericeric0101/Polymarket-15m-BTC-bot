@@ -1025,7 +1025,8 @@ class TradeJournalDB:
                     """
                     SELECT payload_json
                     FROM order_events
-                    WHERE event_type IN (
+                    WHERE client_order_id IN (?, ?)
+                      AND event_type IN (
                       'SHADOW_SIM_ENTRY_CANDIDATE',
                       'SHADOW_SIM_ENTRY_REQUOTED',
                       'SHADOW_SIM_ENTRY_CANCELLED',
@@ -1033,11 +1034,10 @@ class TradeJournalDB:
                       'SHADOW_SIM_ENTRY_EXPIRED',
                       'SHADOW_SIM_SETTLED'
                     )
-                      AND json_extract(payload_json, '$.slug')=?
                     ORDER BY id DESC
                     LIMIT 1
                     """,
-                    (slug,),
+                    (f"shadow-sim:{slug}:up", f"shadow-sim:{slug}:down"),
                 ).fetchone()
             if not row or not row[0]:
                 return None
@@ -1053,21 +1053,22 @@ class TradeJournalDB:
         if not slug:
             return []
         try:
+            client_prefix = f"fair-edge-shadow:{slug}:"
             with self._connect() as conn:
                 rows = conn.execute(
                     """
                     SELECT payload_json
                     FROM order_events
-                    WHERE event_type IN (
+                    WHERE client_order_id >= ? AND client_order_id < ?
+                      AND event_type IN (
                       'FAIR_EDGE_BUCKET_SHADOW_CANDIDATE',
                       'FAIR_EDGE_BUCKET_SHADOW_FILLED',
                       'FAIR_EDGE_BUCKET_SHADOW_EXPIRED',
                       'FAIR_EDGE_BUCKET_SHADOW_SETTLED'
                     )
-                      AND json_extract(payload_json, '$.slug')=?
                     ORDER BY id ASC
                     """,
-                    (slug,),
+                    (client_prefix, client_prefix + "\uffff"),
                 ).fetchall()
             states: Dict[str, Dict[str, Any]] = {}
             for (raw_payload,) in rows:

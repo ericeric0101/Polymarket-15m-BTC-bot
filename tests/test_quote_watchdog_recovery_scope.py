@@ -111,6 +111,87 @@ def test_pending_quotes_without_any_fresh_market_data_still_escalate(monkeypatch
     assert rollovers == [("quote_resubscribe_timeout", 113.0)]
 
 
+def test_connected_transport_heartbeat_does_not_escalate_idle_quote_book_to_node_rollover(monkeypatch):
+    monkeypatch.setattr("run_bot.time.time", lambda: 113.0)
+
+    class StopEvent:
+        calls = 0
+        def wait(self, _seconds):
+            self.calls += 1
+            return self.calls > 1
+
+    rollovers, events = [], []
+    strategy = SimpleNamespace(
+        _stopping=False,
+        _quote_watchdog_stop_event=StopEvent(),
+        quote_healthcheck_interval_sec=1.0,
+        quote_recovery_pending_instruments={"up", "down"},
+        quote_recovery_started_ts=100.0,
+        quote_recovery_attempts=1,
+        quote_resubscribe_grace_sec=12.0,
+        quote_stale_sec=30.0,
+        current_market_instruments=["up", "down"],
+        last_quote_update_ts_by_inst={},
+        # A transport heartbeat proves the connected WebSocket is alive, but
+        # deliberately does not count as a fresh price/book update.
+        last_quote_received_ts_by_inst={"up": 112.5},
+        _emit_strategy_status=lambda _now: None,
+        _cleanup_stale_pending_cancels=lambda _now: None,
+        _quote_watchdog_recovery_is_needed=lambda: True,
+        _request_quote_stream_node_rollover=lambda *args: rollovers.append(args) or True,
+        _db_strategy_event=lambda event_type, payload: events.append((event_type, payload)),
+    )
+    strategy._has_fresh_quote_on_recovered_market_leg = (
+        lambda now_ts: IntegratedBTCStrategy._has_fresh_quote_on_recovered_market_leg(strategy, now_ts)
+    )
+
+    IntegratedBTCStrategy._start_quote_watchdog_timer(strategy)
+
+    assert rollovers == []
+    assert strategy.quote_recovery_pending_instruments == {"up", "down"}
+    assert strategy.quote_recovery_started_ts == 0.0
+    assert any(event == "QUOTE_WATCHDOG_TRANSPORT_ALIVE_DATA_STALE" for event, _ in events)
+
+
+def test_stale_pricing_with_recent_transport_activity_allows_one_resubscribe_only(monkeypatch):
+    monkeypatch.setattr("run_bot.time.time", lambda: 113.0)
+
+    class StopEvent:
+        calls = 0
+        def wait(self, _seconds):
+            self.calls += 1
+            return self.calls > 1
+
+    events, recoveries = [], []
+    strategy = SimpleNamespace(
+        _stopping=False,
+        _quote_watchdog_stop_event=StopEvent(),
+        quote_healthcheck_interval_sec=1.0,
+        quote_recovery_pending_instruments=set(),
+        quote_recovery_started_ts=0.0,
+        last_quote_watchdog_check_ts=0.0,
+        last_quote_watchdog_reload_ts=0.0,
+        quote_reload_cooldown_sec=60.0,
+        quote_recovery_attempts=0,
+        quote_stale_sec=30.0,
+        last_valid_quote_ts=70.0,
+        last_quote_received_ts_by_inst={"up": 112.0},
+        current_market_instruments=["up", "down"],
+        consecutive_invalid_quote_ticks=0,
+        quote_invalid_tick_reload_threshold=80,
+        _emit_strategy_status=lambda _now: None,
+        _cleanup_stale_pending_cancels=lambda _now: None,
+        _db_strategy_event=lambda event_type, payload: events.append((event_type, payload)),
+        _trigger_quote_watchdog_reload=lambda *args: recoveries.append(args),
+    )
+
+    IntegratedBTCStrategy._start_quote_watchdog_timer(strategy)
+
+    assert strategy.last_valid_quote_ts == 70.0  # still stale for pricing
+    assert strategy.quote_recovery_pending_instruments == set()
+    assert recoveries == [("timer_stale_quotes", 113.0)]
+
+
 def test_fresh_sibling_does_not_suppress_recovery_when_inventory_exists():
     strategy = SimpleNamespace(
         inventory_delta_shares=Decimal("5"),
@@ -396,6 +477,22 @@ def test_quote_watchdog_stop_failure_does_not_leave_strategy_stuck_stopping():
 def test_watchdog_recovery_does_not_resubscribe_during_shutdown():
     strategy = SimpleNamespace(_stopping=True)
     IntegratedBTCStrategy._trigger_quote_watchdog_reload(strategy, "timer_stale_quotes", 10.0)
+
+
+def test_watchdog_reuses_active_market_selection_before_boundary():
+    selections = []
+    strategy = SimpleNamespace(
+        current_market_slug="btc-updown-15m-100",
+        current_market_instruments=["up", "down"],
+        current_market_end_timestamp=1000.0,
+        market_phase=SimpleNamespace(value="ACTIVE"),
+        _find_btc_instrument=lambda: selections.append("find") or True,
+    )
+
+    assert IntegratedBTCStrategy._quote_watchdog_select_market(strategy, 500.0)
+    assert selections == []
+    assert IntegratedBTCStrategy._quote_watchdog_select_market(strategy, 1000.0)
+    assert selections == ["find"]
 
 
 def test_node_stop_callback_is_idempotent_across_concurrent_rollover_requests():

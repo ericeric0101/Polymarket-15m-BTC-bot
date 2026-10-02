@@ -19,10 +19,11 @@ _QUOTE_PROVENANCE_TTL_SEC = 600.0
 _DEFAULT_L2_PUBLISH_INTERVAL_SEC = 0.25
 # Optional L2 updates must never sit ahead of a live quote long enough to
 # violate the strategy's two-second delivery-freshness contract.  The previous
-# 64/32 bounds allowed a stalled consumer to release a "latest" quote behind
-# dozens of obsolete updates (observed 14–20s delivery delay in production).
-_MAX_MARKET_DATA_BACKLOG = 16
-_MAX_MARKET_DATA_RELEASE_BACKLOG = 4
+# 64/32 and later 16/4 bounds still let four subscribed outcomes starve a
+# slower consumer. Keep only a few queued events and coalesce per instrument.
+_MAX_MARKET_DATA_BACKLOG = 4
+_MAX_OPTIONAL_L2_BACKLOG = 2
+_MAX_MARKET_DATA_RELEASE_BACKLOG = 2
 _quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
 
 
@@ -104,10 +105,11 @@ def enqueue_bounded_market_data(engine, data) -> bool:
     # of actionable quotes. Keep the optional market-data backlog bounded in
     # absolute event count as well as by the configured queue size.
     pressure_mark = min(max(1, int(limit * 0.25)), _MAX_MARKET_DATA_BACKLOG) if limit else 0
+    l2_pressure_mark = min(pressure_mark, _MAX_OPTIONAL_L2_BACKLOG)
     if kind == "OrderBookDeltas" and state["l2_suppression_active"]:
         _record_l2_suppression(engine, data)
         return False
-    if kind == "OrderBookDeltas" and limit and depth >= pressure_mark:
+    if kind == "OrderBookDeltas" and limit and depth >= l2_pressure_mark:
         state["l2_suppression_active"] = True
         _record_l2_suppression(engine, data)
         return False
@@ -213,16 +215,16 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
     release_mark = min(
         max(1, int(limit * 0.10)), _MAX_MARKET_DATA_RELEASE_BACKLOG,
     ) if limit else 0
-    if consumer_drained and limit:
-        # A coalesced quote is useful only if it can reach the strategy while
-        # still fresh.  Keep it staged until stale L2 events ahead of it are
-        # almost drained; merely freeing one slot used to put the quote behind
-        # 31 old messages.
-        if queue.qsize() >= release_mark:
-            return 0
+    if consumer_drained and limit and queue.qsize() <= release_mark and not state["quotes"]:
         state["l2_suppression_active"] = False
+    # A continuous producer can keep the queue above release_mark forever.
+    # Releasing a latest quote into each consumer-freed slot prevents the
+    # staged quote from starving while optional L2 remains suppressed.
+    quote_mark = min(max(1, int(limit * 0.25)), _MAX_MARKET_DATA_BACKLOG) if limit else 0
     sent = 0
     for key, quote in tuple(state["quotes"].items()):
+        if consumer_drained and limit and queue.qsize() >= quote_mark:
+            break
         sampled_depth = queue.qsize()
         try:
             queue.put_nowait(quote)
@@ -244,6 +246,8 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
                     emit_data_engine_queue_report(engine, report)
             except Exception:
                 pass
+    if consumer_drained and limit and queue.qsize() <= release_mark and not state["quotes"]:
+        state["l2_suppression_active"] = False
     return sent
 
 

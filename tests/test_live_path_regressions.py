@@ -69,6 +69,7 @@ from bot.launcher import (
     _strategy_rollover_exposure_reasons,
     wait_for_node_engines_disconnected,
     dispose_node_and_wait_for_engines_disconnected,
+    unrequested_clean_node_return_requires_stop,
 )
 from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
@@ -482,6 +483,54 @@ def test_market_subscription_replacement_keeps_one_future_pair_prewarmed():
     assert ("unsub_quote", "next-up") not in strategy.calls
     assert strategy.calls.count(("sub_quote", "next-up")) == 1
     assert strategy.calls.count(("sub_quote", "after-up")) == 1
+    assert strategy.calls.count(("sub_l2", "next-up")) == 1
+    assert ("sub_l2", "after-up") not in strategy.calls
+
+
+def test_future_pair_prewarm_subscribes_quotes_without_optional_l2():
+    calls = []
+    strategy = SimpleNamespace(
+        subscribe_quote_ticks=lambda inst: calls.append(("quote", inst)),
+        subscribe_order_book_deltas=lambda inst: calls.append(("l2", inst)),
+        unsubscribe_quote_ticks=lambda inst: calls.append(("unsub_quote", inst)),
+        unsubscribe_order_book_deltas=lambda inst: calls.append(("unsub_l2", inst)),
+    )
+
+    assert replace_market_subscriptions(
+        strategy, [], ["current-up", "current-down"],
+        prewarm_instrument_ids=["next-up", "next-down"],
+    )
+
+    assert ("quote", "next-up") in calls
+    assert ("quote", "next-down") in calls
+    assert ("l2", "next-up") not in calls
+    assert ("l2", "next-down") not in calls
+    assert ("l2", "current-up") in calls
+    assert ("l2", "current-down") in calls
+
+
+def test_replaced_future_prewarm_unsubscribes_with_original_instrument_object():
+    class Instrument:
+        def __init__(self, name): self.name = name
+        def __str__(self): return self.name
+
+    current = Instrument("current")
+    old_future = Instrument("old-future")
+    new_future = Instrument("new-future")
+    calls = []
+    strategy = SimpleNamespace(
+        subscribe_quote_ticks=lambda inst: calls.append(("sub_quote", inst)),
+        subscribe_order_book_deltas=lambda inst: calls.append(("sub_l2", inst)),
+        unsubscribe_quote_ticks=lambda inst: calls.append(("unsub_quote", inst)),
+        unsubscribe_order_book_deltas=lambda inst: calls.append(("unsub_l2", inst)),
+    )
+
+    assert replace_market_subscriptions(strategy, [], [current], prewarm_instrument_ids=[old_future])
+    assert replace_market_subscriptions(strategy, [current], [current], prewarm_instrument_ids=[new_future])
+
+    assert ("unsub_quote", old_future) in calls
+    assert ("unsub_quote", "old-future") not in calls
+    assert "old-future" not in strategy._managed_market_quote_subscription_ids
 
 
 def test_next_market_pair_selects_only_immediate_future_up_down_tokens():
@@ -6125,6 +6174,18 @@ def test_rollover_rebuild_waits_for_engine_disconnect_before_declaring_clean():
     assert engine.calls == 2
 
 
+def test_clean_node_return_without_rollover_does_not_restart_bot():
+    assert unrequested_clean_node_return_requires_stop(
+        node_run_returned=True, rollover_requested=False
+    )
+    assert not unrequested_clean_node_return_requires_stop(
+        node_run_returned=True, rollover_requested=True
+    )
+    assert not unrequested_clean_node_return_requires_stop(
+        node_run_returned=False, rollover_requested=False
+    )
+
+
 def test_rollover_disposes_before_waiting_for_engine_disconnect():
     class Engine:
         disconnected = False
@@ -6193,6 +6254,28 @@ def test_watchdog_node_stop_is_scheduled_on_the_node_event_loop_thread():
 
     assert stops == ["stop"]
     assert request_stop() is False
+
+
+def test_node_stop_fences_market_data_before_async_disconnect_starts():
+    scheduled = []
+    class Loop:
+        def is_running(self): return True
+        def is_closed(self): return False
+        def call_soon_threadsafe(self, callback): scheduled.append(callback)
+
+    order = []
+    engine = SimpleNamespace(_btc15m_backpressure={"quotes": {"up": object()}})
+    node = SimpleNamespace(
+        kernel=SimpleNamespace(loop=Loop(), data_engine=engine),
+        stop=lambda: order.append(("stop", engine._btc15m_disposing)),
+    )
+    request_stop = threadsafe_node_stop_callback(node)
+
+    assert request_stop() is True
+    scheduled.pop()()
+
+    assert order == [("stop", True)]
+    assert engine._btc15m_backpressure["quotes"] == {}
 
 
 def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():

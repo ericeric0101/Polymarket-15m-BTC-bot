@@ -320,6 +320,87 @@ def test_watchdog_resubscribes_only_after_both_quote_and_l2_refs_are_removed():
     assert reference_count == 2
 
 
+def test_watchdog_refresh_preserves_healthy_sibling_quote_and_subscription(monkeypatch):
+    monkeypatch.setattr("bot.market_runtime.time.time", lambda: 100.0)
+    calls = []
+    strategy = SimpleNamespace(
+        current_market_instruments=["up", "down"],
+        quote_stale_sec=30.0,
+        latest_quote_by_inst={"up": (0.60, 0.61), "down": (0.39, 0.40)},
+        latest_quote_depth_by_inst={"up": (5, 5), "down": (5, 5)},
+        last_quote_update_ts_by_inst={"up": 99.0, "down": 50.0},
+        last_quote_source_ts_by_inst={"up": 99.0, "down": 50.0},
+        last_quote_received_ts_by_inst={"up": 99.0, "down": 50.0},
+        quote_recovery_pending_instruments=set(),
+        unsubscribe_quote_ticks=lambda inst: calls.append(("unsub_quote", inst)),
+        unsubscribe_order_book_deltas=lambda inst: calls.append(("unsub_l2", inst)),
+        subscribe_quote_ticks=lambda inst: calls.append(("sub_quote", inst)),
+        subscribe_order_book_deltas=lambda inst: calls.append(("sub_l2", inst)),
+    )
+
+    refresh_quote_tick_subscriptions(strategy)
+
+    assert calls == [
+        ("unsub_quote", "down"), ("unsub_l2", "down"),
+        ("sub_quote", "down"), ("sub_l2", "down"),
+    ]
+    assert strategy.latest_quote_by_inst["up"] == (0.60, 0.61)
+    assert "down" not in strategy.latest_quote_by_inst
+    assert strategy.quote_recovery_pending_instruments == {"down"}
+
+
+def test_optional_l2_yields_to_quotes_before_data_queue_reaches_sixteen():
+    class QuoteTick:
+        instrument_id = "current-up"
+
+    class OrderBookDeltas:
+        instrument_id = "current-up"
+        ts_event = 1
+
+    engine = SimpleNamespace(
+        _data_queue=asyncio.Queue(maxsize=6000),
+        _config=SimpleNamespace(qsize=6000),
+    )
+    for _ in range(2):
+        assert enqueue_bounded_market_data(engine, OrderBookDeltas())
+
+    assert not enqueue_bounded_market_data(engine, OrderBookDeltas())
+    assert enqueue_bounded_market_data(engine, QuoteTick())
+    assert engine._data_queue.qsize() == 3
+
+
+def test_four_outcome_burst_keeps_processed_current_quotes_within_two_seconds():
+    class QuoteTick:
+        def __init__(self, instrument_id, sequence):
+            self.instrument_id = instrument_id
+            self.sequence = sequence
+
+    class OrderBookDeltas:
+        def __init__(self, instrument_id, sequence):
+            self.instrument_id = instrument_id
+            self.ts_event = sequence
+
+    engine = SimpleNamespace(
+        _data_queue=asyncio.Queue(maxsize=6000),
+        _config=SimpleNamespace(qsize=6000),
+    )
+    last_processed = {"current-up": -1, "current-down": -1}
+    for sequence in range(100):
+        for instrument in ("current-up", "current-down"):
+            enqueue_bounded_market_data(engine, OrderBookDeltas(instrument, sequence))
+        for instrument in ("current-up", "current-down", "next-up", "next-down"):
+            enqueue_bounded_market_data(engine, QuoteTick(instrument, sequence))
+        if not engine._data_queue.empty():
+            processed = engine._data_queue.get_nowait()
+            if isinstance(processed, QuoteTick) and processed.instrument_id in last_processed:
+                last_processed[processed.instrument_id] = processed.sequence
+            flush_coalesced_quote_ticks(engine, consumer_drained=True)
+
+    # One cycle models 250 ms. Both current outcomes must be updated despite
+    # the prewarmed pair and the optional depth producer outrunning the consumer.
+    assert max(99 - sequence for sequence in last_processed.values()) <= 8
+
+
 def test_l2_rate_limit_coalesces_reconnect_snapshot_bursts():
     last = 0.0
     published = 0
@@ -472,24 +553,20 @@ def test_large_data_queue_caps_optional_l2_backlog_and_keeps_latest_quote_near_f
         enqueue_bounded_market_data(engine, OrderBookDeltas(sequence))
         enqueue_bounded_market_data(engine, QuoteTick("up", sequence))
 
-    assert engine._data_queue.qsize() <= 16
+    assert engine._data_queue.qsize() <= 4
     assert engine._btc15m_backpressure["quotes"]["up"].sequence == 999
 
-    # Do not place the latest quote behind a meaningful L2 backlog.  Releasing
-    # it at the old 32-event watermark made a fresh quote wait ~10+ seconds
-    # whenever the consumer was slow.
+    # A freed slot must release the latest quote even while the producer keeps
+    # the queue above the old release watermark.
     engine._data_queue.get_nowait()
-    assert flush_coalesced_quote_ticks(engine, consumer_drained=True) == 0
-    assert "up" in engine._btc15m_backpressure["quotes"]
-    while engine._data_queue.qsize() > 4:
-        engine._data_queue.get_nowait()
-    flush_coalesced_quote_ticks(engine, consumer_drained=True)
+    assert flush_coalesced_quote_ticks(engine, consumer_drained=True) == 1
+    assert "up" not in engine._btc15m_backpressure["quotes"]
     contents = list(engine._data_queue._queue)
     quote_index = next(
         index for index, item in enumerate(contents)
         if type(item).__name__ == "QuoteTick"
     )
-    assert quote_index <= 4
+    assert quote_index <= 3
 
 
 def test_disposing_data_engine_rejects_new_events_and_does_not_flush_staged_quotes():

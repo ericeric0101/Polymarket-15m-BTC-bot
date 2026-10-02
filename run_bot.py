@@ -4248,6 +4248,85 @@ class IntegratedBTCStrategy(
                 return True
         return False
 
+    def _quote_watchdog_select_market(self, now_ts: float) -> bool:
+        """Keep an already selected active market during same-market feed recovery."""
+        phase = getattr(self, "market_phase", None)
+        phase_value = str(getattr(phase, "value", phase) or "").upper()
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        if (
+            phase_value == "ACTIVE"
+            and getattr(self, "current_market_slug", None)
+            and getattr(self, "current_market_instruments", None)
+            and end_ts is not None
+            and float(now_ts) < float(end_ts)
+        ):
+            return True
+        return self._find_btc_instrument()
+
+    def _has_recent_quote_transport_activity(
+        self,
+        now_ts: float,
+        *,
+        since_ts: float = 0.0,
+    ) -> bool:
+        """Distinguish an idle/stale book from a silent or disconnected transport.
+
+        The adapter emits cached transport heartbeats only while the Polymarket
+        market WebSocket reports connected. These update receipt timestamps but
+        are rejected as pricing inputs in ``handle_quote_tick``. They therefore
+        prove transport activity without refreshing quote age or enabling BUYs.
+        """
+        instruments = {
+            str(item)
+            for item in (getattr(self, "current_market_instruments", []) or [])
+            if item is not None
+        }
+        received = getattr(self, "last_quote_received_ts_by_inst", {})
+        if not instruments or not isinstance(received, dict):
+            return False
+        max_age = max(0.0, float(getattr(self, "quote_stale_sec", 0.0) or 0.0))
+        since = float(since_ts or 0.0)
+        now = float(now_ts)
+        for instrument_id in instruments:
+            try:
+                received_ts = float(received.get(instrument_id, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            age = now - received_ts
+            if received_ts >= since and 0.0 <= age < max_age:
+                return True
+        return False
+
+    def _record_transport_alive_stale_quote(self, now_ts: float, *, recovery_timeout: bool) -> None:
+        """Keep a connected but price-stale node alive, with throttled diagnostics."""
+        last_notice = float(getattr(self, "_last_transport_alive_stale_notice_ts", 0.0) or 0.0)
+        if now_ts - last_notice < 60.0:
+            return
+        self._last_transport_alive_stale_notice_ts = now_ts
+        pending = sorted(
+            str(item)
+            for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set())
+        )
+        logger.warning(
+            "Quote data remains stale while market transport is active; "
+            f"keeping node alive and blocking stale-price decisions: recovery_timeout={recovery_timeout} "
+            f"pending={pending}"
+        )
+        self._db_strategy_event(
+            "QUOTE_WATCHDOG_TRANSPORT_ALIVE_DATA_STALE",
+            {
+                "recovery_timeout": bool(recovery_timeout),
+                "pending_instruments": pending,
+                "current_market_instruments": sorted(
+                    str(item)
+                    for item in (getattr(self, "current_market_instruments", []) or [])
+                ),
+                "last_valid_quote_ts": float(getattr(self, "last_valid_quote_ts", 0.0) or 0.0),
+                "transport_received_ts": dict(getattr(self, "last_quote_received_ts_by_inst", {}) or {}),
+                "ts": float(now_ts),
+            },
+        )
+
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
@@ -4285,7 +4364,7 @@ class IntegratedBTCStrategy(
             consecutive_invalid_quote_ticks=int(self.consecutive_invalid_quote_ticks),
             db_strategy_event_fn=self._db_strategy_event,
             cancel_active_buy_orders_fn=self._cancel_maker_buys_for_quote_recovery,
-            find_btc_instrument_fn=self._find_btc_instrument,
+            find_btc_instrument_fn=lambda: self._quote_watchdog_select_market(now_ts),
             logger_warning_fn=logger.warning,
             logger_error_fn=logger.error,
             trigger_count=trigger_counts[trigger_source],
@@ -4410,6 +4489,20 @@ class IntegratedBTCStrategy(
                                     },
                                 )
                             continue
+                        if IntegratedBTCStrategy._has_recent_quote_transport_activity(
+                            self,
+                            now_ts, since_ts=recovery_started_ts,
+                        ):
+                            # A native quote can be quiet because the book has
+                            # not changed. The transport heartbeat proves the
+                            # socket is alive; stale prices remain unusable, but
+                            # destroying the node cannot make that book fresher.
+                            self.quote_recovery_started_ts = 0.0
+                            IntegratedBTCStrategy._record_transport_alive_stale_quote(
+                                self,
+                                now_ts, recovery_timeout=True,
+                            )
+                            continue
                         if self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts):
                             return
                         # A protected SELL still lives at the venue. Keep the
@@ -4420,6 +4513,24 @@ class IntegratedBTCStrategy(
                 continue
             stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else None
             if stale_for is None or stale_for < self.quote_stale_sec:
+                continue
+            if IntegratedBTCStrategy._has_recent_quote_transport_activity(self, now_ts):
+                # Give a stale subscription one targeted resubscribe, but never
+                # rebuild a connected node just because an unchanged book has
+                # not emitted a new price event. Once an attempt is pending or
+                # has timed out, keep the stale-price gate active and wait for
+                # genuine fresh data instead of creating a reconnect loop.
+                has_pending = bool(
+                    getattr(self, "quote_recovery_pending_instruments", set())
+                )
+                attempts = int(getattr(self, "quote_recovery_attempts", 0) or 0)
+                if not has_pending and attempts == 0:
+                    self._trigger_quote_watchdog_reload("timer_stale_quotes", now_ts)
+                else:
+                    IntegratedBTCStrategy._record_transport_alive_stale_quote(
+                        self,
+                        now_ts, recovery_timeout=False,
+                    )
                 continue
             self._trigger_quote_watchdog_reload("timer_stale_quotes", now_ts)
 

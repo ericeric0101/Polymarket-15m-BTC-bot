@@ -34,6 +34,7 @@ from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.app_config import AppConfig
+from bot.adapter_overrides import begin_data_engine_shutdown
 from bot.compat_patches import apply_compatibility_patches
 from bot.market_discovery import (
     resolve_best_btc_15m_market,
@@ -80,15 +81,24 @@ def threadsafe_node_stop_callback(node: TradingNode):
     disconnect coroutine unscheduled.  Marshal the call back to the owning
     loop; the node then performs its normal awaited client/engine shutdown.
     """
+    def stop_after_fencing_market_data() -> None:
+        engine = getattr(getattr(node, "kernel", None), "data_engine", None)
+        if engine is not None:
+            # The kernel disconnects clients only after strategy shutdown.
+            # Stop optional market-data producers before that multi-second
+            # phase so the DataEngine queue cannot refill while disconnecting.
+            begin_data_engine_shutdown(engine)
+        node.stop()
+
     def request_stop() -> None:
         loop = getattr(getattr(node, "kernel", None), "loop", None)
         if loop is not None and not loop.is_closed() and loop.is_running():
             node._btc15m_stop_requested_monotonic = time.monotonic()
-            loop.call_soon_threadsafe(node.stop)
+            loop.call_soon_threadsafe(stop_after_fencing_market_data)
             logger.warning("Node stop request dispatched to owning event loop")
             return
         node._btc15m_stop_requested_monotonic = time.monotonic()
-        node.stop()
+        stop_after_fencing_market_data()
         logger.warning("Node stop request dispatched directly; owning event loop is not running")
 
     return idempotent_stop_callback(request_stop)
@@ -472,6 +482,13 @@ def run_preflight_checks(simulation: bool) -> Optional[Dict[str, str]]:
     return auth
 
 
+def unrequested_clean_node_return_requires_stop(
+    *, node_run_returned: bool, rollover_requested: bool
+) -> bool:
+    """A clean node return without recovery intent must not spawn another bot."""
+    return bool(node_run_returned and not rollover_requested)
+
+
 def run_integrated_bot(
     simulation: bool = True,
     test_mode: bool = True,
@@ -495,7 +512,7 @@ def run_integrated_bot(
     )
     if startup_verbose:
         logger.info(
-            f"Startup detail: unexpected_exit_restart=on "
+            f"Startup detail: unexpected_clean_exit_restart=off "
             f"rollover_cooldown={auto_rollover_cooldown_sec}s max_failures={auto_rollover_max_failures}"
         )
 
@@ -782,6 +799,19 @@ def run_integrated_bot(
             logger.error(
                 "Automatic node rollover stopped after unclean engine shutdown; "
                 "operator restart is required after the old process has exited."
+            )
+            break
+        if unrequested_clean_node_return_requires_stop(
+            node_run_returned=node_run_returned,
+            rollover_requested=rollover_requested.is_set(),
+        ):
+            # Nautilus can consume Ctrl-C internally and return from run()
+            # normally. Rebuilding here silently starts a new bot cycle after
+            # the operator tried to stop it. An unrequested clean return has
+            # no proven recovery intent, so fail closed instead.
+            logger.error(
+                "Node returned without an explicit rollover request; "
+                "stopping instead of silently rebuilding."
             )
             break
         if not auto_rollover_enabled:

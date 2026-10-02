@@ -222,9 +222,14 @@
   to DataEngine at a bounded 4 Hz per instrument, retaining fresh depth for
   fast-follow checks while bounding queue fan-out. A percentage-only queue
   threshold still allowed a large stale backlog with the configured 6,000
-  slots, so optional L2 admission now starts suppressing at 64 queued events;
-  the latest quote is coalesced by instrument and placed behind at most that
-  bounded backlog when the consumer resumes. DataEngine disposal now fences
+  slots, so optional L2 admission now starts suppressing at two queued events
+  (or 25% of queue capacity, whichever is smaller); quote coalescing retains
+  a separate four-event cap. The latest quote is kept by instrument and one
+  coalesced quote is released whenever the consumer frees capacity. Waiting
+  for the queue to fall below a separate release mark had starved current
+  quotes during sustained four-outcome updates. Node stop now fences optional
+  market-data production on the owning loop before strategy shutdown begins.
+  DataEngine disposal also fences
   late producer callbacks before sentinel draining and detaches telemetry only
   after the original disposal path finishes. This limits stale quote delay and
   prevents shutdown queue refill; it does not by itself explain or eliminate
@@ -254,6 +259,56 @@
   remain pending. Market selection is serialized across lifecycle, fallback
   reload, and watchdog callers, and subscription API failures are reported as
   an unsuccessful selection so callers retry instead of treating it as ready.
+  Managed subscriptions retain their original `InstrumentId` objects, so a
+  replaced future prewarm can be unsubscribed without leaving an orphaned
+  WebSocket reference. API scheduling success is not treated as evidence that
+  the remote stream is live; per-outcome fresh quote arrival remains the
+  handoff confirmation.
+  The future pair prewarms quote ticks only; full L2 starts when that pair
+  becomes current. During a same-market quote stall, the watchdog keeps the
+  selected market and resubscribes only the stale outcome, retaining fresh
+  sibling quotes and depth. These limits address the observed four-outcome L2
+  queue pressure and avoid a redundant multi-second market re-selection during
+  ordinary quote recovery. A truly stalled feed can still require node
+  recovery; a DataEngine that does not disconnect remains a fail-closed stop.
+  **Transport liveness is not quote freshness:** the adapter emits a cached
+  quote heartbeat only while its Polymarket market WebSocket reports connected.
+  The heartbeat preserves the original exchange timestamp and is rejected as
+  pricing input, so it cannot refresh BBO freshness or authorize an order. A
+  stale quote may trigger one targeted subscription refresh; if transport
+  heartbeats continue after that refresh but no new executable book arrives,
+  the watchdog records `QUOTE_WATCHDOG_TRANSPORT_ALIVE_DATA_STALE`, leaves the
+  node running, and keeps the affected quote leg unavailable instead of
+  repeatedly rebuilding the whole node. If transport activity itself stops,
+  the existing recovery escalation remains enabled. This separates a quiet or
+  unchanged book from a dead transport; it does not claim that stale prices are
+  safe to trade or that the remote market feed is producing new prices.
+  The 2026-10-02 dry-run showed the queue was not saturated (observed queue
+  peak 5, despite a configured 6,000 slots), while quote-source age reached
+  110 seconds and five watchdog node rollovers occurred across eight strategy
+  runs. Thus queue capacity / accumulated research data alone did not explain
+  the repeated restarts. Synchronous journal writes were measurable
+  (worst sampled write 594 ms, up to 2.13 seconds aggregate in a telemetry
+  window) and remain a secondary event-loop latency risk, but the observed
+  watchdog escalation was primarily caused by treating quote silence as proof
+  of transport failure. The soak covered more than five hours due to recovery
+  cycles; it was not a continuous three-hour run.
+  The dry-run shadow simulation previously repeated a full-journal JSON slug
+  scan on every quote when no paper order existed. Measured quote callbacks
+  then blocked the DataEngine for 4–12 seconds even with a four-event queue,
+  producing stale books and spurious watchdog recovery. Missing simulation
+  states are now cached for that market; restart recovery uses the indexed
+  deterministic client-order ID instead of scanning JSON payloads, including
+  for fair-edge shadow states. New paper orders replace the cached absence.
+  In a no-order dry-run against the same large journal, native quote delivery
+  telemetry changed from 49 of 55 sampled quotes delayed over two seconds
+  (mean 5.05 s, maximum 12.52 s) to 0 of 37 (mean 2 ms, maximum 15.9 ms)
+  after the cache/index fix. This is a short soak, not a guarantee that all
+  future network stalls or market rollovers are eliminated.
+  A clean `node.run()` return without an explicit rollover request now stops
+  the launcher rather than silently starting a new cycle after an operator
+  interrupt; only requested rollover or a separately bounded exception retry
+  may rebuild the node.
   Regression coverage is in `tests/test_quote_watchdog_recovery_scope.py` and
   `tests/test_live_path_regressions.py`.
 - Fast-follow records a durable `ORDER_FAST_FOLLOW_INTENT` after risk-state
@@ -674,8 +729,8 @@ flowchart LR
 |---|---|---|
 | Market discovery / phase | `bot.lifecycle.{collect_btc_market_candidates,resolve_bi_side_market_selection,evaluate_market_phase}` and `bot.lifecycle_runtime` select an alive BTC Up/Down market, set `WAITING/ACTIVE/REDUCE_ONLY/SETTLING`, and invoke settlement on rollover. Input: Gamma/cache instruments and clock. Output: slug, paired instruments, strike/end time, phase. | `BTC_MARKET_*`, fixed lifecycle policy (some defaults are intentionally no longer profile keys). |
 | Spot and TWAP | `bot.price_streams.extract_*_tick`, `bot.market_runtime.handle_quote_tick`, `bot.spot_pricer._fetch_external_spot_price`, and `bot.market_data.record_external_spot_observation`. BTC 15-minute reference is Polymarket RTDS relayed Chainlink BTC/USD **60-second TWAP**. The direct RTDS client sends its required text `PING` every five seconds. Trading freshness uses Chainlink `payload.timestamp` / observation time; local receipt time is retained only as transport-lag telemetry. Native CLOB books additionally fail closed for execution if adapter-to-strategy delivery exceeds `QUOTE_MAX_DELIVERY_DELAY_SEC`; this is independent of the broader feed watchdog's `QUOTE_STALE_SEC`. A missing, future, or stale source observation degrades rather than being accepted because it was received recently. | `POLYMARKET_CHAINLINK_TWAP_*`, `REQUIRE_TWAP_REFERENCE_SPOT`, `TWAP_DEGRADED_BLOCK_NEW_ENTRIES`, `EXTERNAL_SPOT_*`, `QUOTE_STALE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`, `QUOTE_RESUBSCRIBE_GRACE_SEC`, `QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC`. |
-| Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. Native quote updates older than `QUOTE_MAX_DELIVERY_DELAY_SEC` between adapter emission and strategy handling are rejected for execution; this does not change the broader feed watchdog interval. Every CLOB L2 update is still applied in order to the complete adapter-local book. DataEngine consumers receive a replacing CLEAR + top-`ORDERBOOK_LEVELS_LIMIT` snapshot at no more than the configured `POLYMARKET_L2_PUBLISH_INTERVAL_SEC` cadence (default 0.25s); this keeps cache deletion/re-entry correct while bounding serialized depth. Under queue pressure optional L2 fan-out is suppressed once the smaller of 25% queue capacity or 64 events is reached; fresh QuoteTicks are prioritized/coalesced and existing strategy freshness/depth gates remain authoritative. Queue telemetry now attributes suppression totals and open gaps to instrument IDs, and only calls a gap recovered after a newer-than-dropped L2 snapshot is actually processed by the DataEngine. This separates temporary L2 fan-out suppression from an unresolved strategy-side depth gap. Queue telemetry also includes observed start/end depth and depth delta separately from enqueue-minus-process throughput delta, plus peak/utilization and bounded quote-queue latency samples. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `POLYMARKET_L2_PUBLISH_INTERVAL_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`. |
-| Market subscription lifecycle | On market-pair change, `bot.market_runtime.replace_market_subscriptions` unsubscribes quote and L2 streams for the prior pair and subscribes the new pair. Quote and L2 subscription state are tracked independently so a partial API failure is visible and retried on a later market reload. Full/reconnect snapshots use the same per-instrument L2 governor as incremental updates. DataEngine market-data events use bounded same-loop queue admission rather than Nautilus' overflow `queue.put` task creation; at pressure L2 fan-out is dropped first and the latest quote is retained in a per-instrument side buffer until consumer capacity returns. The absolute pressure cap prevents the 6,000-slot queue configuration from turning a brief consumer pause into minutes of stale backlog. On shutdown, the DataEngine rejects late producer events before sentinel draining, discards pending market-data quotes, then waits for queue capacity; after its bounded deadline it cancels and awaits stuck consumers. Watchdog, timer, and lifecycle stop requests share an idempotent node-stop callback; watchdog recovery does not resubscribe once shutdown begins. | `QUOTE_TRANSPORT_TELEMETRY` journal events split WebSocket receipt→adapter emission, adapter coalescing, DataEngine publish→strategy receipt, and total adapter→strategy delivery. They also carry queue depth sampled at actual admission and 10-second per-event counts/high-water, enqueue/process rates, explicit depth delta and throughput delta, window and lifetime suppression/coalescing counts, utilization and quote queue latency percentiles where samples exist. Strategy quote-callback time and synchronous journal-write duration/event counts are aggregated into 10-second windows without per-tick DB writes. |
+| Order book | `bot.market_runtime.handle_quote_tick` caches per-instrument bid/ask and freshness; `run_bot._append_real_mid_price` maintains outcome-specific history. Inputs: Nautilus quote ticks; outputs: top of book/mid and timestamps used by quote drift and entry confirmation. Native quote updates older than `QUOTE_MAX_DELIVERY_DELAY_SEC` between adapter emission and strategy handling are rejected for execution; this does not change the broader feed watchdog interval. Every CLOB L2 update is still applied in order to the complete adapter-local book. DataEngine consumers receive a replacing CLEAR + top-`ORDERBOOK_LEVELS_LIMIT` snapshot at no more than the configured `POLYMARKET_L2_PUBLISH_INTERVAL_SEC` cadence (default 0.25s); this keeps cache deletion/re-entry correct while bounding serialized depth. Under queue pressure optional L2 fan-out is suppressed once the smaller of 25% queue capacity or two events is reached; QuoteTicks retain a separate four-event coalescing cap, with a latest quote released as the consumer frees a slot. Existing strategy freshness/depth gates remain authoritative. Queue telemetry attributes suppression totals and open gaps to instrument IDs and only calls a gap recovered after a newer-than-dropped L2 snapshot is processed by the DataEngine. This separates temporary L2 fan-out suppression from an unresolved strategy-side depth gap. Queue telemetry includes observed start/end depth and depth delta separately from enqueue-minus-process throughput delta, plus peak/utilization and bounded quote-queue latency samples. | `ORDERBOOK_FETCH_INTERVAL_SEC`, `ORDERBOOK_LEVELS_LIMIT`, `POLYMARKET_L2_PUBLISH_INTERVAL_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`, `STALE_QUOTE_SYNTH_MAX_AGE_SEC`, `QUOTE_MAX_DELIVERY_DELAY_SEC`. |
+| Market subscription lifecycle | On market-pair change, `bot.market_runtime.replace_market_subscriptions` unsubscribes quote and L2 streams for the prior pair, keeps quote-only prewarm for the next pair, and adds L2 only when that pair becomes current. Quote and L2 subscription state are tracked independently so a partial API failure is visible and retried on a later market reload. Full/reconnect snapshots use the same per-instrument L2 governor as incremental updates. DataEngine market-data events use bounded same-loop queue admission rather than Nautilus' overflow `queue.put` task creation; at pressure L2 fan-out is dropped first and the latest quote is retained in a per-instrument side buffer until consumer capacity returns. The absolute pressure cap prevents the 6,000-slot queue configuration from turning a brief consumer pause into minutes of stale backlog. On node-stop request, the DataEngine rejects late market-data producer events before strategy shutdown and sentinel draining; after its bounded deadline it cancels and awaits stuck consumers. Watchdog, timer, and lifecycle stop requests share an idempotent node-stop callback; watchdog recovery does not resubscribe once shutdown begins. | `QUOTE_TRANSPORT_TELEMETRY` journal events split WebSocket receipt→adapter emission, adapter coalescing, DataEngine publish→strategy receipt, and total adapter→strategy delivery. They also carry queue depth sampled at actual admission and 10-second per-event counts/high-water, enqueue/process rates, explicit depth delta and throughput delta, window and lifetime suppression/coalescing counts, utilization and quote queue latency percentiles where samples exist. Strategy quote-callback time and synchronous journal-write duration/event counts are aggregated into 10-second windows without per-tick DB writes. |
 
 For the first runtime soak after a market-data reliability change, operators can temporarily launch with `NORMAL_MAKER_BUY_ENABLED=false` to measure feed/queue stability without maker order traffic. This is an operator override only: do not persist it into the canonical strategy profile. Confirm both subscribed outcome tokens recover after resubscription, queue utilization remains comfortably below capacity, quote delivery latency stays below `QUOTE_MAX_DELIVERY_DELAY_SEC`, L2 suppression counters rise only under pressure, and shutdown/rollover completes without lingering workers before restoring the existing live profile.
 

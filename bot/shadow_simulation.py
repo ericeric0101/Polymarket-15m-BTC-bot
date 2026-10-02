@@ -194,12 +194,17 @@ class ShadowSimulationMixin:
             )
 
     def _load_shadow_simulation_for_slug(self, slug: str) -> Optional[Dict[str, Any]]:
-        cached = getattr(self, "_shadow_simulations_by_slug", {}).get(slug)
-        if cached is not None:
-            return cached
+        cache = getattr(self, "_shadow_simulations_by_slug", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._shadow_simulations_by_slug = cache
+        if slug in cache:
+            return cache[slug]
         record = self.trade_db.load_shadow_simulation(slug) if self.trade_db else None
-        if record is not None:
-            self._shadow_simulations_by_slug[slug] = record
+        # A missing simulation is a valid result. Without a negative cache,
+        # every quote repeats a JSON-extract scan of the entire trade journal;
+        # on a large journal that blocks the DataEngine event loop for seconds.
+        cache[slug] = record
         return record
 
     def _restore_shadow_simulation_for_slug(self, slug: str) -> Optional[Dict[str, Any]]:

@@ -114,6 +114,65 @@ def _event_count(db, event_type):
         ).fetchone()[0]
 
 
+def test_absent_shadow_simulation_is_cached_for_quote_callbacks():
+    loads = []
+    db = SimpleNamespace(load_shadow_simulation=lambda slug: loads.append(slug) or None)
+    host = _ShadowHost(db)
+    host.fair_edge_bucket_shadow_enabled = False
+
+    for _ in range(3):
+        host._shadow_simulation_on_quote(
+            "inst-up", Decimal("0.65"), Decimal("0.66"), time.time()
+        )
+
+    assert loads == [host.current_market_slug]
+    assert host.current_market_slug in host._shadow_simulations_by_slug
+    assert host._shadow_simulations_by_slug[host.current_market_slug] is None
+
+
+def test_shadow_recovery_uses_client_order_id_instead_of_scanning_payloads(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-1790895600"
+    db.log_order_event(
+        run_id="shadow-test", event_type="SHADOW_SIM_ENTRY_CANDIDATE",
+        client_order_id=f"shadow-sim:{slug}:up", side="UP", price=0.65,
+        qty=5, payload={"slug": slug, "simulation_id": f"shadow-sim:{slug}:up", "status": "PENDING"},
+    )
+    db.log_order_event(
+        run_id="shadow-test", event_type="FAIR_EDGE_BUCKET_SHADOW_CANDIDATE",
+        client_order_id=f"fair-edge-shadow:{slug}:up:high", side="UP", price=0.65,
+        qty=5, payload={"slug": slug, "simulation_id": f"fair-edge-shadow:{slug}:up:high", "status": "PENDING"},
+    )
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO order_events(ts, run_id, event_type, client_order_id, payload_json) VALUES (?, ?, ?, ?, ?)",
+            ("2026-10-02T00:00:00+00:00", "shadow-test", "SHADOW_SIM_ENTRY_CANDIDATE", "unrelated", "invalid-json"),
+        )
+        conn.execute(
+            "INSERT INTO order_events(ts, run_id, event_type, client_order_id, payload_json) VALUES (?, ?, ?, ?, ?)",
+            ("2026-10-02T00:00:00+00:00", "shadow-test", "FAIR_EDGE_BUCKET_SHADOW_CANDIDATE", "unrelated", "invalid-json"),
+        )
+    assert db.load_shadow_simulation(slug)["status"] == "PENDING"
+    fair = db.load_fair_edge_bucket_shadow_simulations(slug)
+    assert len(fair) == 1
+    assert fair[0]["simulation_id"] == f"fair-edge-shadow:{slug}:up:high"
+
+
+def test_cached_absence_is_replaced_when_paper_order_is_created(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _ShadowHost(db)
+    assert host._load_shadow_simulation_for_slug(host.current_market_slug) is None
+    assert host.current_market_slug in host._shadow_simulations_by_slug
+
+    created = host._record_shadow_simulated_entry(
+        instrument_id="inst-up", limit_price=Decimal("0.65"),
+        qty=Decimal("5"), econ=SimpleNamespace(expected_net_usdc=Decimal("0.10"), expected_rebate_usdc=Decimal("0")),
+        directional_snapshot={"p_fair": Decimal("0.70")},
+    )
+    assert created
+    assert host._load_shadow_simulation_for_slug(host.current_market_slug)["status"] == "PENDING"
+
+
 def test_shadow_simulation_is_one_per_market_and_settles(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     host = _ShadowHost(db)
