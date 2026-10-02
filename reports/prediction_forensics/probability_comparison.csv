@@ -1,0 +1,4 @@
+model,n,brier,log_loss,direction_accuracy,note
+market_fill_mid_all_fresh,14,0.14256428571428573,0.45457999640325375,0.8571428571428571,fresh fill-time simulated midpoint; not executable ask
+market_fill_mid_on_p_ex_subset,1,0.021025000000000005,0.15665381004537685,1,paired same markets as p_ex row
+p_ex,1,0.007199871416616562,0.08866953940409614,1,"sigma/source fresh, probability in [0,1], observation within 2s of fill"
