@@ -495,6 +495,25 @@ class QuoteRuntimeMixin:
             if current:
                 continue
 
+            if side == "buy" and not desired.get("fair_edge_bucket_shadow"):
+                snapshotter = getattr(self, "prediction_research_snapshotter", None)
+                if snapshotter is not None:
+                    try:
+                        try:
+                            intended_side = str(getattr(self._side_for_instrument_id(inst_id), "value", "") or "")
+                        except Exception:
+                            intended_side = str(self.active_side.value)
+                        snapshotter.capture(
+                            self, now_ts=time.time(), trigger=("dry_run_order_submit"
+                                                               if self._is_dry_run_mode() else "order_submit"),
+                            force=True,
+                            entry_context={"entry_side": intended_side,
+                                           "entry_price": limit_price,
+                                           "entry_candidate_id": desired.get("research_candidate_id")},
+                        )
+                    except Exception:
+                        pass
+
             await self._submit_maker_quote(
                 inst_id,
                 side,

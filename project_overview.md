@@ -885,6 +885,30 @@ stop, while compact `MARKET_TWAP_SUMMARY` remains allowed. This never changes
 trading authority. Stop-forensics stores fair-at-entry only at the first BUY
 fill; unavailable entry fair remains unavailable rather than being replaced by
 the current fair value.
+
+### Synchronized prediction research snapshot (research-only)
+
+`bot.prediction_research_snapshot.PredictionResearchSnapshotter` records one
+best-effort snapshot per active market per second from the existing quote
+cycle, plus forced snapshots at eligible entry decisions and new BUY submit
+attempts. It joins the existing `p_up_ex_market` and required-path diagnostics,
+current UP/DOWN BBO cache, Binance aggTrade in-memory history, and official TWAP
+with each source timestamp and age. Residuals and edges are null unless their
+model and corresponding quote are fresh under existing freshness rules.
+Records use the existing asynchronous `twap_forward_shadow.db` queue; a full
+queue drops research rows rather than blocking quote/order handling. Periodic
+capture is capped at 1 Hz; forced entry observations are separately labeled.
+This instrumentation has no signal, order, sizing, stop, or other live
+authority.
+
+Run `python scripts/prediction_snapshot_analysis.py` to create
+`reports/prediction_snapshot/`. Track A measures fixed-bin `p_ex - fresh UP
+mid` against 30-second UP-mid repricing (5/10/60 seconds are secondary), with
+same-market episodes and market-cluster bootstrap intervals. Track B compares
+30-second held-side repricing for BTC 10-second agreement versus disagreement.
+Reports flag insufficient independent episode counts rather than overclaiming
+an effect. Entry output reports synchronized `p_ex - ask` only when both are
+fresh; settlement outcomes are secondary context.
 | Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing high-price/weak-signal/Kelly multipliers only reduce the risk caps. | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`; `MARKET_TARGET_SHARES` remains legacy compatibility and is no longer a scale-up authority. |
 | Submission / repricing | `bot.quote_runtime._submit_quote_cycle` → `run_bot._submit_maker_quote` → `bot.order_submission.submit_maker_quote`. A maker entry is `LimitOrder` / **GTC**; `ORDER_POST_ONLY` requests post-only where adapter supports it. Existing entries are preserved if target version/hysteresis is unchanged; cancellation is handled by `bot.order_runtime`. The documented normal `ORDER_TTL_SEC` is no longer a TTL for unchanged BUYs. | `ORDER_POST_ONLY`, `MAKER_POST_ONLY_STRICT`, `ORDER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_HYSTERESIS_TICKS`, `MAX_REQUOTE_PER_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`; `ORDER_TTL_SEC` applies to exit-owned orders. |
 

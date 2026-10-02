@@ -1,0 +1,3 @@
+btc_10s_group,observations,episodes,markets,mean_held_side_mid_change_30s,median_held_side_mid_change_30s,adverse_repricing_rate,large_adverse_ge_5c_rate,large_adverse_ge_10c_rate
+AGREES,0,0,0,,,,,
+DISAGREES,0,0,0,,,,,

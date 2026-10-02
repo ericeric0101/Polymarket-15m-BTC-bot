@@ -45,6 +45,7 @@ from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliqu
 from bot.trend_entry_shadow import TrendEntryShadow
 from bot.forward_shadow import ForwardShadowExperiment
 from bot.btc_1s_history import BTC1sHistoryCollector
+from bot.prediction_research_snapshot import PredictionResearchSnapshotter
 
 
 TWAP_RESEARCH_DB_DEFAULT = "data/research/twap_forward_shadow.db"
@@ -725,6 +726,8 @@ def initialize_strategy_settings(
     strategy.sell_balance_retry_pause_sec = config.operations.sell_balance_retry_pause_sec
     strategy._binance_ws_price = None
     strategy._binance_ws_price_ts = 0.0
+    strategy._binance_ws_price_source_ts = 0.0
+    strategy._prediction_btc_research_history = deque(maxlen=2400)
     strategy._btc_trend_source = "unavailable"
     strategy._btc_trend_source_ts = 0.0
     strategy._btc_trend_source_price = None
@@ -817,6 +820,11 @@ def initialize_strategy_settings(
         db=strategy.twap_research_db, run_id=strategy.run_id, max_samples=180,
         max_db_mb=float(os.getenv("TWAP_RESEARCH_MAX_DB_MB", "500")),
         min_free_disk_gb=float(os.getenv("TWAP_RESEARCH_MIN_FREE_DISK_GB", "10")),
+    )
+    # Synchronized prediction telemetry shares the existing asynchronous TWAP
+    # research writer. It has no authority over any trading decision.
+    strategy.prediction_research_snapshotter = PredictionResearchSnapshotter(
+        db=strategy.twap_research_db, run_id=strategy.run_id, interval_sec=1.0,
     )
     # Research-only comparison of early BTC trend-entry schedules. This
     # recorder has no venue/order ownership and persists through the async DB.

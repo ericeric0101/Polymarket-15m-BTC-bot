@@ -47,6 +47,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/entry_session_policy.py",
         "bot/pricing_runtime.py",
         "bot/spot_pricer.py",
+        "bot/prediction_research_snapshot.py",
         "bot/side_decision.py",
         "bot/forecast_state.py",
         "bot/strong_directional_regime.py",
@@ -2134,6 +2135,23 @@ class IntegratedBTCStrategy(
             "candidate_first_eligible_ts": episode["first_eligible_ts"] or (float(now_ts) if should_quote else None),
             "candidate_update_count": episode["update_count"],
         })
+        if should_quote:
+            snapshotter = getattr(self, "prediction_research_snapshotter", None)
+            if snapshotter is not None:
+                try:
+                    try:
+                        entry_side = str(getattr(self._side_for_instrument_id(inst_id), "value", "") or "")
+                    except Exception:
+                        entry_side = str(self.active_side.value)
+                    snapshotter.capture(
+                        self, now_ts=float(now_ts), trigger="entry_decision", force=True,
+                        entry_context={"entry_side": entry_side,
+                                       "entry_price": entry_price,
+                                       "entry_candidate_id": candidate_id},
+                    )
+                except Exception:
+                    # Research capture is never allowed to affect BUY flow.
+                    pass
         tick = candidate_context.get("quote_context")
         tick = _as_float(getattr(tick, "tick", None)) if tick is not None else None
         emit, current_episode = lifecycle.should_emit(
@@ -3733,6 +3751,11 @@ class IntegratedBTCStrategy(
         Place symmetric maker quotes if expected net economics is positive.
         """
         self._telegram_cycle_tick()
+        snapshotter = getattr(self, "prediction_research_snapshotter", None)
+        if snapshotter is not None:
+            # Sample before maker pause/kill-switch returns so locked periods
+            # still contribute research observations. Persistence is queued.
+            snapshotter.capture(self, now_ts=time.time(), trigger="periodic")
         if self.dashboard_state is not None and self.dashboard_state.bot_paused:
             now_ts = time.time()
             if now_ts - self._last_dashboard_pause_log_ts >= 30.0:

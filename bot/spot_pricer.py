@@ -521,6 +521,14 @@ class SpotPricerMixin:
                             if tick is not None:
                                 self._binance_ws_price = tick.price
                                 self._binance_ws_price_ts = tick.received_at_ts
+                                source_ms = getattr(tick, "exchange_trade_ts_ms", None) or tick.updated_at_ms
+                                self._binance_ws_price_source_ts = float(source_ms) / 1000.0
+                                # Small bounded in-memory research buffer only;
+                                # no disk access occurs on the feed callback.
+                                history = getattr(self, "_prediction_btc_research_history", None)
+                                if history is not None:
+                                    history.append((self._binance_ws_price_source_ts,
+                                                    float(tick.price), float(tick.received_at_ts)))
                                 self._update_btc_trend_price(
                                     tick.price,
                                     tick.received_at_ts,
