@@ -129,6 +129,8 @@ def request_auto_rollover_stop(node: TradingNode) -> bool:
 _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES = 0.01
 _MARKET_DISCOVERY_RETRY_SEC = 15.0
 _NODE_DISCONNECT_WAIT_SEC = 15.0
+_CLIENT_DISCONNECT_TASK_DRAIN_SEC = 60.0
+_CLIENT_DISCONNECT_CANCEL_DRAIN_SEC = 5.0
 
 
 class MarketDiscoveryUnavailable(RuntimeError):
@@ -227,10 +229,119 @@ def wait_for_node_engines_disconnected(
         sleep_fn(min(0.25, max(0.0, deadline - monotonic_fn())))
 
 
+def _client_disconnect_tasks(node: Optional[TradingNode]) -> tuple[Any, list[asyncio.Task]]:
+    """Find LiveDataClient disconnect cleanup tasks on a stopped node's loop."""
+    loop = getattr(getattr(node, "kernel", None), "loop", None)
+    if loop is None or loop.is_closed():
+        return loop, []
+    try:
+        tasks = asyncio.all_tasks(loop)
+    except RuntimeError:
+        return loop, []
+    disconnect_tasks = []
+    for task in tasks:
+        try:
+            coro = task.get_coro()
+            qualname = str(getattr(coro, "__qualname__", ""))
+        except Exception:
+            continue
+        if "disconnect.<locals>._disconnect_with_cleanup" in qualname:
+            disconnect_tasks.append(task)
+    return loop, disconnect_tasks
+
+
+def _describe_asyncio_task(task: asyncio.Task) -> str:
+    try:
+        stack = task.get_stack(limit=4)
+        frames = [f"{frame.f_code.co_name}:{frame.f_lineno}" for frame in stack]
+    except Exception:
+        frames = []
+    name = task.get_name() if callable(getattr(task, "get_name", None)) else "task"
+    return f"{name}[{' -> '.join(frames) or 'stack unavailable'}]"
+
+
+def wait_for_client_disconnect_tasks(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _CLIENT_DISCONNECT_TASK_DRAIN_SEC,
+) -> tuple[bool, list[str]]:
+    """Pump the stopped node loop until its client disconnect coroutines finish.
+
+    Nautilus 1.225 can time out its engine-disconnect poll and still return from
+    ``node.run`` while a LiveDataClient's untracked ``_disconnect_with_cleanup``
+    task remains. ``node.dispose`` closes that loop, so give those exact tasks a
+    bounded chance to finish first and report their frames if they do not.
+    """
+    loop, tasks = _client_disconnect_tasks(node)
+    if not tasks:
+        return True, []
+    if loop is None or loop.is_closed():
+        return False, ["client_disconnect_loop_unavailable"]
+    if loop.is_running():
+        return False, ["client_disconnect_loop_still_running"]
+
+    async def _wait_for_tasks() -> set[asyncio.Task]:
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, float(timeout_sec)),
+        )
+        return pending
+
+    try:
+        pending = loop.run_until_complete(_wait_for_tasks())
+    except Exception as exc:
+        return False, [f"client_disconnect_wait:{type(exc).__name__}:{exc}"]
+
+    failures = []
+    for task in tasks:
+        if task in pending:
+            failures.append(f"pending:{_describe_asyncio_task(task)}")
+            continue
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            error = None
+        if error is not None:
+            failures.append(f"failed:{_describe_asyncio_task(task)}:{type(error).__name__}:{error}")
+    return not failures, failures
+
+
+def cancel_client_disconnect_tasks(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _CLIENT_DISCONNECT_CANCEL_DRAIN_SEC,
+) -> list[str]:
+    """Cancel and drain timed-out client cleanup tasks before loop disposal."""
+    loop, tasks = _client_disconnect_tasks(node)
+    if not tasks:
+        return []
+    if loop is None or loop.is_closed() or loop.is_running():
+        return ["client_disconnect_tasks_cannot_be_drained"]
+    for task in tasks:
+        task.cancel()
+
+    async def _drain_cancelled() -> set[asyncio.Task]:
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, float(timeout_sec)),
+        )
+        return pending
+
+    try:
+        pending = loop.run_until_complete(_drain_cancelled())
+    except Exception as exc:
+        return [f"client_disconnect_cancel_drain:{type(exc).__name__}:{exc}"]
+    return [
+        f"cancelled_task_still_pending:{_describe_asyncio_task(task)}"
+        for task in pending
+    ]
+
+
 def dispose_node_and_wait_for_engines_disconnected(
     node: Optional[TradingNode],
     *,
     timeout_sec: float = _NODE_DISCONNECT_WAIT_SEC,
+    client_disconnect_timeout_sec: float = _CLIENT_DISCONNECT_TASK_DRAIN_SEC,
     sleep_fn=time.sleep,
     monotonic_fn=time.monotonic,
 ) -> tuple[bool, list[str]]:
@@ -244,6 +355,13 @@ def dispose_node_and_wait_for_engines_disconnected(
     dispose_error: str | None = None
     if node is None:
         return False, ["node_missing"]
+    client_tasks_clean, client_task_errors = wait_for_client_disconnect_tasks(
+        node,
+        timeout_sec=client_disconnect_timeout_sec,
+    )
+    if not client_tasks_clean:
+        cancel_errors = cancel_client_disconnect_tasks(node)
+        client_task_errors.extend(cancel_errors)
     try:
         node.dispose()
     except Exception as exc:
@@ -256,7 +374,8 @@ def dispose_node_and_wait_for_engines_disconnected(
     )
     if dispose_error:
         pending = [*pending, dispose_error]
-    return clean and dispose_error is None, pending
+    pending = [*pending, *client_task_errors]
+    return clean and dispose_error is None and not client_task_errors, pending
 
 
 def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str]:
@@ -489,6 +608,31 @@ def unrequested_clean_node_return_requires_stop(
     return bool(node_run_returned and not rollover_requested)
 
 
+def rollover_restart_label(source: str | None) -> str:
+    """Return an accurate operator-facing reason for starting another node cycle."""
+    labels = {
+        "scheduled_auto_rollover": "scheduled auto node rollover",
+        "quote_watchdog_recovery": "quote watchdog recovery",
+        "strategy_requested": "strategy-requested rollover",
+        "market_discovery_retry": "market discovery retry",
+    }
+    return labels.get(str(source or ""), "requested node rollover")
+
+
+def _strategy_rollover_source(node: Optional[TradingNode]) -> str:
+    """Classify a strategy-requested stop before node disposal clears its actors."""
+    if node is not None:
+        try:
+            if any(
+                bool(getattr(strategy, "_quote_stream_rollover_requested", False))
+                for strategy in node.trader.strategies()
+            ):
+                return "quote_watchdog_recovery"
+        except Exception:
+            pass
+    return "strategy_requested"
+
+
 def run_integrated_bot(
     simulation: bool = True,
     test_mode: bool = True,
@@ -684,6 +828,7 @@ def run_integrated_bot(
         strategy_requested_rollover = False
         node_run_returned = False
         unsafe_engine_shutdown = False
+        rollover_source: str | None = None
         rollover_stop = threading.Event()
         rollover_thread: Optional[threading.Thread] = None
 
@@ -693,6 +838,7 @@ def run_integrated_bot(
 
             if auto_rollover_enabled:
                 def _rollover_worker() -> None:
+                    nonlocal rollover_source
                     wait_sec = auto_rollover_sec
                     last_deferred_log_ts = 0.0
                     while not rollover_stop.wait(wait_sec):
@@ -711,6 +857,7 @@ def run_integrated_bot(
                             wait_sec = 5.0
                             continue
 
+                        rollover_source = "scheduled_auto_rollover"
                         rollover_requested.set()
                         logger.warning(
                             f"Auto node rollover timer reached ({auto_rollover_sec}s). "
@@ -744,6 +891,7 @@ def run_integrated_bot(
             # no order or exit is affected; retry discovery on a bounded,
             # intentional cadence without consuming the crash-failure budget.
             rollover_requested.set()
+            rollover_source = "market_discovery_retry"
             retry_delay_sec = _MARKET_DISCOVERY_RETRY_SEC
             logger.warning(
                 f"Node cycle {cycle_idx} deferred: {e} "
@@ -761,6 +909,8 @@ def run_integrated_bot(
                 rollover_thread.join(timeout=1)
             strategy_requested_rollover = _strategy_requested_rollover(node)
             if strategy_requested_rollover:
+                if rollover_source is None:
+                    rollover_source = _strategy_rollover_source(node)
                 rollover_requested.set()
                 logger.info("Strategy requested rollover (stale instruments)")
             if node_run_returned:
@@ -824,7 +974,9 @@ def run_integrated_bot(
             break
 
         if rollover_requested.is_set():
-            logger.info("Starting next cycle after scheduled auto rollover...")
+            logger.info(
+                f"Starting next cycle after {rollover_restart_label(rollover_source)}..."
+            )
         else:
             run_sec = int(time.time() - cycle_started_at)
             logger.warning(

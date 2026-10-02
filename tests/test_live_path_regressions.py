@@ -11,9 +11,11 @@ from types import SimpleNamespace
 from bot.adapter_overrides import (
     batch_order_book_deltas,
     build_transport_heartbeat_quote,
+    build_polymarket_websocket_config,
     coalesce_price_changes_by_asset,
     enqueue_shutdown_sentinels,
     install_runtime_compatibility_overrides,
+    is_polymarket_pong,
     position_fetch_retry_delay_sec,
     record_quote_data_engine_queue_depth,
     record_quote_data_engine_publish_ts,
@@ -67,7 +69,9 @@ from bot.launcher import (
     threadsafe_node_stop_callback,
     _strategy_requested_rollover,
     _strategy_rollover_exposure_reasons,
+    rollover_restart_label,
     wait_for_node_engines_disconnected,
+    wait_for_client_disconnect_tasks,
     dispose_node_and_wait_for_engines_disconnected,
     unrequested_clean_node_return_requires_stop,
 )
@@ -3859,15 +3863,56 @@ def test_rtds_application_heartbeat_is_due_immediately_then_every_five_seconds()
     assert rtds_application_heartbeat_due(now_monotonic=105.0, last_sent_monotonic=100.0)
 
 
+def test_polymarket_market_websocket_uses_text_ping_not_control_ping():
+    captured = {}
+
+    def config_factory(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    build_polymarket_websocket_config(
+        config_factory,
+        url="wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        headers=[],
+    )
+
+    assert captured["heartbeat"] == 10
+    assert captured["heartbeat_msg"] == "PING"
+
+
+def test_polymarket_user_websocket_does_not_receive_market_ping_override():
+    captured = {}
+
+    def config_factory(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    build_polymarket_websocket_config(
+        config_factory,
+        url="wss://ws-subscriptions-clob.polymarket.com/ws/user",
+        headers=[],
+    )
+
+    assert "heartbeat_msg" not in captured
+
+
+def test_polymarket_text_pong_is_identified_for_market_stream():
+    assert is_polymarket_pong(b"PONG")
+    assert is_polymarket_pong(" PONG\n")
+    assert not is_polymarket_pong(b'{"event_type":"book"}')
+
+
 def test_runtime_compatibility_overrides_install():
     install_runtime_compatibility_overrides()
 
     from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
     from nautilus_trader.adapters.polymarket.execution import PolymarketExecutionClient
+    from nautilus_trader.adapters.polymarket.websocket.client import PolymarketWebSocketClient
     import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 
     assert getattr(PolymarketDataClient, "_btc15m_runtime_compat_patched", False) is True
     assert getattr(PolymarketExecutionClient, "_btc15m_runtime_compat_patched", False) is True
+    assert getattr(PolymarketWebSocketClient, "_btc15m_market_text_heartbeat_patched", False) is True
     assert getattr(pyclob_helpers, "_btc15m_runtime_compat_patched", False) is True
 
 
@@ -6186,7 +6231,13 @@ def test_clean_node_return_without_rollover_does_not_restart_bot():
     )
 
 
-def test_rollover_disposes_before_waiting_for_engine_disconnect():
+def test_rollover_restart_label_distinguishes_watchdog_from_scheduled_rollover():
+    assert rollover_restart_label("quote_watchdog_recovery") == "quote watchdog recovery"
+    assert rollover_restart_label("scheduled_auto_rollover") == "scheduled auto node rollover"
+    assert rollover_restart_label(None) == "requested node rollover"
+
+
+def test_rollover_drains_client_disconnect_task_before_disposing_node():
     class Engine:
         disconnected = False
 
@@ -6194,10 +6245,23 @@ def test_rollover_disposes_before_waiting_for_engine_disconnect():
             return self.disconnected
 
     engine = Engine()
-    node = SimpleNamespace(data_engine=engine)
+    loop = asyncio.new_event_loop()
+
+    class LiveMarketDataClient:
+        def disconnect(self):
+            async def _disconnect_with_cleanup():
+                await asyncio.sleep(0.01)
+                engine.disconnected = True
+
+            return loop.create_task(_disconnect_with_cleanup())
+
+    task = LiveMarketDataClient().disconnect()
+    node = SimpleNamespace(data_engine=engine, kernel=SimpleNamespace(loop=loop))
 
     def dispose():
-        engine.disconnected = True
+        assert task.done()
+        assert engine.disconnected
+        loop.close()
 
     node.dispose = dispose
     clean, pending = dispose_node_and_wait_for_engines_disconnected(
@@ -6207,6 +6271,31 @@ def test_rollover_disposes_before_waiting_for_engine_disconnect():
 
     assert clean is True
     assert pending == []
+
+
+def test_wait_for_client_disconnect_tasks_runs_stopped_node_loop_until_cleanup_finishes():
+    class Node:
+        pass
+
+    loop = asyncio.new_event_loop()
+
+    class LiveMarketDataClient:
+        def disconnect(self):
+            async def _disconnect_with_cleanup():
+                await asyncio.sleep(0.01)
+
+            return loop.create_task(_disconnect_with_cleanup())
+
+    task = LiveMarketDataClient().disconnect()
+    node = Node()
+    node.kernel = SimpleNamespace(loop=loop)
+
+    clean, pending = wait_for_client_disconnect_tasks(node, timeout_sec=1.0)
+
+    assert clean is True
+    assert pending == []
+    assert task.done()
+    loop.close()
 
 
 def test_quote_age_status_marks_stale_status_not_tradable():
@@ -6264,17 +6353,29 @@ def test_node_stop_fences_market_data_before_async_disconnect_starts():
         def call_soon_threadsafe(self, callback): scheduled.append(callback)
 
     order = []
-    engine = SimpleNamespace(_btc15m_backpressure={"quotes": {"up": object()}})
+    client = SimpleNamespace(
+        _btc15m_disconnecting=False,
+        _quote_transport_heartbeat_task=None,
+        _quote_delivery_task=None,
+        _quote_delivery_pending={"up": object()},
+    )
+    engine = SimpleNamespace(
+        _btc15m_backpressure={"quotes": {"up": object()}},
+        _clients={"POLYMARKET": client},
+    )
     node = SimpleNamespace(
         kernel=SimpleNamespace(loop=Loop(), data_engine=engine),
-        stop=lambda: order.append(("stop", engine._btc15m_disposing)),
+        stop=lambda: order.append((
+            "stop", engine._btc15m_disposing, client._btc15m_disconnecting,
+            dict(client._quote_delivery_pending),
+        )),
     )
     request_stop = threadsafe_node_stop_callback(node)
 
     assert request_stop() is True
     scheduled.pop()()
 
-    assert order == [("stop", True)]
+    assert order == [("stop", True, True, {})]
     assert engine._btc15m_backpressure["quotes"] == {}
 
 

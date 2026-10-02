@@ -25,6 +25,7 @@ _MAX_MARKET_DATA_BACKLOG = 4
 _MAX_OPTIONAL_L2_BACKLOG = 2
 _MAX_MARKET_DATA_RELEASE_BACKLOG = 2
 _quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
+_polymarket_market_ws_client_patched = False
 
 
 def l2_publish_interval_sec(value: object | None = None) -> float:
@@ -35,6 +36,63 @@ def l2_publish_interval_sec(value: object | None = None) -> float:
         return max(0.05, float(value))
     except (TypeError, ValueError):
         return _DEFAULT_L2_PUBLISH_INTERVAL_SEC
+
+
+def build_polymarket_websocket_config(config_factory, *, url: str, headers: list, heartbeat: int = 10):
+    """Build adapter WS config with Polymarket's required market text heartbeat."""
+    kwargs = {"url": url, "headers": headers, "heartbeat": heartbeat}
+    if str(url).rstrip("/").endswith("/market"):
+        # Nautilus defaults heartbeat_msg=None to RFC 6455 control Ping frames.
+        # Polymarket's market endpoint requires the text frame "PING" instead.
+        kwargs["heartbeat_msg"] = "PING"
+    return config_factory(**kwargs)
+
+
+def is_polymarket_pong(raw: bytes | str) -> bool:
+    """Identify the market endpoint's text heartbeat response."""
+    value = raw.decode("ascii", errors="ignore") if isinstance(raw, bytes) else str(raw)
+    return value.strip().upper() == "PONG"
+
+
+def _install_polymarket_market_ws_heartbeat_override() -> None:
+    """Use the CLOB's documented app-level heartbeat without altering user WS."""
+    import nautilus_trader.adapters.polymarket.websocket.client as ws_mod
+
+    cls = ws_mod.PolymarketWebSocketClient
+    if getattr(cls, "_btc15m_market_text_heartbeat_patched", False):
+        return
+
+    async def patched_connect_client(self, client_id: int) -> None:
+        subs = self._client_subscriptions.get(client_id, [])
+        if not subs:
+            self._log.error(f"ws-client {client_id}: Cannot connect: no subscriptions")
+            return
+
+        self._log.debug(f"ws-client {client_id}: Connecting to {self._ws_url}...")
+        self._is_connecting[client_id] = True
+        try:
+            config = build_polymarket_websocket_config(
+                ws_mod.WebSocketConfig,
+                url=self._ws_url,
+                headers=[],
+                heartbeat=10,
+            )
+            self._clients[client_id] = await ws_mod.WebSocketClient.connect(
+                loop_=self._loop,
+                config=config,
+                handler=self._handler,
+                post_reconnection=lambda cid=client_id: self._handle_reconnect(cid),
+            )
+            current_subs = self._client_subscriptions.get(client_id, [])
+            self._log.info(
+                f"ws-client {client_id}: Connected to {self._ws_url} with {len(current_subs)} subscriptions",
+            )
+            await self._subscribe_all(client_id)
+        finally:
+            self._is_connecting[client_id] = False
+
+    cls._connect_client = patched_connect_client
+    cls._btc15m_market_text_heartbeat_patched = True
 
 
 def bounded_l2_depth(value: object | None = None) -> int:
@@ -321,11 +379,19 @@ def cleanup_data_engine_runtime_state(engine) -> None:
 
 
 def begin_data_engine_shutdown(engine) -> None:
-    """Fence event producers before shutdown sentinels begin draining queues."""
+    """Fence event producers and WS parsers before shutdown starts draining queues."""
     engine._btc15m_disposing = True
     backpressure = getattr(engine, "_btc15m_backpressure", None)
     if backpressure is not None:
         backpressure.get("quotes", {}).clear()
+    clients = getattr(engine, "_clients", {})
+    values = clients.values() if isinstance(clients, dict) else ()
+    for client in values:
+        if getattr(client, "_btc15m_disconnecting", None) is not None:
+            # Node.stop() does not disconnect data clients until after strategy
+            # shutdown. Fence their raw websocket callbacks now so a busy CLOB
+            # stream cannot monopolize the owning event loop during that gap.
+            cancel_quote_delivery_tasks(client)
 
 
 def cancel_quote_delivery_tasks(client) -> None:
@@ -624,6 +690,7 @@ def build_transport_heartbeat_quote(data_mod, quote: object, ts_init: int):
 
 
 def install_runtime_compatibility_overrides() -> None:
+    _install_polymarket_market_ws_heartbeat_override()
     _install_polymarket_data_overrides()
     _install_live_data_engine_observability_override()
     _install_polymarket_execution_overrides()
@@ -820,6 +887,8 @@ def _install_polymarket_data_overrides() -> None:
     def patched_handle_raw_ws_message(self, raw: bytes) -> None:
         """Capture ingress time before Nautilus decodes and routes a WS payload."""
         if getattr(self, "_btc15m_disconnecting", False):
+            return
+        if is_polymarket_pong(raw):
             return
         self._btc15m_raw_ws_received_ts = time.time()
         original_handle_raw_ws_message(self, raw)
