@@ -1,0 +1,15 @@
+market_slug,entry_side,low_flip_sigma,btc_disagrees_10s,side_unstable_60s,thin_fair_value_edge,fragility_flags_available,number_of_fragility_flags,result,simulated_pnl_usdc,future_adverse_mid_change_5s,actual_horizon_5s,future_adverse_mid_change_10s,actual_horizon_10s,future_adverse_mid_change_30s,actual_horizon_30s,future_adverse_mid_change_60s,actual_horizon_60s,diagnostic_only_not_live_score
+btc-updown-15m-1790920800,UP,True,True,,,2,2,LOSS,-5.351351351351352,,,,,,,,,True
+btc-updown-15m-1790921700,UP,True,False,,,2,1,WIN,2.138888888888889,0.0,4.358314037322998,,,0.0,30.103559970855713,,,True
+btc-updown-15m-1790923500,UP,False,False,,,2,0,WIN,0.8953488372093023,,,,,-0.08999999999999997,30.993244886398315,,,True
+btc-updown-15m-1790925300,DOWN,,False,,,1,0,WIN,1.9324324324324325,,,,,,,,,True
+btc-updown-15m-1790926200,DOWN,,False,,,1,0,WIN,1.5512820512820513,,,,,,,,,True
+btc-updown-15m-1790927100,UP,True,True,,,2,2,WIN,1.375,,,,,,,,,True
+btc-updown-15m-1790928900,UP,,False,,,1,0,WIN,0.9705882352941178,,,-0.020000000000000018,9.132925987243652,,,,,True
+btc-updown-15m-1790930700,DOWN,,False,,,1,0,WIN,3.4,,,-0.06000000000000005,10.358044147491455,,,,,True
+btc-updown-15m-1790932500,DOWN,,False,,,1,0,WIN,3.6,,,,,,,,,True
+btc-updown-15m-1790934300,UP,True,True,,,2,2,WIN,3.2,0.0,4.774166107177734,,,0.0,30.68124008178711,,,True
+btc-updown-15m-1790936100,UP,,True,,,1,1,WIN,4.1,,,,,,,,,True
+btc-updown-15m-1790937900,DOWN,False,False,,,2,0,WIN,0.6797752808988765,,,,,,,,,True
+btc-updown-15m-1790938800,UP,False,True,,,2,1,WIN,1.5512820512820513,,,,,,,,,True
+btc-updown-15m-1790939700,UP,,True,,,1,1,LOSS,-5.5,-0.07499999999999996,3.643678903579712,,,,,,,True

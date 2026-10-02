@@ -1,0 +1,16 @@
+feature,bin,entries,wins,losses,win_rate,mean_simulated_pnl_usdc,mean_future_adverse_mid_move_5s,mean_future_adverse_mid_move_10s,mean_future_adverse_mid_move_30s,mean_future_adverse_mid_move_60s,note
+opposite_flip_sigma_abs,0.5-1,4,3,1,0.75,0.3406343843843843,0.0,,0.0,,descriptive cohort counts; repeated markets/candidate observations are not independent
+opposite_flip_sigma_abs,1-2,3,3,0,1.0,1.0421353897967434,,,-0.08999999999999997,,descriptive cohort counts; repeated markets/candidate observations are not independent
+opposite_flip_sigma_abs,UNAVAILABLE,7,6,1,0.8571428571428571,1.4363289598583715,-0.07499999999999996,-0.040000000000000036,,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_5s,False,9,8,1,0.8888888888888888,1.0907738194060352,0.0,-0.040000000000000036,-0.044999999999999984,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_5s,True,5,4,1,0.8,0.9452564102564103,-0.03749999999999998,,0.0,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_10s,True,6,4,2,0.6666666666666666,-0.10417821667821676,-0.03749999999999998,,0.0,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_10s,False,8,8,0,1.0,1.8960394657507087,0.0,-0.040000000000000036,-0.044999999999999984,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_30s,UNAVAILABLE,2,1,1,0.5,-1.6062312312312315,0.0,,0.0,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_30s,False,11,10,1,0.9090909090909091,1.473129712465162,-0.03749999999999998,-0.040000000000000036,-0.044999999999999984,,descriptive cohort counts; repeated markets/candidate observations are not independent
+btc_disagreement_30s,True,1,1,0,1.0,1.5512820512820513,,,,,descriptive cohort counts; repeated markets/candidate observations are not independent
+side_unstable_60s,UNAVAILABLE,14,12,2,0.8571428571428571,1.0388033161383121,-0.024999999999999984,-0.040000000000000036,-0.02999999999999999,,descriptive cohort counts; repeated markets/candidate observations are not independent
+thin_fair_value_edge,UNAVAILABLE,14,12,2,0.8571428571428571,1.0388033161383121,-0.024999999999999984,-0.040000000000000036,-0.02999999999999999,,descriptive cohort counts; repeated markets/candidate observations are not independent
+number_of_fragility_flags,2,3,2,1,0.6666666666666666,-0.25878378378378386,0.0,,0.0,,descriptive cohort counts; repeated markets/candidate observations are not independent
+number_of_fragility_flags,1,4,3,1,0.75,0.572542735042735,-0.03749999999999998,,0.0,,descriptive cohort counts; repeated markets/candidate observations are not independent
+number_of_fragility_flags,0,7,7,0,1.0,1.861346691016683,,-0.040000000000000036,-0.08999999999999997,,descriptive cohort counts; repeated markets/candidate observations are not independent
