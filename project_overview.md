@@ -2370,3 +2370,23 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   lead times include only canonical settlement labels and observations with
   `sigma_ex_market_fresh=true`; legacy rows without explicit freshness proof
   are excluded. All fields remain shadow-only.
+
+## Canonical offline prediction research and session regimes (2026-10-03)
+
+- `scripts/research_analysis.py` is the canonical offline entry point for
+  `latest`, `run`, `market`, and `compare-regimes` analysis. It consumes the
+  existing TWAP research journal and trade journal only; it has no runtime,
+  entry, exit, stop, sizing, order-routing, or session-policy authority.
+- Every market is classified from its **market start time in Asia/Taipei** as
+  `WEEKDAY` or `WEEKEND`, using the existing Taipei session-policy timezone.
+  Standard CSV outputs carry `session_regime`, `weekday_name`, and
+  `market_start_taipei`, so observations cannot silently pool the two regimes.
+- Absolute 5c/10c repricing events remain the primary cross-regime comparison.
+  A separate top-20%-within-regime normalized-event view is secondary and
+  cannot replace the absolute evidence. Likewise raw BTC returns and
+  scale-normalized required-move sigma remain distinct measures.
+- The first synchronized four-market weekend batch is labeled
+  `WEEKEND_REPLICATION_BATCH_1`. It is an out-of-regime replication test, not
+  evidence that directly confirms or falsifies weekday hypotheses. Until both
+  cohorts replicate, any difference is reported as possible regime dependence
+  or a small-sample effect rather than a strategy conclusion.
