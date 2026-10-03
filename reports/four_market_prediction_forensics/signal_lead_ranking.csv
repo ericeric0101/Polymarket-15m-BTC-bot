@@ -1,0 +1,7 @@
+signal,measurable_events,markets,median_lead_vs_mid_sec,mean_lead_vs_mid_sec,min_lead_vs_mid_sec,max_lead_vs_mid_sec,qualification,rank
+BTC 10s,11,4,0.0,1.9323780536651611,-17.230896949768066,23.558856964111328,DESCRIPTIVE,1
+bot side,1,1,0.0,0.0,0.0,0.0,LOW_SAMPLE,
+BTC 5s,13,4,0.0,-0.5915736785301795,-9.314311027526855,11.814841270446777,DESCRIPTIVE,2
+p_ex,9,4,-7.132049798965454,-9.51064329677158,-26.49534797668457,0.0,DESCRIPTIVE,3
+residual,0,0,,,,,LOW_SAMPLE,
+TWAP state,0,0,,,,,LOW_SAMPLE,
