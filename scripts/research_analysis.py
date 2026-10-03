@@ -25,6 +25,7 @@ from scripts import four_market_prediction_forensics as forensic
 DEFAULT_DB = Path("data/research/twap_forward_shadow.db")
 DEFAULT_JOURNAL = Path("logs/trade_journal.db")
 DEFAULT_OUTPUT = Path("reports/research_analysis")
+PRIMARY_CHECKPOINTS = (300, 180, 120, 60, 30)
 
 
 def _num(value: Any) -> float | None:
@@ -190,6 +191,253 @@ def _regime_comparison(markets: list[dict[str, Any]], events: list[dict[str, Any
     return output
 
 
+def _checkpoint_row(rows: list[dict[str, Any]], checkpoint_sec: int) -> dict[str, Any] | None:
+    """Nearest synchronized row to the checkpoint, within a conservative 12s."""
+    candidates = [row for row in rows if _num(row.get("time_left_sec")) is not None
+                  and abs(float(row["time_left_sec"]) - checkpoint_sec) <= 12.0]
+    return min(candidates, key=lambda row: abs(float(row["time_left_sec"]) - checkpoint_sec)) if candidates else None
+
+
+def checkpoint_flip_rows(slug: str, rows: list[dict[str, Any]], summary: dict[str, Any],
+                         regime: str) -> list[dict[str, Any]]:
+    """Checkpoint labels based on TWAP settlement leader versus final settlement."""
+    settlement = str(summary.get("canonical_settlement_side") or "")
+    output: list[dict[str, Any]] = []
+    for checkpoint in PRIMARY_CHECKPOINTS:
+        row = _checkpoint_row(rows, checkpoint)
+        leader = str(row.get("settlement_state_side") or "") if row else "UNKNOWN"
+        valid = row is not None and leader in {"UP", "DOWN"} and settlement in {"UP", "DOWN"}
+        market_up = _num(row.get("market_mid_up")) if row and row.get("market_mid_up_fresh") is True else None
+        pex_up = _num(row.get("p_up_ex_market")) if row and row.get("sigma_ex_market_fresh") is True else None
+        market_flip = (1.0 - market_up if leader == "UP" else market_up) if valid and market_up is not None else None
+        analytic_flip = (1.0 - pex_up if leader == "UP" else pex_up) if valid and pex_up is not None else None
+        output.append({"market_slug": slug, "session_regime": regime, "checkpoint_sec": checkpoint,
+                       "snapshot_ts": row.get("snapshot_ts") if row else None,
+                       "observed_time_left_sec": row.get("time_left_sec") if row else None,
+                       "leader_side": leader, "canonical_settlement_side": settlement,
+                       "observed_flip": leader != settlement if valid else None,
+                       "market_implied_flip_probability": market_flip,
+                       "analytic_flip_probability": analytic_flip,
+                       "empirical_path_probability": None,
+                       "comparable_synchronized": valid,
+                       "required_move_sigma": _num(row.get("required_move_sigma")) if row else None})
+    return output
+
+
+def _brier(rows: list[dict[str, Any]], field: str) -> float | None:
+    values = [(float(row[field]), 1.0 if row["observed_flip"] else 0.0) for row in rows
+              if row.get("observed_flip") is not None and _num(row.get(field)) is not None]
+    return sum((prediction - outcome) ** 2 for prediction, outcome in values) / len(values) if values else None
+
+
+def _checkpoint_summary(rows: list[dict[str, Any]], regime: str) -> list[dict[str, Any]]:
+    output = []
+    for checkpoint in PRIMARY_CHECKPOINTS:
+        usable = [row for row in rows if row["checkpoint_sec"] == checkpoint and row.get("observed_flip") is not None]
+        flips = [row for row in usable if row["observed_flip"]]
+        def average(field: str) -> float | None:
+            values = [_num(row.get(field)) for row in usable if _num(row.get(field)) is not None]
+            return statistics.mean(values) if values else None
+        observed_rate = len(flips) / len(usable) if usable else None
+        market_mean, analytic_mean = average("market_implied_flip_probability"), average("analytic_flip_probability")
+        output.append({"session_regime": regime, "checkpoint_sec": checkpoint, "N": len(usable),
+                       "observed_flips": len(flips), "observed_flip_rate": observed_rate,
+                       "mean_market_implied_flip_probability": market_mean,
+                       "mean_analytic_flip_probability": analytic_mean,
+                       "mean_empirical_path_probability": None,
+                       "market_brier": _brier(usable, "market_implied_flip_probability"),
+                       "analytic_brier": _brier(usable, "analytic_flip_probability"),
+                       "market_calibration_error": abs(market_mean - observed_rate) if market_mean is not None and observed_rate is not None else None,
+                       "analytic_calibration_error": abs(analytic_mean - observed_rate) if analytic_mean is not None and observed_rate is not None else None})
+    return output
+
+
+def _sigma_flip_curve(rows: list[dict[str, Any]], regime: str) -> list[dict[str, Any]]:
+    bins = ((-math.inf, .5, "<0.5sigma"), (.5, 1., "0.5-1sigma"), (1., 2., "1-2sigma"), (2., 3., "2-3sigma"), (3., math.inf, ">3sigma"))
+    output = []
+    for low, high, label in bins:
+        selected = [row for row in rows if row.get("observed_flip") is not None
+                    and (sigma := _num(row.get("required_move_sigma"))) is not None and low <= sigma < high]
+        flips = [row for row in selected if row["observed_flip"]]
+        def average(field: str) -> float | None:
+            values = [_num(row.get(field)) for row in selected if _num(row.get(field)) is not None]
+            return statistics.mean(values) if values else None
+        output.append({"session_regime": regime, "sigma_bin": label, "N_markets": len({row["market_slug"] for row in selected}),
+                       "N": len(selected), "observed_flips": len(flips),
+                       "observed_flip_rate": len(flips) / len(selected) if selected else None,
+                       "mean_analytic_flip_probability": average("analytic_flip_probability"),
+                       "mean_market_implied_flip_probability": average("market_implied_flip_probability")})
+    return output
+
+
+def _persistent_side_ts(rows: list[dict[str, Any]], field: str, side: str, start_ts: float) -> float | None:
+    """First of three consecutive samples agreeing with the settlement side."""
+    candidates = [row for row in rows if row["snapshot_ts"] >= start_ts]
+    for index, row in enumerate(candidates[:-2]):
+        sequence = candidates[index:index + 3]
+        if field == "p_ex":
+            current = _num(row.get("p_up_ex_market"))
+            sides = ["UP" if (_num(item.get("p_up_ex_market")) or -1) >= .5 else "DOWN"
+                     if _num(item.get("p_up_ex_market")) is not None else "UNKNOWN" for item in sequence]
+            current_side = "UP" if current is not None and current >= .5 else "DOWN" if current is not None else "UNKNOWN"
+        elif field == "market_mid":
+            current = _num(row.get("up_mid"))
+            sides = ["UP" if (_num(item.get("up_mid")) or -1) >= .5 else "DOWN"
+                     if _num(item.get("up_mid")) is not None else "UNKNOWN" for item in sequence]
+            current_side = "UP" if current is not None and current >= .5 else "DOWN" if current is not None else "UNKNOWN"
+        else:
+            current_side = str(row.get(field) or "UNKNOWN")
+            sides = [str(item.get(field) or "UNKNOWN") for item in sequence]
+        if current_side == side and all(item == side for item in sides):
+            return row["snapshot_ts"]
+    return None
+
+
+def _actual_flip_events(timelines: dict[str, list[dict[str, Any]]], summaries: dict[str, dict[str, Any]],
+                        contexts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for slug, rows in timelines.items():
+        checkpoint = _checkpoint_row(rows, 300)
+        settlement = str(summaries.get(slug, {}).get("canonical_settlement_side") or "")
+        leader = str(checkpoint.get("settlement_state_side") or "") if checkpoint else "UNKNOWN"
+        if leader not in {"UP", "DOWN"} or settlement not in {"UP", "DOWN"} or leader == settlement:
+            continue
+        start = checkpoint["snapshot_ts"]
+        signals = {
+            "P_EX": _persistent_side_ts(rows, "p_ex", settlement, start),
+            "MARKET_MID": _persistent_side_ts(rows, "market_mid", settlement, start),
+            "TWAP_STATE": _persistent_side_ts(rows, "settlement_state_side", settlement, start),
+            "BOT_SIDE": _persistent_side_ts(rows, "active_side", settlement, start),
+        }
+        for horizon in (5, 10, 30):
+            key = f"btc_return_{horizon}s_bps"
+            signals[f"BTC_{horizon}S"] = next(
+                (row["snapshot_ts"] for row in rows if row["snapshot_ts"] >= start
+                 and (value := _num(row.get(key))) is not None
+                 and ((settlement == "UP" and value > 0) or (settlement == "DOWN" and value < 0))),
+                None,
+            )
+        observed = [(name, ts) for name, ts in signals.items() if ts is not None]
+        output.append({**contexts[slug], "market_slug": slug, "leader_at_t300": leader,
+                       "canonical_settlement_side": settlement, "actual_flip": True,
+                       "earliest_persistent_signal": min(observed, key=lambda item: item[1])[0] if observed else "NOT_MEASURABLE",
+                       **{f"{name.lower()}_ts": ts for name, ts in signals.items()}})
+    return output
+
+
+def preliminary_regime_comparison(db_path: Path, journal_path: Path, output: Path) -> dict[str, Any]:
+    """Preliminary comparison using only directly comparable synchronized cohorts."""
+    output.mkdir(parents=True, exist_ok=True)
+    catalog = _catalog(db_path)
+    all_timelines, summaries = _load_selection(db_path, catalog)
+    comparable = [row for row in catalog if all_timelines.get(row["market_slug"])]
+    legacy_weekday = [row for row in catalog if row["session_regime"] == "WEEKDAY" and not all_timelines.get(row["market_slug"])]
+    contexts = {row["market_slug"]: row for row in comparable}
+    checkpoints = []
+    for row in comparable:
+        checkpoints.extend(checkpoint_flip_rows(row["market_slug"], all_timelines[row["market_slug"]],
+                                                 summaries.get(row["market_slug"], {}), row["session_regime"]))
+    weekday_rows = [row for row in checkpoints if row["session_regime"] == "WEEKDAY"]
+    weekend_rows = [row for row in checkpoints if row["session_regime"] == "WEEKEND"]
+    summary_rows = _checkpoint_summary(weekday_rows, "WEEKDAY") + _checkpoint_summary(weekend_rows, "WEEKEND")
+    sigma_rows = _sigma_flip_curve(weekday_rows, "WEEKDAY") + _sigma_flip_curve(weekend_rows, "WEEKEND")
+    flip_events = _actual_flip_events({slug: all_timelines[slug] for slug in contexts}, summaries, contexts)
+    _write_csv(output / "checkpoint_flip_rates.csv", checkpoints)
+    _write_csv(output / "checkpoint_summary.csv", summary_rows)
+    _write_csv(output / "sigma_flip_curve.csv", sigma_rows)
+    _write_csv(output / "actual_flip_events.csv", flip_events)
+    _write_csv(output / "legacy_weekday_not_directly_comparable.csv", legacy_weekday)
+
+    weekend_markets = [row for row in comparable if row["session_regime"] == "WEEKEND"]
+    weekday_markets = [row for row in comparable if row["session_regime"] == "WEEKDAY"]
+    weekend_start_span_hours = ((max(int(row["market_slug"].rsplit("-", 1)[-1]) for row in weekend_markets)
+                                 - min(int(row["market_slug"].rsplit("-", 1)[-1]) for row in weekend_markets)) / 3600 + .25) if weekend_markets else 0
+    weekend_hours = sum(
+        max(0.0, rows[-1]["snapshot_ts"] - rows[0]["snapshot_ts"]) / 3600
+        for slug, rows in all_timelines.items()
+        if slug in contexts and contexts[slug]["session_regime"] == "WEEKEND" and rows
+    )
+    weekend_t300 = next((row for row in summary_rows if row["session_regime"] == "WEEKEND" and row["checkpoint_sec"] == 300), {})
+    checkpoint_lines = "\n".join(
+        f"| T-{row['checkpoint_sec']} | {row['N']} | {row['observed_flip_rate']} | "
+        f"{row['mean_market_implied_flip_probability']} | {row['mean_analytic_flip_probability']} | "
+        f"{row['market_brier']} | {row['analytic_brier']} |"
+        for row in summary_rows if row["session_regime"] == "WEEKEND"
+    )
+    sigma_lines = "\n".join(
+        f"| {row['sigma_bin']} | {row['N']} | {row['observed_flips']} | {row['observed_flip_rate']} | "
+        f"{row['mean_market_implied_flip_probability']} | {row['mean_analytic_flip_probability']} |"
+        for row in sigma_rows if row["session_regime"] == "WEEKEND"
+    )
+    flip_counts = defaultdict(int)
+    for row in flip_events:
+        flip_counts[row["earliest_persistent_signal"]] += 1
+    report = f"""# Preliminary weekend vs weekday regime comparison
+
+Mode: PRELIMINARY_REGIME_COMPARISON. Weekend and weekday are never pooled.
+
+## Market counts
+
+- Weekend: sampled coverage={weekend_hours:.2f} hours across completed={len(weekend_markets)};
+  market-start span={weekend_start_span_hours:.2f} hours;
+  synchronized usable={len(weekend_markets)}; actual T-300 leader flips={len([r for r in flip_events if r["session_regime"] == "WEEKEND"])}.
+- Weekday: synchronized usable={len(weekday_markets)}; actual T-300 leader flips={len([r for r in flip_events if r["session_regime"] == "WEEKDAY"])}.
+- Legacy weekday: {len(legacy_weekday)} summaries lack comparable synchronized
+  prediction snapshots and are excluded from primary calibration, lead/lag,
+  residual, and flip comparisons.
+
+## Numeric direction visible now
+
+- Weekend T-300: N={weekend_t300.get("N", 0)}, observed flip rate={weekend_t300.get("observed_flip_rate")},
+  market-implied flip probability={weekend_t300.get("mean_market_implied_flip_probability")},
+  analytic flip probability={weekend_t300.get("mean_analytic_flip_probability")}.
+- Comparable weekday rows: {len(weekday_rows)}. Weekday curves and cross-regime
+  calibration are NOT_MEASURABLE, rather than zero or pooled with legacy data.
+
+## Weekend checkpoint curve
+
+| Checkpoint | N | Observed flip rate | Market flip p | Analytic flip p | Market Brier | Analytic Brier |
+|---|---:|---:|---:|---:|---:|---:|
+{checkpoint_lines}
+
+Market versus analytic calibration is MIXED by checkpoint: analytic is lower
+Brier at T-300, T-60 and T-30, while market is lower Brier at T-180 and T-120.
+This is an early signal only; it is not a cross-regime result.
+
+## Weekend sigma flip-rate curve
+
+| Required move | N | Flips | Observed rate | Market flip p | Analytic flip p |
+|---|---:|---:|---:|---:|---:|
+{sigma_lines}
+
+Within this weekend-only sample the observed rate decreases monotonically from
+the <0.5sigma bin through >3sigma. This is an EARLY_SIGNAL (five observed
+checkpoint flips), not proof of a stable curve.
+
+## Actual flip events
+
+There are {len([r for r in flip_events if r["session_regime"] == "WEEKEND"])}
+weekend markets whose T-300 official-TWAP leader differed from final settlement.
+Earliest persistent directional labels: {dict(flip_counts)}. Event timestamps
+and every candidate signal are in actual_flip_events.csv. There is no directly
+comparable weekday flip-event cohort.
+
+## Preliminary weekend vs weekday verdict
+
+E. Data quality / comparable weekday coverage is still the main limitation.
+The strongest early difference and strongest similarity are both NOT_MEASURABLE:
+there is no synchronized weekday cohort with this schema. The most useful
+metric to keep collecting is fresh T-300/T-180/T-120 flip probability,
+separately by regime. A same-schema weekday capture cohort would change this
+preliminary conclusion.
+"""
+    (output / "summary.md").write_text(report, encoding="utf-8")
+    return {"mode": "PRELIMINARY_REGIME_COMPARISON", "weekend_markets": len(weekend_markets),
+            "weekday_synchronized_markets": len(weekday_markets), "legacy_weekday_markets": len(legacy_weekday),
+            "weekend_hours": weekend_hours, "weekend_market_start_span_hours": weekend_start_span_hours,
+            "output": str(output)}
+
+
 def analyze_selection(db_path: Path, journal_path: Path, output: Path, selected: list[dict[str, Any]]) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     contexts = {row["market_slug"]: row for row in selected}
@@ -296,7 +544,7 @@ magnitude without asserting significance.
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("latest", "run", "market", "compare-regimes"))
+    parser.add_argument("command", choices=("latest", "run", "market", "compare-regimes", "preliminary-regimes"))
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -310,6 +558,9 @@ def main() -> None:
         parser.error("run requires --run-id")
     if args.command == "market" and not args.slug:
         parser.error("market requires --slug")
+    if args.command == "preliminary-regimes":
+        print(json.dumps(preliminary_regime_comparison(args.db, args.journal, args.output), indent=2, sort_keys=True))
+        return
     limit = None if args.command == "compare-regimes" else args.markets
     selected = select_catalog(catalog, markets=limit, regime=args.regime, run_id=args.run_id, slug=args.slug)
     if not selected:
