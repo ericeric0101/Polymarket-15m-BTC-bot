@@ -16,6 +16,8 @@ from bot.execution_events import (
 from bot.fill_ledger import interpret_fill_liquidity
 from bot.enums import ActiveSide
 from bot.post_trade import build_fill_order_event_payload
+from bot.research.lifecycle import fill_lifecycle_metadata
+from bot.research.provenance import LIFECYCLE_SCHEMA_VERSION
 
 
 def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float) -> Dict[str, Any]:
@@ -252,6 +254,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         elif side_norm == "sell":
             strategy.inventory_delta_shares -= fill_qty_dec
     realized_net_usdc = None
+    fill_lifecycle_payload = {}
     if side_for_ledger:
         pre_fill_state = dict(
             getattr(strategy, "live_inventory_cost", {}).get(
@@ -266,6 +269,35 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             fee_usdc=effective_fee_usdc_dec,
             fee_shares=effective_fee_shares_dec,
         )
+        # All research metadata failures remain outside execution authority.
+        try:
+            inst_key_after_fill = str(strategy._instrument_key(filled_inst))
+            entry_slug = str(getattr(strategy, "current_market_slug", "") or "")
+            state_after_fill = getattr(strategy, "live_inventory_cost", {}).get(inst_key_after_fill, {})
+            fill_lifecycle_payload = fill_lifecycle_metadata(
+                market_slug=entry_slug, instrument_id=inst_key_after_fill, client_order_id=filled_id,
+                side=side_for_ledger, before=pre_fill_state, after=state_after_fill,
+            )
+            fill_lifecycle_payload["fill_event_id"] = str(getattr(event, "trade_id", "") or getattr(event, "id", "") or "")
+            research_db = getattr(strategy, "twap_research_db", None)
+            if fill_lifecycle_payload["fresh_position_entry"] and research_db is not None and entry_slug:
+                entry_ts = time.time()
+                research_db.enqueue_decision(
+                    run_id=str(getattr(strategy, "run_id", "")), slug=entry_slug, market_id=None,
+                    decision_epoch_ns=int(entry_ts * 1_000_000_000),
+                    payload={
+                        "event_type": "POSITION_LIFECYCLE_ENTRY",
+                        "lifecycle_schema_version": LIFECYCLE_SCHEMA_VERSION,
+                        **fill_lifecycle_payload,
+                        "instrument_id": inst_key_after_fill,
+                        "side": str(getattr(strategy._side_for_instrument_id(filled_inst), "value", "NONE")),
+                        "entry_ts": entry_ts, "entry_price": float(fill_price_dec),
+                        "entry_qty": float(fill_qty_dec), "market_slug": entry_slug,
+                        "research_candidate_id": filled_directional_snapshot.get("research_candidate_id"),
+                    },
+                )
+        except Exception:
+            fill_lifecycle_payload = {}
         exit_context = getattr(strategy, "taker_exit_execution_by_client_order_id", {}).get(filled_id, {})
         stop_reason = str(taker_exit_reason or exit_context.get("reason") or "").lower()
         decision_reason = str(exit_context.get("decision_reason") or "").lower()
@@ -293,6 +325,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                         position_side=str(exit_context.get("position_side") or strategy._side_for_instrument_id(filled_inst).value),
                         entry_price=avg_entry, entry_fee_usdc=allocated_entry_fee,
                         reason=decision_reason or stop_reason,
+                        position_lifecycle_id=pre_fill_state.get("position_lifecycle_id"),
                     )
             except Exception as exc:
                 logger.debug(f"Stop continuation shadow start failed: {exc}")
@@ -560,7 +593,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             else None
         ),
         commission_usdc=float(effective_fee_usdc_dec),
-        payload=build_fill_order_event_payload(
+        payload={**build_fill_order_event_payload(
             liquidity_side_raw=liquidity_side_raw,
             inventory_delta_shares=strategy.inventory_delta_shares,
             raw_commission_dec=raw_commission_dec,
@@ -569,7 +602,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             filled_econ=filled_econ,
             filled_directional_snapshot=filled_directional_snapshot,
             realized_net_usdc=realized_net_usdc,
-        ),
+        ), **fill_lifecycle_payload},
     )
     complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
     if callable(complete_research_candidate):

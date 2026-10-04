@@ -207,6 +207,8 @@ class BTC1sHistoryCollector:
         return self._dropped_history_rows
 
     def start(self) -> None:
+        if self._stop.is_set():
+            return
         if self._thread is not None and self._thread.is_alive():
             return
         try:
@@ -219,7 +221,6 @@ class BTC1sHistoryCollector:
         except Exception as exc:
             self._disable(f"history_directory_unavailable:{type(exc).__name__}:{exc}")
             return
-        self._stop.clear()
         self._thread = threading.Thread(target=self._writer_loop, name="btc-1s-history-writer", daemon=True)
         self._thread.start()
 
@@ -237,7 +238,7 @@ class BTC1sHistoryCollector:
                 return
             ts_sec = src_ms // 1000
             with self._lock:
-                if not self._enabled:
+                if not self._enabled or self._stop.is_set():
                     return
                 if self._watermark_sec is not None and ts_sec < self._watermark_sec - 2:
                     self._dropped_history_rows += 1
@@ -356,14 +357,18 @@ class BTC1sHistoryCollector:
             self._queue.qsize(), self._enabled,
         )
 
-    def stop(self, *, timeout_sec: float = 5.0) -> None:
-        if self._stop.is_set():
-            return
+    def stop(self, *, timeout_sec: float = 5.0) -> bool:
         with self._lock:
-            for sec in sorted(self._bars):
-                self._enqueue_nonblocking(self._bars[sec].row())
-            self._bars.clear()
-        self._stop.set()
+            if not self._stop.is_set():
+                # Observer acceptance and final bar flush share this lock.
+                self._stop.set()
+                for sec in sorted(self._bars):
+                    self._enqueue_nonblocking(self._bars[sec].row())
+                self._bars.clear()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(0.1, float(timeout_sec)))
+        return ((thread is None or not thread.is_alive()) and self._queue.empty()
+                and not self._bars and not self._failure_reason
+                and self._dropped_history_rows == 0
+                and self._bars_written == self._bars_completed)

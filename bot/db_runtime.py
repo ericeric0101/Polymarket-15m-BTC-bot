@@ -107,10 +107,27 @@ class StrategyDBRuntimeMixin:
             "drawdown_from_high_usdc": float(decision.drawdown_from_high_usdc),
             "profit_guard_armed": decision.armed,
             "buy_lock_reason": decision.reason if not decision.allowed else "",
+            "mode": decision.mode,
+            "state": decision.state,
+            "target_protection_active": decision.target_protection_active,
+            "normalized_target_usdc": float(decision.normalized_target_usdc or 0),
+            "current_allowed_drawdown_usdc": float(decision.current_allowed_drawdown_usdc or 0),
+            "shadow_would_block": decision.shadow_would_block,
+        }
+
+    def _cache_monthly_pnl_status(
+        self, monthly: Optional[Decimal], target: Optional[Decimal], now_ts: Optional[float] = None,
+    ) -> None:
+        """Cache canonical monthly reconstruction for read-only STATUS display."""
+        progress = monthly / target * Decimal("100") if monthly is not None and target else None
+        self._monthly_pnl_status = {
+            "realized_pnl_usdc": monthly, "target_usdc": target,
+            "progress_pct": progress, "updated_ts": time.time() if now_ts is None else float(now_ts),
         }
 
     def _initialize_session_pnl_guard(self, now_ts: Optional[float] = None) -> None:
         config = SessionPnlGuardConfig(
+            mode=str(getattr(self, "session_pnl_guard_mode", "legacy") or "legacy"),
             enabled=bool(getattr(self, "session_pnl_guard_enabled", True)),
             profit_arm_usdc=Decimal(str(getattr(self, "session_profit_arm_usdc", "8"))),
             profit_drawdown_usdc=Decimal(str(getattr(self, "session_profit_drawdown_usdc", "4"))),
@@ -118,16 +135,60 @@ class StrategyDBRuntimeMixin:
             hard_profit_lock_usdc=Decimal(str(getattr(self, "session_hard_profit_lock_usdc", "10"))),
             max_loss_enabled=bool(getattr(self, "session_max_loss_enabled", True)),
             max_loss_usdc=Decimal(str(getattr(self, "session_max_loss_usdc", "8"))),
+            monthly_net_target_usdc=(
+                Decimal(str(getattr(self, "monthly_net_target_usdc")))
+                if getattr(self, "monthly_net_target_usdc", None) is not None else None
+            ),
+            per_trade_risk_usdc=(
+                Decimal(str(getattr(self, "session_guard_per_trade_risk_usdc")))
+                if getattr(self, "session_guard_per_trade_risk_usdc", None) is not None else None
+            ),
         )
+        # Do not silently turn a malformed V2 risk boundary into an arbitrary
+        # legacy threshold.  Settings validates this for normal startup; this
+        # additional guard protects reduced test/legacy hosts too.
+        if config.is_target_scaled_v2:
+            config.target_scaled_thresholds()
         date = self._taipei_session_date(now_ts)
         loaded = self.trade_db.load_session_pnl_state(date) if getattr(self, "trade_db", None) else None
+        mode_changed = bool(loaded and str(loaded.get("guard_mode") or "legacy") != config.mode)
         if loaded:
             state = SessionPnlState.from_mapping(loaded)
+            if mode_changed:
+                # Accounting survives policy changes, including active-cycle
+                # SELL deltas absent from completed-cycle reconstruction.
+                state.profit_guard_armed = False
+                state.buy_lock_active = False
+                state.buy_lock_reason = ""
+                state.guard_mode = config.mode
         else:
             reconstructed = self.trade_db.reconstruct_session_pnl_state(date) if getattr(self, "trade_db", None) else {"session_date_taipei": date}
             state = SessionPnlState.from_mapping(reconstructed)
         self._session_pnl_guard = SessionPnlGuard(config, session_date=date, state=state)
         self._session_pnl_guard_created_ts = time.time() if now_ts is None else float(now_ts)
+        decision = self._session_pnl_guard.decision()
+        if config.is_target_scaled_v2:
+            self._update_monthly_pnl_cache(now_ts)
+            monthly = self.monthly_realized_pnl_usdc(now_ts)
+            progress = (
+                monthly / decision.monthly_target_usdc * Decimal("100")
+                if monthly is not None and decision.monthly_target_usdc else None
+            )
+            self._cache_monthly_pnl_status(monthly, decision.monthly_target_usdc, now_ts)
+            logger.info(
+                "[SESSION PNL GUARD V2] "
+                f"mode={config.mode.upper()} monthly_target=${decision.monthly_target_usdc:.2f} "
+                f"normalized_target=${decision.normalized_target_usdc:.2f} "
+                f"R=${config.per_trade_risk_usdc:.2f} arm=${config.target_scaled_thresholds()['profit_arm_usdc']:.2f} "
+                f"normal_trail=${config.target_scaled_thresholds()['normal_profit_drawdown_usdc']:.2f} "
+                f"target_trail=${config.target_scaled_thresholds()['target_profit_drawdown_usdc']:.2f} "
+                f"hard_lock=${config.target_scaled_thresholds()['hard_profit_lock_usdc']:.2f} "
+                f"max_loss=-${config.target_scaled_thresholds()['max_loss_usdc']:.2f} "
+                f"month={'MONTHLY_PNL_NOT_RECONSTRUCTABLE' if monthly is None else f'{monthly:+.2f}'} "
+                f"month_progress={'n/a' if progress is None else f'{progress:.1f}%'} "
+                f"session={decision.realized_pnl_usdc:+.2f} hwm={decision.realized_high_water_usdc:+.2f} "
+                f"state={decision.state} BUY={'ALLOWED' if decision.allowed else 'BLOCKED'}"
+            )
         if getattr(self, "trade_db", None) and not loaded:
             self._persist_session_pnl_guard(event_type="SESSION_DAY_RESET")
         elif loaded:
@@ -141,7 +202,7 @@ class StrategyDBRuntimeMixin:
             loaded_reason = str(loaded.get("buy_lock_reason") or "")
             current = self._session_pnl_guard.state
             if (
-                current.profit_guard_armed != loaded_armed
+                mode_changed or current.profit_guard_armed != loaded_armed
                 or current.buy_lock_active != loaded_locked
                 or current.buy_lock_reason != loaded_reason
             ):
@@ -159,6 +220,7 @@ class StrategyDBRuntimeMixin:
             "profit_guard_armed": state.profit_guard_armed,
             "buy_lock_active": state.buy_lock_active,
             "buy_lock_reason": state.buy_lock_reason,
+            "guard_mode": guard.config.mode,
             "created_ts": getattr(self, "_session_pnl_guard_created_ts", time.time()),
         }
         if not self.trade_db or not self.trade_db.save_session_pnl_state(stored):
@@ -174,7 +236,30 @@ class StrategyDBRuntimeMixin:
             self._initialize_session_pnl_guard(now_ts)
             guard = self._session_pnl_guard
         decision = guard.decision()
+        self._update_monthly_pnl_cache(now_ts)
         return decision
+
+    def _update_monthly_pnl_cache(self, now_ts: Optional[float] = None) -> None:
+        target = getattr(self, "monthly_net_target_usdc", None)
+        db = getattr(self, "trade_db", None)
+        request = getattr(db, "request_monthly_pnl_refresh", None)
+        cached = getattr(db, "cached_monthly_pnl", None)
+        if target is None or not callable(request) or not callable(cached):
+            return
+        local = datetime.fromtimestamp(time.time() if now_ts is None else float(now_ts), ZoneInfo("Asia/Taipei"))
+        month = local.strftime("%Y-%m")
+        try:
+            request(month, only_if_new_month=True)
+            status = cached(month)
+            self._cache_monthly_pnl_status(status["realized_pnl_usdc"], Decimal(str(target)), status["updated_ts"])
+        except Exception as exc:
+            logger.warning(f"Monthly reporting cache unavailable: {type(exc).__name__}")
+            self._cache_monthly_pnl_status(None, Decimal(str(target)), now_ts)
+
+    def monthly_realized_pnl_usdc(self, now_ts: Optional[float] = None) -> Optional[Decimal]:
+        """Read reporting cache only; never query the journal on a fill path."""
+        status = getattr(self, "_monthly_pnl_status", None)
+        return status.get("realized_pnl_usdc") if isinstance(status, dict) else None
 
     def _record_session_realized_pnl(self, delta_usdc: Decimal | float | str, *, source: str) -> bool:
         guard = getattr(self, "_session_pnl_guard", None)
@@ -182,14 +267,47 @@ class StrategyDBRuntimeMixin:
             self._initialize_session_pnl_guard()
             guard = self._session_pnl_guard
         before_armed, before_locked = guard.state.profit_guard_armed, guard.state.buy_lock_active
+        before_target = guard.decision().target_protection_active
         guard.apply_realized_delta(delta_usdc)
         if not self._persist_session_pnl_guard():
             return False
         decision = guard.decision()
+        monthly = self.monthly_realized_pnl_usdc()
+        amount = Decimal(str(delta_usdc))
+        target = decision.normalized_target_usdc
+        session_progress = (decision.realized_pnl_usdc / target * Decimal("100")) if target else None
+        month_progress = (
+            monthly / decision.monthly_target_usdc * Decimal("100")
+            if monthly is not None and decision.monthly_target_usdc else None
+        )
+        logger.info(
+            "[PNL] "
+            f"{'WIN' if amount >= 0 else 'LOSS'} {amount:+.2f} | "
+            f"Session {decision.realized_pnl_usdc:+.2f}"
+            + (f"/{target:.2f} ({session_progress:.1f}%)" if target and session_progress is not None else "")
+            + (f" | Month {monthly:+.2f}/{decision.monthly_target_usdc:.2f} ({month_progress:.1f}%)" if month_progress is not None else "")
+            + f" | HWM {decision.realized_high_water_usdc:+.2f} | Guard {decision.state} | BUY {'ALLOWED' if decision.allowed else 'BLOCKED'}"
+        )
         if decision.armed and not before_armed:
             self._db_strategy_event("SESSION_PROFIT_GUARD_ARMED", {**self._session_guard_payload(decision), "source": source})
+            logger.info(
+                "SESSION PROFIT GUARD ARMED: "
+                f"HWM={decision.realized_high_water_usdc:+.2f} "
+                f"allowed_drawdown={decision.current_allowed_drawdown_usdc:.2f} BUY=ALLOWED"
+            )
+        if decision.target_protection_active and not before_target:
+            logger.info(
+                "TARGET PROTECTION ACTIVE: "
+                f"HWM={decision.realized_high_water_usdc:+.2f} "
+                f"allowed_drawdown={decision.current_allowed_drawdown_usdc:.2f} BUY=ALLOWED"
+            )
         if not decision.allowed and not before_locked:
             self._db_strategy_event("SESSION_BUY_LOCKED", {**self._session_guard_payload(decision), "source": source})
+            logger.warning(
+                "SESSION PNL BUY LOCK ACTIVE: "
+                f"reason={decision.reason} session={decision.realized_pnl_usdc:+.2f} "
+                "SELL/STOP/REDEEM=ENABLED"
+            )
         return True
     def _run_startup_execution_calibration(self) -> None:
         """Expose the synchronous startup calibration phase and its duration."""

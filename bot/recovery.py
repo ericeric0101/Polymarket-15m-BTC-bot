@@ -161,6 +161,7 @@ class StrategyRecoveryMixin:
             fill_qty = Decimal(str(row["qty"] or 0))
             fee_usdc = Decimal(str(row["commission_usdc"] or 0))
             fee_shares = Decimal("0")
+            payload = {}
             try:
                 payload = json.loads(str(row["payload_json"] or "{}"))
                 if isinstance(payload, dict):
@@ -184,6 +185,16 @@ class StrategyRecoveryMixin:
                 fee_shares=fee_shares,
                 now_ts=first_fill_ts or time.time(),
             )
+
+            # Restore only persisted research identity; never infer it from
+            # the newest scale-in or use it for execution/cost-basis authority.
+            restored = ledger.get(inst_key, {})
+            if Decimal(str(restored.get("qty", 0))) <= 0:
+                restored.pop("position_lifecycle_id", None)
+                restored.pop("entry_client_order_id", None)
+            elif isinstance(payload, dict) and payload.get("position_lifecycle_id"):
+                restored["position_lifecycle_id"] = payload["position_lifecycle_id"]
+                restored["entry_client_order_id"] = payload.get("entry_client_order_id")
 
         state = ledger.get(inst_key)
         if not state:

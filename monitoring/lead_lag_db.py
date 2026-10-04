@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from bot.research.provenance import RESEARCH_SCHEMA_VERSION
+
 
 class LeadLagDB:
     # SQLite treats NULL values as distinct in UNIQUE/PRIMARY KEY checks.
@@ -24,6 +26,7 @@ class LeadLagDB:
         self._queue_drops = 0
         self._write_errors = 0
         self._decision_rows_written = 0
+        self._late_enqueue_rejections = 0
         self._init_schema()
         self._thread = threading.Thread(target=self._writer, daemon=True, name="lead-lag-db-writer")
         self._thread.start()
@@ -82,32 +85,24 @@ class LeadLagDB:
             conn.close()
 
     def enqueue_snapshot(self, *, run_id: str, polymarket_slug: str, hyperliquid_market_id: int | None, observed_ts: float, payload: dict[str, Any]) -> None:
-        row = (str(run_id), str(polymarket_slug), hyperliquid_market_id, int(float(observed_ts) * 1000), dict(payload))
-        try:
-            self._queue.put_nowait(row)
-        except queue.Full:
-            # Research loss must never add latency to execution. The next 5s
-            # snapshot is still useful and the gap is visible in the report.
-            return
+        versioned_payload = {**dict(payload), "research_schema_version": RESEARCH_SCHEMA_VERSION}
+        row = (str(run_id), str(polymarket_slug), hyperliquid_market_id, int(float(observed_ts) * 1000), versioned_payload)
+        self._enqueue(row)
 
     def enqueue_reference_1s(self, *, run_id: str, slug: str, market_id: int | None, bucket_epoch_ms: int, source: str, price_cents: int, received_epoch_ns: int) -> None:
         persisted_market_id = self.GLOBAL_MARKET_ID if market_id is None else int(market_id)
         self._enqueue_sql("reference", (str(run_id), str(slug), persisted_market_id, int(bucket_epoch_ms), str(source), int(price_cents), int(received_epoch_ns)))
 
     def enqueue_decision(self, *, run_id: str, slug: str, market_id: int | None, decision_epoch_ns: int, payload: dict[str, Any]) -> bool:
-        try:
-            self._queue.put_nowait(("decision", (str(run_id), str(slug), market_id, int(decision_epoch_ns), dict(payload))))
-            return True
-        except queue.Full:
-            with self._health_lock:
-                self._queue_drops += 1
-            return False
+        versioned_payload = {**dict(payload), "research_schema_version": RESEARCH_SCHEMA_VERSION}
+        return self._enqueue(("decision", (str(run_id), str(slug), market_id, int(decision_epoch_ns), versioned_payload)))
 
     def research_health(self) -> dict[str, int]:
         with self._health_lock:
             return {"queue_depth": self._queue.qsize(), "queue_capacity": self._queue.maxsize,
                     "queue_drops": self._queue_drops, "write_errors": self._write_errors,
-                    "decision_rows_written": self._decision_rows_written}
+                    "decision_rows_written": self._decision_rows_written,
+                    "late_enqueue_rejections": self._late_enqueue_rejections}
 
     def enqueue_latency(self, *, run_id: str, client_order_id: str, name: str, started_monotonic_ns: int, ended_monotonic_ns: int, created_epoch_ns: int) -> None:
         self._enqueue_sql("latency", (str(run_id), str(client_order_id), str(name), int(started_monotonic_ns), int(ended_monotonic_ns), int(created_epoch_ns)))
@@ -116,10 +111,19 @@ class LeadLagDB:
         self._enqueue_sql("markout", (str(run_id), str(slug), market_id, int(candidate_epoch_ns), int(horizon_ms), int(observed_epoch_ns), dict(payload)))
 
     def _enqueue_sql(self, kind: str, row: tuple[Any, ...]) -> None:
-        try:
-            self._queue.put_nowait((kind, row))
-        except queue.Full:
-            return
+        self._enqueue((kind, row))
+
+    def _enqueue(self, row: tuple[Any, ...]) -> bool:
+        with self._health_lock:
+            if self._stop.is_set():
+                self._late_enqueue_rejections += 1
+                return False
+            try:
+                self._queue.put_nowait(row)
+                return True
+            except queue.Full:
+                self._queue_drops += 1
+                return False
 
     def _writer(self) -> None:
         while not self._stop.is_set() or not self._queue.empty():
@@ -160,8 +164,17 @@ class LeadLagDB:
                     self._write_errors += 1
             finally:
                 if conn is not None:
-                    conn.close()
+                    try:
+                        conn.close()
+                    except Exception:
+                        with self._health_lock:
+                            self._write_errors += 1
 
-    def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=3.0)
+    def stop(self, *, timeout_sec: float = 3.0) -> bool:
+        """Terminal stop: success requires drained work and no known data loss."""
+        with self._health_lock:
+            self._stop.set()
+        self._thread.join(timeout=max(0.1, float(timeout_sec)))
+        with self._health_lock:
+            return (not self._thread.is_alive() and self._queue.empty()
+                    and self._write_errors == 0 and self._queue_drops == 0)

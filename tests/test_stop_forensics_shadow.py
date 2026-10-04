@@ -15,11 +15,12 @@ def test_adverse_episode_records_only_after_raw_adverse_and_emits_p10_candidate(
     )
     recorder.observe(raw_adverse=False, now_ts=100.0, **base)
     assert recorder.events == []
-    recorder.observe(raw_adverse=True, now_ts=101.0, **base)
+    recorder.observe(raw_adverse=True, now_ts=101.0, position_lifecycle_id="market|inst|buy-1", **base)
     recorder.observe(raw_adverse=True, now_ts=111.1, **base)
     candidates = [event for event in recorder.events if event["event_type"] == "STOP_SHADOW_CANDIDATE"]
     assert {event["payload"]["candidate"] for event in candidates} >= {"STOP_SHADOW_P5", "STOP_SHADOW_P10"}
     assert all(event["payload"]["thesis_weakening_count"] >= 2 for event in candidates)
+    assert all(event["payload"]["position_lifecycle_id"] == "market|inst|buy-1" for event in candidates)
 
 
 def test_checkpoint_never_invents_bbo_when_quote_unavailable():

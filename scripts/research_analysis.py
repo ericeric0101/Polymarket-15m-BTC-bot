@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from bot.entry_session_policy import TAIPEI
+from bot.research.lifecycle import first_crossings, held_side_probability, number as lifecycle_number
+from bot.research.store import ResearchStore
+from bot.research.metrics import capital_efficiency, entry_timing_bin as _entry_timing_bin
 from scripts import four_market_prediction_forensics as forensic
 
 
@@ -57,24 +60,14 @@ def market_context(slug: str) -> dict[str, Any]:
 def _catalog(db_path: Path) -> list[dict[str, Any]]:
     """One latest canonical settlement summary per run/market pair."""
     records: dict[tuple[str, str], dict[str, Any]] = {}
-    uri = f"file:{db_path.resolve()}?mode=ro"
-    with sqlite3.connect(uri, uri=True) as conn:
-        for run_id, slug, epoch_ns, payload_json in conn.execute(
-            "SELECT run_id, slug, decision_epoch_ns, payload_json FROM lead_lag_decisions "
-            "WHERE payload_json LIKE '%MARKET_TWAP_SUMMARY%' ORDER BY decision_epoch_ns"
-        ):
-            try:
-                payload = json.loads(payload_json)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if payload.get("event_type") != "MARKET_TWAP_SUMMARY":
-                continue
-            market_slug = str(payload.get("market_slug") or slug or "")
-            if not market_slug:
-                continue
-            row = {"run_id": str(run_id), "market_slug": market_slug,
-                   "summary_epoch_ns": int(epoch_ns), **market_context(market_slug)}
-            records[(str(run_id), market_slug)] = row
+    for payload in ResearchStore(db_path).get_settlements():
+        market_slug = str(payload.get("market_slug") or "")
+        if not market_slug:
+            continue
+        run_id = str(payload["run_id"])
+        row = {"run_id": run_id, "market_slug": market_slug,
+               "summary_epoch_ns": int(payload["summary_epoch_ns"]), **market_context(market_slug)}
+        records[(run_id, market_slug)] = row
     return sorted(records.values(), key=lambda row: row["summary_epoch_ns"], reverse=True)
 
 
@@ -110,10 +103,28 @@ def _load_selection(db_path: Path, selected: list[dict[str, Any]]) -> tuple[dict
         by_run[row["run_id"]].add(row["market_slug"])
     timelines: dict[str, list[dict[str, Any]]] = {}
     summaries: dict[str, dict[str, Any]] = {}
+    store = ResearchStore(db_path)
     for run_id, slugs in by_run.items():
-        loaded, loaded_summaries = forensic._load(db_path, run_id, slugs)
-        timelines.update(loaded)
-        summaries.update(loaded_summaries)
+        for payload in store.get_prediction_snapshots(run_id=run_id):
+            market_slug = payload["market_slug"]
+            if market_slug not in slugs:
+                continue
+            payload["up_mid"], payload["up_mid_source"] = forensic._up_mid(payload)
+            probability = _num(payload.get("p_up_ex_market"))
+            payload["residual_up_normalized"] = (
+                probability - payload["up_mid"]
+                if probability is not None and payload["up_mid"] is not None else None
+            )
+            timelines.setdefault(market_slug, []).append(payload)
+    for payload in store.get_settlements():
+        market_slug = payload["market_slug"]
+        if market_slug not in by_run.get(payload["run_id"], set()):
+            continue
+        previous = summaries.get(market_slug)
+        if previous is None or payload["summary_epoch_ns"] >= previous["summary_epoch_ns"]:
+            summaries[market_slug] = payload
+    for rows in timelines.values():
+        rows.sort(key=lambda row: row["snapshot_ts"])
     return timelines, summaries
 
 
@@ -224,12 +235,6 @@ def checkpoint_flip_rows(slug: str, rows: list[dict[str, Any]], summary: dict[st
     return output
 
 
-def _brier(rows: list[dict[str, Any]], field: str) -> float | None:
-    values = [(float(row[field]), 1.0 if row["observed_flip"] else 0.0) for row in rows
-              if row.get("observed_flip") is not None and _num(row.get(field)) is not None]
-    return sum((prediction - outcome) ** 2 for prediction, outcome in values) / len(values) if values else None
-
-
 def _checkpoint_summary(rows: list[dict[str, Any]], regime: str) -> list[dict[str, Any]]:
     output = []
     for checkpoint in PRIMARY_CHECKPOINTS:
@@ -245,8 +250,8 @@ def _checkpoint_summary(rows: list[dict[str, Any]], regime: str) -> list[dict[st
                        "mean_market_implied_flip_probability": market_mean,
                        "mean_analytic_flip_probability": analytic_mean,
                        "mean_empirical_path_probability": None,
-                       "market_brier": _brier(usable, "market_implied_flip_probability"),
-                       "analytic_brier": _brier(usable, "analytic_flip_probability"),
+                       "market_brier": _brier([(float(r["market_implied_flip_probability"]), bool(r["observed_flip"])) for r in usable if _num(r.get("market_implied_flip_probability")) is not None]),
+                       "analytic_brier": _brier([(float(r["analytic_flip_probability"]), bool(r["observed_flip"])) for r in usable if _num(r.get("analytic_flip_probability")) is not None]),
                        "market_calibration_error": abs(market_mean - observed_rate) if market_mean is not None and observed_rate is not None else None,
                        "analytic_calibration_error": abs(analytic_mean - observed_rate) if analytic_mean is not None and observed_rate is not None else None})
     return output
@@ -438,6 +443,232 @@ preliminary conclusion.
             "output": str(output)}
 
 
+def _epoch(value: Any) -> float | None:
+    """Parse an explicit persisted UTC value; never fabricate a timestamp."""
+    numeric = _num(value)
+    if numeric is not None:
+        return numeric
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _mean(values: Iterable[float | None]) -> float | None:
+    clean = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    return statistics.mean(clean) if clean else None
+
+
+def _percentile(values: Iterable[float | None], percentile: float) -> float | None:
+    clean = sorted(float(value) for value in values if value is not None and math.isfinite(float(value)))
+    if not clean:
+        return None
+    index = (len(clean) - 1) * percentile
+    low, high = math.floor(index), math.ceil(index)
+    return clean[low] if low == high else clean[low] + (clean[high] - clean[low]) * (index - low)
+
+
+def _read_shadow_settlements(journal_path: Path, *, regime: str,
+                             allowed_run_ids: set[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Reconstruct settled shadow entries from a read-only journal snapshot."""
+    dedup: dict[str, tuple[int, dict[str, Any]]] = {}
+    audit: list[dict[str, Any]] = []
+    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        rows = conn.execute(
+            "SELECT id, ts, run_id, payload_json FROM order_events "
+            "WHERE event_type = 'SHADOW_SIM_SETTLED' ORDER BY id"
+        )
+        for event_id, event_ts, run_id, raw in rows:
+            if allowed_run_ids is not None and str(run_id) not in allowed_run_ids:
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                audit.append({"event_id": event_id, "status": "EXCLUDED", "exclusion_reason": "invalid_payload_json"})
+                continue
+            slug = str(payload.get("slug") or payload.get("market_slug") or "")
+            if not slug or market_context(slug)["session_regime"] != regime:
+                continue
+            simulation_id = str(payload.get("simulation_id") or f"{slug}:{payload.get('side')}:{payload.get('filled_ts')}")
+            if simulation_id in dedup:
+                audit.append({"event_id": dedup[simulation_id][0], "market_slug": slug, "simulation_id": simulation_id,
+                              "status": "EXCLUDED", "exclusion_reason": "duplicate_settlement_superseded"})
+            dedup[simulation_id] = (int(event_id), {"event_id": int(event_id), "run_id": str(run_id), "event_ts": event_ts,
+                                                     "simulation_id": simulation_id, "market_slug": slug,
+                                                     "side": str(payload.get("side") or "").upper(), "payload": payload})
+    output: list[dict[str, Any]] = []
+    for _, row in dedup.values():
+        payload = row.pop("payload")
+        entry_ts = _epoch(payload.get("filled_ts"))
+        if entry_ts is None:
+            entry_ts = _epoch(payload.get("created_ts"))
+        settlement_ts = _epoch(row["event_ts"])
+        price, qty = _num(payload.get("entry_price")), _num(payload.get("qty"))
+        capital = price * qty if price is not None and qty is not None and price > 0 and qty > 0 else None
+        holding_sec = settlement_ts - entry_ts if entry_ts is not None and settlement_ts is not None else None
+        reason = ("entry_ts_missing" if entry_ts is None else "settlement_ts_missing" if settlement_ts is None else
+                  "invalid_holding_time" if holding_sec is None or holding_sec <= 0 else "CAPITAL_UNKNOWN" if capital is None else None)
+        gross, net = _num(payload.get("simulated_gross_pnl_usdc")), _num(payload.get("simulated_pnl_usdc"))
+        if reason is None and gross is None:
+            reason = "PNL_UNKNOWN"
+        measured = capital_efficiency(capital_committed_usdc=capital, entry_ts=entry_ts,
+                                      exit_ts=settlement_ts, gross_pnl=gross, net_pnl=net) if reason is None else {}
+        capital_minutes = measured.get("capital_minutes")
+        output.append({**row, "entry_ts": entry_ts, "settlement_ts": settlement_ts,
+                       "settlement_ts_source": "SHADOW_SIM_SETTLED_EVENT_TS", "actual_exit_ts": None,
+                       "holding_sec": holding_sec, "holding_min": holding_sec / 60.0 if holding_sec is not None else None,
+                       "capital_committed_usdc": capital, "capital_seconds": capital * holding_sec if capital is not None and holding_sec is not None else None,
+                       "capital_minutes": capital_minutes, "entry_price": price, "qty": qty, "gross_pnl": gross, "net_pnl": net,
+                       "gross_profit_per_dollar_minute": gross / capital_minutes if gross is not None and capital_minutes and capital_minutes > 0 else None,
+                       "net_profit_per_dollar_minute": net / capital_minutes if net is not None and capital_minutes and capital_minutes > 0 else None,
+                       "time_left_at_entry": _num(payload.get("time_left_sec")),
+                       "entry_timing_bin": _entry_timing_bin(_num(payload.get("time_left_sec"))),
+                       "position_outcome": "HELD_TO_SETTLEMENT", "won": payload.get("won"),
+                       "settlement_same_as_entry_side": str(payload.get("outcome") or "").upper() == row["side"],
+                       "status": "USABLE" if reason is None else "EXCLUDED", "exclusion_reason": reason})
+    return output, audit
+
+
+def _journal_event_count_for_regime(conn: sqlite3.Connection, event_type: str, regime: str,
+                                    allowed_run_ids: set[str] | None = None) -> int:
+    """Count only events whose persisted market identity belongs to this cohort."""
+    count = 0
+    for run_id, raw in conn.execute("SELECT run_id, payload_json FROM order_events WHERE event_type = ?", (event_type,)):
+        if allowed_run_ids is not None and str(run_id) not in allowed_run_ids:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        slug = str(payload.get("slug") or payload.get("market_slug") or "")
+        if slug and market_context(slug)["session_regime"] == regime:
+            count += 1
+    return count
+
+
+def _test_dry_run_ids(conn: sqlite3.Connection) -> set[str] | None:
+    """Return the explicit TEST_DRY_RUN cohort, or None for legacy fixtures."""
+    try:
+        return {str(run_id) for run_id, mode, test_mode in conn.execute(
+            "SELECT run_id, mode, test_mode FROM strategy_runs"
+        ) if str(mode or "") == "TEST_DRY_RUN" or bool(test_mode)}
+    except sqlite3.OperationalError:
+        return None
+
+
+def _group_capital_metrics(rows: list[dict[str, Any]], key: str, labels: Iterable[str] | None = None) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row.get(key) or "UNKNOWN")].append(row)
+    for label in labels or ():
+        grouped.setdefault(label, [])
+    output = []
+    for label, selected in grouped.items():
+        wins = [row for row in selected if (_num(row.get("gross_pnl")) or 0) > 0]
+        losses = [row for row in selected if (_num(row.get("gross_pnl")) or 0) < 0]
+        capital_minutes = sum(float(row["capital_minutes"]) for row in selected if row.get("capital_minutes") is not None)
+        gross = sum(float(row["gross_pnl"]) for row in selected if row.get("gross_pnl") is not None)
+        net = [float(row["net_pnl"]) for row in selected if row.get("net_pnl") is not None]
+        output.append({key: label, "N": len(selected), "wins": len(wins), "losses": len(losses),
+                       "win_rate": len(wins) / (len(wins) + len(losses)) if wins or losses else None,
+                       "avg_entry_price": _mean(row.get("entry_price") for row in selected),
+                       "avg_capital_committed": _mean(row.get("capital_committed_usdc") for row in selected),
+                       "avg_holding_min": _mean(row.get("holding_min") for row in selected),
+                       "median_holding_min": _median(row.get("holding_min") for row in selected),
+                       "total_capital_minutes": capital_minutes, "avg_gross_pnl": _mean(row.get("gross_pnl") for row in selected),
+                       "total_gross_pnl": gross, "gross_profit_per_dollar_minute": gross / capital_minutes if capital_minutes else None,
+                       "avg_net_pnl": _mean(net), "total_net_pnl": sum(net) if net else None,
+                       "net_profit_per_dollar_minute": sum(net) / capital_minutes if net and capital_minutes else None})
+    return output
+
+
+def capital_efficiency_analysis(db_path: Path, journal_path: Path, output: Path) -> dict[str, Any]:
+    """Offline P3 accounting validation for the current weekend shadow cohort."""
+    output.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        run_ids = _test_dry_run_ids(conn)
+    records, duplicate_audit = _read_shadow_settlements(journal_path, regime="WEEKEND", allowed_run_ids=run_ids)
+    usable = [row for row in records if row["status"] == "USABLE"]
+    excluded = [row for row in records if row["status"] != "USABLE"] + duplicate_audit
+    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        shadow_entries = _journal_event_count_for_regime(conn, "SHADOW_SIM_ENTRY_FILLED", "WEEKEND", run_ids)
+        live_entries = _journal_event_count_for_regime(conn, "ORDER_FILLED", "WEEKEND", run_ids)
+        stop_events = _journal_event_count_for_regime(conn, "ORDER_TAKER_EXIT_SUBMIT", "WEEKEND", run_ids)
+    cohort_slugs = {row["market_slug"] for row in records}
+    # ResearchStore supplies canonical settlement provenance for every market,
+    # including markets that never produced a shadow fill. Do not disappear
+    # those markets from the availability audit.
+    settlements = [row for row in ResearchStore(db_path).get_settlements()
+                   if market_context(row["market_slug"])["session_regime"] == "WEEKEND"
+                   and (run_ids is None or row["run_id"] in run_ids)]
+    completed_markets = len({row["market_slug"] for row in settlements})
+    completed_markets_with_trade = len({row["market_slug"] for row in settlements if row["market_slug"] in cohort_slugs})
+    bins = _group_capital_metrics(usable, "entry_timing_bin", (">600s", "480–600s", "360–480s", "240–360s", "120–240s", "<120s"))
+    winners = _group_capital_metrics([row for row in usable if (_num(row.get("gross_pnl")) or 0) > 0], "cohort", ("WINNERS",))[0]
+    losers = _group_capital_metrics([row for row in usable if (_num(row.get("gross_pnl")) or 0) < 0], "cohort", ("LOSERS",))[0]
+    winners["cohort"], losers["cohort"] = "WINNERS", "LOSERS"
+    markets = _group_capital_metrics(usable, "market_slug")
+    quality = [
+        {"metric": "completed_research_markets", "usable_N": completed_markets, "missing_N": 0, "excluded_N": 0, "detail": "ResearchStore canonical TEST_DRY_RUN summaries"},
+        {"metric": "completed_markets_with_settled_shadow_trade", "usable_N": completed_markets_with_trade, "missing_N": 0, "excluded_N": 0, "detail": "Completed markets represented in trade capital cohort"},
+        {"metric": "shadow_entry_records", "usable_N": shadow_entries, "missing_N": 0, "excluded_N": 0, "detail": "SHADOW_SIM_ENTRY_FILLED; may be unresolved"},
+        {"metric": "live_recorded_entries", "usable_N": live_entries, "missing_N": 0, "excluded_N": 0, "detail": "ORDER_FILLED; not pooled with simulated entries"},
+        {"metric": "settled_shadow_entries", "usable_N": len(records), "missing_N": 0, "excluded_N": len(duplicate_audit), "detail": "Deduped SHADOW_SIM_SETTLED"},
+        {"metric": "capital_efficiency_usable", "usable_N": len(usable), "missing_N": len(records) - len(usable), "excluded_N": len(excluded), "detail": "positive fill notional and positive holding time required"},
+        {"metric": "stopped_trade_reconstruction", "usable_N": 0, "missing_N": stop_events, "excluded_N": stop_events, "detail": "No durable joined stop-to-finalized-shadow lifecycle"},
+    ]
+    _write_csv(output / "trade_capital_efficiency.csv", usable)
+    _write_csv(output / "entry_timing_bins.csv", bins)
+    _write_csv(output / "winner_loser_comparison.csv", [winners, losers])
+    _write_csv(output / "stopped_trade_capital_time.csv", [])
+    _write_csv(output / "market_capital_efficiency.csv", markets)
+    _write_csv(output / "data_quality.csv", quality + excluded)
+    outliers = sorted(usable, key=lambda row: abs(_num(row.get("gross_profit_per_dollar_minute")) or 0), reverse=True)[:10]
+    _write_csv(output / "outliers.csv", outliers)
+    stake, ppm = [row.get("capital_committed_usdc") for row in usable], [row.get("gross_profit_per_dollar_minute") for row in usable]
+    total_minutes = sum(float(row["capital_minutes"]) for row in usable)
+    total_gross = sum(float(row["gross_pnl"]) for row in usable if row.get("gross_pnl") is not None)
+    bin_lines = "\n".join(f"| {row['entry_timing_bin']} | {row['N']} | {row['wins']} | {row['losses']} | {row['avg_holding_min']} | {row['total_capital_minutes']} | {row['total_gross_pnl']} | {row['gross_profit_per_dollar_minute']} |" for row in bins)
+    (output / "summary.md").write_text(f"""# Preliminary weekend capital-efficiency validation
+
+Cohort: **PRELIMINARY_WEEKEND_CAPITAL_EFFICIENCY**. Offline snapshots only; this validates accounting mechanics, not a live strategy.
+
+## Data availability
+
+- TEST_DRY_RUN runs: {len(run_ids) if run_ids is not None else 'legacy/unspecified'}; completed research markets: {completed_markets}; completed markets with a settled shadow trade: {completed_markets_with_trade}; shadow fills: {shadow_entries}; settled shadow entries: {len(records)}; usable trades: {len(usable)}.
+- Live `ORDER_FILLED` records visible: {live_entries}; they are not pooled with simulated trades.
+- Valid stake, entry timestamp, settlement timestamp, and gross PnL: {len(usable)} each. Excluded: {len(excluded)}; every reason is in `data_quality.csv`.
+- Stopped lifecycle usable: 0. `BANKROLL_UTILIZATION_NOT_MEASURABLE`: no durable bankroll time series.
+
+## Core metrics
+
+- Gross PnL={total_gross}; capital-minutes={total_minutes}; gross PnL/$-minute={total_gross / total_minutes if total_minutes else None}.
+- Actual simulated stake: min={min(stake) if stake else None}, median={_median(stake)}, mean={_mean(stake)}, max={max(stake) if stake else None}.
+- Gross PnL/$-minute: mean={_mean(ppm)}, median={_median(ppm)}, P25={_percentile(ppm, .25)}, P75={_percentile(ppm, .75)}, P90={_percentile(ppm, .90)}.
+
+## Entry timing
+
+| Time left | N | Wins | Losses | Avg hold min | Capital-minutes | Gross PnL | Gross PnL/$-min |
+|---|---:|---:|---:|---:|---:|---:|---:|
+{bin_lines}
+
+## Framework verdict
+
+1. Q1 reconstruction: **YES** — {len(usable)} deduped settled shadow entries have non-imputed time, stake, and PnL.
+2. Q2 capital lock measurable: **YES** — median={_median(row.get('holding_min') for row in usable)} minutes.
+3. Q3/Q4 timing bins: **YES**, but `PRELIMINARY_PATTERN_ONLY`; sparse bins are not recommendations.
+4. Q5 outlier sensitivity: **MIXED** — mean and median plus `outliers.csv` are supplied.
+5. Q6 stop capital release: **NOT_MEASURABLE** — no joined stopped-shadow lifecycle.
+6. Q7 missing fields: **MIXED** — settled shadow accounting works; stop lifecycle and bankroll history are absent.
+7. Q8 future weekday/weekend study: **MIXED** — core reconstruction is ready if weekday emits the same schema; stop and bankroll provenance need work.
+""", encoding="utf-8")
+    return {"mode": "PRELIMINARY_WEEKEND_CAPITAL_EFFICIENCY", "completed_markets": completed_markets,
+            "completed_markets_with_settled_shadow_trade": completed_markets_with_trade,
+            "settled_entries": len(records), "usable_trades": len(usable), "excluded": len(excluded), "output": str(output)}
+
+
 def analyze_selection(db_path: Path, journal_path: Path, output: Path, selected: list[dict[str, Any]]) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     contexts = {row["market_slug"]: row for row in selected}
@@ -542,9 +773,486 @@ magnitude without asserting significance.
             "output": str(output)}
 
 
+def _fixed_bin(value: float | None, bins: tuple[tuple[float, float, str], ...]) -> str | None:
+    if value is None:
+        return None
+    for low, high, label in bins:
+        if low <= value < high:
+            return label
+    return bins[-1][2]
+
+
+def _brier(values: list[tuple[float, bool]]) -> float | None:
+    return _mean([(probability - float(outcome)) ** 2 for probability, outcome in values])
+
+
+def _log_loss(values: list[tuple[float, bool]]) -> float | None:
+    clipped = [(min(.999999, max(.000001, probability)), outcome) for probability, outcome in values]
+    return _mean([-(math.log(probability) if outcome else math.log(1 - probability)) for probability, outcome in clipped])
+
+
+def _event_ts(value: Any) -> float | None:
+    """Parse journal timestamps without depending on local timezone."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_side(payload: dict[str, Any], snapshots: list[dict[str, Any]], instrument_id: str) -> str:
+    candidate = str(payload.get("research_candidate_id") or "")
+    parts = candidate.split("|")
+    if len(parts) >= 2 and parts[-2].upper() in {"UP", "DOWN"}:
+        return parts[-2].upper()
+    for row in snapshots:
+        if str(row.get("up_instrument_id") or "") == str(instrument_id):
+            return "UP"
+        if str(row.get("down_instrument_id") or "") == str(instrument_id):
+            return "DOWN"
+    return "UNKNOWN"
+
+
+def _price_bucket(price: float | None) -> str | None:
+    if price is None or not (.55 <= float(price) < .90):
+        return None
+    return _fixed_bin(price, ((.55,.60,"0.55–0.60"),(.60,.65,"0.60–0.65"),(.65,.70,"0.65–0.70"),
+                               (.70,.75,"0.70–0.75"),(.75,.80,"0.75–0.80"),(.80,.85,"0.80–0.85"),
+                               (.85,.90,"0.85–0.90")))
+
+
+def _sigma_bucket(sigma: float | None) -> str | None:
+    return _fixed_bin(abs(sigma) if sigma is not None else None, ((0,.5,"<0.5σ"),(.5,1,"0.5–1σ"),
+                                                                   (1,2,"1–2σ"),(2,math.inf,">2σ")))
+
+
+def _snapshot_near(rows: list[dict[str, Any]], ts: float, *, max_age_sec: float = 8.0) -> dict[str, Any] | None:
+    candidates = [row for row in rows if ts - max_age_sec <= float(row["snapshot_ts"]) <= ts
+                  and row.get("joint_fresh") is True]
+    return max(candidates, key=lambda row: float(row["snapshot_ts"])) if candidates else None
+
+
+def _journal_fill_entries(journal_path: Path, timelines: dict[str, list[dict[str, Any]]],
+                         sparse_entries: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project BUY fills into persisted logical identities; legacy ambiguity stays explicit."""
+    from bot.research.lifecycle import position_lifecycle_id
+    groups, audit, seen = {}, [], set()
+    sparse = {row["position_lifecycle_id"]: row for row in sparse_entries or [] if row.get("position_lifecycle_id")}
+    query = """SELECT id, ts, run_id, client_order_id, side, price, qty, instrument_id, payload_json
+               FROM order_events WHERE event_type='ORDER_FILLED' AND upper(coalesce(side,''))='BUY' ORDER BY id"""
+    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+        raw_rows = conn.execute(query).fetchall()
+    for event_id, raw_ts, run_id, client_id, _, price, qty, instrument_id, raw_payload in raw_rows:
+        try:
+            payload = json.loads(raw_payload or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("non-object payload")
+        except (TypeError, ValueError):
+            audit.append({"order_event_id": event_id, "status": "EXCLUDED", "reason": "INVALID_PAYLOAD"})
+            continue
+        slug = str(payload.get("market_slug") or payload.get("slug") or "")
+        identity = str(payload.get("position_lifecycle_id") or "")
+        source = "PERSISTED_IDENTITY" if identity else "LEGACY_CLIENT_ORDER_AMBIGUOUS"
+        if not identity and slug and instrument_id and client_id:
+            identity = position_lifecycle_id(market_slug=slug, instrument_id=str(instrument_id), entry_client_order_id=str(client_id))
+        if not identity:
+            audit.append({"order_event_id": event_id, "status": "EXCLUDED", "reason": "MISSING_ENTRY_ID"})
+            continue
+        fill_id = payload.get("fill_event_id") or payload.get("trade_id")
+        duplicate_key = (str(run_id), str(instrument_id), str(fill_id)) if fill_id else (
+            str(run_id), str(client_id), str(raw_ts), price, qty, raw_payload)
+        if duplicate_key in seen:
+            audit.append({"order_event_id": event_id, "status": "EXCLUDED", "reason": "DUPLICATE_FILL_EVENT"})
+            continue
+        seen.add(duplicate_key)
+        price, qty = _num(price), _num(qty)
+        if price is None or qty is None or price <= 0 or qty <= 0:
+            audit.append({"order_event_id": event_id, "status": "EXCLUDED", "reason": "INVALID_FILL"})
+            continue
+        entry = groups.get(identity)
+        if entry is None:
+            canonical = sparse.get(identity, {})
+            entry_ts = _num(canonical.get("entry_ts"))
+            if entry_ts is None:
+                entry_ts = _event_ts(raw_ts)
+            snapshots = [r for r in timelines.get(slug, []) if r.get("run_id") in (None, str(run_id))]
+            anchor = _snapshot_near(snapshots, entry_ts) if entry_ts is not None else None
+            side = str(canonical.get("side") or _entry_side(payload, snapshots, str(instrument_id or ""))).upper()
+            entry = {
+                "position_lifecycle_id": identity, "identity_source": "SPARSE_ENTRY_CONFIRMED" if canonical else source,
+                "market_slug": slug, "run_id": str(run_id),
+                "entry_client_order_id": str(canonical.get("entry_client_order_id") or payload.get("entry_client_order_id") or client_id or ""),
+                "instrument_id": str(instrument_id or ""), "side": side, "entry_ts": entry_ts,
+                "entry_qty": 0.0, "entry_notional": 0.0, "total_buy_qty": 0.0, "total_buy_notional": 0.0,
+                "scale_in_qty": 0.0, "buy_client_order_ids": set(),
+                "entry_anchor_status": "JOINED" if anchor is not None else "MISSING_FRESH_PRIOR_SNAPSHOT_WITHIN_8S",
+                "entry_required_sigma": _num(anchor.get("required_move_sigma")) if anchor else None,
+                "entry_required_bps": _num(anchor.get("required_move_bps")) if anchor else None,
+                "entry_flip_p": 1 - held_side_probability(anchor, side) if anchor and held_side_probability(anchor, side) is not None else None,
+                "entry_market_mid": _num(anchor.get(f"market_mid_{side.lower()}")) if anchor else None,
+                "entry_executable_ask": _num(anchor.get(f"best_ask_{side.lower()}")) if anchor else None,
+                "time_left_at_entry": _num(anchor.get("time_left_sec")) if anchor else None,
+                "status": "USABLE" if anchor is not None and side in {"UP", "DOWN"} and source == "PERSISTED_IDENTITY" else "PARTIAL",
+            }
+            groups[identity] = entry
+        entry["buy_client_order_ids"].add(str(client_id))
+        entry["total_buy_qty"] += qty
+        entry["total_buy_notional"] += price * qty
+        if str(client_id) == entry["entry_client_order_id"]:
+            entry["entry_qty"] += qty
+            entry["entry_notional"] += price * qty
+        else:
+            entry["scale_in_qty"] += qty
+    for entry in groups.values():
+        entry["entry_price"] = entry["entry_notional"] / entry["entry_qty"] if entry["entry_qty"] else None
+        entry["buy_client_order_count"] = len(entry.pop("buy_client_order_ids"))
+    return list(groups.values()), audit
+
+
+def _first_persistent_adverse_repricing(rows: list[dict[str, Any]], *, side: str, entry_mid: float | None, threshold: float) -> float | None:
+    """First two adjacent fresh snapshot observations adverse by ``threshold``.
+
+    This is a deliberately simple research definition, not a trading rule.
+    It needs two observations so a single stale/transient quote does not
+    masquerade as a persistent repricing.
+    """
+    if entry_mid is None:
+        return None
+    previous_adverse = False
+    for row in rows:
+        mid = _num(row.get(f"market_mid_{side.lower()}"))
+        fresh = row.get(f"market_mid_{side.lower()}_fresh") is True
+        adverse = bool(fresh and mid is not None and ((mid <= entry_mid - threshold) if side == "UP" else (mid <= entry_mid - threshold)))
+        if adverse and previous_adverse:
+            return _num(row.get("snapshot_ts"))
+        previous_adverse = adverse
+    return None
+
+
+def position_lifecycle_analysis(
+    db_path: Path, journal_path: Path, output: Path, *, slug: str | None = None,
+    legacy_stop_db: Path | None = None,
+) -> dict[str, Any]:
+    """Reconstruct one offline row per actual opened position.
+
+    Historical rows without the future sparse lifecycle id remain visible as
+    ``PARTIAL`` or ``AMBIGUOUS``.  The function never invents a stop event or
+    rewrites source databases.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    catalog = _catalog(db_path)
+    # Catalog is newest-first; use one final outcome per market while retaining
+    # every run in the selection passed to the common timeline loader.
+    selection = catalog
+    catalog = list({row["market_slug"]: row for row in reversed(catalog)}.values())
+    if slug:
+        catalog = [row for row in catalog if row["market_slug"] == slug]
+    timelines, summaries = _load_selection(db_path, [row for row in selection if row["market_slug"] in {item["market_slug"] for item in catalog}])
+    coverage = {row["market_slug"]: row for row in ResearchStore(db_path).get_market_coverage()}
+    entries, entry_audit = _journal_fill_entries(
+        journal_path, timelines, ResearchStore(db_path).get_research_events(event_type="POSITION_LIFECYCLE_ENTRY", slug=slug),
+    )
+    if slug:
+        entries = [row for row in entries if row["market_slug"] == slug]
+    events_by_type = {name: ResearchStore(db_path).get_research_events(event_type=name, slug=slug) for name in (
+        "POSITION_LIFECYCLE_ENTRY", "STOP_SHADOW_ADVERSE_EPISODE_STARTED", "STOP_SHADOW_CANDIDATE",
+        "STOP_SHADOW_ACTUAL_STOP", "STOP_SHADOW_POST_STOP_SETTLEMENT",
+    )}
+    # Stop-forensics previously used the separate Outcome lead/lag DB.  Read
+    # it only as legacy evidence; new sparse events share ``db_path`` with
+    # synchronized snapshots so no cross-store join is required going forward.
+    legacy_events_by_type: dict[str, list[dict[str, Any]]] = {}
+    if legacy_stop_db is not None and legacy_stop_db.exists() and legacy_stop_db.resolve() != db_path.resolve():
+        legacy_store = ResearchStore(legacy_stop_db)
+        for name in ("STOP_SHADOW_ADVERSE_EPISODE_STARTED", "STOP_SHADOW_CANDIDATE", "STOP_SHADOW_ACTUAL_STOP", "STOP_SHADOW_POST_STOP_SETTLEMENT"):
+            legacy_events_by_type[name] = [{**row, "research_event_source": "LEGACY_OUTCOME_LEAD_LAG_DB"}
+                                           for row in legacy_store.get_research_events(event_type=name, slug=slug)]
+    else:
+        legacy_events_by_type = {}
+    events = [event for rows in events_by_type.values() for event in rows]
+    events.extend(event for rows in legacy_events_by_type.values() for event in rows)
+    for entry in entries:
+        market_rows = [row for row in timelines.get(entry["market_slug"], []) if entry["entry_ts"] is not None and row["snapshot_ts"] >= entry["entry_ts"]]
+        settlement = summaries.get(entry["market_slug"], {})
+        final_side = str(settlement.get("canonical_settlement_side") or "UNKNOWN").upper()
+        features = first_crossings(market_rows, side=entry["side"]) if entry["side"] in {"UP", "DOWN"} else {}
+        sigmas = [abs(_num(row.get("required_move_sigma"))) for row in market_rows if _num(row.get("required_move_sigma")) is not None]
+        probabilities = [1 - held_side_probability(row, entry["side"]) for row in market_rows if held_side_probability(row, entry["side"]) is not None]
+        entry.update(features)
+        entry.update({
+            "min_required_sigma": min(sigmas) if sigmas else None,
+            "min_required_sigma_ts": next((row["snapshot_ts"] for row in market_rows if _num(row.get("required_move_sigma")) is not None and abs(_num(row.get("required_move_sigma"))) == min(sigmas)), None) if sigmas else None,
+            "max_flip_p": max(probabilities) if probabilities else None,
+            "max_flip_p_ts": next((row["snapshot_ts"] for row in market_rows if held_side_probability(row, entry["side"]) is not None and 1 - held_side_probability(row, entry["side"]) == max(probabilities)), None) if probabilities else None,
+            "first_market_adverse_2c_ts": _first_persistent_adverse_repricing(market_rows, side=entry["side"], entry_mid=entry["entry_market_mid"], threshold=.02),
+            "first_market_adverse_5c_ts": _first_persistent_adverse_repricing(market_rows, side=entry["side"], entry_mid=entry["entry_market_mid"], threshold=.05),
+            "first_market_adverse_10c_ts": _first_persistent_adverse_repricing(market_rows, side=entry["side"], entry_mid=entry["entry_market_mid"], threshold=.10),
+            "final_settlement_side": final_side,
+            "entry_won_final_settlement": (entry["side"] == final_side) if final_side in {"UP", "DOWN"} else None,
+            "run_ids": ",".join(coverage.get(entry["market_slug"], {}).get("run_ids", [])),
+            "coverage_quality": coverage.get(entry["market_slug"], {}).get("coverage_quality"),
+            "joint_fresh_pct": 100 * float(coverage.get(entry["market_slug"], {}).get("joint_fresh_rate") or 0),
+            "largest_gap_sec": coverage.get(entry["market_slug"], {}).get("largest_gap_sec"),
+        })
+        exact_events = [e for e in events if e.get("event_type") == "STOP_SHADOW_ACTUAL_STOP" and e.get("position_lifecycle_id") == entry["position_lifecycle_id"]]
+        join_provenance = "EXACT_IDENTITY"
+        if not exact_events:
+            join_provenance = "LEGACY_SLUG_INSTRUMENT_FALLBACK"
+            legacy = [e for e in events if e.get("event_type") == "STOP_SHADOW_ACTUAL_STOP" and not e.get("position_lifecycle_id") and e.get("market_slug") == entry["market_slug"] and str(e.get("instrument_id") or "") == entry["instrument_id"]]
+            same_market_entries = [e for e in entries if e["market_slug"] == entry["market_slug"] and e["instrument_id"] == entry["instrument_id"]]
+            exact_events = legacy if len(same_market_entries) == 1 else []
+            if legacy and not exact_events:
+                entry["stop_join_status"] = "AMBIGUOUS"
+        stop = next((e for e in exact_events if e.get("event_type") == "STOP_SHADOW_ACTUAL_STOP"), None)
+        entry.update({
+            "stop_trigger_ts": _num(stop.get("stop_trigger_ts")) if stop else None,
+            "stop_reason": stop.get("reason") if stop else None,
+            "stop_execution_ts": _num(stop.get("actual_stop_ts")) if stop else None,
+            "stop_execution_price": _num(stop.get("actual_stop_price")) if stop else None,
+            "stop_realized_pnl": _num(stop.get("actual_stop_pnl")) if stop else None,
+            "stop_join_status": entry.get("stop_join_status") or (join_provenance if stop else "UNJOINABLE"),
+            "exit_type": "STOP" if stop else "HELD_OR_NONSTOP_EXIT_UNKNOWN",
+            "exit_ts": _num(stop.get("actual_stop_ts")) if stop else None,
+        })
+    _write_csv(output / "position_lifecycle.csv", entries)
+    _write_csv(output / "entry_audit.csv", entry_audit)
+    source_audit = [
+        {"source": "trade_journal.order_events", "event_type": "ORDER_FILLED_BUY", "count": len(entries),
+         "join_key": "market_slug + instrument_id + entry_client_order_id", "notes": "entry anchor; historical identity may be reconstructed"},
+    ]
+    for event_type, source_rows in events_by_type.items():
+        with_identity = sum(bool(row.get("position_lifecycle_id")) for row in source_rows)
+        source_audit.append({"source": "twap_forward_shadow.lead_lag_decisions", "event_type": event_type,
+                             "count": len(source_rows), "with_position_lifecycle_id": with_identity,
+                             "join_key": "position_lifecycle_id", "notes": "sparse research event"})
+    for event_type, source_rows in legacy_events_by_type.items():
+        source_audit.append({"source": "hyperliquid_lead_lag.lead_lag_decisions", "event_type": event_type,
+                             "count": len(source_rows), "with_position_lifecycle_id": 0,
+                             "join_key": "legacy slug + instrument only", "notes": "legacy cross-store evidence; ambiguous when multiple entries"})
+    _write_csv(output / "event_source_audit.csv", source_audit)
+    quality = [
+        {"metric": "positions_total", "count": len(entries)},
+        {"metric": "positions_with_canonical_entry", "count": sum(bool(r["position_lifecycle_id"]) for r in entries)},
+        {"metric": "positions_with_synchronized_post_entry_snapshots", "count": sum(r["entry_anchor_status"] == "JOINED" for r in entries)},
+        {"metric": "positions_with_settlement", "count": sum(r["final_settlement_side"] in {"UP", "DOWN"} for r in entries)},
+        {"metric": "positions_with_stop_trigger", "count": sum(r["stop_trigger_ts"] is not None for r in entries)},
+        {"metric": "positions_with_stop_execution", "count": sum(r["stop_execution_ts"] is not None for r in entries)},
+        {"metric": "complete_entry_to_settlement", "count": sum(r["entry_anchor_status"] == "JOINED" and r["final_settlement_side"] in {"UP", "DOWN"} for r in entries)},
+        {"metric": "complete_entry_stop_settlement", "count": sum(r["stop_execution_ts"] is not None and r["final_settlement_side"] in {"UP", "DOWN"} for r in entries)},
+    ]
+    _write_csv(output / "lifecycle_data_quality.csv", quality)
+    if slug:
+        lines = [f"# Position lifecycle timeline — {slug}", "", "Offline reconstruction only; unavailable values are not imputed.", ""]
+        for row in entries:
+            lines.append(f"## {row['position_lifecycle_id']}")
+            lines.append(f"T+00 ENTRY {row['side']} @ {row['entry_price']} qty={row['entry_qty']}")
+            base = row.get("entry_ts")
+            for label, key in (("BTC5 adverse", "first_adverse_btc5_ts"), ("BTC10 adverse", "first_adverse_btc10_ts"),
+                               ("BTC30 adverse", "first_adverse_btc30_ts"), ("sigma 1.5 crossed", "sigma_cross_1_5_ts"),
+                               ("sigma 1.0 crossed", "sigma_cross_1_ts"), ("flip-p 15% crossed", "flip_p_15_ts"),
+                               ("market adverse 5c persistent", "first_market_adverse_5c_ts"),
+                               ("settlement state flipped", "first_settlement_state_flip_ts"),
+                               ("stop execution", "stop_execution_ts")):
+                event_time = _num(row.get(key))
+                if event_time is not None and base is not None:
+                    lines.append(f"T+{event_time - base:.1f}s {label}")
+            if row.get("stop_execution_ts") is not None:
+                lines.append(f"STOP {row.get('stop_reason')} @ {row.get('stop_execution_price')} pnl={row.get('stop_realized_pnl')}")
+            lines.append(f"FINAL {row.get('final_settlement_side')} (entry_won={row.get('entry_won_final_settlement')})")
+            lines.append("")
+        (output / "position_timeline.md").write_text("\n".join(lines), encoding="utf-8")
+    return {"positions": len(entries), "exact_stop_joins": sum(r["stop_join_status"] == "EXACT_IDENTITY" for r in entries), "output": str(output)}
+
+
+def entry_stop_status_analysis(db_path: Path, journal_path: Path, output: Path) -> dict[str, Any]:
+    """Canonical offline entry/stop status report using persisted evidence only.
+
+    Precision analyses are restricted to completed settlements with a joined
+    fresh snapshot at the requested checkpoint. Older settlement-only rows
+    remain visible in the audit, never silently pooled into calibration.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    catalog = _catalog(db_path)
+    # Catalog is newest-first; use one final outcome per market while retaining
+    # every run in the selection passed to the common timeline loader.
+    selection = catalog
+    catalog = list({row["market_slug"]: row for row in reversed(catalog)}.values())
+    store = ResearchStore(db_path)
+    coverage = {row["market_slug"]: row for row in store.get_market_coverage()}
+    timelines, summaries = _load_selection(db_path, [row for row in selection if row["market_slug"] in {item["market_slug"] for item in catalog}])
+    contexts = {row["market_slug"]: row for row in catalog}
+    all_rows = {slug: forensic._joint_rows(rows) for slug, rows in timelines.items()}
+    regimes = ("WEEKEND", "WEEKDAY")
+    audit: list[dict[str, Any]] = []
+    for regime in regimes:
+        completed = [r for r in catalog if r["session_regime"] == regime]
+        synchronized = [r for r in completed if all_rows.get(r["market_slug"])]
+        rows = [row for item in synchronized for row in all_rows[item["market_slug"]]]
+        quality = [coverage.get(r["market_slug"], {}) for r in completed]
+        def count(predicate): return len({r["market_slug"] for r in rows if predicate(r)})
+        audit.append({
+            "session_regime": regime, "completed_settlement_markets": len(completed),
+            "comparable_synchronized_markets": len(synchronized),
+            "fresh_p_ex_markets": count(lambda r: r.get("p_ex_fresh") is True),
+            "fresh_market_mid_markets": count(lambda r: r.get("market_mid_fresh") is True),
+            "btc_5s_markets": count(lambda r: _num(r.get("btc_return_5s_bps")) is not None),
+            "btc_10s_markets": count(lambda r: _num(r.get("btc_return_10s_bps")) is not None),
+            "btc_30s_markets": count(lambda r: _num(r.get("btc_return_30s_bps")) is not None),
+            "required_move_sigma_markets": count(lambda r: _num(r.get("required_move_sigma")) is not None),
+            "analytic_probability_markets": count(lambda r: _num(r.get("p_up_ex_market")) is not None),
+            "empirical_probability_markets": count(lambda r: _num(r.get("p_up_empirical")) is not None),
+            "median_coverage_ratio": _median([_num(r.get("coverage_ratio")) for r in quality]),
+            "median_largest_gap_sec": _median([_num(r.get("largest_gap_sec")) for r in quality]),
+            "median_joint_fresh_pct": _median([100 * (_num(r.get("joint_fresh_rate")) or 0) for r in quality]),
+            "FULL": sum(r.get("coverage_quality") == "FULL" for r in quality),
+            "GOOD": sum(r.get("coverage_quality") == "GOOD" for r in quality),
+            "PARTIAL": sum(r.get("coverage_quality") == "PARTIAL" for r in quality),
+            "INTERRUPTED": sum(r.get("coverage_quality") == "INTERRUPTED" for r in quality),
+            "UNUSABLE": sum(r.get("coverage_quality") == "UNUSABLE" for r in quality),
+        })
+    _write_csv(output / "dataset_audit.csv", audit)
+
+    checkpoints = (600, 480, 360, 300, 240, 180, 120, 90, 60, 30, 15, 5)
+    checkpoint_rows: list[dict[str, Any]] = []
+    for item in catalog:
+        slug, regime = item["market_slug"], item["session_regime"]
+        settlement = str(summaries.get(slug, {}).get("canonical_settlement_side") or "")
+        if settlement not in {"UP", "DOWN"}:
+            continue
+        for checkpoint in checkpoints:
+            candidates = [r for r in all_rows.get(slug, []) if _num(r.get("time_left_sec")) is not None]
+            if not candidates:
+                continue
+            row = min(candidates, key=lambda r: abs(float(r["time_left_sec"]) - checkpoint))
+            if abs(float(row["time_left_sec"]) - checkpoint) > 8:
+                continue
+            leader = str(row.get("settlement_state_side") or "")
+            up_mid = _num(row.get("up_mid"))
+            p_up = _num(row.get("p_up_ex_market")) if row.get("p_ex_fresh") is True else None
+            market_leader = "UP" if up_mid is not None and up_mid >= .5 else "DOWN" if up_mid is not None else ""
+            pex_leader = "UP" if p_up is not None and p_up >= .5 else "DOWN" if p_up is not None else ""
+            def opposite_prob(prob, side): return (1 - prob) if prob is not None and side == "UP" else prob if prob is not None else None
+            checkpoint_rows.append({"market_slug": slug, "session_regime": regime, "checkpoint_sec": checkpoint,
+                "settlement_side": settlement, "settlement_state_leader": leader,
+                "market_leader": market_leader, "p_ex_leader": pex_leader,
+                "leader_up": leader == "UP", "leader_down": leader == "DOWN",
+                "eventual_flip": leader in {"UP", "DOWN"} and leader != settlement,
+                "market_implied_flip_probability": opposite_prob(up_mid, leader),
+                "analytic_flip_probability": opposite_prob(p_up, leader),
+                "empirical_flip_probability": None,
+                "required_move_sigma": _num(row.get("required_move_sigma")),
+                "required_move_bps": abs(_num(row.get("required_move_bps"))) if _num(row.get("required_move_bps")) is not None else None,
+            })
+    summary_rows: list[dict[str, Any]] = []
+    calibration_rows: list[dict[str, Any]] = []
+    for regime in regimes:
+        for checkpoint in checkpoints:
+            selected = [r for r in checkpoint_rows if r["session_regime"] == regime and r["checkpoint_sec"] == checkpoint and r["settlement_state_leader"] in {"UP", "DOWN"}]
+            summary_rows.append({"session_regime": regime, "checkpoint_sec": checkpoint, "total_eligible": len([r for r in checkpoint_rows if r["session_regime"] == regime and r["checkpoint_sec"] == checkpoint]), "usable_N": len(selected), "leader_UP": sum(r["leader_up"] for r in selected), "leader_DOWN": sum(r["leader_down"] for r in selected), "eventual_flips": sum(r["eventual_flip"] for r in selected), "observed_flip_rate": _mean([r["eventual_flip"] for r in selected]), "mean_market_implied_flip_probability": _mean([r["market_implied_flip_probability"] for r in selected]), "mean_analytic_flip_probability": _mean([r["analytic_flip_probability"] for r in selected]), "mean_empirical_flip_probability": None})
+            for name, field in (("MARKET", "market_implied_flip_probability"), ("ANALYTIC", "analytic_flip_probability"), ("EMPIRICAL", "empirical_flip_probability")):
+                pairs = [(float(r[field]), bool(r["eventual_flip"])) for r in selected if _num(r.get(field)) is not None]
+                calibration_rows.append({"session_regime": regime, "checkpoint_sec": checkpoint, "model": name, "total_eligible": len(selected), "usable_N": len(pairs), "brier": _brier(pairs), "log_loss": _log_loss(pairs), "mean_predicted_flip_probability": _mean([p for p, _ in pairs]), "observed_flip_rate": _mean([y for _, y in pairs]), "calibration_bias": (_mean([p for p, _ in pairs]) - _mean([y for _, y in pairs])) if pairs else None})
+    _write_csv(output / "flip_probability_by_checkpoint.csv", summary_rows)
+    _write_csv(output / "calibration_by_checkpoint.csv", calibration_rows)
+    calibration_bins: list[dict[str, Any]] = []
+    probability_bins = ((0,.05,"0–5%"),(.05,.10,"5–10%"),(.10,.20,"10–20%"),(.20,.30,"20–30%"),(.30,.50,"30–50%"),(.50,math.inf,">50%"))
+    for regime in regimes:
+        for checkpoint in checkpoints:
+            selected=[r for r in checkpoint_rows if r["session_regime"]==regime and r["checkpoint_sec"]==checkpoint]
+            for model, field in (("MARKET","market_implied_flip_probability"),("ANALYTIC","analytic_flip_probability"),("EMPIRICAL","empirical_flip_probability")):
+                for low, high, label in probability_bins:
+                    chosen=[r for r in selected if (p:=_num(r.get(field))) is not None and low <= p < high]
+                    calibration_bins.append({"session_regime":regime,"checkpoint_sec":checkpoint,"model":model,"bin":label,"total_eligible":len(selected),"usable_N":len(chosen),"mean_predicted":_mean([r[field] for r in chosen]),"observed_flip_rate":_mean([r["eventual_flip"] for r in chosen])})
+    _write_csv(output / "calibration_bins.csv", calibration_bins)
+
+    sigma_bins = ((-math.inf,.5,"<0.5σ"),(.5,1,"0.5–1σ"),(1,2,"1–2σ"),(2,3,"2–3σ"),(3,5,"3–5σ"),(5,math.inf,">5σ"))
+    bps_bins = ((0,2,"<2bps"),(2,5,"2–5bps"),(5,10,"5–10bps"),(10,20,"10–20bps"),(20,math.inf,">20bps"))
+    def grouped_flips(bins, field):
+        output_rows=[]
+        for regime in regimes:
+            base=[r for r in checkpoint_rows if r["session_regime"] == regime and r["checkpoint_sec"] == 300 and r["settlement_state_leader"] in {"UP","DOWN"}]
+            for low, high, label in bins:
+                chosen=[r for r in base if (value:=_num(r.get(field))) is not None and low <= value < high]
+                output_rows.append({"session_regime":regime, "bin":label, "total_eligible":len(base), "usable_N":len(chosen), "eventual_flips":sum(r["eventual_flip"] for r in chosen), "flip_rate":_mean([r["eventual_flip"] for r in chosen]), "mean_market_implied_flip_probability":_mean([r["market_implied_flip_probability"] for r in chosen]), "mean_analytic_flip_probability":_mean([r["analytic_flip_probability"] for r in chosen])})
+        return output_rows
+    sigma_rows, bps_rows = grouped_flips(sigma_bins,"required_move_sigma"), grouped_flips(bps_bins,"required_move_bps")
+    _write_csv(output / "flip_rate_by_sigma.csv", sigma_rows); _write_csv(output / "flip_rate_by_bps.csv", bps_rows)
+
+    entries: list[dict[str, Any]] = []
+    shadow_records = [record for regime in regimes
+                      for record in _read_shadow_settlements(journal_path, regime=regime)[0]]
+    for record in shadow_records:
+        slug, side = record["market_slug"], record["side"]
+        if slug not in contexts or side not in {"UP", "DOWN"} or record["status"] != "USABLE":
+            continue
+        ts = record["entry_ts"]
+        nearest = _snapshot_near(all_rows.get(slug, []), ts)
+        p_side = _num(nearest.get(f"p_{side.lower()}_ex_market")) if nearest and nearest.get("p_ex_fresh") is True else None
+        ask = _num(nearest.get(f"best_ask_{side.lower()}")) if nearest and nearest.get(f"market_mid_{side.lower()}_fresh") is True else None
+        edge = p_side - ask if p_side is not None and ask is not None else None
+        classification = "UNVERIFIED_DUE_TO_DATA" if edge is None else "VERIFIED_EX_MARKET_EDGE" if edge > 0 else "MARKET_FOLLOWING"
+        entries.append({"market_slug": slug, "session_regime": contexts[slug]["session_regime"],
+            "side": side, "won": record["won"], "gross_pnl": record["gross_pnl"],
+            "entry_price": record["entry_price"], "time_left_sec": record["time_left_at_entry"],
+            "holding_minutes": record["holding_min"], "capital_committed": record["capital_committed_usdc"],
+            "required_move_sigma": _num(nearest.get("required_move_sigma")) if nearest else None,
+            "analytic_flip_probability": 1 - p_side if p_side is not None else None,
+            "market_implied_probability": _num(nearest.get(f"market_mid_{side.lower()}")) if nearest else None,
+            "analytic_edge_vs_ask": edge, "classification": classification,
+            **{f"btc_{horizon}s_bps": _num(nearest.get(f"btc_return_{horizon}s_bps")) if nearest else None for horizon in (5, 10, 30)}})
+    def entry_summary(selected, label):
+        pnls=[r["gross_pnl"] for r in selected if r["gross_pnl"] is not None]; winners=[p for p in pnls if p>0]; losers=[p for p in pnls if p<0]
+        capital_minutes=sum((r["capital_committed"] or 0)*(r["holding_minutes"] or 0) for r in selected)
+        return {"group":label,"total_eligible":len(selected),"usable_N":len(pnls),"wins":len(winners),"losses":len(losers),"win_rate":_mean([r["won"] for r in selected]),"gross_pnl":sum(pnls),"avg_pnl":_mean(pnls),"median_pnl":_median(pnls),"avg_winner":_mean(winners),"avg_loser":_mean(losers),"profit_factor":sum(winners)/abs(sum(losers)) if losers else None,"capital_minutes":capital_minutes,"pnl_per_dollar_minute":sum(pnls)/capital_minutes if capital_minutes else None}
+    entry_outcomes=[]; timing=[]; capital=[]; edge_rows=[]
+    timing_labels=(">600s","480–600s","360–480s","240–360s","120–240s","<120s")
+    for regime in regimes:
+        chosen=[r for r in entries if r["session_regime"]==regime]
+        entry_outcomes.append(entry_summary(chosen,regime)); capital.append(entry_summary(chosen,regime))
+        for label in timing_labels:
+            timing.append(entry_summary([r for r in chosen if _entry_timing_bin(r["time_left_sec"])==label],f"{regime}:{label}"))
+        for label, group in (("VERIFIED_EX_MARKET_EDGE",[r for r in chosen if r["classification"]=="VERIFIED_EX_MARKET_EDGE"]),("MARKET_FOLLOWING",[r for r in chosen if r["classification"]=="MARKET_FOLLOWING"]),("UNVERIFIED_DUE_TO_DATA",[r for r in chosen if r["classification"]=="UNVERIFIED_DUE_TO_DATA"])):
+            edge_rows.append({**entry_summary(group,f"{regime}:{label}"),"classification":label})
+    _write_csv(output / "entry_outcomes.csv", entry_outcomes); _write_csv(output / "entry_timing.csv", timing); _write_csv(output / "capital_efficiency.csv", capital); _write_csv(output / "entry_edge_vs_ask.csv", edge_rows)
+    losses=sorted([r for r in entries if (r.get("gross_pnl") or 0)<0], key=lambda r:r["gross_pnl"])
+    tail=losses[:max(1, math.ceil(len(losses)*.25))] if losses else []
+    tail_rows=[entry_summary(losses,"ALL_LOSERS"),entry_summary(tail,"WORST_25_PERCENT_LOSSES")]
+    _write_csv(output / "tail_loss_analysis.csv", tail_rows)
+    # P2 deliberately uses fixed, pre-declared bins.  These are settled
+    # shadow entries only; they are not silently mixed with live fills.
+    same_price_sigma = []
+    for regime in regimes:
+        chosen = [row for row in entries if row["session_regime"] == regime]
+        for price_label in ("0.55–0.60", "0.60–0.65", "0.65–0.70", "0.70–0.75", "0.75–0.80", "0.80–0.85", "0.85–0.90"):
+            for sigma_label in ("<0.5σ", "0.5–1σ", "1–2σ", ">2σ"):
+                group = [row for row in chosen if _price_bucket(row.get("entry_price")) == price_label and _sigma_bucket(row.get("required_move_sigma")) == sigma_label]
+                pnls = [row["gross_pnl"] for row in group if row.get("gross_pnl") is not None]
+                same_price_sigma.append({
+                    "session_regime": regime, "source": "SETTLED_SHADOW_SIM_ONLY",
+                    "price_bucket": price_label, "required_move_sigma_bucket": sigma_label,
+                    "N": len(group), "wins": sum(bool(row.get("won")) for row in group),
+                    "losses": sum(not bool(row.get("won")) for row in group),
+                    "win_rate": _mean([bool(row.get("won")) for row in group]),
+                    "flip_rate": _mean([not bool(row.get("won")) for row in group]),
+                    "gross_pnl": sum(pnls) if pnls else None, "avg_pnl": _mean(pnls),
+                })
+    _write_csv(output / "same_price_structural_risk.csv", same_price_sigma)
+    # Preserve explicit missingness: this command does not fabricate lifecycle
+    # or lead/lag rows.  The dedicated stop-lifecycle command emits them only
+    # when a canonical join exists.
+    placeholders = {"true_false_reversal.csv": [], "actual_flip_lead_lag.csv": [], "pex_market_lead_lag.csv": [], "btc_fast_warning.csv": [], "stop_timing.csv": [{"status":"SEE_STOP_LIFECYCLE_COMMAND","reason":"canonical sparse lifecycle joins are reported separately"}], "structural_stop_thresholds.csv": [], "hour_of_day.csv": [], "regime_comparison.csv": [], "predictive_power_matrix.csv": []}
+    for filename, rows in placeholders.items(): _write_csv(output / filename, rows)
+    lines = ["# Canonical entry + stop-loss research status", "", "Offline-only; no live authority changed.", "", "## Dataset audit"]
+    for row in audit: lines.append(f"- {row['session_regime']}: completed={row['completed_settlement_markets']}; synchronized={row['comparable_synchronized_markets']}; median coverage={row['median_coverage_ratio']}; median largest gap={row['median_largest_gap_sec']}.")
+    lines += ["", "## Precision-analysis scope", "Only joined-fresh checkpoint rows are used for flip/calibration tables. Entry, stop-lifecycle and capital fields are retained as NOT_MEASURABLE in this first canonical pass when a durable same-timestamp join is absent; no values are imputed."]
+    (output / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"completed_markets": len(catalog), "weekend_completed": sum(r["session_regime"] == "WEEKEND" for r in catalog), "weekday_completed": sum(r["session_regime"] == "WEEKDAY" for r in catalog), "synchronized_markets": sum(bool(all_rows.get(r["market_slug"])) for r in catalog), "checkpoint_rows": len(checkpoint_rows), "output": str(output)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("latest", "run", "market", "compare-regimes", "preliminary-regimes"))
+    parser.add_argument("command", choices=("latest", "run", "market", "compare-regimes", "preliminary-regimes", "capital-efficiency", "integrity", "provenance", "entry-stop-status", "stop-lifecycle"))
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -552,6 +1260,8 @@ def main() -> None:
     parser.add_argument("--regime", choices=("weekday", "weekend"))
     parser.add_argument("--run-id")
     parser.add_argument("--slug")
+    parser.add_argument("--legacy-stop-db", type=Path,
+                        help="Optional read-only legacy Outcome stop-forensics DB; not scanned by default.")
     args = parser.parse_args()
     catalog = _catalog(args.db)
     if args.command == "run" and not args.run_id:
@@ -560,6 +1270,33 @@ def main() -> None:
         parser.error("market requires --slug")
     if args.command == "preliminary-regimes":
         print(json.dumps(preliminary_regime_comparison(args.db, args.journal, args.output), indent=2, sort_keys=True))
+        return
+    if args.command == "capital-efficiency":
+        if args.db == DEFAULT_DB or args.journal == DEFAULT_JOURNAL:
+            parser.error(
+                "capital-efficiency requires explicit offline --db and --journal SQLite snapshots; "
+                "do not analyze an actively written database directly"
+            )
+        output = args.output / "capital_efficiency" / "preliminary_weekend"
+        print(json.dumps(capital_efficiency_analysis(args.db, args.journal, output), indent=2, sort_keys=True))
+        return
+    if args.command == "integrity":
+        result = ResearchStore(args.db).integrity()
+        result["run_provenance"] = ResearchStore(args.db).get_run_provenance(args.journal)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+    if args.command == "provenance":
+        print(json.dumps(ResearchStore(args.db).get_run_provenance(args.journal), indent=2, sort_keys=True))
+        return
+    if args.command == "entry-stop-status":
+        output = args.output / "entry_stop_status"
+        print(json.dumps(entry_stop_status_analysis(args.db, args.journal, output), indent=2, sort_keys=True))
+        return
+    if args.command == "stop-lifecycle":
+        output = args.output / "stop_lifecycle"
+        print(json.dumps(position_lifecycle_analysis(
+            args.db, args.journal, output, slug=args.slug, legacy_stop_db=args.legacy_stop_db,
+        ), indent=2, sort_keys=True))
         return
     limit = None if args.command == "compare-regimes" else args.markets
     selected = select_catalog(catalog, markets=limit, regime=args.regime, run_id=args.run_id, slug=args.slug)

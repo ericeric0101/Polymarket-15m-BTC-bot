@@ -3,6 +3,7 @@ import sqlite3
 import time
 
 from monitoring.lead_lag_db import LeadLagDB
+from bot.research.provenance import RESEARCH_SCHEMA_VERSION
 from scripts.archive_lead_lag_research import apply_retention
 from scripts.hyperliquid_outcome_lead_lag_report import load_snapshots
 from scripts.outcome_lead_lag_event_report import load_quality_gated_markouts, summarize
@@ -19,7 +20,7 @@ def test_lead_lag_db_batches_raw_snapshots_and_flushes_on_stop(tmp_path):
         run_id="run-a", polymarket_slug="btc-a", hyperliquid_market_id=1313,
         observed_ts=105.25, payload={"up_mid": 0.51},
     )
-    db.stop()
+    assert db.stop() is True
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
@@ -28,7 +29,7 @@ def test_lead_lag_db_batches_raw_snapshots_and_flushes_on_stop(tmp_path):
     assert [(row[0], row[1], row[2], row[3]) for row in rows] == [
         ("run-a", "btc-a", 1313, 100250), ("run-a", "btc-a", 1313, 105250),
     ]
-    assert json.loads(rows[0][4]) == {"up_mid": 0.5}
+    assert json.loads(rows[0][4]) == {"up_mid": 0.5, "research_schema_version": RESEARCH_SCHEMA_VERSION}
 
 
 def test_report_loads_only_quality_gated_rows_from_dedicated_db(tmp_path):
@@ -68,7 +69,9 @@ def test_lead_lag_db_persists_compact_reference_decision_and_latency(tmp_path):
     db.stop()
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT count(*) FROM reference_1s").fetchone()[0] == 1
-        assert conn.execute("SELECT payload_json FROM lead_lag_decisions").fetchone()[0] == '{"state": "observe"}'
+        assert json.loads(conn.execute("SELECT payload_json FROM lead_lag_decisions").fetchone()[0]) == {
+            "state": "observe", "research_schema_version": RESEARCH_SCHEMA_VERSION,
+        }
         assert conn.execute("SELECT elapsed_ns FROM latency_spans").fetchone()[0] == 150
 
 
@@ -105,10 +108,9 @@ def test_writer_explicitly_closes_each_batch_connection(tmp_path, monkeypatch):
             closed.append(True)
 
     monkeypatch.setattr(db, "_connect", Connection)
-    db.enqueue_reference_1s(
-        run_id="r", slug="s", market_id=None, bucket_epoch_ms=1_000,
-        source="hyperliquid_btc_bbo", price_cents=7_700_000, received_epoch_ns=1_000_000_000,
-    )
+    # Simulate work accepted before terminal stop; the public enqueue API
+    # intentionally rejects new work after stop.
+    db._queue.put_nowait(("reference", ("r", "s", -1, 1_000, "hyperliquid_btc_bbo", 7_700_000, 1_000_000_000)))
     db._writer()
 
     assert closed == [True]

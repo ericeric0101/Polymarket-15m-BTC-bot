@@ -1309,6 +1309,7 @@ class IntegratedBTCStrategy(
                         best_bid=best_bid, best_bid_size=None, time_left_sec=float(time_left_sec or 0.0),
                         twap_features=twap_features,
                         bid_levels=bid_levels,
+                        position_lifecycle_id=entry_state.get("position_lifecycle_id"),
                     )
             except Exception as exc:
                 logger.debug(f"Stop forensics shadow observation failed: {exc}")
@@ -1601,21 +1602,43 @@ class IntegratedBTCStrategy(
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
 
     def _init_live_prom_metrics(self) -> None:
-        """Initialize Prometheus gauges/counters for live trading metrics."""
+        """Run-local position-close metrics; never canonical session/month PnL."""
+        if getattr(self, "_prom_live_metrics_ok", False):
+            return
         try:
-            from prometheus_client import Gauge, Counter
-            self._prom_live_pnl = Gauge('trading_live_realized_pnl', 'Cumulative realized PnL from live trades (USDC)')
-            self._prom_live_trades = Counter('trading_live_trades_total', 'Total live trades (position round-trips)')
-            self._prom_live_wins = Counter('trading_live_winning_trades', 'Live winning trades')
-            self._prom_live_losses = Counter('trading_live_losing_trades', 'Live losing trades')
-            self._prom_live_win_rate = Gauge('trading_live_win_rate', 'Live win rate percentage')
-            self._prom_live_open_pos = Gauge('trading_live_open_positions', 'Number of open positions')
-            self._prom_live_inventory = Gauge('trading_live_inventory_shares', 'Current inventory in shares')
+            from prometheus_client import Gauge, Counter, REGISTRY
+
+            def collector(name, factory):
+                existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+                if existing is not None:
+                    return existing
+                try:
+                    return factory()
+                except ValueError:
+                    # A simultaneous strategy initialization may win registration.
+                    existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+                    if existing is None:
+                        raise
+                    return existing
+
+            scope = str(getattr(self, "run_id", None) or f"instance-{id(self)}")
+            def metric(name, description, kind=Gauge):
+                return collector(name, lambda: kind(name, description, ["strategy_run_id", "strategy_instance"], registry=REGISTRY)).labels(scope, str(id(self)))
+
+            self._prom_live_pnl = metric("trading_position_close_realized_pnl_usdc", "Position-close PnL in this strategy run; excludes canonical settlement/session/month accounting")
+            self._prom_live_trades = metric("trading_position_close_trades", "Position closes in this strategy run", Counter)
+            self._prom_live_wins = metric("trading_position_close_wins", "Profitable position closes in this strategy run", Counter)
+            self._prom_live_losses = metric("trading_position_close_losses", "Non-profitable position closes in this strategy run", Counter)
+            self._prom_live_win_rate = metric("trading_position_close_win_rate", "Position-close win rate percentage in this strategy run")
+            self._prom_live_open_pos = metric("trading_live_open_positions", "Current open positions in this strategy run")
+            self._prom_live_inventory = metric("trading_live_inventory_shares", "Current inventory in this strategy run")
             self._live_cumulative_pnl = 0.0
             self._live_total_trades = 0
             self._live_total_wins = 0
+            self._prom_live_pnl.set(0)
+            self._prom_live_win_rate.set(0)
             self._prom_live_metrics_ok = True
-            logger.info("✓ Live Prometheus trading metrics initialized")
+            logger.info("Position-close Prometheus metrics initialized (strategy-run scope)")
         except Exception as e:
             logger.debug(f"Failed to init live prom metrics: {e}")
             self._prom_live_metrics_ok = False
@@ -1639,7 +1662,7 @@ class IntegratedBTCStrategy(
             self._prom_live_win_rate.set(win_rate)
 
             logger.info(
-                f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
+                f"📊 Position-close Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
                 f"cum_pnl={self._live_cumulative_pnl:+.4f} win_rate={win_rate:.0f}%"
             )
             if self.dashboard_state is not None:
@@ -3834,6 +3857,21 @@ class IntegratedBTCStrategy(
         self._recover_market_strike_from_trade_db_on_startup()
         self._run_startup_execution_calibration()
 
+        run_manifest = None
+        try:
+            from bot.research.provenance import build_run_manifest
+            run_manifest = build_run_manifest(
+                run_id=self.run_id,
+                config=getattr(self, "app_config", None),
+                mode="TEST_DRY_RUN" if self._is_dry_run_mode() else "LIVE",
+                test_mode=self.test_mode,
+                maker_mode=self.maker_mode,
+                trade_journal_schema_version=getattr(getattr(self, "trade_db", None), "SCHEMA_VERSION", None),
+            )
+        except Exception as exc:
+            # Reproducibility metadata is optional; it must never affect startup
+            # or the live authority boundary.
+            logger.warning(f"Run provenance manifest unavailable: {type(exc).__name__}")
         log_strategy_run_start(
             trade_db=self.trade_db,
             run_id=self.run_id,
@@ -3844,6 +3882,7 @@ class IntegratedBTCStrategy(
             selected_slug=self.selected_slug,
             maker_quote_sides=self.maker_quote_sides,
             maker_quote_size_usdc=self.maker_quote_size_usdc,
+            run_manifest=run_manifest,
         )
         self.hyperliquid_outcome_observer.start()
         self._db_strategy_event(
@@ -4589,6 +4628,10 @@ class IntegratedBTCStrategy(
             reasons.append("no_instrument")
         if now_ts < float(self.regime_guard_conservative_until_ts):
             reasons.append(f"regime_guard_{int(self.regime_guard_conservative_until_ts - now_ts)}s")
+        pnl_guard = getattr(self, "session_buy_guard_decision", None)
+        pnl_decision = pnl_guard(now_ts) if callable(pnl_guard) else None
+        if pnl_decision is not None and not pnl_decision.allowed:
+            reasons.append(pnl_decision.reason)
         current_slug = str(self.current_market_slug or "")
         market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
         if (
@@ -4661,6 +4704,56 @@ class IntegratedBTCStrategy(
             except Exception as outcome_status_error:
                 logger.debug(f"Outcome WebSocket status snapshot skipped: {outcome_status_error}")
 
+        pnl_target_txt = (
+            f"{pnl_decision.normalized_target_usdc:.2f}"
+            if pnl_decision is not None and pnl_decision.normalized_target_usdc is not None else "n/a"
+        )
+        pnl_dd_limit_txt = (
+            f"{pnl_decision.current_allowed_drawdown_usdc:.2f}"
+            if pnl_decision is not None and pnl_decision.current_allowed_drawdown_usdc is not None else "n/a"
+        )
+        monthly_status = getattr(self, "_monthly_pnl_status", None)
+        monthly_status_txt = ""
+        if pnl_decision is not None and pnl_decision.monthly_target_usdc is not None:
+            if isinstance(monthly_status, dict):
+                monthly_value = monthly_status.get("realized_pnl_usdc")
+                monthly_progress = monthly_status.get("progress_pct")
+                monthly_age = max(0.0, now_ts - float(monthly_status.get("updated_ts") or now_ts))
+                monthly_status_txt = (
+                    f" pnl_month={'unavailable' if monthly_value is None else f'{monthly_value:+.2f}'}"
+                    f"/{pnl_decision.monthly_target_usdc:.2f}"
+                    f" pnl_month_progress={'n/a' if monthly_progress is None else f'{monthly_progress:.1f}%'}"
+                    f" pnl_month_age={monthly_age:.0f}s"
+                )
+            else:
+                monthly_status_txt = f" pnl_month=unavailable/{pnl_decision.monthly_target_usdc:.2f}"
+        pnl_status = (
+            f" pnl_session={pnl_decision.realized_pnl_usdc:+.2f}"
+            f" pnl_target={pnl_target_txt}"
+            f" pnl_guard_mode={pnl_decision.mode}"
+            f" pnl_hwm={pnl_decision.realized_high_water_usdc:+.2f}"
+            f" pnl_dd={pnl_decision.drawdown_from_high_usdc:.2f}"
+            f" pnl_dd_limit={pnl_dd_limit_txt}"
+            f" pnl_guard={pnl_decision.state}"
+            f" buy_guard={'ALLOW' if pnl_decision.allowed else 'BLOCK'}"
+            f" pnl_lock_reason={pnl_decision.reason if not pnl_decision.allowed else '-'}"
+            f"{monthly_status_txt}"
+            if pnl_decision is not None else ""
+        )
+        if pnl_decision is not None and now_ts - float(getattr(self, "_last_session_pnl_heartbeat_ts", 0.0)) >= 3600.0:
+            self._last_session_pnl_heartbeat_ts = now_ts
+            target_txt = (
+                f"{pnl_decision.normalized_target_usdc:.2f}"
+                if pnl_decision.normalized_target_usdc is not None else "n/a"
+            )
+            logger.info(
+                "[PNL STATUS] "
+                f"Session {pnl_decision.realized_pnl_usdc:+.2f}/${target_txt} "
+                f"HWM {pnl_decision.realized_high_water_usdc:+.2f} "
+                f"DD ${pnl_decision.drawdown_from_high_usdc:.2f}/${pnl_dd_limit_txt} "
+                f"Guard {pnl_decision.state} BUY {'ALLOWED' if pnl_decision.allowed else 'BLOCKED'}"
+            )
+
         logger.info(
             "STATUS "
             f"tradable={tradable} reason={reason_txt} "
@@ -4678,6 +4771,7 @@ class IntegratedBTCStrategy(
             f"stale_for={stale_for_txt} invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
+            f"{pnl_status}"
             f"{fast_follow_status}"
             f"{outcome_ws_status}"
             f"{self._format_time_left()}"

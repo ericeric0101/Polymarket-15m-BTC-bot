@@ -94,6 +94,16 @@ def test_btc_disagreement_is_research_only_side_relative_diagnostic():
     assert build_prediction_snapshot(_context(active_side="NONE"))["btc_disagree_10s"] is None
 
 
+def test_weekday_and_weekend_labels_do_not_change_prediction_snapshot_semantics():
+    weekend = build_prediction_snapshot(_context(identity={"market_slug": "btc-updown-15m-1791072000", "run_id": "r"}))
+    weekday = build_prediction_snapshot(_context(identity={"market_slug": "btc-updown-15m-1791244800", "run_id": "r"}))
+    # Regime is derived offline from market-open time.  The capture layer must
+    # not branch its price, freshness, or probability semantics by weekday.
+    assert {key: value for key, value in weekend.items() if key != "market_slug"} == {
+        key: value for key, value in weekday.items() if key != "market_slug"
+    }
+
+
 def test_btc_return_requires_recent_enough_prior_sample():
     row = build_prediction_snapshot(_context(btc_return_10s_prior_age_sec=0.3))
     assert row["btc_return_10s_bps"] == 3

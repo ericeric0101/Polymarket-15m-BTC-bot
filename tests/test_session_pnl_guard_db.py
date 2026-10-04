@@ -104,6 +104,46 @@ def test_session_pnl_reconstruction_uses_completed_cycle_events(tmp_path):
         db.stop()
 
 
+def test_monthly_reconstruction_uses_same_completed_cycle_authority(tmp_path):
+    db = TradeJournalDB(str(tmp_path / "journal.db"), backup_interval_sec=3600)
+    try:
+        for timestamp, pnl in [(_taipei_at(30, 20), 5), (_taipei_at(30, 21), -2)]:
+            assert db.log_strategy_event("run", "MARKET_CYCLE_PNL", {"cycle_combined_pnl_usdc": pnl})
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE strategy_events SET ts=? WHERE id=(SELECT MAX(id) FROM strategy_events)",
+                    (datetime.fromtimestamp(timestamp, timezone.utc).isoformat(),),
+                )
+                conn.commit()
+        assert db.reconstruct_monthly_realized_pnl("2026-09") == 3
+        assert db.reconstruct_monthly_realized_pnl("2026-10") == 0
+    finally:
+        db.stop()
+
+
+def test_v2_restart_restores_target_protection_from_high_water(tmp_path):
+    db = TradeJournalDB(str(tmp_path / "journal.db"), backup_interval_sec=3600)
+    try:
+        host = _GuardHost(db)
+        host.session_pnl_guard_mode = "target_scaled_v2"
+        host.monthly_net_target_usdc = 500
+        host.session_guard_per_trade_risk_usdc = 10
+        host._initialize_session_pnl_guard(_taipei_ts(28))
+        assert host._record_session_realized_pnl(18, source="sell_fill")
+        assert host._record_session_realized_pnl(-4, source="sell_fill")
+        restarted = _GuardHost(db)
+        restarted.session_pnl_guard_mode = "target_scaled_v2"
+        restarted.monthly_net_target_usdc = 500
+        restarted.session_guard_per_trade_risk_usdc = 10
+        restarted._initialize_session_pnl_guard(_taipei_ts(28))
+        decision = restarted.session_buy_guard_decision(_taipei_ts(28))
+        assert decision.target_protection_active is True
+        assert decision.state == "TARGET_PROTECTION"
+        assert decision.allowed is True
+    finally:
+        db.stop()
+
+
 def test_session_guard_end_to_end_persists_lock_and_resets_next_taipei_day(tmp_path):
     """BUY boundaries see the durable lock; SELL/redeem never consult it."""
     db = TradeJournalDB(str(tmp_path / "journal.db"), backup_interval_sec=3600)

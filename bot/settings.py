@@ -797,6 +797,11 @@ def initialize_strategy_settings(
     strategy.session_hard_profit_lock_usdc = config.operations.session_hard_profit_lock_usdc
     strategy.session_max_loss_enabled = config.operations.session_max_loss_enabled
     strategy.session_max_loss_usdc = config.operations.session_max_loss_usdc
+    strategy.session_pnl_guard_mode = config.operations.session_pnl_guard_mode
+    strategy.monthly_net_target_usdc = config.operations.monthly_net_target_usdc
+    # R is intentionally the existing per-trade risk authority, not a new
+    # sizing input. V2 refuses startup if this value is absent/non-positive.
+    strategy.session_guard_per_trade_risk_usdc = config.maker.depth_risk_max_loss_usdc
     strategy._initialize_session_pnl_guard()
     if not strategy.trade_db_buy_ready:
         logger.error(
@@ -840,7 +845,10 @@ def initialize_strategy_settings(
     # Research-only: receives raw production invalidation observations but has
     # no execution or stop-loss authority.
     strategy.stop_forensics_shadow = StopForensicsShadow(
-        db=strategy.lead_lag_db, run_id=strategy.run_id,
+        # Keep stop lifecycle evidence beside synchronized prediction
+        # snapshots.  The legacy lead/lag DB remains readable offline, but
+        # cross-DB joins made a canonical stop timeline ambiguous.
+        db=strategy.twap_research_db, run_id=strategy.run_id,
     )
     lead_lag = config.outcome_lead_lag
     strategy.outcome_lead_lag_mode = lead_lag.mode

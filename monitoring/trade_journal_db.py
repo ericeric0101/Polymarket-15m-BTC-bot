@@ -73,7 +73,7 @@ class TradeJournalDB:
     - Never raises to strategy path; logs and continues
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     _REQUIRED_COLUMNS = {
         "strategy_runs": {"run_id", "started_at", "mode", "test_mode", "maker_mode"},
         "order_events": {
@@ -85,6 +85,7 @@ class TradeJournalDB:
         "session_pnl_state": {
             "session_date_taipei", "realized_pnl_usdc", "realized_high_water_usdc",
             "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "created_ts", "updated_ts",
+            "guard_mode",
         },
     }
     # These writes are required to reconstruct live exposure or prevent a
@@ -137,6 +138,12 @@ class TradeJournalDB:
             "ready": True, "state": "HEALTHY", "reason": "ready", "consecutive_failures": 0,
         }
         self._health_lock = threading.Lock()
+        self._monthly_report_lock = threading.Lock()
+        self._monthly_report_wakeup = threading.Event()
+        self._monthly_report_stop = threading.Event()
+        self._monthly_report_thread = None
+        self._monthly_report_month = None
+        self._monthly_report_cache = {}
         self._last_health_probe_monotonic = 0.0
         self._backup_interval_sec = max(1.0, float(backup_interval_sec))
         self._backup_dirty = False
@@ -325,6 +332,12 @@ class TradeJournalDB:
                 self.flush_backup()
 
     def stop(self) -> None:
+        self._monthly_report_stop.set()
+        self._monthly_report_wakeup.set()
+        if self._monthly_report_thread is not None:
+            self._monthly_report_thread.join(timeout=2.0)
+            if self._monthly_report_thread.is_alive():
+                logger.warning("Monthly reporting worker has not terminated; no execution authority")
         self._backup_stop.set()
         self._backup_wakeup.set()
         self._backup_thread.join(timeout=2.0)
@@ -396,6 +409,7 @@ class TradeJournalDB:
             profit_guard_armed INTEGER NOT NULL,
             buy_lock_active INTEGER NOT NULL,
             buy_lock_reason TEXT NOT NULL,
+            guard_mode TEXT NOT NULL DEFAULT 'legacy',
             created_ts TEXT NOT NULL,
             updated_ts TEXT NOT NULL
         );
@@ -403,6 +417,11 @@ class TradeJournalDB:
         try:
             with self._connect() as conn:
                 conn.executescript(ddl)
+                session_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(session_pnl_state)").fetchall()
+                }
+                if "guard_mode" not in session_columns:
+                    conn.execute("ALTER TABLE session_pnl_state ADD COLUMN guard_mode TEXT NOT NULL DEFAULT 'legacy'")
                 version = conn.execute("SELECT version FROM journal_schema LIMIT 1").fetchone()
                 if version is None:
                     conn.execute("INSERT INTO journal_schema(version) VALUES (?)", (self.SCHEMA_VERSION,))
@@ -1009,6 +1028,7 @@ class TradeJournalDB:
                         (_json_dumps(cycle_payload), int(row[0])),
                     )
                 conn.commit()
+            self._request_current_monthly_report_refresh()
             return {**reconciliation, "wrote_cycle_pnl": wrote_cycle_pnl}
         except Exception as e:
             logger.debug(f"TradeJournalDB reconcile_redeem_cycle failed: {e}")
@@ -1099,6 +1119,8 @@ class TradeJournalDB:
             )
             conn.commit()
             self._schedule_backup()
+            if event_type == "MARKET_CYCLE_PNL":
+                self._request_current_monthly_report_refresh()
             return True
         except Exception as e:
             if event_type in self._CRITICAL_STRATEGY_EVENTS:
@@ -1115,7 +1137,7 @@ class TradeJournalDB:
             with self._connect() as conn:
                 row = conn.execute(
                     """SELECT session_date_taipei, realized_pnl_usdc, realized_high_water_usdc,
-                              profit_guard_armed, buy_lock_active, buy_lock_reason,
+                              profit_guard_armed, buy_lock_active, buy_lock_reason, guard_mode,
                               created_ts, updated_ts
                        FROM session_pnl_state WHERE session_date_taipei=?""",
                     (str(session_date_taipei),),
@@ -1123,7 +1145,7 @@ class TradeJournalDB:
             if row is None:
                 return None
             keys = ("session_date_taipei", "realized_pnl_usdc", "realized_high_water_usdc",
-                    "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "created_ts", "updated_ts")
+                    "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "guard_mode", "created_ts", "updated_ts")
             return dict(zip(keys, row))
         except Exception as exc:
             self._mark_runtime_failure("session_pnl_state_read_failed", exc, event_type="SESSION_PNL_UPDATE")
@@ -1138,19 +1160,21 @@ class TradeJournalDB:
             conn.execute(
                 """INSERT INTO session_pnl_state(
                        session_date_taipei, realized_pnl_usdc, realized_high_water_usdc,
-                       profit_guard_armed, buy_lock_active, buy_lock_reason, created_ts, updated_ts
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       profit_guard_armed, buy_lock_active, buy_lock_reason, guard_mode, created_ts, updated_ts
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(session_date_taipei) DO UPDATE SET
                        realized_pnl_usdc=excluded.realized_pnl_usdc,
                        realized_high_water_usdc=excluded.realized_high_water_usdc,
                        profit_guard_armed=excluded.profit_guard_armed,
                        buy_lock_active=excluded.buy_lock_active,
                        buy_lock_reason=excluded.buy_lock_reason,
+                       guard_mode=excluded.guard_mode,
                        updated_ts=excluded.updated_ts""",
                 (
                     str(state["session_date_taipei"]), float(state["realized_pnl_usdc"]),
                     float(state["realized_high_water_usdc"]), int(bool(state["profit_guard_armed"])),
                     int(bool(state["buy_lock_active"])), str(state.get("buy_lock_reason") or ""),
+                    str(state.get("guard_mode") or "legacy"),
                     str(state.get("created_ts") or now), now,
                 ),
             )
@@ -1213,7 +1237,99 @@ class TradeJournalDB:
             "profit_guard_armed": False,
             "buy_lock_active": False,
             "buy_lock_reason": "",
+            "guard_mode": "legacy",
         }
+
+    def reconstruct_monthly_realized_pnl(self, month_taipei: str) -> Optional[Decimal]:
+        """Return durable completed-cycle PnL for a Taipei calendar month.
+
+        `MARKET_CYCLE_PNL` is intentionally the same canonical completed-cycle
+        source used by session reconstruction.  Individual SELL fills are not
+        added here because their amount is already included in the final cycle
+        event; doing otherwise would double-count a partially exited market.
+        ``None`` reports unavailable or malformed reporting data, independently
+        of execution-journal health.
+        """
+        try:
+            year, month = (int(part) for part in str(month_taipei).split("-", 1))
+            if not 1 <= month <= 12:
+                return None
+            local_zone = ZoneInfo("Asia/Taipei")
+            start = datetime(year, month, 1, tzinfo=local_zone)
+            end = datetime(year + (month == 12), 1 if month == 12 else month + 1, 1, tzinfo=local_zone)
+            total = Decimal("0")
+            with sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.5) as conn:
+                rows = conn.execute(
+                    "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' "
+                    "AND julianday(ts) >= julianday(?) AND julianday(ts) < julianday(?) ORDER BY id",
+                    (start.isoformat(), end.isoformat()),
+                ).fetchall()
+            for ts, raw in rows:
+                event_time = datetime.fromisoformat(str(ts))
+                if event_time.tzinfo is None:
+                    event_time = event_time.replace(tzinfo=timezone.utc)
+                if not (start <= event_time.astimezone(local_zone) < end):
+                    continue
+                payload = json.loads(raw or "{}")
+                amount = Decimal(str(payload["cycle_combined_pnl_usdc"]))
+                if not amount.is_finite():
+                    raise ValueError("non-finite completed-cycle PnL")
+                total += amount
+            return total
+        except Exception as exc:
+            # Reporting availability is not execution-journal health authority.
+            logger.warning(f"Monthly PnL report unavailable: {type(exc).__name__}")
+            return None
+
+    def request_monthly_pnl_refresh(self, month: str, *, only_if_new_month: bool = False) -> None:
+        """Coalesce reporting requests; all reconstruction runs off the live path."""
+        with self._monthly_report_lock:
+            if self._monthly_report_stop.is_set():
+                return
+            if only_if_new_month and self._monthly_report_month == month:
+                return
+            self._monthly_report_month = month
+            if self._monthly_report_thread is None:
+                self._monthly_report_thread = threading.Thread(
+                    target=self._monthly_report_worker, name="monthly-pnl-report", daemon=True,
+                )
+                try:
+                    self._monthly_report_thread.start()
+                except Exception as exc:
+                    self._monthly_report_thread = None
+                    self._monthly_report_month = None
+                    self._monthly_report_cache[month] = {"realized_pnl_usdc": None, "updated_ts": time.time()}
+                    logger.warning(f"Monthly reporting worker unavailable: {type(exc).__name__}")
+                    return
+            self._monthly_report_wakeup.set()
+
+    def _request_current_monthly_report_refresh(self) -> None:
+        with self._monthly_report_lock:
+            month = self._monthly_report_month
+        if month is not None:
+            self.request_monthly_pnl_refresh(month)
+
+    def cached_monthly_pnl(self, month: str) -> Dict[str, Any]:
+        with self._monthly_report_lock:
+            return dict(self._monthly_report_cache.get(month, {
+                "realized_pnl_usdc": None, "updated_ts": 0.0,
+            }))
+
+    def _monthly_report_worker(self) -> None:
+        while not self._monthly_report_stop.is_set():
+            self._monthly_report_wakeup.wait(timeout=300.0)
+            self._monthly_report_wakeup.clear()
+            if self._monthly_report_stop.is_set():
+                break
+            with self._monthly_report_lock:
+                month = self._monthly_report_month
+            try:
+                value = self.reconstruct_monthly_realized_pnl(month)
+            except Exception as exc:
+                logger.warning(f"Monthly PnL report unavailable: {type(exc).__name__}")
+                value = None
+            with self._monthly_report_lock:
+                self._monthly_report_cache[month] = {"realized_pnl_usdc": value, "updated_ts": time.time()}
 
     def reconcile_startup_resolved_cycle(
         self,

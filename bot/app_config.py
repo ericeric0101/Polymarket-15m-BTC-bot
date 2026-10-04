@@ -503,6 +503,20 @@ class OperationsConfig:
     session_hard_profit_lock_usdc: Decimal
     session_max_loss_enabled: bool
     session_max_loss_usdc: Decimal
+    session_pnl_guard_mode: str
+    monthly_net_target_usdc: Decimal | None
+
+    def __post_init__(self) -> None:
+        supported = {"legacy", "target_scaled_v2", "shadow_target_scaled_v2"}
+        if self.session_pnl_guard_mode not in supported:
+            raise ValueError("SESSION_PNL_GUARD_MODE must be legacy, target_scaled_v2, or shadow_target_scaled_v2")
+        if self.monthly_net_target_usdc is not None and not self.monthly_net_target_usdc.is_finite():
+            raise ValueError("MONTHLY_NET_TARGET_USDC must be finite")
+        if self.session_pnl_guard_mode != "legacy" and (
+            self.monthly_net_target_usdc is None or not self.monthly_net_target_usdc.is_finite()
+            or self.monthly_net_target_usdc <= 0
+        ):
+            raise ValueError("MONTHLY_NET_TARGET_USDC must be positive when SESSION_PNL_GUARD_MODE is V2")
 
 
 @dataclass(frozen=True)
@@ -1132,6 +1146,11 @@ class AppConfig:
                 session_hard_profit_lock_usdc=max(Decimal("0"), _env_decimal("SESSION_HARD_PROFIT_LOCK_USDC", "10.0")),
                 session_max_loss_enabled=_env_bool_inverted("SESSION_MAX_LOSS_ENABLED", True),
                 session_max_loss_usdc=max(Decimal("0"), _env_decimal("SESSION_MAX_LOSS_USDC", "8.0")),
+                session_pnl_guard_mode=_env_str("SESSION_PNL_GUARD_MODE", "legacy").strip().lower() or "legacy",
+                monthly_net_target_usdc=(
+                    _env_decimal("MONTHLY_NET_TARGET_USDC", "0")
+                    if os.getenv("MONTHLY_NET_TARGET_USDC") is not None else None
+                ),
             ),
             outcome_lead_lag=OutcomeLeadLagConfig(
                 mode=_env_str("OUTCOME_LEAD_LAG_MODE", "shadow").strip().lower(),

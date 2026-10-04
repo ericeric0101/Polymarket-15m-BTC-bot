@@ -20,6 +20,7 @@ def log_strategy_run_start(
     selected_slug: str | None,
     maker_quote_sides: str,
     maker_quote_size_usdc: Any,
+    run_manifest: dict[str, Any] | None = None,
 ) -> None:
     if not trade_db:
         return
@@ -33,6 +34,7 @@ def log_strategy_run_start(
         notes={
             "quote_sides": maker_quote_sides,
             "quote_size_usdc": float(maker_quote_size_usdc),
+            **({"run_manifest": dict(run_manifest)} if isinstance(run_manifest, dict) else {}),
         },
     )
 

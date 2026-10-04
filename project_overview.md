@@ -69,6 +69,87 @@
   collector module for downstream research. This storage layer does not
   change the empirical probability estimator or any live probability logic.
 
+
+## Pre-commit blocker corrections (2026-10-04; prepared, not deployed)
+
+This correction supersedes the earlier readiness claims below where they
+conflict. The running collection process and its DB/Parquet data remain untouched.
+
+- Monthly reporting reconstructs completed `MARKET_CYCLE_PNL` events in a
+  journal-owned background worker, on initial request, finalized-cycle/redeem
+  notification and a five-minute fallback refresh. Live realized-delta handling
+  reads cached values only. Reporting failure yields unavailable monthly
+  display and never changes journal/BUY health. The cache can lag a finalized
+  event until the background refresh completes; it is not another PnL ledger.
+- Durable session accounting (realized PnL and high-water) survives guard mode
+  changes. Only policy flags are recomputed on a mode change; same-mode sticky
+  locks remain durable. Missing-state reconstruction still has legacy limitations.
+- Prometheus `trading_position_close_*` metrics have strategy-run and instance
+  labels and explicitly measure position-close activity. They exclude canonical
+  settlement/session/month accounting. Old `trading_live_realized_pnl` consumers
+  must migrate their observability queries; no trading authority changes.
+- ResearchStore owns JSON parsing, stable row-order dedupe and settlement access
+  for the current canonical modes. Malformed/non-object payload exclusions are
+  counted by integrity. Older standalone tools remain compatibility paths.
+- MarketEvidence recursively freezes mappings/sequences, including direct
+  construction; display preserves run identity and captured freshness/provenance.
+- Entry anchors require fresh evidence at or before entry. Partial opening-order
+  fills aggregate; scale-ins retain the original lifecycle and have separate
+  aggregate fields. Legacy client-order grouping remains explicitly ambiguous.
+  Identity joins and legacy slug/instrument fallbacks have different labels.
+  Execution timestamp does not stand in for an unavailable stop-trigger timestamp.
+- Fresh inventory after a full close receives a new lifecycle ID. Persisted
+  identity is restored during existing inventory recovery without changing cost
+  basis. Duplicate journal events with durable fill identity are excluded offline;
+  this is not a new venue-fill deduplication authority.
+- Writer success now requires terminal acceptance stop, terminated worker,
+  empty queue/buffers and no known write failure or dropped accepted data.
+  Research writers stop after background producers and final strategy events;
+  the shared TWAP writer result is checked. Failure/timeout means incomplete
+  shutdown, not success. SIGKILL remains non-draining.
+- Git status failure is UNKNOWN (`null`), not clean. Profile is explicit when
+  available and UNKNOWN otherwise. Config hash covers only the documented safe
+  section allowlist, not every environment/instrumentation setting. Tracked diff
+  hash still excludes untracked contents; old provenance is not backfilled.
+
+Research results retain their cohort boundaries: the earlier preliminary
+weekend `<0.5sigma` estimate of about 12.9% and the later entry/stop report's
+12/46 (26.1%) are different cohorts/checkpoint selections. Neither is a live gate.
+Generated cohort CSVs remain local and were not regenerated against active data.
+
+Blocker regression validation: **59 regression cases** in
+`tests/test_precommit_blockers.py`; complete suite **871 passed** with the
+existing upstream websockets deprecation warning. `git diff --check` passes.
+No commit/push or deployment was performed.
+
+## Research engineering authorities (2026-10-04)
+
+- **Live authority:** `IntegratedBTCStrategy` and its existing entry/exit/risk
+  policies. Offline research modules consume persisted evidence only; they do
+  not authorize orders. The blocker fixes preserve entry signals, stop, TP, sizing and prediction.
+  V2 remains opt-in; mode changes preserve accounting while recomputing policy.
+- **Run provenance:** the existing `strategy_runs.notes_json` is the canonical
+  run-metadata container. New starts write one secret-filtered manifest with
+  git/config/schema fingerprints; legacy runs remain explicitly
+  `LEGACY_UNKNOWN`. It does not backfill or mutate old research data.
+- **Prediction/research storage:** `LeadLagDB` is the asynchronous sparse-event
+  writer; prediction snapshots carry a prediction schema version. BTC 1-second
+  dense history remains in separate UTC Parquet parts. Research health and
+  storage protections remain component-specific; the TWAP storage guard only
+  covers optional TWAP events, not every writer sharing the research volume.
+- **PnL/order authority:** `MARKET_CYCLE_PNL` is the durable completed-market
+  source for session/month reconstruction; `SessionPnlGuard` is the BUY-only
+  session authority. The terminal projects guard accounting; Prometheus position-close statistics
+  are explicitly scoped by strategy run and instance, not session/month PnL. The venue
+  cache/local inventory ledger control current execution state; journal events
+  provide durable forensic/recovery evidence, not a second live order state
+  machine.
+- **Replay/deployment:** existing replay tools remain purpose-specific; there
+  is not yet one canonical market/decision/accounting replay harness. The
+  engineering-readiness report records that gap and other deferred integration
+  work. This working-tree pass is not deployed; a future controlled restart is
+  required before new run manifests/schema tags appear in runtime records.
+
 ## Audit scope and safety status
 
 - The 2026-09-24 lifecycle hardening pass changes quote freshness handling,
@@ -405,6 +486,198 @@
 - High-price, weak-fair, entry-quality, and depth controls were audited as implemented sizing/quote controls; no thresholds or sizing behavior changed in this evidence pass. Existing `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` and profile weak-fair adjustment remain active as configured; local `.env` also sets 10 base shares and 5.5 shares above the configured high-price threshold, subject to deployed environment overrides.
 - Economics semantics: maker `fair` comes from the configured pricer (normally the digital model when canonical spot/strike inputs are valid) and is used for passive quote planning. The legacy trace field `calibrated_probability` copies `fair`; that name alone is not evidence of empirical calibration. Outcome FOK uses a fresh target-outcome forecast probability and executable ask-derived limit. For scale, at an assumed probability 0.78 versus an 0.82 FOK limit, resolution EV is negative before fees/penalty; at 0.72 versus 0.63 it is positive before costs but still requires subtracting taker fee and adverse markout. These are estimates, not guaranteed probabilities or fills.
 
+## Entry + stop-loss research — authoritative status (2026-10-03)
+
+This is the canonical research roadmap for entry quality, settlement-flip risk,
+stop-loss improvement, and capital efficiency. It supersedes ad-hoc
+interpretations from individual dry-runs and the 2026-09-27 candidate-exit
+roadmap below. The older replay and forward-shadow paragraphs remain historical
+implementation evidence only; they do not define current policy.
+
+The goal is not merely to predict UP/DOWN more often. The connected research
+problem is to enter only when the selected side is structurally and economically
+attractive, distinguish temporary adverse BTC noise from a genuine settlement
+reversal, reduce tail losses without whipsaw exits, and improve capital
+efficiency without adding premature live authority.
+
+### 1. Current observed strategy problem
+
+The observed economic pattern is relatively frequent small/moderate winners
+and a small number of much larger losers. In the preliminary weekend
+capital-efficiency cohort, 10 settled shadow entries produced 8 winners worth
+about **+$9.03** and 2 losers worth **-$11.00**, for total gross PnL about
+**-$1.97**. Winner efficiency was about **+$0.02495 per dollar-minute**;
+loser efficiency was about **-$0.11496 per dollar-minute**. The primary
+problem is therefore **tail-loss magnitude**, not simply win rate.
+
+Earlier examples also showed that an immediate price-loss stop can exit during
+a short-lived reversal that later settles on the original side. The target is
+therefore **stop more correctly**, not stop whenever BTC moves against a held
+position.
+
+### 2. Entry and stop share one research target: settlement-flip risk
+
+At entry the question is how fragile the selected side is; while holding, it
+is whether final settlement has become materially more likely to flip. Entry
+quality and stop confirmation should eventually consume the same structural
+evidence, but must remain separate decisions. This is research architecture,
+not current live authority.
+
+### 3. Current entry framework
+
+#### 3.1 Direction
+
+Direction asks which side to prefer. It is **LOW / EARLY** maturity, not
+validated independent alpha. BTC 5/10-second movement remains a candidate;
+current evidence does not justify a new directional indicator, ML model, or
+live direction authority. In early synchronized work, `p_ex` did not
+consistently lead Polymarket mid and residual effects did not reliably
+replicate in the first weekend cohort.
+
+#### 3.2 Structural entry quality
+
+Structural quality asks how difficult an opposite settlement is. Primary
+research fields are `settlement_state_side`,
+`required_future_avg_to_flip`, `required_move_usd`, `required_move_bps`,
+`required_move_sigma`, analytic and empirical flip probabilities when valid,
+and market-implied flip probability. A market price alone is insufficient: two
+0.80 UP contracts can have radically different required future BTC movement.
+This is **PROMISING** for research filtering, not a proven live filter.
+
+#### 3.3 Economic entry quality
+
+Economic quality asks whether executable price, expected/observed holding time,
+capital committed, capital-minutes, and independently supported probability
+make entry worthwhile. The preliminary weekend bins are descriptive only:
+
+| Entry time left | N | Wins / losses | Capital-minutes | Gross PnL | Gross PnL / dollar-minute |
+|---|---:|---:|---:|---:|---:|
+| 480–600s | 7 | 5 / 2 | 342.45 | -$5.65 | -$0.0165 |
+| 360–480s | 3 | 3 / 0 | 114.91 | +$3.68 | +$0.0320 |
+
+This is **PRELIMINARY_PATTERN_ONLY**, not a later-entry rule; the second group
+has only three observations. Independent price edge is **NOT YET DEMONSTRATED
+CONSISTENTLY**: a final winner, a market-favorite purchase, and an entry below
+independently supported fair probability are distinct claims.
+
+### 4. Future entry model — conceptual only
+
+The eventual model, after validation only, is:
+
+```text
+SIDE + STRUCTURAL FLIP RISK + ECONOMIC QUALITY → ENTER / WAIT / SKIP
+```
+
+It must separately answer direction, structural safety, and price/capital
+quality. It is not a current live rule.
+
+### 5. Required-move sigma and flip probabilities
+
+`required_move_sigma` is primarily a **terminal settlement-fragility** measure,
+not a short-term 30-second repricing predictor. Preliminary weekend data was
+monotonic—roughly 12.9% observed flips below 0.5σ in the earlier preliminary cohort
+(distinct from the later entry/stop cohort's 12/46, or 26.1%), 3.0% at 0.5–1σ, and 0%
+above 1σ—but had few flips. It is early evidence for ranking terminal
+fragility, not a deployment filter.
+
+At T-300/T-180/T-120/T-60/T-30, preliminary observed weekend flips were about
+6.1%/3.0%/3.3%/0%/3.2%; market estimates were about
+22.1%/11.8%/12.4%/5.8%/6.0%, and analytic estimates about
+23.7%/18.0%/14.7%/6.4%/4.9%. Both estimates may overstate this small weekend
+cohort. Do **not** recalibrate live probabilities: ranking and absolute
+calibration need matched weekday evidence.
+
+### 6. Stop-loss research goal and layers
+
+The target distinction is:
+
+- **False reversal:** fast BTC move opposes the held side while required sigma
+  remains large, structural probability/TWAP state still support the position,
+  and market repricing is absent or recovers.
+- **True reversal:** adverse BTC movement accompanies collapsing required sigma,
+  rising opposite flip probability, deteriorating `p_ex`, persistent market
+  repricing, and ultimately a fragile or flipped settlement state.
+
+The conceptual research stack is **FAST WARNING + STRUCTURAL DETERIORATION +
+MARKET CONFIRMATION**. Fast inputs are BTC 5/10/30s; structural inputs are
+required move/sigma, analytic/empirical flip probability and TWAP state; market
+inputs are fresh bid/ask/mid, spread, and persistent repricing. Potential edge
+exists only if fast and structural evidence change before full market repricing;
+this is unproven. `p_ex` is currently a fair/probability reference and
+calibration target, **not** a proven early-lead signal.
+
+Current maturity: price-loss stop exists; fast reversal warning is a research
+candidate; structural confirmation is promising; true-vs-false reversal is
+under study; flip-risk stop authority is **not implemented**. Do not replace
+the existing live stop with flip probability.
+
+### 7. Required prospective analyses
+
+Entry research must repeatedly measure, without pooling weekday/weekend:
+
+1. flip risk at entry versus final settlement;
+2. same-price entries stratified by required sigma / calibrated flip risk;
+3. analytic/empirical probability versus the fresh executable ask;
+4. fixed entry-time bins (`>600`, `480–600`, `360–480`, `240–360`,
+   `120–240`, `<120` seconds), with PnL, holding time, capital-minutes and
+   flip risk.
+
+For every losing or stopped position, reconstruct:
+
+```text
+ENTRY → first adverse BTC shock → required-sigma change → flip-p change
+→ market repricing → stop trigger/execution → final settlement
+```
+
+Classify material adverse episodes as `TRUE_REVERSAL` or `FALSE_REVERSAL` and
+compare BTC shock, required sigma, flip probability, market repricing, time
+left, and session regime. The question is whether an existing structural field
+could identify true failure earlier without raising whipsaw frequency.
+
+### 8. Capital efficiency: current status and gaps
+
+The canonical offline `capital-efficiency` analysis verified 47 completed
+weekend TEST_DRY_RUN markets, of which 10 had settled shadow trades. All 10
+trades have non-imputed simulated fill notional, entry timestamp, settlement
+timestamp, and PnL. Median stake is about $5.50, median holding about 8.60
+minutes, total capital-minutes about 457.36, and total simulated gross PnL
+about -$1.975 (about -$0.00432 per dollar-minute).
+
+Per-trade capital efficiency is therefore **MEASURABLE**. Portfolio bankroll
+utilization and stop capital-time released are **NOT_MEASURABLE** for this
+cohort: a durable bankroll time series and a joined stopped-shadow lifecycle
+are absent. Do not fabricate either. The current stored data also does not
+prove multi-level executable capacity, partial fills, or full fee/slippage;
+1c/2c/5c capacity remains `CAPACITY_NOT_MEASURABLE` without genuine depth.
+
+### 9. Regime and collection policy
+
+Weekday and weekend are never pooled by default. Legacy weekday summaries are
+not admissible to primary flip calibration, lead/lag, residual, or
+capital-efficiency comparisons unless they carry comparable synchronized data.
+Continue the current synchronized weekend collection, then collect roughly two
+matched weekday days using identical instrumentation. Required fields include
+flip outcome, required sigma, analytic/market/empirical probability where
+valid, BTC 5/10/30s, fresh market mid, TWAP state, entry and settlement facts,
+capital, holding duration, and PnL.
+
+### 10. Current authority and priority order
+
+No new live authority is approved from this roadmap. In maturity order:
+
+1. flip risk as a research annotation — most mature;
+2. flip risk as entry-quality filter — promising, unvalidated;
+3. flip risk as stop confirmation — promising and economically valuable;
+4. capital-efficiency timing — early/descriptive;
+5. fast BTC standalone direction — early;
+6. early opposite-side reversal entry — very early.
+
+Priority order is: collect matched regimes; validate required-sigma versus final
+flips; calibrate market/analytic/empirical probabilities; analyse true versus
+false reversals; combine flip risk with capital efficiency; only then assess a
+shadow-to-live decision integration. This section is the current authority for
+Entry + Stop-Loss research; it supersedes conflicting older roadmap wording.
+
 ## Historical strategy evidence — unified BTC 15m research (2026-09-26)
 
 This is the canonical interpretation of the current historical strategy
@@ -574,7 +847,11 @@ weekend-only observation policy is a separate operator-approved live change;
 other future live changes require separate approval and executable-price/cost
 evidence, not only resolved direction.
 
-### Next evidence requirements
+### Historical evidence-collection requirements
+
+These are supporting requirements for the 2026-09-26 public-history study;
+the current Entry + Stop-Loss collection priority and authority are defined in
+the authoritative roadmap above.
 
 1. **Scale public historical research:** target 1,000–3,000 BTC 15-minute
    markets over 3–6 months, preferably the full universe when API/cache limits
@@ -597,27 +874,14 @@ evidence, not only resolved direction.
    naturally occurring invalidation/stop-loss outcomes. Never create trades
    merely to meet a sample target.
 
-### 證據最貼近的完整出場候選架構（2026-09-27，研究中，未授權 live）
+### Historical exit-replay evidence (2026-09-27; not the current roadmap)
 
-目前最合理的研究候選不是單獨的固定停利或固定停損，而是把獲利保護、
-thesis weakening 與無條件災難停損放在同一個狀態機：
-
-1. 進場邏輯維持不變。以「相對於實際進場價的報酬率」計算研究階梯；這和
-   現有 live 部分路徑使用的每股絕對價差不是同一語意，未經另行核准不得直接
-   套成 live 參數。
-2. 獲利側：+5% 啟動保本；+10% 最低保護 +3%；+15% 保護 +5%；
-   +20% 保護 +10%；+30% 保護 +15%，並同時比較 peak 後 5% trailing。
-   一旦保護底線被跌破，研究假設是 aggressive SELL，不是假設被動 maker
-   一定成交。
-3. 虧損側：−8% 進入警戒；−10% 以下只有在至少兩個互相獨立的 thesis
-   weakening 成立時才退出。前瞻研究中的獨立成分限定為：(a) production
-   signal 反向、(b) canonical strike leader 反向、(c) 持倉 token 的 fresh
-   fair probability 較進場下降至少 5 個百分點。單純 bid 下跌不是第二個
-   thesis 成分，避免同一價格雜訊被重複計票。
-4. 進場後 180 秒與 300 秒各保留一組 forward shadow：若從未達 +5%、
-   當下未獲利且至少兩個 thesis weakening 成立，記錄 no-progress exit。
-5. `mark_pnl_usdc <= -$2` 是無條件 hard breaker；不需等待 thesis、spread
-   或被動 SELL。這是候選研究語意，不代表本段已更改 live stop-loss。
+The former detailed candidate-exit ladder is superseded as roadmap by
+**Entry + stop-loss research — authoritative status (2026-10-03)** above.
+The retained material below is historical replay/forward-shadow evidence only.
+In particular, its old fixed profit-lock, percentage-loss, no-progress, and
+aggressive-SELL values are not current research targets or approved live
+parameters.
 
 #### 歷史價格回放：獲利側與虧損側已合併
 
@@ -803,6 +1067,56 @@ morning; if the bot is unexpectedly run from 07:30 to 19:30, that period is
 tracked under a separate `-day` session key and is not mixed into the overnight
 guard. This defines PnL accounting only; it does not itself schedule bot uptime.
 
+#### Target-scaled session profit / loss guard V2 — prepared, not deployed (2026-10-03)
+
+The legacy `$8 / $4 / -$8` overnight guard remains the active default through
+`SESSION_PNL_GUARD_MODE=legacy`. It is deliberately unchanged for the current
+process. V2 is a prepared, opt-in replacement for a future controlled restart:
+`SESSION_PNL_GUARD_MODE=target_scaled_v2` plus a positive
+`MONTHLY_NET_TARGET_USDC` (initial candidate `$500`).
+
+V2 separates three authorities which must not be conflated: the monthly target
+is reporting/profit-protection pace; existing `DEPTH_RISK_MAX_LOSS_USDC` is the
+per-trade risk `R`; the session guard only decides whether **new BUYs** may
+continue. It never changes sizing, entry thresholds, frequency, stop logic, or
+fair value. SELL, stop, recovery, reconciliation, cancellation, rollover and
+redeem remain permitted after every V2 lock.
+
+With monthly target `M`, `D=M/30`, and current `R`, V2 derives using Decimal
+arithmetic: profit arm and normal trailing drawdown `max(0.35D, R)`; target
+zone `D`; target-zone drawdown `max(0.25D, 0.75R)`; hard profit lock `1.35D`;
+and max-loss lock `min(2R, max(1.5R, 0.45D))`. For `M=$500, R=$10`, this is
+approximately `$16.67`, `$10`, `$10`, `$7.50`, `$22.50`, and `-$15`.
+
+States are `NORMAL`, `PROFIT_GUARD_ARMED`, `TARGET_PROTECTION`,
+`PROFIT_LOCKED`, and `LOSS_LOCKED`. Arm/target state is reconstructed from the
+sticky realized high-water after restart; a current drawdown cannot erase
+previous target protection. `shadow_target_scaled_v2` computes and reports a
+would-lock decision without vetoing BUYs.
+
+The sole realized-PnL authority remains durable completed-cycle
+`MARKET_CYCLE_PNL` for restart/month reconstruction, while the live path
+persists fill/settlement deltas to `session_pnl_state`. This avoids counting a
+partial SELL both individually and again at final settlement. Monthly values
+use Asia/Taipei calendar months and are displayed as
+`MONTHLY_PNL_NOT_RECONSTRUCTABLE` if that durable reconstruction cannot be
+performed. Terminal output is the operational UI: startup summary, compact
+`STATUS` fields, realized-PnL events and state transitions expose this same
+authority. The existing dashboard is intentionally not redesigned.
+
+Prometheus collector construction is idempotent across in-process node rebuilds.
+Position-close metrics are renamed to `trading_position_close_*`, scoped by
+strategy run and instance, and explicitly exclude session/month/settlement PnL.
+Existing queries for `trading_live_realized_pnl` need observability migration;
+trading accounting is unchanged. The current
+storage does not introduce another accounting DB.
+
+Deployment is deferred until synchronized weekend collection, roughly two
+matched weekday days, graceful stop of the current process, review, commit, and
+one controlled restart. The current Taipei 19:30–07:30 guard-session boundary
+is unchanged; the monthly reporting boundary is separately Asia/Taipei calendar
+month. Per-hour/per-market pace is not trading authority.
+
 `bot.stop_forensics_shadow.StopForensicsShadow` records the production raw
 invalidation condition from its first adverse observation, 5/10/15/20/30s
 checkpoints, and P5/P10/P15/adaptive candidates. Candidate votes are limited to
@@ -841,6 +1155,58 @@ candidates, actual stops, post-stop checkpoints, and settlement comparisons
 under `reports/stop_forensics/`; settlement-only comparisons are descriptive,
 not executable backtests. Smart-money snapshots remain auxiliary and
 rate-limited to five seconds while holding inventory.
+
+### 8. Entry + stop-loss measurement status and next evidence
+
+The canonical offline reports are `scripts/research_analysis.py
+entry-stop-status` and `scripts/research_analysis.py stop-lifecycle`.  The
+first report keeps fixed price × `required_move_sigma` bins (0.55–0.90 price;
+<0.5σ, 0.5–1σ, 1–2σ, >2σ) separate from live fills and does not optimize those
+boundaries.  Its primary question is whether structural sigma adds information
+beyond entry price.  The second report reconstructs sparse position lifecycles
+by joining existing one-Hz prediction snapshots to immutable entry/stop events:
+
+```text
+ENTRY → adverse BTC return → sigma / opposite-p_ex crossing
+      → persistent adverse market repricing → settlement-state flip
+      → actual stop (if any) → canonical final settlement
+```
+
+New processes persist a research-only `position_lifecycle_id` once at a fresh
+BUY fill: `market_slug | instrument_id | entry_client_order_id`.  It is then
+attached to sparse adverse-episode and actual-stop continuation events in the
+same TWAP research database as synchronized prediction snapshots.  It has no
+entry, stop, sizing, recovery, or accounting authority.  The existing dense
+snapshot cadence is unchanged; lifecycle analysis joins it offline and never
+duplicates per-second state.  Historic stop records in the former separate
+Outcome lead/lag database can be supplied explicitly as read-only legacy
+evidence and are only associated when the market/instrument relationship is
+unambiguous; otherwise the report emits `AMBIGUOUS`.
+
+The research priority order is:
+
+1. **P1 — synchronized weekday collection:** collect at least two Taipei
+   weekday days with exactly the same prediction snapshot schema, cadence,
+   timestamp semantics, and freshness rules as weekend.  Weekday/weekend is
+   metadata from market-open time only; legacy unsynchronized weekday rows are
+   excluded from precision comparisons.
+2. **P2 — same-price × sigma:** assess raw settled shadow cohorts at fixed
+   price/sigma buckets.  `required_move_sigma` is currently the strongest
+   structural flip-risk candidate, but not a live gate.
+3. **P3 — complete stop lifecycle:** use the sparse identity above to measure
+   real ENTRY → STOP → settlement sequences.  Before a controlled restart
+   carrying the new telemetry, old multiple-entry markets may remain
+   non-reconstructable.
+4. **P4 — weekend vs weekday sigma calibration:** compare only synchronized
+   comparable rows at T−600 through T−5.  The current weekend sigma-to-flip
+   relationship is a reproducibility baseline, not a weekday conclusion.
+
+On the current synchronized weekend cohort, analytic `p_ex` calibrates worse
+than market flip probability at the major checkpoints, most observed entries
+remain market-following, and independent alpha remains unproven.  Tail-loss
+measurement therefore takes priority over adding another directional model.
+No sigma entry gate, sigma/p_ex/BTC stop, regime-specific trading rule, or
+time-of-day gate is authorized by this research architecture.
 
 ### TWAP forward telemetry (research-only)
 
@@ -2390,3 +2756,29 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   evidence that directly confirms or falsifies weekday hypotheses. Until both
   cohorts replicate, any difference is reported as possible regime dependence
   or a small-sample effect rather than a strategy conclusion.
+- `scripts/research_analysis.py capital-efficiency` is the only canonical
+  preliminary capital-time validator. It requires explicit offline SQLite
+  snapshots for both `--db` and `--journal`, writes to
+  `reports/research_analysis/capital_efficiency/preliminary_weekend/`, and
+  labels its 47-market / 10-settled-shadow-trade weekend result
+  `PRELIMINARY_WEEKEND_CAPITAL_EFFICIENCY`. It measures non-imputed simulated
+  fill capital, holding time, capital-minutes, and PnL per dollar-minute; it
+  does not pool real fills with simulated trades, infer bankroll utilization,
+  or derive a live timing rule.
+
+## Offline research engineering boundary (prepared, not deployed)
+
+- The future canonical offline access path is ResearchStore plus frozen
+  MarketEvidence under bot/research. They open the research SQLite file
+  read-only and consume persisted values; they do not calculate probabilities,
+  settlement paths, freshness, or trading decisions.
+- New analysis must extend scripts/research_analysis.py before introducing a
+  general-purpose report CLI. Older focused scripts remain compatibility tools
+  until their callers have migrated.
+- Research data responsibilities remain split: SQLite stores lifecycle/events/
+  snapshots, while Parquet stores dense BTC one-second history. Neither store
+  is a live strategy authority.
+- Prepared shutdown diagnostics report if the lead-lag writer or BTC one-second
+  Parquet writer fails to drain within its bounded timeout. These diagnostics
+  take effect only after a controlled future restart and do not alter current
+  collection semantics.

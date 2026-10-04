@@ -9,6 +9,8 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from statistics import mean
 from typing import Any
+
+from bot.research.provenance import PREDICTION_SCHEMA_VERSION
 import math
 import time
 
@@ -102,6 +104,7 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
     identity = dict(context.get("identity") or {})
     result = {
         "event_type": "PREDICTION_RESEARCH_SNAPSHOT",
+        "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
         "snapshot_ts": now,
         "snapshot_trigger": str(context.get("trigger") or "periodic"),
         "snapshot_interval_sec": _number(context.get("snapshot_interval_sec")),

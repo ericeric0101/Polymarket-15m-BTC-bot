@@ -8,6 +8,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from bot.research.provenance import LIFECYCLE_SCHEMA_VERSION
+
 
 class StopForensicsShadow:
     CHECKPOINTS = (5, 10, 15, 20, 30)
@@ -24,6 +26,8 @@ class StopForensicsShadow:
         return None if value is None else float(value)
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        if event_type.startswith("STOP_SHADOW_"):
+            payload = {**payload, "lifecycle_schema_version": LIFECYCLE_SCHEMA_VERSION}
         self.events.append({"event_type": event_type, "payload": payload})
         if self.db is not None:
             try:
@@ -45,6 +49,7 @@ class StopForensicsShadow:
         actual_stop_ts: float, actual_stop_price: Decimal, actual_stop_qty: Decimal,
         actual_stop_pnl: Decimal, position_side: str, entry_price: Decimal,
         entry_fee_usdc: Decimal = Decimal("0"), reason: str = "stop_loss",
+        position_lifecycle_id: str | None = None,
     ) -> None:
         """Start a research-only continuation for the shares actually stopped."""
         if actual_stop_qty <= 0 or entry_price <= 0:
@@ -53,6 +58,7 @@ class StopForensicsShadow:
         row = {
             "slug": str(slug), "instrument_id": str(instrument_id),
             "client_order_id": str(client_order_id), "actual_stop_ts": float(actual_stop_ts),
+            "position_lifecycle_id": str(position_lifecycle_id or "") or None,
             "actual_stop_price": float(actual_stop_price), "actual_stop_qty": float(actual_stop_qty),
             "actual_stop_pnl": float(actual_stop_pnl), "position_side": str(position_side).upper(),
             "entry_price": float(entry_price), "entry_fee_usdc": float(entry_fee_usdc),
@@ -217,9 +223,13 @@ class StopForensicsShadow:
         fair_probability: Decimal | None, fair_at_entry: Decimal | None, leader_side: str,
         best_bid: Decimal | None, best_bid_size: Decimal | None, time_left_sec: float,
         twap_features: dict[str, Any] | None = None, bid_levels: Any = None,
+        position_lifecycle_id: str | None = None,
     ) -> None:
         key = (str(slug), str(instrument_id))
         episode = self._episodes.get(key)
+        if episode is not None and position_lifecycle_id and episode.get("position_lifecycle_id") != position_lifecycle_id:
+            self._episodes.pop(key, None)
+            episode = None
         if not raw_adverse:
             if episode is not None:
                 self._emit_missing_checkpoints(episode, now_ts)
@@ -234,11 +244,13 @@ class StopForensicsShadow:
                 "id": f"{slug}:{instrument_id}:{now_ts:.6f}", "first_ts": now_ts,
                 "emitted_checkpoints": set(), "emitted_candidates": set(),
                 "fair_at_entry": fair_at_entry,
+                "position_lifecycle_id": str(position_lifecycle_id or "") or None,
             }
             self._episodes[key] = episode
             self._emit("STOP_SHADOW_ADVERSE_EPISODE_STARTED", {
                 "episode_id": episode["id"], "slug": slug, "instrument_id": instrument_id,
                 "first_adverse_ts": now_ts, "position_side": position_side,
+                "position_lifecycle_id": episode["position_lifecycle_id"],
             })
         elapsed = max(0.0, now_ts - episode["first_ts"])
         position = str(position_side).upper()
@@ -267,6 +279,7 @@ class StopForensicsShadow:
         depth = self._depth_metrics(self._levels(bid_levels), best_bid, qty, entry_price)
         base = {
             "episode_id": episode["id"], "slug": slug, "instrument_id": instrument_id,
+            "position_lifecycle_id": episode.get("position_lifecycle_id"),
             "first_adverse_ts": episode["first_ts"], "elapsed_sec": elapsed,
             "position_side": position_side, "entry_price": self._number(entry_price),
             "qty": self._number(qty), "best_bid": self._number(best_bid),

@@ -1203,7 +1203,7 @@ def handle_stop(strategy: Any) -> None:
 
     strategy._stopping = True
     stage_started = time.monotonic()
-    logger.info("Strategy shutdown stage started: stage=outcome_observers_and_research_databases")
+    logger.info("Strategy shutdown stage started: stage=outcome_observers")
     outcome_observer = getattr(strategy, "hyperliquid_outcome_observer", None)
     if outcome_observer is not None:
         try:
@@ -1216,21 +1216,9 @@ def handle_stop(strategy: Any) -> None:
             lead_lag_runtime.stop()
         except Exception:
             logger.debug("Failed to stop Outcome lead/lag runtime", exc_info=True)
-    lead_lag_db = getattr(strategy, "lead_lag_db", None)
-    if lead_lag_db is not None:
-        try:
-            lead_lag_db.stop()
-        except Exception:
-            logger.debug("Failed to flush Hyperliquid lead/lag observations", exc_info=True)
-    log_shutdown_stage("outcome_observers_and_research_databases", stage_started)
+    log_shutdown_stage("outcome_observers", stage_started)
     stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=background_threads")
-    twap_research_db = getattr(strategy, "twap_research_db", None)
-    if twap_research_db is not None and twap_research_db is not lead_lag_db:
-        try:
-            twap_research_db.stop()
-        except Exception:
-            logger.debug("Failed to flush TWAP forward research observations", exc_info=True)
     stop_event_threads(
         stop_events=[
             strategy._lifecycle_stop_event,
@@ -1257,7 +1245,8 @@ def handle_stop(strategy: Any) -> None:
     history_collector = getattr(strategy, "btc_1s_history_collector", None)
     if history_collector is not None:
         try:
-            history_collector.stop(timeout_sec=5.0)
+            if not history_collector.stop(timeout_sec=5.0):
+                logger.warning("BTC 1s history writer shutdown incomplete or data lost")
         except Exception:
             logger.debug("Failed to stop BTC 1s history collector; live shutdown continues", exc_info=True)
     log_shutdown_stage("background_threads", stage_started)
@@ -1292,6 +1281,19 @@ def handle_stop(strategy: Any) -> None:
         market_cycle_realized_net_usdc=strategy.market_cycle_realized_net_usdc,
     )
     log_shutdown_stage("orders_and_final_journal_events", stage_started)
+    stage_started = time.monotonic()
+    seen_writers = set()
+    for writer_name in ("lead_lag_db", "twap_research_db"):
+        writer = getattr(strategy, writer_name, None)
+        if writer is None or id(writer) in seen_writers:
+            continue
+        seen_writers.add(id(writer))
+        try:
+            if not writer.stop():
+                logger.warning(f"Research writer shutdown incomplete or data lost: writer={writer_name}")
+        except Exception:
+            logger.warning(f"Research writer shutdown failed: writer={writer_name}", exc_info=True)
+    log_shutdown_stage("research_writers", stage_started)
     stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=trade_journal_final_backup")
     trade_db = getattr(strategy, "trade_db", None)
