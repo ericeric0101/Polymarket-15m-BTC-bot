@@ -195,6 +195,7 @@ class PredictionResearchSnapshotter:
         self._latencies_ms: deque[float] = deque(maxlen=600)
         self._counters: dict[str, int] = defaultdict(int)
         self._fresh: dict[str, int] = defaultdict(int)
+        self._recent_quality: deque[tuple] = deque(maxlen=600)
 
     @staticmethod
     def _btc_returns(history: Any, now_ts: float) -> dict[str, float | None]:
@@ -353,6 +354,7 @@ class PredictionResearchSnapshotter:
                 decision_epoch_ns=int(now * 1_000_000_000), payload=snapshot,
             ))
             self._counters["written" if accepted else "dropped"] += 1
+            self._recent_quality.append((now, bool(snapshot["joint_fresh"]), accepted, interval))
             self._latencies_ms.append((time.perf_counter() - started) * 1000.0)
             if accepted:
                 self._last_snapshot_ts[slug] = now
@@ -367,6 +369,22 @@ class PredictionResearchSnapshotter:
             if self._counters["errors"] == 1:
                 logger.warning(f"Prediction research snapshot disabled/skipped: {type(exc).__name__}: {exc}")
             return None
+
+    def recent_health(self, now_ts: float, *, window_sec: float = 300.0) -> dict:
+        """Bounded recent capture quality; no DB reads and no freshness authority."""
+        recent = [row for row in tuple(self._recent_quality) if now_ts - window_sec <= row[0] <= now_ts]
+        accepted_times = [row[0] for row in recent if row[2]]
+        accepted_times.extend(ts for ts in tuple(self._last_snapshot_ts.values()) if ts <= now_ts)
+        last = max(accepted_times, default=None)
+        gaps = [row[3] for row in recent if row[3] is not None and row[2]]
+        # Detect a collector that went silent, even when no new rows arrive.
+        if last is not None:
+            gaps.append(max(0, now_ts - last))
+        return {"interval_sec": self.interval_sec, "sample_count": len(recent),
+                "recent_largest_gap_sec": max(gaps) if gaps else None,
+                "joint_fresh_pct": 100 * sum(row[1] for row in recent) / len(recent) if recent else None,
+                "drops": sum(not row[2] for row in recent), "errors": self._counters["errors"],
+                "window_sec": window_sec}
 
     def _emit_metrics(self, now: float) -> None:
         if now - self._last_metrics_ts < self.metrics_interval_sec:

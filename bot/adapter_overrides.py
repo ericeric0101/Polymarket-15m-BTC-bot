@@ -383,7 +383,9 @@ def emit_data_engine_queue_report(engine, report) -> None:
     message = format_data_engine_queue_report(report, queue_limit)
     # Keep the existing warning threshold. Loguru renders WARNING in the
     # configured warning colour, while healthy summaries stay INFO-coloured.
-    if queue_limit and report["queue_depth"] >= int(queue_limit * 0.75):
+    warning_active = bool(queue_limit and report["queue_depth"] >= int(queue_limit * 0.75))
+    report["warning_active"] = warning_active
+    if warning_active:
         logger.warning(message)
     else:
         logger.info(message)

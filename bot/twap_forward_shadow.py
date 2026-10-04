@@ -203,11 +203,15 @@ class TwapForwardShadow:
                     "disk_free_gb": free_gb, "configured_min_free_disk_gb": self.min_free_disk_gb,
                     "trigger_reason": reason, "timestamp": now_ts,
                 })
-            return {"checked": True, "triggered": self._storage_guard_triggered, "reason": self._storage_guard_reason,
+            self._last_storage_health = {"checked": True, "triggered": self._storage_guard_triggered,
+                    "reason": self._storage_guard_reason, "observed_ts": now_ts,
                     "db_main_mb": main_mb, "db_wal_mb": wal_mb, "db_shm_mb": shm_mb,
                     "db_total_disk_mb": total_mb, "db_size_mb": total_mb, "disk_free_gb": free_gb}
+            return dict(self._last_storage_health)
         except Exception:
-            return {"checked": True, "triggered": self._storage_guard_triggered}
+            self._last_storage_health = {"checked": True, "triggered": self._storage_guard_triggered,
+                                         "observation_unavailable": True, "observed_ts": now_ts}
+            return dict(self._last_storage_health)
 
     def _persist_raw(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
         try:

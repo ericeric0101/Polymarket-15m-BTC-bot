@@ -4754,6 +4754,11 @@ class IntegratedBTCStrategy(
                 f"Guard {pnl_decision.state} BUY {'ALLOWED' if pnl_decision.allowed else 'BLOCKED'}"
             )
 
+        try:
+            from bot.research.health import status_health
+            derived_health_status = status_health(self, now_ts)
+        except Exception:
+            derived_health_status = " Data=UNKNOWN Research=UNKNOWN Storage=UNKNOWN Execution=UNKNOWN"
         logger.info(
             "STATUS "
             f"tradable={tradable} reason={reason_txt} "
@@ -4772,6 +4777,7 @@ class IntegratedBTCStrategy(
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
             f"{pnl_status}"
+            f"{derived_health_status}"
             f"{fast_follow_status}"
             f"{outcome_ws_status}"
             f"{self._format_time_left()}"

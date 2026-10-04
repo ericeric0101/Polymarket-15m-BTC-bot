@@ -11,9 +11,11 @@ import pytest
 from bot.journal_replay import replay_evidence
 from bot.execution_events import audit_reconciliation
 from bot.research.clocks import available_at, latest_evidence, compare_clocks, epoch
+from bot.research.health import aggregate_health, strategy_health, status_health
 from bot.research.indexing import migrate_closed_copy, benchmark_index
 from bot.research.storage import StorageSummary, archival_readiness
 from bot.research.store import ResearchStore
+from bot.prediction_research_snapshot import PredictionResearchSnapshotter
 from bot.session_pnl_guard import SessionPnlGuardConfig
 from bot.db_runtime import StrategyDBRuntimeMixin
 from scripts.research_analysis import canonical_replay, engineering_integrity
@@ -128,6 +130,41 @@ def test_reconciliation_reopen_identity_and_open_inventory():
     assert audit_reconciliation(rows)['status']=='CONSISTENT'
 
 
+def test_health_unknown_subdomains_reasons_and_no_gate():
+    view=aggregate_health({'Research':{'writer':{'queue_drops':2,'write_errors':1}},
+                           'Execution':{'journal':{'ready':False}},'Data':{'quote':{'quote_fresh':False}}})
+    assert view['domains']['Storage']['state']=='UNKNOWN'
+    assert view['domains']['Research']['state']=='CRITICAL'
+    assert 'journal:BUY_SAFETY_BLOCK_ACTIVE' in view['domains']['Execution']['reason_codes']
+    assert view['observability_only']
+    assert 'allowed' not in view
+
+
+def test_health_failure_isolation_no_db_scan_and_stale_cache():
+    def fail(*args):raise OSError('synthetic unavailable')
+    host=SimpleNamespace(trade_db=SimpleNamespace(runtime_health_snapshot=lambda:{'ready':True}),
+        lead_lag_db=SimpleNamespace(research_health=fail),
+        _last_market_data_health={'quote_fresh':True,'observed_ts':100})
+    view=strategy_health(host,120)
+    assert view['domains']['Research']['state']=='UNKNOWN'
+    assert view['domains']['Execution']['state']=='HEALTHY'
+    assert view['domains']['Data']['state']=='DEGRADED'
+    assert 'Execution=HEALTHY' in status_health(host,120)
+    assert status_health(host,120)==status_health(host,120)
+
+
+def test_recent_quality_gaps_freshness_drops_and_silence_without_scan():
+    snapshotter=PredictionResearchSnapshotter(db=SimpleNamespace(),run_id='r')
+    snapshotter._recent_quality.extend([(100,True,True,1),(102,False,False,2),(103,False,True,3)])
+    snapshotter._recent_quality.append((-1000,False,False,500))
+    health=snapshotter.recent_health(110)
+    assert health['sample_count']==3
+    assert health['recent_largest_gap_sec']==7
+    assert health['drops']==1
+    assert health['joint_fresh_pct']==pytest.approx(100/3)
+    assert snapshotter.recent_health(1000)['sample_count']==0
+
+
 def dbs(tmp_path):
     research,journal=tmp_path/'research?#.db',tmp_path/'journal?#.db'
     with sqlite3.connect(research) as conn:
@@ -187,6 +224,23 @@ def test_storage_throttle_failure_isolation_and_archive_no_actions(tmp_path,monk
         assert result['state']==state and result['automatic_action'] is None
 
 
+def test_health_projection_never_probes_journal_and_writer_failure_no_buy_veto(tmp_path,monkeypatch):
+    from monitoring.trade_journal_db import TradeJournalDB
+    from bot.session_pnl_guard import SessionPnlGuard
+    journal=TradeJournalDB(str(tmp_path/'journal.db'),backup_interval_sec=3600)
+    try:
+        journal._runtime_health={'state':'DEGRADED','ready':False,'reason':'existing_failure'}
+        monkeypatch.setattr(journal,'_probe_runtime_health',lambda:pytest.fail('projection did blocking probe'))
+        host=SimpleNamespace(trade_db=journal,lead_lag_db=SimpleNamespace(research_health=lambda:{'write_errors':3}))
+        view=strategy_health(host,100)
+        assert view['domains']['Execution']['state']=='CRITICAL'
+        guard=SessionPnlGuard(SessionPnlGuardConfig(),session_date='synthetic')
+        before=guard.decision()
+        assert 'Research=CRITICAL' in status_health(host,100)
+        assert guard.decision()==before
+    finally:journal.stop()
+
+
 @pytest.mark.parametrize('qty', ['NaN','bad','Infinity'])
 def test_invalid_reconciliation_snapshot_quantity_is_reported(qty):
     result=audit_reconciliation([fill()],local_inventory={'up':qty})
@@ -223,6 +277,27 @@ def test_clock_requires_known_named_origin_and_receive_source_skew():
     assert result['delta_sec']==-1  # Diagnostic skew; not an impossible failure assumption.
 
 
+def test_recent_quality_never_sampled_is_unknown_and_silent_known_capture_is_gap():
+    capture=PredictionResearchSnapshotter(db=None,run_id='r')
+    assert capture.recent_health(100)['recent_largest_gap_sec'] is None
+    capture._last_snapshot_ts['m']=100
+    health=capture.recent_health(500)
+    assert health['recent_largest_gap_sec']==400
+    view=aggregate_health({'Research':{'capture':health}})
+    assert view['domains']['Research']['state']=='DEGRADED'
+
+
+def test_existing_dataengine_warning_and_watchdog_are_projected_only():
+    host=SimpleNamespace(_last_market_data_health={'observed_ts':100,'quote_fresh':True,
+        'queue_window':{'warning_active':True,'queue_depth':75}},quote_watchdog_trigger_counts={'stale':1},
+        quote_recovery_pending_instruments={'up'})
+    view=strategy_health(host,100)
+    reasons=view['domains']['Data']['reason_codes']
+    assert 'data_engine:EXISTING_DATAENGINE_QUEUE_WARNING' in reasons
+    assert 'watchdog:EXISTING_WATCHDOG_RECOVERY_PENDING' in reasons
+    assert host.quote_recovery_pending_instruments=={'up'}
+
+
 def test_real_redeem_tag_repeats_same_tx_but_allows_distinct_partial_redemptions():
     events=[{'event_type':'REDEEM_EXECUTED','payload':{'slug':'m','tx_hash':'tx1'}}]*2
     assert audit_reconciliation(events)['status']=='UNRESOLVED_MISMATCH'
@@ -238,6 +313,12 @@ def test_snapshot_replay_revision_after_decision_is_never_backfilled(tmp_path):
     result=canonical_replay(research,journal,kind='MARKET',decision_ts=100,run_id='r')
     assert len(result['rows'])==1
     assert 'p_up_ex_market' not in result['rows'][0]
+
+
+def test_storage_measurement_failure_projects_unknown_without_buy_authority():
+    view=aggregate_health({'Storage':{'disk':{'observation_unavailable':True}}})
+    assert view['domains']['Storage']['state']=='UNKNOWN'
+    assert view['observability_only']
 
 
 def test_integrity_cli_reads_synthetic_schema_and_reports_missing_trace(tmp_path,monkeypatch,capsys):

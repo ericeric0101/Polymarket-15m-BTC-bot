@@ -219,6 +219,11 @@ class TradeJournalDB:
         """Return the immutable-at-startup journal gate used for new BUYs."""
         return dict(self._startup_health)
 
+    def runtime_health_snapshot(self) -> Dict[str, Any]:
+        """Read cached authority state without recovery probes or database I/O."""
+        with self._health_lock:
+            return dict(self._runtime_health)
+
     def runtime_health(self) -> Dict[str, Any]:
         with self._health_lock:
             state = str(self._runtime_health.get("state") or "HEALTHY")

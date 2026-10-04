@@ -274,11 +274,15 @@ class BTC1sHistoryCollector:
         try:
             free_bytes = int(self._free_disk_provider(self.data_dir).free)
             free_gb = free_bytes / (1024 ** 3)
+            self._last_disk_health = {"disk_free_gb": free_gb, "checked_monotonic": now,
+                                      "triggered": free_gb < self.min_free_disk_gb,
+                                      "configured_min_free_disk_gb": self.min_free_disk_gb}
             if free_gb < self.min_free_disk_gb:
                 self._disable(f"free_disk_below_minimum:{free_gb:.2f}GB")
                 return False
             return True
         except Exception as exc:
+            self._last_disk_health = {"observation_unavailable": True, "checked_monotonic": now}
             self._disable(f"disk_check_failed:{type(exc).__name__}")
             return False
 
@@ -339,6 +343,13 @@ class BTC1sHistoryCollector:
             self._enabled = False
             self._failure_reason = str(reason)
             logger.warning(f"BTC 1s history collector disabled; live feed continues: reason={reason}")
+
+    def research_health(self) -> dict:
+        with self._lock:
+            return {"queue_depth": self._queue.qsize(), "queue_capacity": self._queue.maxsize,
+                    "drops": self._dropped_history_rows, "enabled": self._enabled,
+                    "failure_reason": self._failure_reason, "bars_completed": self._bars_completed,
+                    "bars_written": self._bars_written, "buffered_bars": len(self._bars)}
 
     def _emit_metrics(self) -> None:
         latencies = sorted(self._latencies_ms)

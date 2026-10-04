@@ -154,6 +154,11 @@ def _record_quote_transport_telemetry(
     state[instrument_key] = received_ts
     callback_report = getattr(strategy, "_quote_callback_last_report", None)
     journal_write_report = take_sync_journal_write_report(strategy)
+    strategy._last_market_data_health = {
+        "quote_fresh": bool(quote_is_fresh), "queue_depth": data_engine_queue_depth,
+        "observed_ts": received_ts, "instrument_id": instrument_key,
+        "queue_window": provenance.get("data_engine_queue_window"),
+    }
     strategy._db_strategy_event(
         "QUOTE_TRANSPORT_TELEMETRY",
         {
