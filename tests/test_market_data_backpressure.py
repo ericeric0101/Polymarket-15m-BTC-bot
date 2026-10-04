@@ -18,6 +18,7 @@ from bot.adapter_overrides import (
     cleanup_data_engine_runtime_state,
     cancel_quote_delivery_tasks,
     drain_cancelled_quote_delivery_tasks,
+    format_data_engine_queue_report,
     should_publish_l2_snapshot,
     l2_publish_interval_sec,
     install_runtime_compatibility_overrides,
@@ -238,6 +239,46 @@ def test_l2_suppression_gap_is_attributed_and_recovery_requires_fresh_processed_
     recovered = engine._btc15m_backpressure["l2_suppressed_by_instrument"]["up"]
     assert recovered["recovered_gaps"] == 1
     assert recovered["last_recovery_event_ts"] == 101
+
+
+def test_queue_report_is_compact_and_only_lists_current_l2_activity():
+    historical_instrument = "0x" + "a" * 160 + ".POLYMARKET"
+    active_instrument = "0x" + "b" * 160 + ".POLYMARKET"
+    report = {
+        "queue_depth": 1,
+        "peak": 4,
+        "utilization_pct": None,
+        "enqueue_rate": 12.0,
+        "process_rate": 12.2,
+        "l2_suppressed_window": 5,
+        "l2_suppressed_total": 3000,
+        "quote_coalesced_window": 0,
+        "quote_coalesced_total": 308,
+        "quote_latency_p50_ms": 1.2,
+        "quote_latency_p95_ms": 46.2,
+        "quote_latency_p99_ms": 364.5,
+        "counts": {"OrderBookDeltas": 67, "QuoteTick": 54},
+        "high_water": {"OrderBookDeltas": 3, "QuoteTick": 4},
+        "l2_suppressed_by_instrument": {
+            historical_instrument: {"count_window": 0, "count_total": 289, "recovered_gaps": 95},
+            active_instrument: {"count_window": 5, "count_total": 100, "recovered_gaps": 48},
+        },
+        "l2_open_gaps_by_instrument": {
+            historical_instrument: {"suppressed_count": 1},
+        },
+    }
+
+    message = format_data_engine_queue_report(report, queue_limit=16)
+
+    assert "DataEngine queue:" in message
+    assert "l2_active=[" in message
+    assert "w=5" in message
+    assert "gap=1" in message
+    assert "total=289" not in message
+    assert "recovered=95" not in message
+    assert historical_instrument not in message
+    assert active_instrument not in message
+    assert len(message) < 500
 
 
 def test_unsubscribed_trade_ticks_are_not_allowed_to_fill_data_engine_queue():

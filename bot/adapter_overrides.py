@@ -309,39 +309,80 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
     return sent
 
 
+def _short_queue_instrument(instrument_id: object) -> str:
+    """Keep console telemetry identifiable without printing full token IDs."""
+    value = str(instrument_id)
+    if len(value) <= 20:
+        return value
+    return f"{value[:8]}…{value[-8:]}"
+
+
+def _compact_l2_queue_activity(report: dict[str, object], *, limit: int = 3) -> str:
+    """Render only current-window suppression and unresolved gaps for the console.
+
+    Full per-instrument lifetime counters remain in the in-memory telemetry
+    report. They are useful for forensic inspection but made the regular
+    ten-second operational log several thousand characters long.
+    """
+    suppressed = report.get("l2_suppressed_by_instrument", {})
+    gaps = report.get("l2_open_gaps_by_instrument", {})
+    suppressed = suppressed if isinstance(suppressed, dict) else {}
+    gaps = gaps if isinstance(gaps, dict) else {}
+    keys = {
+        key
+        for key, value in suppressed.items()
+        if isinstance(value, dict) and int(value.get("count_window", 0) or 0) > 0
+    }
+    keys.update(gaps)
+    entries = []
+    for key in sorted(keys, key=str):
+        window = suppressed.get(key, {})
+        gap = gaps.get(key, {})
+        window_count = int(window.get("count_window", 0) or 0) if isinstance(window, dict) else 0
+        gap_count = int(gap.get("suppressed_count", 0) or 0) if isinstance(gap, dict) else 0
+        detail = f"{_short_queue_instrument(key)}:w={window_count}"
+        if gap_count:
+            detail += f"/gap={gap_count}"
+        entries.append(detail)
+    if not entries:
+        return "none"
+    visible = entries[:limit]
+    if len(entries) > limit:
+        visible.append(f"+{len(entries) - limit} more")
+    return ",".join(visible)
+
+
+def format_data_engine_queue_report(report: dict[str, object], queue_limit: int) -> str:
+    """Build a bounded, operator-readable queue health summary."""
+    counts = report.get("counts", {})
+    high_water = report.get("high_water", {})
+    counts = counts if isinstance(counts, dict) else {}
+    high_water = high_water if isinstance(high_water, dict) else {}
+    events = ",".join(
+        f"{kind}:{count}(hi={high_water.get(kind, 0)})"
+        for kind, count in sorted(counts.items())
+    ) or "none"
+    utilization = report.get("utilization_pct")
+    utilization_text = f"{utilization}%" if utilization is not None else "unknown"
+    return (
+        "DataEngine queue: "
+        f"depth={report['queue_depth']}/{queue_limit or 'unknown'} peak={report['peak']} "
+        f"util={utilization_text} rate={report['enqueue_rate']:.1f}->{report['process_rate']:.1f}/s "
+        f"l2={report['l2_suppressed_window']}(total={report['l2_suppressed_total']}) "
+        f"coalesced={report['quote_coalesced_window']}(total={report['quote_coalesced_total']}) "
+        f"qlat_ms=p50:{report.get('quote_latency_p50_ms', 0):.1f}/"
+        f"p95:{report.get('quote_latency_p95_ms', 0):.1f}/"
+        f"p99:{report.get('quote_latency_p99_ms', 0):.1f} "
+        f"l2_active=[{_compact_l2_queue_activity(report)}] events=[{events}]"
+    )
+
+
 def emit_data_engine_queue_report(engine, report) -> None:
     engine._btc15m_queue_telemetry_pending_report = report
     queue_limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or 0)
-    summary = ",".join(
-        f"{kind}={count}/high={report['high_water'].get(kind, 0)}"
-        for kind, count in sorted(report["counts"].items())
-    )
-    l2_by_instrument = ",".join(
-        f"{key}:window={value.get('count_window', 0)}/total={value.get('count_total', 0)}/"
-        f"recovered={value.get('recovered_gaps', 0)}"
-        for key, value in sorted(report.get("l2_suppressed_by_instrument", {}).items())
-    ) or "none"
-    l2_open_gaps = ",".join(
-        f"{key}:{value.get('suppressed_count', 0)}"
-        for key, value in sorted(report.get("l2_open_gaps_by_instrument", {}).items())
-    ) or "none"
-    message = (
-        "DataEngine queue telemetry: "
-        f"depth={report['queue_depth']}/{queue_limit or 'unknown'} "
-        f"start_depth={report['window_start_depth']} peak={report['peak']} "
-        f"depth_delta={report['depth_delta']} "
-        f"util={report['utilization_pct'] if report['utilization_pct'] is not None else 'unknown'}% "
-        f"window={report['window_sec']:.1f}s enqueued={report['enqueued']} processed={report['processed']} "
-        f"enqueue_rate={report['enqueue_rate']:.1f}/s process_rate={report['process_rate']:.1f}/s "
-        f"throughput_delta={report['throughput_delta']} "
-        f"l2_suppressed={report['l2_suppressed_window']}(total={report['l2_suppressed_total']}) "
-        f"l2_by_instrument=[{l2_by_instrument}] l2_open_gaps=[{l2_open_gaps}] "
-        f"quote_coalesced={report['quote_coalesced_window']}(total={report['quote_coalesced_total']}) "
-        f"quote_latency_ms=p50:{report.get('quote_latency_p50_ms', 0):.1f}/"
-        f"p95:{report.get('quote_latency_p95_ms', 0):.1f}/"
-        f"p99:{report.get('quote_latency_p99_ms', 0):.1f}/"
-        f"max:{report.get('quote_latency_max_ms', 0):.1f} events=[{summary}]"
-    )
+    message = format_data_engine_queue_report(report, queue_limit)
+    # Keep the existing warning threshold. Loguru renders WARNING in the
+    # configured warning colour, while healthy summaries stay INFO-coloured.
     if queue_limit and report["queue_depth"] >= int(queue_limit * 0.75):
         logger.warning(message)
     else:
