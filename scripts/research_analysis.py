@@ -16,11 +16,13 @@ import statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from decimal import Decimal
 from typing import Any, Iterable
 
 from bot.entry_session_policy import TAIPEI
 from bot.research.lifecycle import first_crossings, held_side_probability, number as lifecycle_number
 from bot.research.store import ResearchStore
+from bot.research.clocks import latest_evidence, epoch as clock_epoch
 from bot.research.metrics import capital_efficiency, entry_timing_bin as _entry_timing_bin
 from scripts import four_market_prediction_forensics as forensic
 
@@ -444,16 +446,8 @@ preliminary conclusion.
 
 
 def _epoch(value: Any) -> float | None:
-    """Parse an explicit persisted UTC value; never fabricate a timestamp."""
-    numeric = _num(value)
-    if numeric is not None:
-        return numeric
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
+    """Compatibility name for the canonical UTC parser; naive clocks stay unknown."""
+    return clock_epoch(value)
 
 
 def _mean(values: Iterable[float | None]) -> float | None:
@@ -475,29 +469,28 @@ def _read_shadow_settlements(journal_path: Path, *, regime: str,
     """Reconstruct settled shadow entries from a read-only journal snapshot."""
     dedup: dict[str, tuple[int, dict[str, Any]]] = {}
     audit: list[dict[str, Any]] = []
-    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
-        rows = conn.execute(
-            "SELECT id, ts, run_id, payload_json FROM order_events "
-            "WHERE event_type = 'SHADOW_SIM_SETTLED' ORDER BY id"
-        )
-        for event_id, event_ts, run_id, raw in rows:
-            if allowed_run_ids is not None and str(run_id) not in allowed_run_ids:
-                continue
-            try:
-                payload = json.loads(raw)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                audit.append({"event_id": event_id, "status": "EXCLUDED", "exclusion_reason": "invalid_payload_json"})
-                continue
-            slug = str(payload.get("slug") or payload.get("market_slug") or "")
-            if not slug or market_context(slug)["session_regime"] != regime:
-                continue
-            simulation_id = str(payload.get("simulation_id") or f"{slug}:{payload.get('side')}:{payload.get('filled_ts')}")
-            if simulation_id in dedup:
-                audit.append({"event_id": dedup[simulation_id][0], "market_slug": slug, "simulation_id": simulation_id,
-                              "status": "EXCLUDED", "exclusion_reason": "duplicate_settlement_superseded"})
-            dedup[simulation_id] = (int(event_id), {"event_id": int(event_id), "run_id": str(run_id), "event_ts": event_ts,
-                                                     "simulation_id": simulation_id, "market_slug": slug,
-                                                     "side": str(payload.get("side") or "").upper(), "payload": payload})
+    rows = ResearchStore(journal_path).journal_events(journal_path, event_type="SHADOW_SIM_SETTLED")
+    for row in rows:
+        event_id, event_ts, run_id, raw = row["id"], row["ts"], row["run_id"], row["payload_json"]
+        if allowed_run_ids is not None and str(run_id) not in allowed_run_ids:
+            continue
+        try:
+            if row["payload_status"] != "VALID":
+                raise ValueError("invalid journal payload")
+            payload = row["payload"]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            audit.append({"event_id": event_id, "status": "EXCLUDED", "exclusion_reason": "invalid_payload_json"})
+            continue
+        slug = str(payload.get("slug") or payload.get("market_slug") or "")
+        if not slug or market_context(slug)["session_regime"] != regime:
+            continue
+        simulation_id = str(payload.get("simulation_id") or f"{slug}:{payload.get('side')}:{payload.get('filled_ts')}")
+        if simulation_id in dedup:
+            audit.append({"event_id": dedup[simulation_id][0], "market_slug": slug, "simulation_id": simulation_id,
+                          "status": "EXCLUDED", "exclusion_reason": "duplicate_settlement_superseded"})
+        dedup[simulation_id] = (int(event_id), {"event_id": int(event_id), "run_id": str(run_id), "event_ts": event_ts,
+                                                 "simulation_id": simulation_id, "market_slug": slug,
+                                                 "side": str(payload.get("side") or "").upper(), "payload": payload})
     output: list[dict[str, Any]] = []
     for _, row in dedup.values():
         payload = row.pop("payload")
@@ -531,25 +524,21 @@ def _read_shadow_settlements(journal_path: Path, *, regime: str,
     return output, audit
 
 
-def _journal_event_count_for_regime(conn: sqlite3.Connection, event_type: str, regime: str,
+def _journal_event_count_for_regime(journal_path: Path, event_type: str, regime: str,
                                     allowed_run_ids: set[str] | None = None) -> int:
-    """Count only events whose persisted market identity belongs to this cohort."""
+    """Count a cohort through the shared journal parser."""
     count = 0
-    for run_id, raw in conn.execute("SELECT run_id, payload_json FROM order_events WHERE event_type = ?", (event_type,)):
-        if allowed_run_ids is not None and str(run_id) not in allowed_run_ids:
+    for row in ResearchStore(journal_path).journal_events(journal_path, event_type=event_type):
+        if allowed_run_ids is not None and row["run_id"] not in allowed_run_ids:
             continue
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        slug = str(payload.get("slug") or payload.get("market_slug") or "")
-        if slug and market_context(slug)["session_regime"] == regime:
+        slug = row["market_slug"]
+        if row["payload_status"] == "VALID" and slug and market_context(slug)["session_regime"] == regime:
             count += 1
     return count
 
 
 def _test_dry_run_ids(conn: sqlite3.Connection) -> set[str] | None:
-    """Return the explicit TEST_DRY_RUN cohort, or None for legacy fixtures."""
+    """Internal compatibility adapter for the existing journal run schema."""
     try:
         return {str(run_id) for run_id, mode, test_mode in conn.execute(
             "SELECT run_id, mode, test_mode FROM strategy_runs"
@@ -587,15 +576,14 @@ def _group_capital_metrics(rows: list[dict[str, Any]], key: str, labels: Iterabl
 def capital_efficiency_analysis(db_path: Path, journal_path: Path, output: Path) -> dict[str, Any]:
     """Offline P3 accounting validation for the current weekend shadow cohort."""
     output.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+    with ResearchStore.open_readonly(journal_path) as conn:
         run_ids = _test_dry_run_ids(conn)
     records, duplicate_audit = _read_shadow_settlements(journal_path, regime="WEEKEND", allowed_run_ids=run_ids)
     usable = [row for row in records if row["status"] == "USABLE"]
     excluded = [row for row in records if row["status"] != "USABLE"] + duplicate_audit
-    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
-        shadow_entries = _journal_event_count_for_regime(conn, "SHADOW_SIM_ENTRY_FILLED", "WEEKEND", run_ids)
-        live_entries = _journal_event_count_for_regime(conn, "ORDER_FILLED", "WEEKEND", run_ids)
-        stop_events = _journal_event_count_for_regime(conn, "ORDER_TAKER_EXIT_SUBMIT", "WEEKEND", run_ids)
+    shadow_entries = _journal_event_count_for_regime(journal_path, "SHADOW_SIM_ENTRY_FILLED", "WEEKEND", run_ids)
+    live_entries = _journal_event_count_for_regime(journal_path, "ORDER_FILLED", "WEEKEND", run_ids)
+    stop_events = _journal_event_count_for_regime(journal_path, "ORDER_TAKER_EXIT_SUBMIT", "WEEKEND", run_ids)
     cohort_slugs = {row["market_slug"] for row in records}
     # ResearchStore supplies canonical settlement provenance for every market,
     # including markets that never produced a shadow fill. Do not disappear
@@ -792,13 +780,8 @@ def _log_loss(values: list[tuple[float, bool]]) -> float | None:
 
 
 def _event_ts(value: Any) -> float | None:
-    """Parse journal timestamps without depending on local timezone."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError):
-        return None
+    """Compatibility name; journal clocks are not assumed to be venue clocks."""
+    return clock_epoch(value)
 
 
 def _entry_side(payload: dict[str, Any], snapshots: list[dict[str, Any]], instrument_id: str) -> str:
@@ -828,9 +811,7 @@ def _sigma_bucket(sigma: float | None) -> str | None:
 
 
 def _snapshot_near(rows: list[dict[str, Any]], ts: float, *, max_age_sec: float = 8.0) -> dict[str, Any] | None:
-    candidates = [row for row in rows if ts - max_age_sec <= float(row["snapshot_ts"]) <= ts
-                  and row.get("joint_fresh") is True]
-    return max(candidates, key=lambda row: float(row["snapshot_ts"])) if candidates else None
+    return latest_evidence(rows, ts, max_age_sec=max_age_sec, require_joint_fresh=True)
 
 
 def _journal_fill_entries(journal_path: Path, timelines: dict[str, list[dict[str, Any]]],
@@ -839,15 +820,16 @@ def _journal_fill_entries(journal_path: Path, timelines: dict[str, list[dict[str
     from bot.research.lifecycle import position_lifecycle_id
     groups, audit, seen = {}, [], set()
     sparse = {row["position_lifecycle_id"]: row for row in sparse_entries or [] if row.get("position_lifecycle_id")}
-    query = """SELECT id, ts, run_id, client_order_id, side, price, qty, instrument_id, payload_json
-               FROM order_events WHERE event_type='ORDER_FILLED' AND upper(coalesce(side,''))='BUY' ORDER BY id"""
-    with sqlite3.connect(journal_path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
-        raw_rows = conn.execute(query).fetchall()
-    for event_id, raw_ts, run_id, client_id, _, price, qty, instrument_id, raw_payload in raw_rows:
+    raw_rows = ResearchStore(journal_path).journal_events(journal_path, event_type="ORDER_FILLED")
+    for row in raw_rows:
+        if str(row.get("side") or "").upper() != "BUY":
+            continue
+        event_id, raw_ts, run_id, client_id, price, qty, instrument_id, raw_payload = (
+            row.get(key) for key in ("id", "ts", "run_id", "client_order_id", "price", "qty", "instrument_id", "payload_json"))
         try:
-            payload = json.loads(raw_payload or "{}")
-            if not isinstance(payload, dict):
-                raise ValueError("non-object payload")
+            if row["payload_status"] != "VALID":
+                raise ValueError("invalid journal payload")
+            payload = row["payload"]
         except (TypeError, ValueError):
             audit.append({"order_event_id": event_id, "status": "EXCLUDED", "reason": "INVALID_PAYLOAD"})
             continue
@@ -1250,9 +1232,60 @@ def entry_stop_status_analysis(db_path: Path, journal_path: Path, output: Path) 
     return {"completed_markets": len(catalog), "weekend_completed": sum(r["session_regime"] == "WEEKEND" for r in catalog), "weekday_completed": sum(r["session_regime"] == "WEEKDAY" for r in catalog), "synchronized_markets": sum(bool(all_rows.get(r["market_slug"])) for r in catalog), "checkpoint_rows": len(checkpoint_rows), "output": str(output)}
 
 
+
+def canonical_replay(db_path: Path, journal_path: Path, *, kind: str, decision_ts: float,
+                     run_id=None, slug=None, guard_config=None, complete_history=False) -> dict:
+    from bot.journal_replay import replay_evidence
+    from bot.research.clocks import epoch
+    store = ResearchStore(db_path)
+    if kind == "MARKET":
+        events = [{**payload, "event_ts": epoch(payload.get("snapshot_ts"))}
+                  for payload in store.get_prediction_snapshots(run_id=run_id, slug=slug, end_ts=decision_ts)]
+    else:
+        table = "strategy_events" if kind == "DECISION" else "order_events"
+        events = []
+        for row in store.journal_events(journal_path, table=table, run_id=run_id, slug=slug):
+            # Journal ts describes when evidence became durably available. It
+            # cannot support exact venue-time ordering without explicit clocks.
+            events.append({**row, "event_ts": row["persist_ts"]})
+    result = replay_evidence(events, kind=kind, decision_ts=decision_ts,
+                             guard_config=guard_config, complete_history=complete_history)
+    if kind != "MARKET" and result["classification"] == "EXACT_REPLAY":
+        result["classification"] = "APPROXIMATE_REPLAY"
+        result["reason_codes"].append("JOURNAL_PERSIST_CLOCK_NOT_VENUE_EVENT_CLOCK")
+    result["execution_authority"] = False
+    return result
+
+
+def engineering_integrity(store: ResearchStore, journal_path: Path) -> dict:
+    from bot.execution_events import audit_reconciliation
+    from bot.research.clocks import available_at
+    orders = store.journal_events(journal_path)
+    strategy = store.journal_events(journal_path, table="strategy_events")
+    snapshots = store.get_prediction_snapshots()
+    research_payloads = [payload for _, _, _, payload in store.rows()]
+    payloads = [row["payload"] for row in orders + strategy] + research_payloads
+    traces = [payload["decision_trace"] for payload in payloads if isinstance(payload.get("decision_trace"), dict)]
+    expected = sum(row.get("event_type") in {"ENTRY_DECISION_TRACE", "SESSION_PNL_UPDATE", "SESSION_DAY_RESET", "ORDER_FILLED"}
+                   or str(row.get("event_type") or "").endswith("_SUBMIT") for row in orders + strategy)
+    trace_kinds = {kind: sum(trace.get("kind") == kind for trace in traces)
+                   for kind in ("ENTRY_DECISION", "STOP_DECISION", "SESSION_GUARD_DECISION", "EXECUTION_DECISION")}
+    clocks = sum(not available_at(row, row["snapshot_ts"]) for row in snapshots)
+    return {"reconciliation": audit_reconciliation(orders + strategy),
+            "decision_trace_rows": len(traces), "trace_rows_by_kind": trace_kinds,
+            "expected_sparse_journal_boundaries": expected,
+            "journal_trace_unavailable_rows": sum(not isinstance(row["payload"].get("decision_trace"), dict)
+                for row in orders + strategy if row.get("event_type") in {"ENTRY_DECISION_TRACE", "SESSION_PNL_UPDATE", "SESSION_DAY_RESET", "ORDER_FILLED"}
+                or str(row.get("event_type") or "").endswith("_SUBMIT")),
+            "decision_point_l2_rows": sum(payload.get("event_type") == "DECISION_POINT_L2" for payload in research_payloads),
+            "trace_l2_available_rows": sum(trace.get("l2", {}).get("status") == "L2_AVAILABLE" for trace in traces),
+            "clock_contract_violations": clocks,
+            "runtime_health_counters": "NOT_PERSISTED_LEGACY_UNKNOWN",
+            "scope": "OFFLINE_DIAGNOSTICS_NO_EXECUTION_ACTION"}
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("latest", "run", "market", "compare-regimes", "preliminary-regimes", "capital-efficiency", "integrity", "provenance", "entry-stop-status", "stop-lifecycle"))
+    parser.add_argument("command", choices=("latest", "run", "market", "compare-regimes", "preliminary-regimes", "capital-efficiency", "integrity", "provenance", "entry-stop-status", "stop-lifecycle", "replay", "index-benchmark", "storage-summary"))
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -1262,7 +1295,34 @@ def main() -> None:
     parser.add_argument("--slug")
     parser.add_argument("--legacy-stop-db", type=Path,
                         help="Optional read-only legacy Outcome stop-forensics DB; not scanned by default.")
+    parser.add_argument("--replay-kind", choices=("MARKET", "DECISION", "ACCOUNTING"), default="MARKET")
+    parser.add_argument("--decision-ts", type=float)
+    parser.add_argument("--guard-mode", choices=("legacy", "target_scaled_v2", "shadow_target_scaled_v2"))
+    parser.add_argument("--monthly-target", type=Decimal)
+    parser.add_argument("--per-trade-risk", type=Decimal)
+    parser.add_argument("--complete-history", action="store_true", help="Assert supplied evidence includes initial state/history; does not assert exact venue replay")
+    parser.add_argument("--btc-dir", type=Path, help="Explicit offline history copy; only used by storage-summary")
     args = parser.parse_args()
+    if args.command == "index-benchmark":
+        from bot.research.indexing import benchmark_index
+        print(json.dumps(benchmark_index(), indent=2))
+        return
+    if args.command in {"replay", "storage-summary"}:
+        if args.db == DEFAULT_DB or args.journal == DEFAULT_JOURNAL:
+            parser.error("requires explicit offline --db and --journal copies")
+        if args.command == "storage-summary":
+            from bot.research.storage import StorageSummary
+            print(json.dumps(StorageSummary().measure(journal=args.journal, research=args.db, btc_dir=args.btc_dir), indent=2))
+            return
+        if args.decision_ts is None:
+            parser.error("replay requires --decision-ts UTC seconds")
+        from bot.session_pnl_guard import SessionPnlGuardConfig
+        config = SessionPnlGuardConfig(mode=args.guard_mode, monthly_net_target_usdc=args.monthly_target,
+                                       per_trade_risk_usdc=args.per_trade_risk) if args.guard_mode else None
+        print(json.dumps(canonical_replay(args.db, args.journal, kind=args.replay_kind,
+              decision_ts=args.decision_ts, run_id=args.run_id, slug=args.slug,
+              guard_config=config, complete_history=args.complete_history), indent=2))
+        return
     catalog = _catalog(args.db)
     if args.command == "run" and not args.run_id:
         parser.error("run requires --run-id")
@@ -1283,6 +1343,7 @@ def main() -> None:
     if args.command == "integrity":
         result = ResearchStore(args.db).integrity()
         result["run_provenance"] = ResearchStore(args.db).get_run_provenance(args.journal)
+        result["engineering"] = engineering_integrity(ResearchStore(args.db), args.journal)
         print(json.dumps(result, indent=2, sort_keys=True))
         return
     if args.command == "provenance":

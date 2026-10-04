@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
+from bot.research.clocks import epoch
 
 
 class ResearchStore:
@@ -16,16 +17,25 @@ class ResearchStore:
     def __init__(self, db_path: str | Path) -> None:
         self.path = Path(db_path)
 
+    @staticmethod
+    def open_readonly(path: str | Path) -> sqlite3.Connection:
+        return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
+        return self.open_readonly(self.path)
 
     def rows(self, *, run_id: str | None = None, slug: str | None = None,
-             event_type: str | None = None) -> Iterator[tuple[str, str, int, dict[str, Any]]]:
+             event_type: str | None = None, start_ts: float | None = None,
+             end_ts: float | None = None) -> Iterator[tuple[str, str, int, dict[str, Any]]]:
         clauses, params = [], []
         if run_id:
             clauses.append("run_id = ?"); params.append(run_id)
         if slug:
             clauses.append("slug = ?"); params.append(slug)
+        if start_ts is not None:
+            clauses.append("decision_epoch_ns >= ?"); params.append(int(start_ts * 1e9))
+        if end_ts is not None:
+            clauses.append("decision_epoch_ns <= ?"); params.append(int(end_ts * 1e9))
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._connect() as conn:
             for run, row_slug, epoch_ns, raw in conn.execute(
@@ -41,10 +51,11 @@ class ResearchStore:
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
 
-    def get_prediction_snapshots(self, *, run_id: str | None = None, slug: str | None = None) -> list[dict[str, Any]]:
+    def get_prediction_snapshots(self, *, run_id: str | None = None, slug: str | None = None,
+                                 start_ts: float | None = None, end_ts: float | None = None) -> list[dict[str, Any]]:
         # Same run/market/snapshot key is deduped deterministically by latest DB row.
         dedup: dict[tuple[str, str, float], dict[str, Any]] = {}
-        for run, row_slug, epoch, payload in self.rows(run_id=run_id, slug=slug, event_type="PREDICTION_RESEARCH_SNAPSHOT"):
+        for run, row_slug, epoch, payload in self.rows(run_id=run_id, slug=slug, event_type="PREDICTION_RESEARCH_SNAPSHOT", start_ts=start_ts, end_ts=end_ts):
             market = str(payload.get("market_slug") or row_slug)
             ts = float(payload.get("snapshot_ts") or epoch / 1e9)
             dedup[(run, market, ts)] = {**payload, "run_id": run, "market_slug": market, "snapshot_ts": ts}
@@ -137,7 +148,7 @@ class ResearchStore:
         warnings: list[str] = []
         if journal.is_file():
             try:
-                with sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+                with self.open_readonly(journal) as conn:
                     columns = {row[1] for row in conn.execute("PRAGMA table_info(strategy_runs)")}
                     if {"run_id", "started_at", "ended_at", "mode", "notes_json"}.issubset(columns):
                         for run_id, started_at, ended_at, mode, raw in conn.execute(
@@ -200,7 +211,7 @@ class ResearchStore:
                         weekend += 1
                     else:
                         weekday += 1
-                except (ValueError, OSError, OverflowError):
+                except (IndexError, ValueError, OSError, OverflowError):
                     pass
             first_ns, last_ns = coverage["first_epoch_ns"], coverage["last_epoch_ns"]
             result_runs.append({
@@ -219,11 +230,12 @@ class ResearchStore:
                     unique_weekend += 1
                 else:
                     unique_weekday += 1
-            except (ValueError, OSError, OverflowError):
+            except (IndexError, ValueError, OSError, OverflowError):
                 pass
         return {
             "run_count": len(result_runs), "market_count": len(all_slugs),
             "weekday_market_count": unique_weekday, "weekend_market_count": unique_weekend,
+            "unclassified_market_count": len(all_slugs) - unique_weekday - unique_weekend,
             "first_snapshot_ts": min((r["first_snapshot_ts"] for r in result_runs if r["first_snapshot_ts"] is not None), default=None),
             "last_snapshot_ts": max((r["last_snapshot_ts"] for r in result_runs if r["last_snapshot_ts"] is not None), default=None),
             "git_commits": sorted(git_commits), "config_hashes": sorted(config_hashes),
@@ -231,3 +243,46 @@ class ResearchStore:
             "legacy_unmanifested_runs": sum(row["provenance_status"] == "LEGACY_UNKNOWN" for row in result_runs),
             "runs": result_runs, "warnings": warnings,
         }
+
+
+    def journal_events(self, journal_path: str | Path, *, table: str = "order_events",
+                       run_id: str | None = None, slug: str | None = None,
+                       event_type: str | None = None) -> list[dict[str, Any]]:
+        """Shared read-only journal decoding. Keep all rows; diagnostics own dedupe.
+
+        `ts` is PERSIST_TS, never silently upgraded to venue fill time.
+        Invalid payload rows remain visible with an error code.
+        """
+        if table not in {"order_events", "strategy_events"}:
+            raise ValueError("unsupported journal table")
+        output = []
+        with self.open_readonly(journal_path) as conn:
+            conn.row_factory = sqlite3.Row
+            clauses, params = [], []
+            if run_id is not None:
+                clauses.append("run_id = ?"); params.append(run_id)
+            if event_type is not None:
+                clauses.append("event_type = ?"); params.append(event_type)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            for raw in conn.execute(f"SELECT * FROM {table}" + where + " ORDER BY id", params):
+                row = dict(raw)
+                if run_id is not None and str(row.get("run_id")) != run_id:
+                    continue
+                if event_type is not None and row.get("event_type") != event_type:
+                    continue
+                try:
+                    payload = json.loads(row.get("payload_json") or "{}")
+                    if not isinstance(payload, dict):
+                        raise ValueError("non-object payload")
+                    row["payload"] = payload
+                    row["payload_status"] = "VALID"
+                except (ValueError, TypeError):
+                    row["payload"] = {}
+                    row["payload_status"] = "INVALID_PAYLOAD"
+                market = row["payload"].get("market_slug") or row["payload"].get("slug")
+                if slug is not None and market != slug:
+                    continue
+                row["market_slug"] = market
+                row["persist_ts"] = epoch(row.get("ts"))
+                output.append(row)
+        return output

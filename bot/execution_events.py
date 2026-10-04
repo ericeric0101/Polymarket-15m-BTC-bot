@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, Iterable
 
 
 @dataclass
@@ -104,3 +104,118 @@ def reconcile_benign_cancel_reject(
             active_maker_orders.pop(order_key, None)
             return True
     return False
+
+
+def audit_reconciliation(events: Iterable[dict], *, local_inventory: dict | None = None,
+                         venue_inventory: dict | None = None, open_orders: Iterable[dict] = (),
+                         complete_history: bool = False) -> dict:
+    """Read-only diagnostics over recorded events and explicitly supplied snapshots.
+
+    This does not recover, cancel or liquidate anything. Quantity projection
+    reuses InventoryLedger and research identity uses its existing annotations.
+    """
+    from decimal import Decimal
+    from bot.inventory import InventoryLedger
+    ledger, seen, clients, finalized, identities = {}, {}, {}, set(), {}
+    issues = []
+    rank = {'CONSISTENT': 0, 'RECOVERABLE_MISMATCH': 1, 'UNRESOLVED_MISMATCH': 2, 'CRITICAL_INCONSISTENCY': 3}
+    def issue(code, severity, **context):
+        issues.append({'reason_code': code, 'status': severity, **context})
+    for event in events:
+        payload = event.get('payload', {})
+        event_type = event.get('event_type', '')
+        inst = str(event.get('instrument_id') or payload.get('instrument_id') or '')
+        client = str(event.get('client_order_id') or '')
+        if event.get('payload_status') == 'INVALID_PAYLOAD':
+            issue('INVALID_PAYLOAD', 'UNRESOLVED_MISMATCH', event_id=event.get('id')); continue
+        if event_type.endswith('_SUBMIT'):
+            if client and client in clients:
+                issue('DUPLICATE_CLIENT_ORDER_ID', 'UNRESOLVED_MISMATCH', client_order_id=client)
+            if client:
+                clients[client] = {'qty': event.get('qty'), 'filled': Decimal(0), 'instrument_id': inst}
+        if event_type == 'ORDER_FILLED':
+            fill_id = payload.get('fill_event_id') or payload.get('trade_id')
+            key = (str(event.get('run_id')), inst, str(fill_id))
+            fingerprint = (event.get('side'), event.get('qty'), event.get('price'), client,
+                           event.get('commission_usdc'), payload.get('effective_fee_shares'))
+            if fill_id and key in seen:
+                issue('DUPLICATE_FILL' if seen[key] == fingerprint else 'CONFLICTING_FILL_ID',
+                      'RECOVERABLE_MISMATCH' if seen[key] == fingerprint else 'CRITICAL_INCONSISTENCY', client_order_id=client)
+                continue
+            if fill_id:
+                seen[key] = fingerprint
+            else:
+                issue('FILL_ID_UNKNOWN', 'UNRESOLVED_MISMATCH', client_order_id=client)
+            try:
+                if event.get('commission_usdc') is None or payload.get('effective_fee_shares') is None:
+                    issue('FEE_INPUT_INCOMPLETE', 'UNRESOLVED_MISMATCH', event_id=event.get('id'))
+                qty, price = Decimal(str(event['qty'])), Decimal(str(event['price']))
+                fee, shares = Decimal(str(event.get('commission_usdc') or 0)), Decimal(str(payload.get('effective_fee_shares') or 0))
+                if not all(v.is_finite() for v in (qty, price, fee, shares)) or qty <= 0 or price <= 0:
+                    raise ValueError('invalid numeric fill')
+                side = str(event.get('side') or '').lower()
+                if side not in {'buy', 'sell'} or not inst:
+                    raise ValueError('invalid side/instrument')
+                before = ledger.get(inst, {}).get('qty', Decimal(0))
+                if side == 'sell' and qty > before:
+                    issue('SELL_EXCEEDS_RECORDED_INVENTORY',
+                          'CRITICAL_INCONSISTENCY' if complete_history else 'UNRESOLVED_MISMATCH', instrument_id=inst)
+                InventoryLedger.update_from_fill(ledger, inst, side, price, qty, fee, shares, 1.0)
+                identity = payload.get('position_lifecycle_id')
+                if side == 'buy' and identity:
+                    if before <= 0 and identities.get(inst) == identity:
+                        issue('REOPEN_REUSES_LIFECYCLE', 'CRITICAL_INCONSISTENCY', instrument_id=inst)
+                    elif before > 0 and identities.get(inst) and identities[inst] != identity:
+                        issue('SCALEIN_CHANGES_LIFECYCLE', 'UNRESOLVED_MISMATCH', instrument_id=inst)
+                    identities[inst] = identity
+                if client in clients:
+                    clients[client]['filled'] += qty
+                    submitted = clients[client]['qty']
+                    if submitted is not None and clients[client]['filled'] > Decimal(str(submitted)):
+                        issue('FILLS_EXCEED_ORDER_QTY', 'CRITICAL_INCONSISTENCY', client_order_id=client)
+            except (KeyError, ValueError, ArithmeticError):
+                issue('INVALID_FILL', 'CRITICAL_INCONSISTENCY', event_id=event.get('id'))
+        if 'CANCEL' in event_type and client in clients and clients[client]['filled'] > 0:
+            issue('CANCELLED_WITH_PARTIAL_FILL', 'RECOVERABLE_MISMATCH', client_order_id=client)
+        if event_type in {'MARKET_CYCLE_PNL', 'MARKET_SETTLEMENT', 'REDEEM_RECONCILIATION', 'REDEEM_EXECUTED'}:
+            market = payload.get('market_slug') or payload.get('slug')
+            if not market:
+                issue('FINALIZATION_IDENTITY_UNKNOWN', 'UNRESOLVED_MISMATCH'); continue
+            key = (event_type, payload.get('tx_hash') or market) if event_type == 'REDEEM_EXECUTED' else (event_type, market)
+            if key in finalized:
+                issue('REPEATED_FINALIZATION', 'UNRESOLVED_MISMATCH', market_slug=market)
+            finalized.add(key)
+    for order in open_orders:
+        client = str(order.get('client_order_id') or '')
+        if client not in clients:
+            issue('RESTART_OPEN_ORDER_WITHOUT_INTENT', 'UNRESOLVED_MISMATCH', client_order_id=client)
+        elif order.get('filled_qty') is not None:
+            try:
+                filled = Decimal(str(order['filled_qty']))
+                if not filled.is_finite():
+                    raise ValueError('non-finite partial quantity')
+                if filled != clients[client]['filled']:
+                    issue('RESTART_PARTIAL_FILL_MISMATCH', 'UNRESOLVED_MISMATCH', client_order_id=client)
+            except (ValueError, ArithmeticError, TypeError):
+                issue('INVALID_OPEN_ORDER_QUANTITY', 'CRITICAL_INCONSISTENCY', client_order_id=client)
+    for label, snapshot in [('JOURNAL_LOCAL_QTY_MISMATCH', local_inventory), ('VENUE_LOCAL_QTY_MISMATCH', venue_inventory)]:
+        if snapshot is None:
+            continue
+        comparison = ledger if label.startswith('JOURNAL') or local_inventory is None else local_inventory
+        for inst in set(comparison) | set(snapshot):
+            def qty(source):
+                value = source.get(inst, 0)
+                return Decimal(str(value.get('qty', 0) if isinstance(value, dict) else value))
+            try:
+                expected, observed = qty(comparison), qty(snapshot)
+                if not expected.is_finite() or not observed.is_finite():
+                    raise ValueError('non-finite quantity')
+                if expected != observed:
+                    actual_label = 'VENUE_JOURNAL_QTY_MISMATCH' if label.startswith('VENUE') and local_inventory is None else label
+                    issue(actual_label, 'UNRESOLVED_MISMATCH', instrument_id=inst)
+            except (ValueError, ArithmeticError, TypeError):
+                issue('INVALID_SNAPSHOT_QUANTITY', 'CRITICAL_INCONSISTENCY', instrument_id=inst)
+    return {'status': max((i['status'] for i in issues), key=rank.get, default='CONSISTENT'),
+            'issues': issues, 'journal_inventory': {key: str(value['qty']) for key, value in ledger.items()},
+            'venue_snapshot_available': venue_inventory is not None, 'execution_action': None,
+            'scope': 'RECORDED_FILL_PROJECTION', 'complete_history_asserted': complete_history}

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Replay completed-cycle PnL under the persistent Taipei-session BUY guard.
 
+Legacy descriptive scenario CLI; canonical evidence replay is available through
+scripts/research_analysis.py replay. This compatibility tool keeps its historical
+scenario semantics, not a second live policy authority.
+
 This is descriptive research.  A lock does not prove that subsequent markets
 would have been traded unchanged, so the reported avoided PnL is not causal.
 """

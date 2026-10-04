@@ -122,3 +122,96 @@ def replay_candidates(
             )
         )
     return results
+
+
+def replay_evidence(events: Iterable[dict], *, kind: str, decision_ts: float,
+                    guard_config=None, complete_history: bool = False) -> dict:
+    """Canonical captured-evidence replay; no venue, I/O or live strategy object.
+
+    EXACT refers to pure evaluation on complete recorded inputs, never to
+    counterfactual venue execution. Missing initial inventory/fees/config makes
+    accounting approximate. No entry/stop formula is invented here.
+    """
+    from decimal import Decimal
+    from bot.research.clocks import available_at, epoch
+    from bot.session_pnl_guard import SessionPnlGuard
+    from bot.inventory import InventoryLedger
+    from bot.db_runtime import StrategyDBRuntimeMixin
+    if kind not in {'MARKET', 'DECISION', 'ACCOUNTING'}:
+        raise ValueError('unsupported replay kind')
+    rows = []
+    excluded = []
+    for index, original in enumerate(events):
+        row = dict(original)
+        if not available_at(row, decision_ts, timestamp='event_ts'):
+            excluded.append({'index': index, 'reason': 'EVIDENCE_UNAVAILABLE_AT_DECISION'})
+            continue
+        rows.append((epoch(row['event_ts']), index, row))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    output, ledger, guards = [], {}, {}
+    classification = 'EXACT_REPLAY' if complete_history else 'APPROXIMATE_REPLAY'
+    reasons = [] if complete_history else ['HISTORY_COMPLETENESS_UNVERIFIED']
+    if kind == 'DECISION' and guard_config is None:
+        return {'kind': kind, 'classification': 'NOT_REPLAYABLE', 'reason_codes': ['HISTORICAL_POLICY_CONFIG_REQUIRED'],
+                'rows': [], 'excluded': excluded}
+    seen = set()
+    finalized = set()
+    for ts, _, row in rows:
+        payload = row.get('payload', row)
+        if kind == 'MARKET':
+            output.append(row)
+        elif kind == 'DECISION':
+            # Completed-cycle policy progression reuses the deployed session
+            # key and guard. It cannot reconstruct unrecorded interim decisions.
+            if row.get('event_type') != 'MARKET_CYCLE_PNL':
+                continue
+            market = payload.get('market_slug') or payload.get('slug')
+            if market and market in finalized:
+                classification = 'NOT_REPLAYABLE'; reasons.append('REPEATED_FINALIZATION'); continue
+            if market:
+                finalized.add(market)
+            amount = payload.get('cycle_combined_pnl_usdc')
+            if amount is None:
+                classification = 'NOT_REPLAYABLE'; reasons.append('PNL_UNKNOWN'); continue
+            date = StrategyDBRuntimeMixin._taipei_session_date(ts)
+            guard = guards.setdefault(date, SessionPnlGuard(guard_config, session_date=date))
+            before = guard.decision()
+            value = Decimal(str(amount))
+            if not value.is_finite():
+                raise ValueError('non-finite accounting event')
+            guard.apply_realized_delta(value)
+            after = guard.decision()
+            output.append({'event_ts': ts, 'session_date': date, 'buy_allowed_before': before.allowed,
+                           'buy_allowed_after': after.allowed, 'reason_code': after.reason,
+                           'realized_pnl_usdc': str(after.realized_pnl_usdc),
+                           'high_water_usdc': str(after.realized_high_water_usdc)})
+        else:
+            if row.get('event_type') != 'ORDER_FILLED':
+                continue
+            fill_id = payload.get('fill_event_id') or payload.get('trade_id')
+            key = (row.get('run_id'), row.get('instrument_id'), fill_id)
+            if fill_id and key in seen:
+                excluded.append({'fill_event_id': fill_id, 'reason': 'DUPLICATE_FILL_EVENT'}); continue
+            if fill_id:
+                seen.add(key)
+            else:
+                classification = 'APPROXIMATE_REPLAY'; reasons.append('FILL_ID_UNKNOWN')
+            if payload.get('effective_fee_shares') is None or row.get('commission_usdc') is None:
+                classification = 'APPROXIMATE_REPLAY'; reasons.append('FEE_INPUT_INCOMPLETE')
+            values = [Decimal(str(value)) for value in
+                      (row.get('price'), row.get('qty'), row.get('commission_usdc') or 0,
+                       payload.get('effective_fee_shares') or 0)]
+            if not all(value.is_finite() for value in values):
+                raise ValueError('non-finite fill')
+            instrument = str(row.get('instrument_id') or '')
+            side = str(row.get('side') or '').lower()
+            if not instrument or side not in {'buy', 'sell'} or values[0] <= 0 or values[1] <= 0:
+                classification = 'NOT_REPLAYABLE'; reasons.append('INVALID_FILL'); continue
+            if side == 'sell' and values[1] > ledger.get(instrument, {}).get('qty', Decimal(0)):
+                classification = 'NOT_REPLAYABLE'; reasons.append('INITIAL_INVENTORY_OR_FILL_MISSING'); continue
+            realized = InventoryLedger.update_from_fill(ledger, instrument, side, *values, ts)
+            output.append({'event_ts': ts, 'instrument_id': instrument,
+                           'qty': str(ledger[instrument]['qty']),
+                           'realized_delta_usdc': str(realized) if realized is not None else None})
+    return {'kind': kind, 'classification': classification, 'reason_codes': sorted(set(reasons)),
+            'rows': output, 'excluded': excluded}
