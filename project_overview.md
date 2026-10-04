@@ -2811,3 +2811,12 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
 Implementation evidence, clock semantics, limits, synthetic benchmarks and the
 P2 completion matrix are in
 `reports/research_analysis/engineering_readiness/summary.md`.
+
+Post-P2 hardening corrects these projection semantics: trace schema 2 keeps
+realized fill PnL separate from unavailable position MTM; current-market health
+separates attempted/accepted freshness and drops; L2 lookup uses canonical
+runtime InstrumentId while persisted IDs stay strings. Integrity distinguishes
+enqueue from persisted reference joins, and reconciliation diagnostics recognize
+redeem corrections. Optional-observer availability, per-filesystem storage and
+archival precondition reasons are explicit. These source-only corrections do
+not change trading/accounting authority or activate the running process.

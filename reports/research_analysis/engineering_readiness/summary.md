@@ -574,3 +574,71 @@ reconciliation/index/storage foundation, (2) runtime health/quality projections,
 DB-runtime and regression-test hunks must follow dependency order; commits and
 push require separate operator authorization. Deployment is not part of that
 checkpoint.
+
+## Post-P2 semantic hardening (source only; not deployed)
+
+This section supersedes the corresponding P2 projection contracts above.
+The P2 checkpoint is `c4aac145`; the fixes below are not yet checkpointed.
+
+- Finalization diagnostics distinguish INITIAL_FINALIZATION,
+  LEGITIMATE_RECONCILIATION_UPDATE, TRUE_DUPLICATE and IDENTITY_INSUFFICIENT.
+  Runtime redemption normally updates the existing cycle row in place and
+  emits MARKET_PNL_RECONCILED; after missing-row recovery it emits a cycle
+  row with redeem reconciliation provenance. A corrected cycle row and its
+  reconciliation notification are complementary records. Duplicate detection
+  uses event kind, cash components and existing transaction/reconciliation
+  identity, excluding observation timestamps. Missing correction identity
+  remains unresolved. Canonical PnL and journal reconciliation are unchanged.
+- Decision trace schema **2** separates `realized_net_usdc` from `position_pnl`.
+  The journal boundaries have no authoritative position MTM input, so their
+  position_pnl is null. No MTM is recomputed. Schema-1 position_pnl may contain
+  realized fill PnL and must not be interpreted as position MTM; historical
+  rows are not rewritten. Current analysis does not calculate PnL from traces.
+- STATUS calls recent_health with the current slug. Its bounded recent samples
+  and last accepted capture cannot be replaced by another market's activity.
+  Global callers may omit slug. `capture_joint_fresh_pct` covers attempts;
+  `persisted_joint_fresh_pct` covers writer-accepted rows only and does **not**
+  prove durable persistence. `joint_fresh_pct` remains an explicitly defined
+  capture alias. `drop_count`/`drop_pct` report rejection independently; health
+  freshness reasons use the accepted-row measure.
+- L2 cache lookup reuses the runtime `_normalize_instrument_id` mechanism.
+  Explicit order IDs and existing submitted_instrument_id metadata take
+  precedence over the current instrument. Lookup uses canonical InstrumentId;
+  persisted evidence identity is a string. Unresolvable IDs produce
+  L2_NOT_AVAILABLE without substituting another instrument's book. Tests use
+  the actual Nautilus Cache and OrderBook, not just permissive fake keys.
+- Integrity reports journal_l2_enqueued_rows, journal_l2_not_persisted_rows,
+  persisted_decision_point_l2_rows, l2_reference_joined_rows and
+  l2_reference_missing_rows. Joins require matching run, market and evidence
+  reference. Enqueue alone never establishes durability. The ambiguous old
+  trace_l2_available_rows name is replaced by explicit persisted/reference
+  counters and legacy_inline_trace_l2_available_rows for inline shadow traces.
+- Trace completeness shares the exact strategy-event set and order predicate
+  used by instrumentation, including SESSION_BUY_LOCKED and
+  SESSION_PROFIT_GUARD_ARMED. Emission frequency is unchanged.
+- Optional observers report NOT_CONFIGURED or DISABLED_BY_POLICY as neutral
+  availability, distinct from FAILED. BTC history uses its existing startup
+  configuration result; initialization failure is not labeled policy-disabled.
+  Execution journal readiness retains its existing BUY authority.
+- Offline storage exposes research_free_disk, journal_free_disk and
+  btc_free_disk, measuring shared devices once per sample. `free_disk` is the
+  compatibility alias for the research filesystem only. Errors remain visible
+  per filesystem. Archival readiness reports each missing precondition:
+  COLLECTION_ACTIVE, WRITERS_RUNNING, INTEGRITY_NOT_VERIFIED and
+  BACKUP_NOT_VERIFIED. No thresholds or archive actions were added.
+
+The hardening changes only diagnostics/evidence projections and startup
+observation metadata. No live entry, stop, sizing, PnL, prediction, TWAP,
+freshness or cadence authority changes. Cache lookup and annotation remain
+best-effort; health reads memory only; filesystem measurement and integrity
+are offline. No deployment, active data mutation, commit or push is included.
+
+Hardening validation: **29 targeted regression cases** plus the **58 P2 cases**
+passed; full suite **958 passed**, with only the known websockets deprecation
+warning. `git diff --check` passed. The final source re-audit found no new
+hot-path database/filesystem/network I/O, competing authority, BUY gate,
+strategy formula/cadence change or execution-visible telemetry exception.
+Cache resolver/book-read failures retain explicit L2_NOT_AVAILABLE evidence;
+async writer failures retain the original journal result. HEAD remains the P2
+checkpoint and the index is empty; inherited generated reports are unchanged.
+Verdict: **POST_P2_HARDENING_READY_FOR_CHECKPOINT**. No commit/push/deploy performed.

@@ -735,6 +735,7 @@ def initialize_strategy_settings(
     strategy._binance_ws_thread = None
     history_enabled = os.getenv("BTC_1S_HISTORY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
     strategy.btc_1s_history_collector = None
+    strategy._btc_history_observer_status = 'CONFIGURED' if history_enabled else 'DISABLED_BY_POLICY'
     if history_enabled:
         try:
             strategy.btc_1s_history_collector = BTC1sHistoryCollector(
@@ -747,6 +748,7 @@ def initialize_strategy_settings(
         except Exception as exc:
             # Observer initialization is isolated from all strategy authority.
             strategy.btc_1s_history_collector = None
+            strategy._btc_history_observer_status = 'FAILED'
             logger.warning(f"BTC 1s history collector unavailable; live strategy continues: {exc}")
     strategy._polymarket_chainlink_price = None
     strategy._polymarket_chainlink_price_ts = 0.0

@@ -569,18 +569,17 @@ class StrategyDBRuntimeMixin:
             and (not payload_slug or payload_slug == str(self.current_market_slug or ""))
         ):
             payload_out["instrument_id"] = str(self.instrument_id)
-        if event_type == "ENTRY_DECISION_TRACE" or event_type in {
-            "SESSION_PNL_UPDATE", "SESSION_BUY_LOCKED", "SESSION_PROFIT_GUARD_ARMED", "SESSION_DAY_RESET"
-        }:
-            try:
+        try:
+            from bot.research.evidence import STRATEGY_TRACE_EVENTS
+            if event_type in STRATEGY_TRACE_EVENTS:
                 from bot.research.evidence import annotate_decision
                 payload_out = annotate_decision(self, payload_out,
                     kind="ENTRY_DECISION" if event_type == "ENTRY_DECISION_TRACE" else "SESSION_GUARD_DECISION",
                     decision=payload_out.get("should_quote") if event_type == "ENTRY_DECISION_TRACE" else not bool(payload_out.get("buy_lock_reason")),
                     side=payload_out.get("side"), reason_code=payload_out.get("reason") or payload_out.get("buy_lock_reason"),
                     now_ts=payload_out.get("observed_ts"), source_event_type=event_type)
-            except Exception:
-                pass
+        except Exception:
+            pass
         started = time.perf_counter()
         try:
             return bool(self.trade_db.log_strategy_event(
@@ -626,14 +625,15 @@ class StrategyDBRuntimeMixin:
             side_norm = self._normalize_side_text(side_out)
             if side_norm:
                 side_out = side_norm.upper()
-        if event_type.endswith("_SUBMIT") or event_type == "ORDER_FILLED":
-            try:
+        try:
+            from bot.research.evidence import order_trace_expected
+            if order_trace_expected(event_type):
                 from bot.research.evidence import annotate_decision
                 payload_out = annotate_decision(self, payload_out, kind="EXECUTION_DECISION",
-                    decision=status, side=side_out, reason_code=reason, instrument_id=instrument_id or self.instrument_id,
+                    decision=status, side=side_out, reason_code=reason, instrument_id=instrument_id or payload_out.get("submitted_instrument_id") or payload_out.get("instrument_id") or self.instrument_id,
                     source_event_type=event_type, client_order_id=client_order_id)
-            except Exception:
-                pass
+        except Exception:
+            pass
         started = time.perf_counter()
         try:
             return bool(self.trade_db.log_order_event(

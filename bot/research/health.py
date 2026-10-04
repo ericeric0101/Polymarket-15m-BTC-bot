@@ -17,7 +17,11 @@ def component_health(metrics: dict | None, *, domain: str) -> dict:
         mark('METRICS_UNAVAILABLE', 'UNKNOWN')
     if metrics.get('ready') is False:
         mark('BUY_SAFETY_BLOCK_ACTIVE' if domain == 'Execution' else 'COMPONENT_NOT_READY', 'CRITICAL')
-    if metrics.get('enabled') is False or metrics.get('failure_reason'):
+    availability = metrics.get('availability')
+    if availability in {'NOT_CONFIGURED', 'DISABLED_BY_POLICY'} and domain != 'Execution':
+        return {'state': 'HEALTHY', 'availability': availability,
+                'reason_codes': [availability], 'source_metrics': metrics}
+    if availability == 'FAILED' or metrics.get('enabled') is False or metrics.get('failure_reason'):
         mark('WRITER_UNAVAILABLE', 'CRITICAL')
     if metrics.get('triggered') is True:
         mark('EXISTING_STORAGE_GUARD_ACTIVE', 'CRITICAL')
@@ -28,7 +32,8 @@ def component_health(metrics: dict | None, *, domain: str) -> dict:
     if metrics.get('recent_largest_gap_sec') is not None and metrics.get('interval_sec'):
         if metrics['recent_largest_gap_sec'] > 3 * metrics['interval_sec']:
             mark('RECENT_SNAPSHOT_GAP', 'DEGRADED')
-    if metrics.get('joint_fresh_pct') is not None and metrics['joint_fresh_pct'] < 100:
+    freshness = metrics.get('persisted_joint_fresh_pct', metrics.get('joint_fresh_pct'))
+    if freshness is not None and freshness < 100:
         mark('RECENT_STALE_EVIDENCE', 'DEGRADED')
     if metrics.get('queue_capacity') and metrics.get('queue_depth', 0) >= metrics['queue_capacity']:
         mark('WRITER_QUEUE_FULL', 'DEGRADED')
@@ -40,7 +45,8 @@ def component_health(metrics: dict | None, *, domain: str) -> dict:
         mark('EXISTING_QUOTE_FRESHNESS_FAILED', 'DEGRADED')
     if metrics.get('sample_count') == 0:
         mark('RECENT_SAMPLES_UNAVAILABLE', 'UNKNOWN')
-    return {'state': state, 'reason_codes': sorted(reasons), 'source_metrics': metrics}
+    return {'state': state, 'availability': 'FAILED' if availability == 'FAILED' or metrics.get('failure_reason') else availability,
+            'reason_codes': sorted(reasons), 'source_metrics': metrics}
 
 
 def aggregate_health(domains: dict[str, dict[str, dict | None]]) -> dict:
@@ -59,10 +65,13 @@ def aggregate_health(domains: dict[str, dict[str, dict | None]]) -> dict:
 
 def strategy_health(strategy: Any, now_ts: float) -> dict:
     """Bounded in-memory reads only; each failing source is isolated independently."""
-    def read(owner_name, method, *args):
+    def read(owner_name, method, *args, **kwargs):
         try:
             owner = getattr(strategy, owner_name, None)
-            return getattr(owner, method)(*args) if owner is not None else None
+            if owner is None:
+                availability = getattr(strategy, '_btc_history_observer_status', None) if owner_name == 'btc_1s_history_collector' else None
+                return {'availability': availability or 'NOT_CONFIGURED'} if hasattr(strategy, owner_name) and owner_name != 'trade_db' else None
+            return getattr(owner, method)(*args, **kwargs)
         except Exception:
             return None
     try:
@@ -80,7 +89,7 @@ def strategy_health(strategy: Any, now_ts: float) -> dict:
                     'watchdog_pending': bool(getattr(strategy, 'quote_recovery_pending_instruments', set()))} if hasattr(strategy, 'quote_watchdog_trigger_counts') else None
         return aggregate_health({
             'Data': {'quote_transport': quote, 'data_engine': queue, 'watchdog': watchdog},
-            'Research': {'prediction': read('prediction_research_snapshotter', 'recent_health', now_ts),
+            'Research': {'prediction': read('prediction_research_snapshotter', 'recent_health', now_ts, slug=getattr(strategy, 'current_market_slug', None) or None),
                          'lead_lag': read('lead_lag_db', 'research_health'),
                          'twap': read('twap_research_db', 'research_health'),
                          'btc': read('btc_1s_history_collector', 'research_health')},

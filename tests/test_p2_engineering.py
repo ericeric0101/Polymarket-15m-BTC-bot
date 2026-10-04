@@ -188,7 +188,7 @@ def test_trace_captures_existing_decision_and_unavailable_fields():
 
 
 def test_annotation_rejects_future_snapshot_and_book_failure_isolated():
-    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up',
+    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up.POLYMARKET', _normalize_instrument_id=runtime_instrument_id,
         prediction_research_snapshotter=SimpleNamespace(_last_payload_by_slug={'m':{'snapshot_ts':101,'p_up_ex_market':.9}}),
         cache=SimpleNamespace(order_book=lambda *_: (_ for _ in ()).throw(RuntimeError('book failure'))))
     out=annotate_decision(host,{},kind='ENTRY_DECISION',decision=False,reason_code='skip',now_ts=100)
@@ -430,7 +430,8 @@ def test_same_fill_identity_with_conflicting_fee_is_critical():
 def test_raw_l2_uses_existing_async_writer_and_journal_contains_reference_only():
     calls=[]
     book=SimpleNamespace(bids=lambda:[(.6,2)],asks=lambda:[(.7,3)])
-    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up',cache=SimpleNamespace(order_book=lambda _:book),
+    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up.POLYMARKET',
+        _normalize_instrument_id=runtime_instrument_id,cache=SimpleNamespace(order_book=lambda _:book),
         twap_research_db=SimpleNamespace(enqueue_decision=lambda **kw:calls.append(kw) or True))
     trace=annotate_decision(host,{},kind='EXECUTION_DECISION',decision='SUBMITTED',now_ts=100,
                             source_event_type='ORDER_BUY_SUBMIT',client_order_id='c')['decision_trace']
@@ -444,10 +445,16 @@ def test_async_l2_writer_failure_does_not_change_submit_or_authoritative_journal
     calls=[]
     book=SimpleNamespace(bids=lambda:[(.6,2)],asks=lambda:[(.7,3)])
     host=SimpleNamespace(trade_db=SimpleNamespace(log_order_event=lambda **kw:calls.append(kw) or True),
-        run_id='r',current_market_slug='m',instrument_id='up',current_token_id='token',last_observed_fee_rate_bps=0,
+        run_id='r',current_market_slug='m',instrument_id='up.POLYMARKET',
+        _normalize_instrument_id=runtime_instrument_id,current_token_id='token',last_observed_fee_rate_bps=0,
         _normalize_side_text=lambda value:value.lower(),cache=SimpleNamespace(order_book=lambda _:book),
         twap_research_db=SimpleNamespace(enqueue_decision=lambda **_: (_ for _ in ()).throw(OSError('writer failed'))))
     assert StrategyDBRuntimeMixin._db_order_event(host,event_type='ORDER_BUY_SUBMIT',client_order_id='c',side='BUY',status='SUBMITTED')
     assert len(calls)==1 and calls[0]['status']=='SUBMITTED'
     assert calls[0]['payload']['decision_trace']['l2']['status']=='L2_NOT_PERSISTED'
     assert calls[0]['payload']['decision_trace']['l2']['bids'] is None
+
+
+def runtime_instrument_id(value):
+    from run_bot import IntegratedBTCStrategy
+    return IntegratedBTCStrategy._normalize_instrument_id(value)

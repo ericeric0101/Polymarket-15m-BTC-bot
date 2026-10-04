@@ -1260,25 +1260,44 @@ def canonical_replay(db_path: Path, journal_path: Path, *, kind: str, decision_t
 def engineering_integrity(store: ResearchStore, journal_path: Path) -> dict:
     from bot.execution_events import audit_reconciliation
     from bot.research.clocks import available_at
+    from bot.research.evidence import STRATEGY_TRACE_EVENTS, order_trace_expected
     orders = store.journal_events(journal_path)
     strategy = store.journal_events(journal_path, table="strategy_events")
     snapshots = store.get_prediction_snapshots()
-    research_payloads = [payload for _, _, _, payload in store.rows()]
+    research_rows = list(store.rows())
+    research_payloads = [payload for _, _, _, payload in research_rows]
     payloads = [row["payload"] for row in orders + strategy] + research_payloads
     traces = [payload["decision_trace"] for payload in payloads if isinstance(payload.get("decision_trace"), dict)]
-    expected = sum(row.get("event_type") in {"ENTRY_DECISION_TRACE", "SESSION_PNL_UPDATE", "SESSION_DAY_RESET", "ORDER_FILLED"}
-                   or str(row.get("event_type") or "").endswith("_SUBMIT") for row in orders + strategy)
+    expected_rows = [row for row in strategy if row.get('event_type') in STRATEGY_TRACE_EVENTS]
+    expected_rows += [row for row in orders if order_trace_expected(str(row.get('event_type') or ''))]
+    expected = len(expected_rows)
+    journal_traces = [row['payload']['decision_trace'] for row in orders + strategy
+                      if isinstance(row['payload'].get('decision_trace'), dict)]
+    persisted_l2 = [payload for payload in research_payloads
+                    if payload.get('event_type') == 'DECISION_POINT_L2'
+                    and payload.get('l2', {}).get('status') == 'L2_AVAILABLE']
+    # Evidence references are scoped by run/market, never joined on time proximity.
+    persisted_keys = {(p.get('run_id', run), p.get('market_slug', slug), p.get('l2_evidence_id'))
+                      for run, slug, _, p in research_rows
+                      if p.get('event_type') == 'DECISION_POINT_L2' and p.get('l2', {}).get('status') == 'L2_AVAILABLE' and p.get('l2_evidence_id')}
+    references = [(trace.get('run_id'), trace.get('market_slug'), trace['l2']['l2_evidence_id'])
+                  for trace in journal_traces if isinstance(trace.get('l2'), dict)
+                  and trace['l2'].get('l2_evidence_id')]
     trace_kinds = {kind: sum(trace.get("kind") == kind for trace in traces)
                    for kind in ("ENTRY_DECISION", "STOP_DECISION", "SESSION_GUARD_DECISION", "EXECUTION_DECISION")}
     clocks = sum(not available_at(row, row["snapshot_ts"]) for row in snapshots)
     return {"reconciliation": audit_reconciliation(orders + strategy),
             "decision_trace_rows": len(traces), "trace_rows_by_kind": trace_kinds,
             "expected_sparse_journal_boundaries": expected,
-            "journal_trace_unavailable_rows": sum(not isinstance(row["payload"].get("decision_trace"), dict)
-                for row in orders + strategy if row.get("event_type") in {"ENTRY_DECISION_TRACE", "SESSION_PNL_UPDATE", "SESSION_DAY_RESET", "ORDER_FILLED"}
-                or str(row.get("event_type") or "").endswith("_SUBMIT")),
-            "decision_point_l2_rows": sum(payload.get("event_type") == "DECISION_POINT_L2" for payload in research_payloads),
-            "trace_l2_available_rows": sum(trace.get("l2", {}).get("status") == "L2_AVAILABLE" for trace in traces),
+            "journal_trace_unavailable_rows": sum(not isinstance(row['payload'].get('decision_trace'), dict)
+                                                    for row in expected_rows),
+            "journal_l2_enqueued_rows": sum(trace.get('l2', {}).get('status') == 'L2_ENQUEUED' for trace in journal_traces),
+            "journal_l2_not_persisted_rows": sum(trace.get('l2', {}).get('status') == 'L2_NOT_PERSISTED' for trace in journal_traces),
+            "persisted_decision_point_l2_rows": len(persisted_l2),
+            "decision_point_l2_rows": sum(payload.get('event_type') == 'DECISION_POINT_L2' for payload in research_payloads),
+            "l2_reference_joined_rows": sum(key in persisted_keys for key in references),
+            "l2_reference_missing_rows": sum(key not in persisted_keys for key in references),
+            "legacy_inline_trace_l2_available_rows": sum(trace.get('l2', {}).get('status') == 'L2_AVAILABLE' for trace in traces),
             "clock_contract_violations": clocks,
             "runtime_health_counters": "NOT_PERSISTED_LEGACY_UNKNOWN",
             "scope": "OFFLINE_DIAGNOSTICS_NO_EXECUTION_ACTION"}

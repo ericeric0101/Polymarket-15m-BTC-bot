@@ -117,6 +117,7 @@ def audit_reconciliation(events: Iterable[dict], *, local_inventory: dict | None
     from decimal import Decimal
     from bot.inventory import InventoryLedger
     ledger, seen, clients, finalized, identities = {}, {}, {}, set(), {}
+    finalization_events, cycle_versions = [], {}
     issues = []
     rank = {'CONSISTENT': 0, 'RECOVERABLE_MISMATCH': 1, 'UNRESOLVED_MISMATCH': 2, 'CRITICAL_INCONSISTENCY': 3}
     def issue(code, severity, **context):
@@ -177,7 +178,41 @@ def audit_reconciliation(events: Iterable[dict], *, local_inventory: dict | None
                 issue('INVALID_FILL', 'CRITICAL_INCONSISTENCY', event_id=event.get('id'))
         if 'CANCEL' in event_type and client in clients and clients[client]['filled'] > 0:
             issue('CANCELLED_WITH_PARTIAL_FILL', 'RECOVERABLE_MISMATCH', client_order_id=client)
-        if event_type in {'MARKET_CYCLE_PNL', 'MARKET_SETTLEMENT', 'REDEEM_RECONCILIATION', 'REDEEM_EXECUTED'}:
+        if event_type in {'MARKET_CYCLE_PNL', 'MARKET_PNL_RECONCILED'}:
+            import json
+            market = payload.get('market_slug') or payload.get('slug')
+            tx = payload.get('redeem_tx_hash') or payload.get('tx_hash')
+            reconciliation_id = tx or payload.get('reconciliation_id')
+            corrected = (event_type == 'MARKET_PNL_RECONCILED' or
+                         payload.get('source') == 'redeem_reconciliation' or
+                         payload.get('cycle_pnl_reconciled_source') == 'onchain_redeem')
+            values = tuple(payload.get(key) for key in ('cycle_fill_realized_usdc',
+                'cycle_settlement_pnl_usdc', 'cycle_combined_pnl_usdc'))
+            # Ignore insertion/reconciliation timestamps: repeated cash evidence
+            # with the same transaction and amounts is still a duplicate.
+            # An in-place corrected cycle row and its MARKET_PNL_RECONCILED
+            # notification are complementary representations, not duplicate writes.
+            fingerprint = json.dumps([event_type, values, reconciliation_id, payload.get('redeem_condition_id'),
+                payload.get('cycle_pnl_reconciled_source'), payload.get('source')], sort_keys=True)
+            versions = cycle_versions.setdefault(market, set()) if market else set()
+            if not market or any(value is None for value in values) or (corrected and not reconciliation_id):
+                classification = 'IDENTITY_INSUFFICIENT'
+                issue('FINALIZATION_IDENTITY_INSUFFICIENT', 'UNRESOLVED_MISMATCH', market_slug=market)
+            elif fingerprint in versions:
+                classification = 'TRUE_DUPLICATE'
+                issue('REPEATED_FINALIZATION', 'UNRESOLVED_MISMATCH', market_slug=market)
+            elif corrected:
+                classification = 'LEGITIMATE_RECONCILIATION_UPDATE'
+            elif not versions:
+                classification = 'INITIAL_FINALIZATION'
+            else:
+                classification = 'IDENTITY_INSUFFICIENT'
+                issue('FINALIZATION_IDENTITY_INSUFFICIENT', 'UNRESOLVED_MISMATCH', market_slug=market)
+            if classification != 'IDENTITY_INSUFFICIENT':
+                versions.add(fingerprint)
+            finalization_events.append({'event_id': event.get('id'), 'event_type': event_type,
+                'market_slug': market, 'classification': classification, 'reconciliation_tx_hash': tx})
+        if event_type in {'MARKET_SETTLEMENT', 'REDEEM_RECONCILIATION', 'REDEEM_EXECUTED'}:
             market = payload.get('market_slug') or payload.get('slug')
             if not market:
                 issue('FINALIZATION_IDENTITY_UNKNOWN', 'UNRESOLVED_MISMATCH'); continue
@@ -216,6 +251,6 @@ def audit_reconciliation(events: Iterable[dict], *, local_inventory: dict | None
             except (ValueError, ArithmeticError, TypeError):
                 issue('INVALID_SNAPSHOT_QUANTITY', 'CRITICAL_INCONSISTENCY', instrument_id=inst)
     return {'status': max((i['status'] for i in issues), key=rank.get, default='CONSISTENT'),
-            'issues': issues, 'journal_inventory': {key: str(value['qty']) for key, value in ledger.items()},
+            'issues': issues, 'finalization_events': finalization_events, 'journal_inventory': {key: str(value['qty']) for key, value in ledger.items()},
             'venue_snapshot_available': venue_inventory is not None, 'execution_action': None,
             'scope': 'RECORDED_FILL_PROJECTION', 'complete_history_asserted': complete_history}

@@ -105,11 +105,19 @@ def bounded_l2(*, bids=None, asks=None, source_ts: float | None = None, limit: i
                 'reason_code': 'L2_SERIALIZATION_FAILED'}
 
 
+STRATEGY_TRACE_EVENTS = frozenset({'ENTRY_DECISION_TRACE', 'SESSION_PNL_UPDATE',
+    'SESSION_BUY_LOCKED', 'SESSION_PROFIT_GUARD_ARMED', 'SESSION_DAY_RESET'})
+
+
+def order_trace_expected(event_type: str) -> bool:
+    return event_type.endswith('_SUBMIT') or event_type == 'ORDER_FILLED'
+
+
 TRACE_FIELDS = ('time_left_sec', 'required_move_sigma', 'required_move_bps', 'p_up_ex_market',
                 'p_down_ex_market', 'market_mid_up', 'market_mid_down', 'best_bid_up', 'best_ask_up',
                 'best_bid_down', 'best_ask_down', 'btc_return_5s_bps', 'btc_return_10s_bps',
                 'btc_return_30s_bps', 'joint_fresh', 'p_ex_fresh', 'btc_fresh', 'twap_fresh',
-                'market_mid_fresh', 'position_pnl', 'holding_sec', 'guard_state')
+                'market_mid_fresh', 'position_pnl', 'realized_net_usdc', 'holding_sec', 'guard_state')
 
 
 def decision_projection(*, kind: str, run_id: str, slug: str, decision_ts: float,
@@ -117,7 +125,7 @@ def decision_projection(*, kind: str, run_id: str, slug: str, decision_ts: float
                         evidence: dict | None = None, l2: dict | None = None) -> dict:
     """Capture a decision already made. Never calculate policy or fill missing inputs."""
     evidence = evidence or {}
-    return {'trace_schema_version': 1, 'kind': kind, 'run_id': run_id, 'market_slug': slug,
+    return {'trace_schema_version': 2, 'kind': kind, 'run_id': run_id, 'market_slug': slug,
             'position_lifecycle_id': lifecycle_id, 'decision_ts': decision_ts, 'timestamp_kind': 'DECISION_TS',
             'side': side, 'decision': decision, 'reason_code': reason_code,
             'decision_ts_status': 'EXPLICIT' if decision_ts is not None else 'UNKNOWN',
@@ -135,7 +143,7 @@ def annotate_decision(strategy, payload: dict, *, kind: str, decision=None,
     try:
         now = time.time() if now_ts is None else float(now_ts)
         slug = str(payload.get('market_slug') or payload.get('slug') or getattr(strategy, 'current_market_slug', '') or '')
-        inst = str(instrument_id or payload.get('instrument_id') or getattr(strategy, 'instrument_id', '') or '')
+        inst = str(instrument_id or payload.get('submitted_instrument_id') or payload.get('instrument_id') or getattr(strategy, 'instrument_id', '') or '')
         snapshotter = getattr(strategy, 'prediction_research_snapshotter', None)
         captured = getattr(snapshotter, '_last_payload_by_slug', {}).get(slug)
         evidence = latest_evidence([captured] if captured else [], now, max_age_sec=8) or {}
@@ -144,16 +152,25 @@ def annotate_decision(strategy, payload: dict, *, kind: str, decision=None,
         state = getattr(strategy, 'live_inventory_cost', {}).get(inst, {})
         if state.get('opened_ts'):
             evidence['holding_sec'] = max(0, now - float(state['opened_ts']))
-        evidence['position_pnl'] = payload.get('realized_net_usdc')
+        # No position/MTM authority is available at these sparse journal boundaries.
+        evidence['position_pnl'] = None
+        evidence['realized_net_usdc'] = payload.get('realized_net_usdc')
         book = None
         if kind in {'ENTRY_DECISION', 'EXECUTION_DECISION', 'STOP_DECISION'}:
             try:
-                # Pass the original instrument object to the canonical cache.
-                book = strategy.cache.order_book(instrument_id or getattr(strategy, 'instrument_id', None))
+                # Journal identity is a string; cache identity uses the existing runtime resolver.
+                raw_id = instrument_id or payload.get('submitted_instrument_id') or payload.get('instrument_id') or getattr(strategy, 'instrument_id', None)
+                resolver = getattr(strategy, '_normalize_instrument_id', None)
+                cache_id = resolver(raw_id) if callable(resolver) else None
+                if cache_id is not None:
+                    book = strategy.cache.order_book(cache_id)
             except Exception:
                 pass
-        l2 = bounded_l2(bids=book.bids() if book is not None else None,
-                        asks=book.asks() if book is not None else None)
+        try:
+            l2 = bounded_l2(bids=book.bids() if book is not None else None,
+                            asks=book.asks() if book is not None else None)
+        except Exception:
+            l2 = bounded_l2()
         trace = decision_projection(kind=kind, run_id=str(getattr(strategy, 'run_id', '')),
             slug=slug, decision_ts=payload.get('decision_ts', payload.get('observed_ts')), side=side, decision=decision, reason_code=reason_code,
             lifecycle_id=payload.get('position_lifecycle_id') or state.get('position_lifecycle_id'), evidence=evidence, l2=l2)

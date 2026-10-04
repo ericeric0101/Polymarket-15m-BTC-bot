@@ -354,7 +354,7 @@ class PredictionResearchSnapshotter:
                 decision_epoch_ns=int(now * 1_000_000_000), payload=snapshot,
             ))
             self._counters["written" if accepted else "dropped"] += 1
-            self._recent_quality.append((now, bool(snapshot["joint_fresh"]), accepted, interval))
+            self._recent_quality.append((now, bool(snapshot["joint_fresh"]), accepted, interval, slug))
             self._latencies_ms.append((time.perf_counter() - started) * 1000.0)
             if accepted:
                 self._last_snapshot_ts[slug] = now
@@ -370,21 +370,36 @@ class PredictionResearchSnapshotter:
                 logger.warning(f"Prediction research snapshot disabled/skipped: {type(exc).__name__}: {exc}")
             return None
 
-    def recent_health(self, now_ts: float, *, window_sec: float = 300.0) -> dict:
-        """Bounded recent capture quality; no DB reads and no freshness authority."""
-        recent = [row for row in tuple(self._recent_quality) if now_ts - window_sec <= row[0] <= now_ts]
-        accepted_times = [row[0] for row in recent if row[2]]
-        accepted_times.extend(ts for ts in tuple(self._last_snapshot_ts.values()) if ts <= now_ts)
+    def recent_health(self, now_ts: float, *, window_sec: float = 300.0, slug: str | None = None) -> dict:
+        """Bounded capture/accepted quality; accepted does not prove durable storage.
+
+        joint_fresh_pct is the compatibility alias for capture_joint_fresh_pct.
+        Current-slug requests never use another market's last accepted capture.
+        """
+        recent = [row for row in tuple(self._recent_quality)
+                  if now_ts - window_sec <= row[0] <= now_ts
+                  and (slug is None or (len(row) > 4 and row[4] == slug))]
+        accepted = [row for row in recent if row[2]]
+        accepted_times = [row[0] for row in accepted]
+        if slug is not None:
+            last_slug = self._last_snapshot_ts.get(slug)
+            if last_slug is not None and last_slug <= now_ts:
+                accepted_times.append(last_slug)
+        else:
+            accepted_times.extend(ts for ts in tuple(self._last_snapshot_ts.values()) if ts <= now_ts)
         last = max(accepted_times, default=None)
-        gaps = [row[3] for row in recent if row[3] is not None and row[2]]
-        # Detect a collector that went silent, even when no new rows arrive.
+        gaps = [row[3] for row in accepted if row[3] is not None]
         if last is not None:
             gaps.append(max(0, now_ts - last))
-        return {"interval_sec": self.interval_sec, "sample_count": len(recent),
-                "recent_largest_gap_sec": max(gaps) if gaps else None,
-                "joint_fresh_pct": 100 * sum(row[1] for row in recent) / len(recent) if recent else None,
-                "drops": sum(not row[2] for row in recent), "errors": self._counters["errors"],
-                "window_sec": window_sec}
+        capture_pct = 100 * sum(row[1] for row in recent) / len(recent) if recent else None
+        persisted_pct = 100 * sum(row[1] for row in accepted) / len(accepted) if accepted else None
+        drops = len(recent) - len(accepted)
+        return {"interval_sec": self.interval_sec, "sample_count": len(recent), "accepted_count": len(accepted),
+                "slug": slug, "recent_largest_gap_sec": max(gaps) if gaps else None,
+                "capture_joint_fresh_pct": capture_pct, "persisted_joint_fresh_pct": persisted_pct,
+                "joint_fresh_pct": capture_pct, "drop_count": drops,
+                "drop_pct": 100 * drops / len(recent) if recent else None,
+                "drops": drops, "errors": self._counters["errors"], "window_sec": window_sec}
 
     def _emit_metrics(self, now: float) -> None:
         if now - self._last_metrics_ts < self.metrics_interval_sec:
