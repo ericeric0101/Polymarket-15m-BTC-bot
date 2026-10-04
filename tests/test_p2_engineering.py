@@ -11,6 +11,7 @@ import pytest
 from bot.journal_replay import replay_evidence
 from bot.execution_events import audit_reconciliation
 from bot.research.clocks import available_at, latest_evidence, compare_clocks, epoch
+from bot.research.evidence import bounded_l2, annotate_decision, decision_projection
 from bot.research.health import aggregate_health, strategy_health, status_health
 from bot.research.indexing import migrate_closed_copy, benchmark_index
 from bot.research.storage import StorageSummary, archival_readiness
@@ -165,6 +166,48 @@ def test_recent_quality_gaps_freshness_drops_and_silence_without_scan():
     assert snapshotter.recent_health(1000)['sample_count']==0
 
 
+def test_l2_top_five_bounded_ordered_and_bbo_never_fabricated():
+    visited=[]
+    def bids():
+        for i in range(100):
+            visited.append(i);yield (.9-i*.01,5)
+    row=bounded_l2(bids=bids(),asks=[(.95,2)],limit=100)
+    assert len(row['bids'])==5 and len(visited)==5
+    assert bounded_l2()['status']=='L2_NOT_AVAILABLE'
+    assert bounded_l2(bids=[(.1,1),(.2,1)])['status']=='L2_NOT_AVAILABLE'
+    assert bounded_l2(bids=[('NaN',1)])['status']=='L2_NOT_AVAILABLE'
+    assert row['source_ts'] is None
+
+
+def test_trace_captures_existing_decision_and_unavailable_fields():
+    trace=decision_projection(kind='STOP_DECISION',run_id='r',slug='m',decision_ts=100,
+                              decision='HOLD',reason_code='existing_reason',evidence={'required_move_sigma':0})
+    assert trace['required_move_sigma']==0
+    assert trace['required_move_bps'] is None
+    assert trace['decision']=='HOLD' and trace['l2']['status']=='L2_NOT_AVAILABLE'
+
+
+def test_annotation_rejects_future_snapshot_and_book_failure_isolated():
+    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up',
+        prediction_research_snapshotter=SimpleNamespace(_last_payload_by_slug={'m':{'snapshot_ts':101,'p_up_ex_market':.9}}),
+        cache=SimpleNamespace(order_book=lambda *_: (_ for _ in ()).throw(RuntimeError('book failure'))))
+    out=annotate_decision(host,{},kind='ENTRY_DECISION',decision=False,reason_code='skip',now_ts=100)
+    assert out['decision_trace']['p_up_ex_market'] is None
+    assert out['decision_trace']['decision'] is False
+    assert out['decision_trace']['l2']['status']=='L2_NOT_AVAILABLE'
+
+
+def test_existing_sparse_journal_boundary_failure_does_not_change_authority(monkeypatch):
+    import bot.research.evidence as evidence
+    calls=[]
+    monkeypatch.setattr(evidence,'annotate_decision',lambda *_args,**_kw: (_ for _ in ()).throw(RuntimeError('telemetry failed')))
+    host=SimpleNamespace(trade_db=SimpleNamespace(log_strategy_event=lambda **kw: calls.append(kw) or True),
+                         current_market_slug='m',instrument_id='up',run_id='r')
+    assert StrategyDBRuntimeMixin._db_strategy_event(host,'ENTRY_DECISION_TRACE',{'should_quote':False})
+    assert len(calls)==1
+    assert calls[0]['payload']['should_quote'] is False
+
+
 def dbs(tmp_path):
     research,journal=tmp_path/'research?#.db',tmp_path/'journal?#.db'
     with sqlite3.connect(research) as conn:
@@ -241,6 +284,26 @@ def test_health_projection_never_probes_journal_and_writer_failure_no_buy_veto(t
     finally:journal.stop()
 
 
+def test_stop_sparse_trace_timestamp_l2_and_hold_recovery():
+    from bot.stop_forensics_shadow import StopForensicsShadow
+    recorder=StopForensicsShadow()
+    args=dict(slug='m',instrument_id='up',position_side='UP',entry_price=Decimal('.7'),qty=Decimal(2),
+        signal_side='DOWN',signal_score=Decimal(0),official_strike=Decimal(100),spot=Decimal(99),
+        fair_probability=Decimal('.5'),fair_at_entry=Decimal('.8'),leader_side='DOWN',best_bid=Decimal('.6'),
+        best_bid_size=Decimal(2),time_left_sec=100,bid_levels=[(Decimal('.6'),Decimal(2))],position_lifecycle_id='m|up|c')
+    recorder.observe(now_ts=100,raw_adverse=True,**args)
+    recorder.observe(now_ts=110,raw_adverse=True,**args)
+    candidates=[e['payload'] for e in recorder.events if e['event_type']=='STOP_SHADOW_CANDIDATE']
+    assert candidates and all(e['decision_trace']['decision_ts']==110 for e in candidates)
+    assert candidates[0]['decision_trace']['l2']['bids']==[[.6,2.0]]
+    assert not any('_trace_bid_levels' in e['payload'] for e in recorder.events)
+    n=len(recorder.events)
+    recorder.observe(now_ts=110,raw_adverse=True,**args)
+    assert len(recorder.events)==n
+    recorder.observe(now_ts=111,raw_adverse=False,**args)
+    assert recorder.events[-1]['payload']['decision_trace']['decision']=='HOLD_RECOVERED'
+
+
 @pytest.mark.parametrize('qty', ['NaN','bad','Infinity'])
 def test_invalid_reconciliation_snapshot_quantity_is_reported(qty):
     result=audit_reconciliation([fill()],local_inventory={'up':qty})
@@ -315,10 +378,30 @@ def test_snapshot_replay_revision_after_decision_is_never_backfilled(tmp_path):
     assert 'p_up_ex_market' not in result['rows'][0]
 
 
+def test_unknown_execution_trigger_time_remains_null_with_separate_capture_time():
+    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up')
+    trace=annotate_decision(host,{},kind='EXECUTION_DECISION',decision='FILLED',now_ts=100)['decision_trace']
+    assert trace['decision_ts'] is None and trace['decision_ts_status']=='UNKNOWN'
+    assert trace['captured_ts']==100
+
+
 def test_storage_measurement_failure_projects_unknown_without_buy_authority():
     view=aggregate_health({'Storage':{'disk':{'observation_unavailable':True}}})
     assert view['domains']['Storage']['state']=='UNKNOWN'
     assert view['observability_only']
+
+
+def test_stop_async_writer_failure_retains_trace_without_execution_action():
+    from bot.stop_forensics_shadow import StopForensicsShadow
+    writer=SimpleNamespace(enqueue_decision=lambda **_: (_ for _ in ()).throw(OSError('synthetic writer unavailable')))
+    recorder=StopForensicsShadow(db=writer,run_id='r')
+    recorder.record_actual_stop(slug='m',instrument_id='up',client_order_id='sell',actual_stop_ts=100,
+        actual_stop_price=Decimal('.5'),actual_stop_qty=Decimal(2),actual_stop_pnl=Decimal('-1'),
+        position_side='UP',entry_price=Decimal('.7'))
+    trace=recorder.events[-1]['payload']['decision_trace']
+    assert trace['decision']=='ACTUAL_STOP_FILL'
+    assert trace['decision_ts'] is None and trace['observed_ts']==100
+    assert trace['l2']['status']=='L2_NOT_AVAILABLE'
 
 
 def test_integrity_cli_reads_synthetic_schema_and_reports_missing_trace(tmp_path,monkeypatch,capsys):
@@ -342,3 +425,29 @@ def test_incomplete_history_sell_is_unresolved_not_proven_critical():
 def test_same_fill_identity_with_conflicting_fee_is_critical():
     a,b=fill(),fill();b['commission_usdc']=1
     assert audit_reconciliation([a,b])['status']=='CRITICAL_INCONSISTENCY'
+
+
+def test_raw_l2_uses_existing_async_writer_and_journal_contains_reference_only():
+    calls=[]
+    book=SimpleNamespace(bids=lambda:[(.6,2)],asks=lambda:[(.7,3)])
+    host=SimpleNamespace(run_id='r',current_market_slug='m',instrument_id='up',cache=SimpleNamespace(order_book=lambda _:book),
+        twap_research_db=SimpleNamespace(enqueue_decision=lambda **kw:calls.append(kw) or True))
+    trace=annotate_decision(host,{},kind='EXECUTION_DECISION',decision='SUBMITTED',now_ts=100,
+                            source_event_type='ORDER_BUY_SUBMIT',client_order_id='c')['decision_trace']
+    assert trace['l2']['status']=='L2_ENQUEUED'
+    assert trace['l2']['bids'] is None and trace['l2']['asks'] is None
+    assert len(calls)==1 and calls[0]['payload']['l2']['bids']==[[.6,2.0]]
+    assert calls[0]['payload']['l2_evidence_id']==trace['l2']['l2_evidence_id']
+
+
+def test_async_l2_writer_failure_does_not_change_submit_or_authoritative_journal():
+    calls=[]
+    book=SimpleNamespace(bids=lambda:[(.6,2)],asks=lambda:[(.7,3)])
+    host=SimpleNamespace(trade_db=SimpleNamespace(log_order_event=lambda **kw:calls.append(kw) or True),
+        run_id='r',current_market_slug='m',instrument_id='up',current_token_id='token',last_observed_fee_rate_bps=0,
+        _normalize_side_text=lambda value:value.lower(),cache=SimpleNamespace(order_book=lambda _:book),
+        twap_research_db=SimpleNamespace(enqueue_decision=lambda **_: (_ for _ in ()).throw(OSError('writer failed'))))
+    assert StrategyDBRuntimeMixin._db_order_event(host,event_type='ORDER_BUY_SUBMIT',client_order_id='c',side='BUY',status='SUBMITTED')
+    assert len(calls)==1 and calls[0]['status']=='SUBMITTED'
+    assert calls[0]['payload']['decision_trace']['l2']['status']=='L2_NOT_PERSISTED'
+    assert calls[0]['payload']['decision_trace']['l2']['bids'] is None

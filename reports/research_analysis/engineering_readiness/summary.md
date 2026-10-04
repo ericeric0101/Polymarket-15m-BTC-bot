@@ -320,3 +320,257 @@ design a read-only aggregate DataEngine/research/storage health view using
 existing metrics and explicit thresholds; (4) add bounded L2 snapshots at
 decision boundaries only if the current local book can be captured without
 blocking the order path.
+
+## P2 source-development completion (2026-10-04; not deployed)
+
+This section records work after checkpoint `0c0af23`. Earlier sections are
+historical audit snapshots; their "not committed" statements describe those
+passes, not the later source-control checkpoint. This P2 pass is uncommitted,
+unpushed and undeployed. The current collector and all active data remain
+untouched. Tests and benchmarks use synthetic inputs/temporary databases only.
+
+### Reuse audit before implementation
+
+| Target | Initial classification | Reused authority / missing piece |
+|---|---|---|
+| P2.1 replay | PARTIAL | `bot/journal_replay`, specialist required-path/Outcome/session tools, SessionPnlGuard and InventoryLedger; missing common captured-evidence progression/classification. |
+| P2.2 reconciliation | PARTIAL | execution_events cancel/reject, InventoryLedger, recovery, journal idempotency, research lifecycle ID; missing read-only cross-source diagnostic result. |
+| P2.3 health | PARTIAL | component counters, journal health, DataEngine warning and watchdog owners; missing common read-only projection. |
+| P2.4 research quality | PARTIAL | snapshotter bounded intervals/counters, LeadLag and BTC metrics; missing recent freshness/gap projection including silence. |
+| P2.5 trace | PARTIAL | sparse ENTRY_DECISION_TRACE, guard updates, order events, stop shadow events; missing common structured evidence envelope. |
+| P2.6 L2 | PARTIAL | canonical local cache books, existing depth calculations; missing bounded persisted raw levels at sparse boundaries. |
+| P2.7 Store | PARTIAL | shared snapshot/settlement/provenance access already complete; important journal paths still decode separately. |
+| P2.8 index | PARTIAL | idempotent composite index primitive exists; missing closed-copy preconditions and representative benchmark. |
+| P2.9 clocks | PARTIAL | separate source/receipt fields and entry as-of rule; missing shared compatibility/as-of contract. |
+| P2.10 storage | PARTIAL | existing BTC/TWAP disk checks and manual archive tool; missing explicit storage summary/readiness projection. |
+
+Legacy scenario/forensic tools remain compatibility paths, not new canonical
+loaders. Their formulas were not copied into another policy implementation.
+Existing archive `--apply` deletes source rows and its default inspection path
+initializes a manifest: neither path was run during this pass.
+
+### P2 completion matrix
+
+| Target | Final status | Implementation / validation | Runtime impact / restart |
+|---|---|---|---|
+| P2.1 | COMPLETE | existing `bot/journal_replay.replay_evidence`, canonical `research_analysis replay`; repeatability, future-field exclusion, classifications and CLI tests | Offline only; no restart needed for offline copies. |
+| P2.2 | COMPLETE | existing `bot/execution_events.audit_reconciliation`, integrity integration; duplicate/conflicting fill, partial cancel, restart, quantity, finalization and reopen tests | Detection only; no runtime recovery change. |
+| P2.3 | COMPLETE | `bot/research/health.py`, cached journal accessor, existing STATUS; subdomains, UNKNOWN, reasons, warning projection and failure isolation | In-memory projections after a future controlled restart. |
+| P2.4 | COMPLETE | existing prediction snapshotter/BTC/LeadLag counters; recent gap/freshness/drop/silence tests | Bounded recent capture history, no cadence/freshness change; future restart. |
+| P2.5 | COMPLETE | existing evidence module, DB-runtime sparse journal boundaries, stop shadow events; structure, sparsity, timing and failure tests | Bounded annotation only at existing emissions; future restart. |
+| P2.6 | COMPLETE | bounded L2 serializer in existing evidence module, local cache book and stop bid levels; top-five, unavailable/invalid book and failure tests | Raw L2 uses the existing async writer only; journal holds references; no feed or sizing authority; future restart. |
+| P2.7 | COMPLETE | ResearchStore journal parsing/opening and time range; canonical capital/lifecycle/replay readers, dedupe/readonly/revision tests | Offline analysis; no source DB writes. |
+| P2.8 | COMPLETE | existing indexing module: synthetic benchmark and confirmed closed-copy migration; index definition/idempotency/query-plan tests | No active index applied. |
+| P2.9 | COMPLETE | shared `clocks.py` parser/as-of/compatibility; entry join delegates; source/future/nested/restart ordering tests | Offline contract and honest trace clocks; no feed timestamp/freshness change. |
+| P2.10 | COMPLETE | explicit `storage-summary`, cached disk owners, archival readiness; throttling/failure/no-action tests | No runtime recursive scan or automatic archival; existing checks cached after future restart. |
+
+COMPLETE means the defined safe foundation/projection/detection scope is
+implemented and tested. It does not claim full venue execution replay,
+complete historical event identity or deployment into the running process.
+Those limits are represented explicitly in outputs and below.
+
+### Replay scope and no-lookahead
+
+The canonical entry point accepts `--replay-kind MARKET|DECISION|ACCOUNTING`,
+`--decision-ts` UTC seconds and explicit offline `--db`/`--journal` copies.
+Optional run/slug filters use ResearchStore. MARKET replays deduplicated
+captured snapshots. DECISION currently evaluates the existing pure session
+guard on completed-cycle events; `--guard-mode` must be explicit. ACCOUNTING
+reuses InventoryLedger on recorded fills and excludes identified duplicates.
+
+The shared selector requires evidence time at or before the decision, checks
+explicit source/receive/evidence clocks (including nested inputs), and excludes
+late-written snapshot revisions. The entry anchor uses the same selector with
+its existing eight-second age and joint-fresh requirements. Existing specialist
+path/Outcome backtests remain specialist evaluations, not newly copied logic.
+
+`EXACT_REPLAY` is pure evaluation with explicitly asserted complete initial
+history/config/fees/identity; it does not assert counterfactual fills. Unknown
+history or fee/fill identity yields `APPROXIMATE_REPLAY`. Missing policy config,
+missing initial inventory, repeated finalized-market accounting or invalid
+required input is rejected or `NOT_REPLAYABLE`. Canonical journal replay is
+always approximate when sequencing on PERSIST_TS rather than venue time.
+Full entry/exit policies remain NOT_REPLAYABLE without their persisted inputs;
+no coupled live strategy was refactored to manufacture a replay result.
+
+### Reconciliation source map and limits
+
+- Intent/submitted: existing durable order/entry intent and `ORDER_*_SUBMIT`.
+- Acknowledged/cancelled/rejected: venue/cache events and execution_events
+  adapters remain authoritative; cancellation can coexist with partial fills.
+- Partial/filled/open/closed: fill events update the existing InventoryLedger;
+  the diagnostic uses the same arithmetic, not a second PnL ledger.
+- Exiting: existing exit engine/taker order state; no research state transitions
+  authorize orders. Settlement/redeem uses existing cycle reconciliation.
+- Research lifecycle identity remains the existing
+  `slug|instrument|first-opening-client-order` annotation, never order authority.
+
+Diagnostics return CONSISTENT / RECOVERABLE_MISMATCH / UNRESOLVED_MISMATCH /
+CRITICAL_INCONSISTENCY, source issue codes and a fill-only quantity projection.
+They never recover/liquidate/cancel. Missing initial fills, token-fee inputs,
+legacy fill identity and unrecorded settlement inventory transitions cannot be
+made exact. Venue/local snapshots are supplied explicitly (mocked in tests);
+no production venue was contacted. Repeated known redeem transaction identity
+is diagnosed; different transactions may legitimately redeem partial amounts.
+
+### Runtime health, quality and sparse trace
+
+Subdomains are MarketData (`Data` in STATUS), Research, Storage and Execution.
+Every state includes reason codes and original component metrics. UNKNOWN
+wins over healthy when a component is missing; observed faults retain higher
+severity. Research gap/freshness warnings describe evidence usability, not
+new trading thresholds. Existing DataEngine warning and watchdog pending state
+are projected; existing execution journal readiness can report
+BUY_SAFETY_BLOCK_ACTIVE. Health never returns or applies BUY permission.
+
+The journal accessor used here is `runtime_health_snapshot`, **not**
+`runtime_health`: the latter can perform an existing recovery probe when
+unhealthy. Recent quality holds at most 600 samples and reports a five-minute
+window, latest gap including silence, joint-fresh percentage and recent drops.
+Lifetime component errors/drops remain source counters and are not erased by
+this projection. The existing STATUS loop prints terse states; detailed state
+and reason changes print only on transitions. No second status daemon exists.
+
+Trace schema 1 annotates the existing ENTRY_DECISION_TRACE, sparse session
+updates, order submit/fill and stop candidate/actual-fill/cleared events.
+Unavailable evidence is null. Trace capture time is separate from policy
+trigger time; unknown trigger time stays null. A stop candidate or recovered
+adverse episode is an explicitly named **shadow observation**, not an
+independent trading stop/HOLD decision. Historical why-HOLD coverage remains
+limited where no corresponding decision was persisted.
+
+Local books are serialized at most five already sorted levels per side; stop
+candidates may have bid-only depth. This bounded evidence can support future
+$5/$10/$25/$50 and 1c/2c/5c offline capacity estimates, subject to captured depth
+coverage. No BBO-to-L2 fabrication, queue-priority/fill assumption, new feed,
+continuous full L2 stream or live capacity sizing was added. Legacy/fill events
+without a book stay L2_NOT_AVAILABLE. Raw L2 persistence uses the existing async TWAP research writer only. Entry/
+order journal trace contains a reference and enqueue status, without raw book
+levels; enqueue is not proof of durable persistence. Stop shadow already uses
+the existing async writer. Writer failure cannot affect the decision or journal
+result, and integrity exposes sparse L2 row counts.
+
+### Timestamp / clock contract
+
+| Fields / source | Actual semantics |
+|---|---|
+| Binance exchange trade timestamp / `_binance_ws_price_source_ts` | SOURCE_TS, exchange milliseconds normalized to UTC seconds. |
+| `_binance_ws_price_ts` / tick `received_at_ts` | RECEIVE_TS on host wall clock. |
+| Chainlink updated/observation timestamp | SOURCE_TS; TWAP observation field is bound to the exact received tick. |
+| `_polymarket_chainlink_price_ts`, `_twap_price_ts` | RECEIVE_TS, separate from observation time. |
+| Nautilus quote `ts_event` | Venue SOURCE_TS when available; existing fallback to local time is not proof of source clock. |
+| Nautilus `ts_init`, raw WS receipt / adapter emission / strategy receipt | Host creation/receive processing clocks; monotonic duration metrics are separate. |
+| Prediction `snapshot_ts`, `decision_epoch_ns` | Local capture/DECISION_TS, epoch seconds/ns. Source/receive fields retain their captured provenance; legacy fallback p_ex clocks can be UNKNOWN. |
+| Entry `observed_ts` and new explicit decision trace time | Recorded decision observation, distinct from journal insertion. |
+| `actual_stop_ts` and sparse execution annotation time | Local fill-handler observation; unavailable stop-trigger time remains null. |
+| Journal `ts`, row ID | PERSIST_TS and durable insertion order, not venue event time. |
+| `time.monotonic`, perf counters | Process-local durations; cannot compare across process restarts. |
+
+`compare_clocks` compares only known matching kinds and named origins, or an
+explicit cross-domain justification. Otherwise it returns
+CLOCKS_NOT_COMPARABLE with no lead/delta. Negative source/receive skew is an
+observation when comparison is explicitly justified, not an impossible exchange
+clock invariant. Naive datetime strings remain unknown rather than using the
+machine timezone. Restart/multi-run selection uses stable persistence ordering
+and does not assert globally synchronized exchange clocks.
+
+### Index benchmark and safe lifecycle
+
+Synthetic 100,000-row temp SQLite DB; three repetitions, median milliseconds.
+Event/lifecycle filtering parses JSON after run/slug selection, matching the
+canonical Store path. No production or copied active DB was opened.
+
+| Query | Rows | Before ms | Composite-index ms |
+|---|---:|---:|---:|
+| market timeline | 1,000 | 6.493 | 2.250 |
+| run timeline | 25,000 | 28.838 | 49.569 |
+| event type + slug | 1,000 | 7.678 | 2.907 |
+| time range | 500 | 6.110 | 0.673 |
+| lifecycle + slug | 1,000 | 7.861 | 2.343 |
+
+Before: SCAN + temporary ORDER BY B-tree. After: SEARCH using
+`idx_lead_lag_run_slug_time`; the run-only query still uses a temporary ORDER BY
+B-tree and is slower in this fixture. The existing composite candidate has
+measurable market/time-range value, but is **not** a universal optimization.
+No additional overlapping index was introduced and no index was deployed.
+
+`migrate_closed_copy(path, closed_copy_confirmed=True)` requires a known closed
+offline copy, verifies quick_check and the existing index definition, reports
+intended SQL and whether created, refuses missing files, and is idempotent.
+ResearchStore never calls it. Operators must verify the copy's provenance and
+that it has no writer; the flag is an explicit precondition, not an automatic
+process detector. `research_analysis.py index-benchmark` only makes a temp DB.
+
+### Storage and archival readiness
+
+`storage-summary --db <OFFLINE_RESEARCH_COPY> --journal <OFFLINE_JOURNAL_COPY>
+--btc-dir <OFFLINE_HISTORY_COPY>` is explicit read-only measurement. It exposes
+free bytes, DB/WAL sizes, optional Parquet total and supplied queue depths; the
+measurement cache is throttled for repeated callers. Recursive Parquet totals
+are **offline only**, never in STATUS/event/tick callbacks. Runtime storage
+health reads existing TWAP/BTC disk-check caches and configured guard outcomes;
+it adds no competing disk threshold or deletes/moves data.
+
+Future lifecycle: ACTIVE while collection/writers are active; CLOSED after
+collection is finished and graceful writer drain is verified; ARCHIVABLE only
+after an integrity-checked, count/hash-verified independent backup. Readiness
+returns no automatic action. On a future authorized closed copy, use the
+existing index helper, verify query plans, and compare copy integrity/counts.
+Inspect archive candidates via existing `eligible_partitions` with a read-only
+connection; destructive retention remains separately authorized. No active
+files are copied/moved/indexed/archived by this pass.
+
+### Performance and duplicate-authority re-audit
+
+New tick-path work is limited to appending a bounded quality sample at an
+already eligible snapshot, storing cached disk/quote health where checks
+already exist, and adding the existing warning outcome to its telemetry report.
+No new live SQLite query, filesystem scan, git subprocess, network feed,
+background writer or periodic logger was introduced. Sparse trace/L2 work
+occurs at existing emission boundaries; at most five levels per side are
+serialized through the existing async writer only. Existing journal writes
+serialize a bounded trace/reference payload without raw L2; this
+pass does not remove their pre-existing synchronous I/O. Replay, integrity,
+index benchmarking/migration and recursive storage measurement are offline.
+
+| Concept | Single authority after this pass |
+|---|---|
+| PnL | Existing cycle journal + SessionPnlGuard/InventoryLedger; replay calls their pure primitives. |
+| Order/lifecycle | Existing venue/cache/recovery/inventory and lifecycle annotation; diagnostic has no execution action. |
+| Replay | Existing journal_replay foundation through the canonical CLI; specialist tools remain documented compatibility paths. |
+| Health | One derived health module, reading component owners; no permission/BUY method. |
+| Store | ResearchStore read-only opening/JSON parsing/filters/dedupe; raw legacy forensic scripts remain compatibility tools. |
+| Decision trace | One evidence envelope attached to existing sparse event owners, no new decision evaluator or stream. |
+| L2 | Existing local cache book, one bounded serializer, existing writers. |
+| Storage | Existing disk guards; explicit offline summary/readiness without new thresholds/actions. |
+| Timestamps | One clocks parser/as-of/compatibility contract; entry join delegates. |
+
+Deferred by design: full venue/journal reconciliation state machine and live
+repair; exact queue-priority/counterfactual execution; entry/exit replay with
+unpersisted inputs; historical L2 backfill; graphical dashboard. Future
+dashboard consumers must use these authoritative projections, not independently
+calculate signals/PnL/positions/health. Activation and index/archival operations
+remain separately controlled after collection. None is required to run the
+new offline tests on synthetic/copy data.
+
+### Final validation and checkpoint recommendation
+
+- P2 focused regression: **58 passed**, synthetic/temp data only.
+- Full suite: **929 passed**, with the single known upstream websockets
+  deprecation warning; all 871 baseline tests remain passing.
+- `git diff --check`: passed.
+- The malformed-slug integrity fixture exposed a provenance IndexError; unknown
+  market epochs now appear in `unclassified_market_count` instead of crashing.
+- Incomplete-history oversells are UNRESOLVED; they become provably CRITICAL
+  only when complete history is explicitly asserted. Conflicting duplicate-fill
+  fees are included in identity-conflict checks.
+- No commit/push/deploy, bot stop/restart, additional collector, active DB/Parquet
+  mutation, live gate or strategy semantics change occurred.
+
+Verdict: **P2_COMPLETE_READY_FOR_CHECKPOINT** for this source-development scope.
+A future authorized checkpoint can separate (1) offline replay/clock/Store/
+reconciliation/index/storage foundation, (2) runtime health/quality projections,
+(3) sparse trace/L2 annotations plus architecture documentation. Shared CLI,
+DB-runtime and regression-test hunks must follow dependency order; commits and
+push require separate operator authorization. Deployment is not part of that
+checkpoint.

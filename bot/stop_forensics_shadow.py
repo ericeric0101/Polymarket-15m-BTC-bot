@@ -28,6 +28,22 @@ class StopForensicsShadow:
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if event_type.startswith("STOP_SHADOW_"):
             payload = {**payload, "lifecycle_schema_version": LIFECYCLE_SCHEMA_VERSION}
+            levels = payload.pop("_trace_bid_levels", None)
+            if event_type in {"STOP_SHADOW_CANDIDATE", "STOP_SHADOW_ACTUAL_STOP", "STOP_SHADOW_ADVERSE_EPISODE_CLEARED"}:
+                try:
+                    from bot.research.evidence import bounded_l2, decision_projection
+                    observed = payload.get("observed_ts", payload.get("actual_stop_ts", payload.get("cleared_ts")))
+                    payload["decision_trace"] = decision_projection(
+                        kind="STOP_DECISION", run_id=self.run_id, slug=str(payload.get("slug") or ""),
+                        decision_ts=None if event_type == "STOP_SHADOW_ACTUAL_STOP" else observed, side=payload.get("position_side"),
+                        decision="ACTUAL_STOP_FILL" if event_type == "STOP_SHADOW_ACTUAL_STOP" else "HOLD_RECOVERED" if event_type == "STOP_SHADOW_ADVERSE_EPISODE_CLEARED" else "SHADOW_CANDIDATE",
+                        reason_code=payload.get("reason") or payload.get("candidate"),
+                        lifecycle_id=payload.get("position_lifecycle_id"), evidence=payload,
+                        l2=bounded_l2(bids=levels))
+                    payload["decision_trace"]["observed_ts"] = observed
+                    payload["decision_trace"]["decision_source"] = "EXISTING_STOP_SHADOW_EVENT"
+                except Exception:
+                    pass
         self.events.append({"event_type": event_type, "payload": payload})
         if self.db is not None:
             try:
@@ -234,7 +250,9 @@ class StopForensicsShadow:
             if episode is not None:
                 self._emit_missing_checkpoints(episode, now_ts)
                 self._emit("STOP_SHADOW_ADVERSE_EPISODE_CLEARED", {
-                    "episode_id": episode["id"], "cleared_ts": now_ts,
+                    "episode_id": episode["id"], "cleared_ts": now_ts, "slug": slug,
+                    "instrument_id": instrument_id, "position_side": position_side,
+                    "position_lifecycle_id": episode.get("position_lifecycle_id"),
                     "duration_from_first_adverse_sec": max(0.0, now_ts - episode["first_ts"]),
                 })
                 self._episodes.pop(key, None)
@@ -279,8 +297,9 @@ class StopForensicsShadow:
         depth = self._depth_metrics(self._levels(bid_levels), best_bid, qty, entry_price)
         base = {
             "episode_id": episode["id"], "slug": slug, "instrument_id": instrument_id,
+            "_trace_bid_levels": bid_levels,
             "position_lifecycle_id": episode.get("position_lifecycle_id"),
-            "first_adverse_ts": episode["first_ts"], "elapsed_sec": elapsed,
+            "first_adverse_ts": episode["first_ts"], "observed_ts": float(now_ts), "elapsed_sec": elapsed,
             "position_side": position_side, "entry_price": self._number(entry_price),
             "qty": self._number(qty), "best_bid": self._number(best_bid),
             "best_bid_size": self._number(best_bid_size) if best_bid_size is not None else depth.get("best_bid_size"), "signal_side": signal_side,

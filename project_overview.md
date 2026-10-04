@@ -2782,3 +2782,32 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   Parquet writer fails to drain within its bounded timeout. These diagnostics
   take effect only after a controlled future restart and do not alter current
   collection semantics.
+
+## P2 engineering projections (source development; not deployed)
+
+- Canonical captured-evidence replay is `scripts/research_analysis.py replay`:
+  MARKET progression, SessionPnlGuard DECISION progression, and InventoryLedger
+  ACCOUNTING progression share the existing pure primitives. The entry anchor
+  and replay use one as-of selector. Outputs explicitly distinguish exact pure
+  evaluation, approximate reconstruction and not-replayable input. Journal
+  persistence time never establishes exact venue-event replay.
+- Offline reconciliation in `bot.execution_events.audit_reconciliation` detects
+  duplicates, partial/cancelled fills, open-order restart discrepancies, quantity
+  disagreements, repeated finalizations and lifecycle reuse. It produces no
+  execution action and never replaces venue/cache, inventory or recovery owners.
+- Existing STATUS consumes a derived Data / Research / Storage / Execution
+  projection. It reads bounded recent snapshot counters, writer counters and
+  cached journal/storage authority states only. It adds no recovery probe,
+  filesystem scan, research-quality BUY gate or periodic logging loop.
+- Existing sparse entry/guard/order/stop events carry a versioned decision trace.
+  Unknown policy-trigger time remains null, separate from local capture time.
+  Top-five local book levels are attached only at existing sparse boundaries;
+  BBO never substitutes for L2, and absent depth remains `L2_NOT_AVAILABLE`.
+- ResearchStore owns read-only research/journal opening and parsing for the
+  current canonical modes. Index benchmarking and closed-copy migration are
+  explicitly offline; storage totals are explicit, throttled measurements.
+  No index, archival, retention or runtime deployment is performed by this pass.
+
+Implementation evidence, clock semantics, limits, synthetic benchmarks and the
+P2 completion matrix are in
+`reports/research_analysis/engineering_readiness/summary.md`.
