@@ -30,6 +30,16 @@ class ConsumerTiming:
         self.last_lag = None
         self.enqueued = {}
         self.dequeued = {}
+        self.generation_counts = {"requested":0, "executed":0, "coalesced":0}
+
+    def quote_generation_event(self, kind):
+        if not self.lock.acquire(blocking=False):
+            self.dropped += 1
+            return
+        try:
+            self.generation_counts[kind] += 1
+        finally:
+            self.lock.release()
 
     def mark_enqueued(self, event):
         if not self.lock.acquire(blocking=False):
@@ -104,6 +114,20 @@ class ConsumerTiming:
             share_policy='unclamped; nested/concurrent/await/delay rows must not be summed',
             dropped_observations=self.dropped,units='ms',quantile_scope='bounded_uniform_reservoir',
             opaque_stages=['cache_update','message_bus_publish'],last_loop_lag=self.last_lag)
+        counts = self.generation_counts
+        generation_ms = sum(h['total_exec_ms'] for h in handlers
+                            if h['handler']=='adapter_quote_generation' and h['owner_loop'])
+        report['quote_generation'] = dict(
+            quote_generation_requested=counts['requested'],
+            quote_generation_executed=counts['executed'],
+            quote_generation_coalesced=counts['coalesced'],
+            requested_per_min=counts['requested']*60/window_sec if window_sec else None,
+            executed_per_min=counts['executed']*60/window_sec if window_sec else None,
+            coalescing_ratio=counts['coalesced']/counts['requested'] if counts['requested'] else None,
+            quote_generation_total_exec_ms=generation_ms,
+            share_of_window_pct=generation_ms/(window_sec*1000)*100 if window_sec else None,
+            execution_scope='attempts_including_failures; collected_observations')
+        self.generation_counts = {"requested":0, "executed":0, "coalesced":0}
         self.states = {}
         self.started = now
         self.dropped = 0
@@ -245,6 +269,7 @@ def bind_consumer_timing(node,strategy):
         (strategy,'_get_orderbook_levels_for_instrument','decision_cache_read','Decision')):
         hooked[label] = monitor.wrap(owner,name,label,kind)
     for client in getattr(kernel.data_engine,'_clients',{}).values():
+        client._consumer_timing = monitor
         # These are actual client method boundaries, not estimates of protocol work.
         from bot.adapter_overrides import is_polymarket_pong
         def raw_kind(raw):

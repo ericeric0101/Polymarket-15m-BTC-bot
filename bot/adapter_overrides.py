@@ -8,6 +8,7 @@ from itertools import islice
 from concurrent.futures import Future as ConcurrentFuture
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
@@ -449,6 +450,85 @@ def begin_data_engine_shutdown(engine) -> None:
             cancel_quote_delivery_tasks(client)
 
 
+def _generation_observation(client, kind):
+    monitor = getattr(client, "_consumer_timing", None)
+    if monitor is not None:
+        try:
+            monitor.quote_generation_event(kind)
+        except Exception:
+            pass
+
+
+def cancel_quote_generation(client, instrument_id=None):
+    pending = getattr(client, "_quote_generation_pending", {})
+    if instrument_id is None:
+        pending.clear()
+    else:
+        pending.pop(instrument_id, None)
+    if not pending:
+        handle = getattr(client, "_quote_generation_flush_handle", None)
+        if handle is not None:
+            handle.cancel()
+        client._quote_generation_flush_handle = None
+
+
+def request_quote_generation(client, instrument, message, *, source="ws_price_change"):
+    """Keep event metadata only; book prices/sizes are read on the next loop turn."""
+    if getattr(client, "_btc15m_disconnecting", False):
+        return
+    subscribed = client.subscribed_quote_ticks()
+    pending = getattr(client, "_quote_generation_pending", None)
+    if pending is None:
+        pending = client._quote_generation_pending = {}
+    # Storage is bounded by current quote ownership, including prewarm tokens.
+    for obsolete in tuple(pending):
+        if obsolete not in subscribed:
+            pending.pop(obsolete, None)
+    if instrument.id not in subscribed:
+        return
+    _generation_observation(client, "requested")
+    if instrument.id in pending:
+        _generation_observation(client, "coalesced")
+    pending[instrument.id] = (instrument, message.timestamp, source,
+                             getattr(client, "_btc15m_raw_ws_received_ts", None),
+                             client._clock.timestamp_ns())
+    if getattr(client, "_quote_generation_flush_handle", None) is None:
+        try:
+            client._quote_generation_flush_handle = client._loop.call_soon(flush_quote_generation, client)
+        except RuntimeError:
+            cancel_quote_generation(client)
+
+
+def flush_quote_generation(client):
+    client._quote_generation_flush_handle = None
+    pending = getattr(client, "_quote_generation_pending", {})
+    if getattr(client, "_btc15m_disconnecting", False):
+        pending.clear()
+        return
+    # Fixed burst boundary: reentrant updates schedule a later turn, never recurse.
+    for instrument_id in tuple(pending):
+        metadata = pending.pop(instrument_id, None)
+        if metadata is None or instrument_id not in client.subscribed_quote_ticks():
+            continue
+        instrument, timestamp, source, received, ts_init_ns = metadata
+        _generation_observation(client, "executed")
+        try:
+            client._publish_quote(instrument, SimpleNamespace(timestamp=timestamp),
+                                  source=source, raw_ws_received_ts=received, ts_init_ns=ts_init_ns)
+        except Exception:
+            # Preserve newer reentrant metadata. Retry on the existing delivery
+            # cadence only after failure; normal generation has no fixed delay.
+            if not getattr(client, "_btc15m_disconnecting", False) and instrument_id in client.subscribed_quote_ticks():
+                pending.setdefault(instrument_id, metadata)
+    if pending and getattr(client, "_quote_generation_flush_handle", None) is None:
+        try:
+            client._quote_generation_flush_handle = client._loop.call_later(
+                max(0.05, float(getattr(client, "_quote_delivery_coalesce_sec", 0.25))),
+                flush_quote_generation, client)
+        except RuntimeError:
+            cancel_quote_generation(client)
+
+
 def cancel_quote_delivery_tasks(client) -> None:
     """Synchronously fence client quote tasks before an event loop can close.
 
@@ -458,6 +538,7 @@ def cancel_quote_delivery_tasks(client) -> None:
     coalescer cannot call ``_handle_data`` against a closed loop.
     """
     client._btc15m_disconnecting = True
+    cancel_quote_generation(client)
     for name in ("_quote_transport_heartbeat_task", "_quote_delivery_task"):
         task = getattr(client, name, None)
         if task is not None and not task.done():
@@ -783,6 +864,7 @@ def _install_polymarket_data_overrides() -> None:
     original_disconnect = cls._disconnect
     original_dispose = cls._dispose
     original_handle_raw_ws_message = cls._handle_raw_ws_message
+    original_unsubscribe_quotes = cls.unsubscribe_quote_ticks
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -807,6 +889,8 @@ def _install_polymarket_data_overrides() -> None:
         # This is separate from WebSocket connectivity.  It is set before
         # client teardown so late callbacks cannot revive the quote pipeline.
         self._btc15m_disconnecting = False
+        self._quote_generation_pending = {}
+        self._quote_generation_flush_handle = None
         if not hasattr(self, "_quote_delivery_coalesce_sec"):
             self._quote_delivery_coalesce_sec = max(
                 0.05,
@@ -932,6 +1016,10 @@ def _install_polymarket_data_overrides() -> None:
         await drain_cancelled_quote_delivery_tasks(self)
         await original_disconnect(self)
 
+    def patched_unsubscribe_quotes(self, command):
+        cancel_quote_generation(self, command.instrument_id)
+        return original_unsubscribe_quotes(self, command)
+
     def patched_dispose(self) -> None:
         # Component disposal can run after a timeout path where Nautilus did
         # not get to await ``_disconnect``.  Fence/cancel first so no quote
@@ -1017,12 +1105,13 @@ def _install_polymarket_data_overrides() -> None:
             self._handle_data(deltas)
         return True
 
-    def patched_publish_quote(self, instrument, ws_message, *, source: str = "ws_price_change") -> None:
+    def patched_publish_quote(self, instrument, ws_message, *, source: str = "ws_price_change", raw_ws_received_ts: float | None = None, ts_init_ns: int | None = None) -> None:
         """Publish the final top-of-book after all message updates are applied."""
         if getattr(self, "_btc15m_disconnecting", False):
             return
         if instrument.id in self.subscribed_quote_ticks():
-            now_ns = self._clock.timestamp_ns()
+            # Deferred generation must not make a delayed book update look new.
+            now_ns = ts_init_ns if ts_init_ns is not None else self._clock.timestamp_ns()
             local_book = self._local_books[instrument.id]
             bid_price = local_book.best_bid_price()
             ask_price = local_book.best_ask_price()
@@ -1050,7 +1139,7 @@ def _install_polymarket_data_overrides() -> None:
                 bid_size=bid_size,
                 ask_size=ask_size,
                 ts_event=data_mod.millis_to_nanos(float(ws_message.timestamp)),
-                ts_init=self._clock.timestamp_ns(),
+                ts_init=now_ns,
             )
 
             last_quote = self._last_quotes.get(instrument.id)
@@ -1074,13 +1163,13 @@ def _install_polymarket_data_overrides() -> None:
             record_quote_provenance(
                 quote,
                 source=source,
-                raw_ws_received_ts=getattr(self, "_btc15m_raw_ws_received_ts", None),
+                raw_ws_received_ts=raw_ws_received_ts,
             )
             self._queue_latest_quote(quote)
 
     def patched_handle_quote(self, instrument, ws_message, price_change) -> None:
         if self._apply_quote_change(instrument, ws_message, price_change, publish_delta=False):
-            self._publish_quote(instrument, ws_message)
+            request_quote_generation(self, instrument, ws_message)
             self._publish_l2_snapshot_if_due(instrument, ws_message)
 
     def patched_handle_quotes(self, ws_message) -> None:
@@ -1101,7 +1190,7 @@ def _install_polymarket_data_overrides() -> None:
                     publish_delta=False,
                 ) or applied
             if applied:
-                self._publish_quote(instrument, ws_message)
+                request_quote_generation(self, instrument, ws_message)
                 self._publish_l2_snapshot_if_due(instrument, ws_message)
 
     def patched_handle_book_snapshot(self, instrument, ws_message) -> None:
@@ -1117,7 +1206,7 @@ def _install_polymarket_data_overrides() -> None:
         self._btc15m_l2_publish_state.setdefault(instrument.id, {
             "last_attempt": 0.0, "last_success": 0.0, "failures": 0, "retry_at": 0.0,
         })
-        self._publish_quote(instrument, ws_message, source="ws_snapshot")
+        request_quote_generation(self, instrument, ws_message, source="ws_snapshot")
         self._publish_l2_snapshot_if_due(instrument, ws_message)
 
     cls.__init__ = patched_init
@@ -1129,6 +1218,7 @@ def _install_polymarket_data_overrides() -> None:
     cls._log_tick_size_warning_throttled = patched_log_tick_size_warning_throttled
     cls._apply_quote_change = patched_apply_quote_change
     cls._publish_quote = patched_publish_quote
+    cls.unsubscribe_quote_ticks = patched_unsubscribe_quotes
     cls._queue_latest_quote = queue_latest_quote
     cls._handle_quote = patched_handle_quote
     cls._handle_quotes = patched_handle_quotes

@@ -2955,3 +2955,29 @@ Owner-loop starvation load attribution (source-only, not deployed):
   request/command binding exclusions or optional telemetry rejection. The slow
   trace signature bug does not affect refresh event payloads. Recovery policy
   and subscription methods remain unchanged.
+
+Adapter quote-generation coalescing (source-only, not deployed):
+- The admission description above describes the pre-coalescing baseline.
+  Every local-book delta still applies immediately and every asset-group retains
+  its existing L2 snapshot attempt. Quote generation now marks the instrument
+  dirty and uses one client-level `call_soon` handle to collapse a loop burst.
+  The existing downstream latest-QuoteTick delivery task remains unchanged.
+- Pending metadata is bounded by subscribed quote instruments, including prewarm
+  tokens. It stores event timestamp, receipt time and update clock, never cached
+  prices/sizes; generation reads the current native local book. Instruments have
+  separate metadata. `ts_init` retains the latest update clock so delayed flushes
+  cannot rejuvenate stale data. Next-turn scheduling adds no normal fixed delay,
+  but cannot guarantee latency while the owner loop itself is starved.
+- Reentrant updates schedule later work without recursive generation. Failed
+  generation retains dirty state and retries at the existing delivery interval
+  (minimum 50 ms), only on failure. Persistent failures do not imply successful
+  delivery. Unsubscribe removes obsolete metadata before delegating unchanged
+  ownership behavior; disconnect/dispose cancels the handle and fences ingress.
+- Existing `EVENT_LOOP_CONSUMER_TIMING` summaries expose requested/executed/
+  coalesced counts, rates, generation elapsed cost and window share. Executed
+  counts attempts including failures; ratio is coalesced/requested. Counters use
+  the existing nonblocking collector lock and can lose observations on contention.
+  No per-event persistence, thread, database or new synchronization lock is added.
+- In-memory burst tests apply 10,001 real native-book updates and retain 10,001
+  L2 attempts while generating one latest quote. Synthetic benchmark wall time
+  measures the isolated before/after behavior models, not live improvement.
