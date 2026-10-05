@@ -331,6 +331,11 @@ def refresh_quote_tick_subscriptions(strategy: Any) -> List[InstrumentId]:
             instrument_ids.append(inst_id)
     if not instrument_ids:
         return []
+    from bot.quote_recovery_observability import request_refresh
+    try:
+        request_refresh(strategy, instrument_ids)
+    except Exception:
+        pass  # Observation failure cannot change subscription recovery.
     mark_quote_subscription_pending(strategy, instrument_ids, clear_cached_quotes=True)
     # Polymarket's WebSocket client reference-counts assets shared by quote and
     # L2 subscriptions. Remove both references before adding either one back;
@@ -477,6 +482,12 @@ def replace_market_subscriptions(
     strategy._managed_market_quote_subscription_ids = tracked_quote
     strategy._managed_market_l2_subscription_ids = tracked_l2
     strategy._managed_market_subscription_instruments = tracked_instruments
+    from bot.quote_recovery_observability import diagnostic, subscription_counts
+    try:
+        diagnostic(strategy, "QUOTE_SUBSCRIPTION_RECONCILIATION", phase="requests_scheduled",
+                   **subscription_counts(strategy))
+    except Exception:
+        pass
     return healthy
 
 
@@ -1063,6 +1074,8 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             ask_size=ask_size_decimal,
         )
         callback_stage_ms["transport_telemetry"] = (time.monotonic() - stage_started) * 1000.0
+        from bot.quote_recovery_observability import confirm_fresh_quote
+        confirm_fresh_quote(strategy, tick.instrument_id, quote_received_ts, adapter_emitted_ts)
         pending_instruments = getattr(strategy, "quote_recovery_pending_instruments", set())
         if str(tick.instrument_id) in pending_instruments:
             # A binary market needs a fresh book for every subscribed outcome.
@@ -1197,6 +1210,12 @@ def handle_generic_event(strategy: Any, event: Any) -> None:
 
 def handle_stop(strategy: Any) -> None:
     """Called when strategy stops."""
+    from bot.ops import collection_lifecycle
+    point = getattr(strategy, "_collection_shutdown_point", None)
+    if callable(point):
+        point("strategy_teardown_start")
+    else:
+        collection_lifecycle(strategy, "strategy_teardown_start")
     shutdown_started = time.monotonic()
 
     def log_shutdown_stage(stage: str, stage_started: float) -> None:
@@ -1302,6 +1321,7 @@ def handle_stop(strategy: Any) -> None:
             logger.warning(f"Research writer shutdown failed: writer={writer_name}", exc_info=True)
     collection_lifecycle(strategy, "research_writer_stop_complete")
     log_shutdown_stage("research_writers", stage_started)
+    collection_lifecycle(strategy, "strategy_teardown_pre_journal_stop")
     stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=trade_journal_final_backup")
     trade_db = getattr(strategy, "trade_db", None)
@@ -1317,3 +1337,6 @@ def handle_stop(strategy: Any) -> None:
             strategy.terminal_dashboard.stop()
         except Exception:
             pass
+    point = getattr(strategy, "_collection_shutdown_point", None)
+    if callable(point):
+        point("strategy_teardown_end")

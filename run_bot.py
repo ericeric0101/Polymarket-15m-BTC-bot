@@ -4449,12 +4449,12 @@ class IntegratedBTCStrategy(
             # The call itself can take seconds, especially during rollover.
             self.quote_recovery_started_ts = time.time()
             logger.warning(
-                "Quote watchdog resubscribed; awaiting first fresh quote: "
+                "Quote watchdog refresh_requested; awaiting task completion and fresh quote: "
                 f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s "
                 f"pending={sorted(str(item) for item in (getattr(self, 'quote_recovery_pending_instruments', set()) or set()))}"
             )
             self._db_strategy_event(
-                "QUOTE_WATCHDOG_RESUBSCRIBED",
+                "QUOTE_WATCHDOG_REFRESH_REQUESTED",
                 {
                     "instrument_before": prev_instrument,
                     "instrument_after": new_instrument,

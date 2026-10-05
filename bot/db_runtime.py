@@ -580,6 +580,13 @@ class StrategyDBRuntimeMixin:
                     now_ts=payload_out.get("observed_ts"), source_event_type=event_type)
         except Exception:
             pass
+        if event_type == "QUOTE_TRANSPORT_TELEMETRY":
+            # Optional observation only: reuse the bounded journal worker.
+            try:
+                payload_out.update(getattr(self, "collection_identity", {}))
+                return bool(self.trade_db.enqueue_strategy_event(self.run_id, event_type, payload_out))
+            except Exception:
+                return False
         started = time.perf_counter()
         try:
             return bool(self.trade_db.log_strategy_event(

@@ -330,7 +330,7 @@ class TradeJournalDB:
             if self._backup_stop.is_set():
                 return False
             try:
-                self._telemetry_queue.put_nowait((run_id, event_type, dict(payload)))
+                self._telemetry_queue.put_nowait((run_id, event_type, dict(payload), _utc_now_iso()))
                 self._backup_wakeup.set()
                 return True
             except queue.Full:
@@ -342,7 +342,7 @@ class TradeJournalDB:
                 args = self._telemetry_queue.get_nowait()
             except queue.Empty:
                 return
-            self.log_strategy_event(*args)
+            self.log_strategy_event(*args[:3], event_ts=args[3])
 
     def _backup_worker(self) -> None:
         while not self._backup_stop.is_set():
@@ -1128,7 +1128,8 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load_fair_edge_bucket_shadow_simulations failed: {e}")
             return []
 
-    def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> bool:
+    def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None,
+                           *, event_ts: Optional[str] = None) -> bool:
         sql = "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)"
         conn: Optional[sqlite3.Connection] = None
         try:
@@ -1136,7 +1137,7 @@ class TradeJournalDB:
             conn.execute(
                 sql,
                 (
-                    _utc_now_iso(),
+                    event_ts or _utc_now_iso(),
                     run_id,
                     event_type,
                     _json_dumps(payload or {}),

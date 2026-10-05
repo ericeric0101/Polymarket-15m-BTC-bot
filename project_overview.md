@@ -2855,3 +2855,27 @@ Collection continuity attribution (source-only, not deployed):
   direct prediction enqueue. The cap is unchanged. Safe closed-copy retention
   and archival execution require a separate design; readiness diagnostics alone
   do not implement rotation.
+
+
+Quote reliability hardening (source-only, not deployed):
+- Only `QUOTE_TRANSPORT_TELEMETRY` switches to the existing bounded journal
+  enqueue path. Payload timestamps/throttling stay unchanged; journal `ts` for
+  asynchronous events records enqueue occurrence rather than worker insertion.
+  Accounting, fills, settlement and other existing authority writes stay intact.
+- Targeted refresh records requests, per-operation coroutine completion,
+  failures and first fresh quote separately. Operations bind to their request
+  at coroutine creation, so delayed prior handoff work cannot satisfy a new
+  refresh. Completion is not venue acknowledgment. Refcount diagnostics derive
+  quote/L2 ownership from the existing client; they never force counters or
+  alter subscription ownership. Handoffs record logical and local venue counts
+  as scheduled-state observations, not confirmed remote subscriptions.
+- Node-local observers retain fixed shutdown-stage timestamps through journal
+  shutdown and include them in existing post-run lifecycle events. Client
+  adapter disconnect and task-cleanup completion are separate; cleanup ends
+  immediately before the connected flag update. Original waits, cancellation
+  behavior, results and exceptions are preserved. No new task, queue, writer,
+  database or thread is introduced by these observers.
+- Historical offline timing shows long delivery delays but does not prove
+  synchronous quote telemetry caused the post-deploy failure. Async isolation
+  is architectural hardening; runtime recovery and stop-latency improvement
+  still require validation after separately authorized deployment.

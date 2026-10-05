@@ -61,7 +61,8 @@ def _collection_strategies(node):
 
 def _collection_transition(node, transition, **context):
     for strategy in _collection_strategies(node):
-        collection_lifecycle(strategy, transition, synchronous=True, **context)
+        collection_lifecycle(strategy, transition, synchronous=True,
+                             shutdown_stages=dict(getattr(node, "_collection_shutdown_timestamps", {})), **context)
 
 
 def idempotent_stop_callback(stop_fn):
@@ -96,6 +97,9 @@ def threadsafe_node_stop_callback(node: TradingNode):
     loop; the node then performs its normal awaited client/engine shutdown.
     """
     def stop_after_fencing_market_data() -> None:
+        point = getattr(node, "_collection_shutdown_point", None)
+        if callable(point):
+            point("owner_loop_stop_callback_start")
         engine = getattr(getattr(node, "kernel", None), "data_engine", None)
         if engine is not None:
             # The kernel disconnects clients only after strategy shutdown.
@@ -105,6 +109,9 @@ def threadsafe_node_stop_callback(node: TradingNode):
         node.stop()
 
     def request_stop() -> None:
+        point = getattr(node, "_collection_shutdown_point", None)
+        if callable(point):
+            point("stop_dispatch")
         for strategy in _collection_strategies(node):
             collection_lifecycle(strategy, "stop_request", stop_requested_at=time.time(),
                                  **getattr(strategy, "_collection_stop_context", {"stop_request_source": "unknown"}))
@@ -839,6 +846,12 @@ def run_integrated_bot(
         node.trader.add_strategy(strategy)
         node._collection_strategy_refs = [strategy]
         node.build()
+        try:
+            from bot.quote_recovery_observability import bind_collection_observers
+            bind_collection_observers(node, strategy)
+            strategy._collection_shutdown_point = node._collection_shutdown_point
+        except Exception:
+            logger.warning("Collection stage observers unavailable; trading setup continues")
         # Strategies are Actors and do not have a public back-reference to the
         # TradingNode. Give lifecycle/watchdog recovery an explicit stop hook so
         # a requested rollover actually returns node.run() to this launcher.
@@ -950,7 +963,9 @@ def run_integrated_bot(
                 if rollover_source is None:
                     rollover_source = _strategy_rollover_source(node)
                 rollover_requested.set()
-                logger.info("Strategy requested rollover (stale instruments)")
+                contexts = [getattr(s, "_collection_stop_context", {}) for s in _collection_strategies(node)]
+                trigger = next((c.get("watchdog_trigger") for c in contexts if c.get("watchdog_trigger")), None)
+                logger.info(f"Strategy requested rollover: rollover_source={rollover_source} watchdog_trigger={trigger}")
             if node_run_returned:
                 if rollover_requested.is_set():
                     consecutive_failures = 0
