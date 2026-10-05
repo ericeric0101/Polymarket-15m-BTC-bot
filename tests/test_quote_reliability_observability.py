@@ -238,3 +238,33 @@ def test_delayed_pre_refresh_quote_cannot_confirm_new_refresh():
     assert 'QUOTE_REFRESH_FRESH_QUOTE_CONFIRMED' not in events
     confirm_fresh_quote(strategy,up,now,adapter_emitted_ts=now)
     assert 'QUOTE_REFRESH_FRESH_QUOTE_CONFIRMED' in events
+
+
+def test_real_public_client_boundary_creates_before_refresh_coroutine_starts():
+    """Use the installed public method: started is coroutine execution, not creation."""
+    from nautilus_trader.live.data_client import LiveMarketDataClient
+    events=[]
+    strategy=host(SimpleNamespace(enqueue_strategy_event=lambda r,e,p:events.append((e,p)) or True))
+    _,client,up,_=observer_node(strategy)
+    request_refresh(strategy,[up])
+    tasks=[]
+    ownership=[]
+    client._add_subscription_quote_ticks=lambda inst:ownership.append(inst)
+    async def exercise():
+        def create_task(coro, **kwargs):
+            task=asyncio.create_task(coro)
+            tasks.append(task)
+            return task
+        client.create_task=create_task
+        command=SimpleNamespace(instrument_id=up,ts_init=time.time_ns())
+        LiveMarketDataClient.subscribe_quote_ticks(client,command)
+        assert ownership==[up]
+        assert len(tasks)==1
+        assert 'QUOTE_REFRESH_TASK_STARTED' not in [e for e,p in events]
+        await tasks[0]
+        starts=[p for e,p in events if e=='QUOTE_REFRESH_TASK_STARTED']
+        assert len(starts)==1
+        assert starts[0]['operation']=='subscribe_quote'
+        assert starts[0]['task_queue_delay_ms'] >= 0
+        assert [e for e,p in events].count('QUOTE_REFRESH_TASK_COMPLETED')==1
+    asyncio.run(exercise())

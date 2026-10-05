@@ -14,7 +14,7 @@ from bot.quote_recovery_observability import diagnostic
 class ConsumerTiming:
     WINDOW_SEC = 60.0
     SAMPLE_LIMIT = 512
-    HANDLER_LIMIT = 40
+    HANDLER_LIMIT = 96
 
     def __init__(self, strategy, loop, *, monotonic=time.monotonic):
         self.strategy, self.loop, self.now = strategy, loop, monotonic
@@ -55,9 +55,10 @@ class ConsumerTiming:
             if key not in self.states and len(self.states) >= self.HANDLER_LIMIT:
                 self.dropped += 1
                 return
-            state = self.states.setdefault(key, {'count':0, 'samples':[], 'max':0.0, 'slow_count':0})
+            state = self.states.setdefault(key, {'count':0, 'samples':[], 'max':0.0, 'slow_count':0, 'total_exec_ms':0.0})
             value = max(0.0, float(duration_ms))
             state['count'] += 1
+            state['total_exec_ms'] += value
             state['max'] = max(state['max'], value)
             state['slow_count'] += int(value > 100.0)
             samples = state['samples']
@@ -69,7 +70,7 @@ class ConsumerTiming:
                     samples[index] = value
             if value > 100.0 and now - self.last_slow >= 10.0:
                 self.last_slow = now
-                slow = dict(handler=handler,event_type=event_type,instrument=instrument,
+                slow = dict(handler=handler,consumer_event_type=event_type,instrument=instrument,
                     duration_ms=value,callback_exec_ms=None if handler in {'loop_lag','data_engine_queue_wait','dequeue_to_handler'} or handler.endswith('_await') else value,
                     queue_wait_ms=queue_wait_ms,owner_loop=owner_loop,
                     threshold_ms=1000 if value>1000 else 500 if value>500 else 100)
@@ -83,15 +84,24 @@ class ConsumerTiming:
 
     def _snapshot(self, now):
         handlers = []
+        window_sec = max(0.0, now-self.started)
         for (handler,event_type,owner_loop), state in self.states.items():
             samples = sorted(state['samples'])
             def quantile(p):
                 return samples[int((len(samples)-1)*p)] if samples else None
             handlers.append(dict(handler=handler,event_type=event_type,owner_loop=owner_loop,
                 timing_scope='await_inclusive' if handler.endswith('_await') else 'boundary_delay' if handler in {'loop_lag','data_engine_queue_wait','dequeue_to_handler'} else 'synchronous_inclusive',
+                inclusive=True,
                 count=state['count'],sample_count=len(samples),median=quantile(.5),
+                median_exec_ms=quantile(.5),total_exec_ms=state['total_exec_ms'],
+                mean_exec_ms=state['total_exec_ms']/state['count'],
+                share_of_window_pct=state['total_exec_ms']/(window_sec*1000.0)*100.0 if window_sec else None,
+                count_per_min=state['count']*60.0/window_sec if window_sec else None,
+                total_exec_ms_per_min=state['total_exec_ms']*60.0/window_sec if window_sec else None,
                 P95=quantile(.95),P99=quantile(.99),max=state['max'],slow_count=state['slow_count']))
-        report = dict(window_sec=max(0.0,now-self.started),handlers=handlers,
+        report = dict(window_sec=window_sec,handlers=handlers,
+            cumulative_scope='per_handler_inclusive_elapsed_not_cpu',
+            share_policy='unclamped; nested/concurrent/await/delay rows must not be summed',
             dropped_observations=self.dropped,units='ms',quantile_scope='bounded_uniform_reservoir',
             opaque_stages=['cache_update','message_bus_publish'],last_loop_lag=self.last_lag)
         self.states = {}
@@ -134,12 +144,16 @@ class ConsumerTiming:
         self.timer = None
         if self.closed:
             return
-        executed_at = self.loop.time()
-        lag = max(0.0,(executed_at-scheduled_at)*1000.0)
-        self.last_lag = dict(scheduled_at=scheduled_at,executed_at=executed_at,lag_ms=lag,
-                             clock='event_loop_monotonic')
-        self.observe('loop_lag','Timer',lag)
-        self._schedule()
+        started = self.now()
+        try:
+            executed_at = self.loop.time()
+            lag = max(0.0,(executed_at-scheduled_at)*1000.0)
+            self.last_lag = dict(scheduled_at=scheduled_at,executed_at=executed_at,lag_ms=lag,
+                                 clock='event_loop_monotonic')
+            self.observe('loop_lag','Timer',lag)
+            self._schedule()
+        finally:
+            self.observe('loop_heartbeat_callback','Timer',(self.now()-started)*1000.0)
 
     def close(self):
         self.closed = True
@@ -171,7 +185,7 @@ class ConsumerTiming:
             try:
                 return original(*args,**kwargs)
             finally:
-                self.observe(handler,type(event).__name__ if event_type=='dynamic' and event is not None else event_type,
+                self.observe(handler,event_type(event) if callable(event_type) else type(event).__name__ if event_type=='dynamic' and event is not None else event_type,
                              (self.now()-started)*1000.0,
                              instrument=str(getattr(event,'instrument_id','')) or None,queue_wait_ms=wait)
         if inspect.iscoroutinefunction(original):
@@ -231,13 +245,27 @@ def bind_consumer_timing(node,strategy):
         (strategy,'_get_orderbook_levels_for_instrument','decision_cache_read','Decision')):
         hooked[label] = monitor.wrap(owner,name,label,kind)
     for client in getattr(kernel.data_engine,'_clients',{}).values():
-        for name,label in (('_handle_raw_ws_message','adapter_raw_decoder'),
-                           ('_handle_quotes','adapter_price_change'),
-                           ('_handle_book_snapshot','adapter_book_snapshot')):
-            hooked[label] = monitor.wrap(client,name,label,'Adapter')
+        # These are actual client method boundaries, not estimates of protocol work.
+        from bot.adapter_overrides import is_polymarket_pong
+        def raw_kind(raw):
+            return 'HeartbeatPong' if isinstance(raw, bytes) and is_polymarket_pong(raw) else 'RawWebSocket'
+        for name,label,kind in (
+                ('_handle_raw_ws_message','adapter_raw_decoder',raw_kind),
+                ('_handle_ws_message','adapter_message_dispatch','dynamic'),
+                ('_handle_quotes','adapter_price_change','PriceChangeMessage'),
+                ('_apply_quote_change','adapter_local_book_delta','LocalBookDelta'),
+                ('_handle_book_snapshot','adapter_book_snapshot','BookSnapshot'),
+                ('_handle_trade','adapter_trade','Trade'),
+                ('_handle_instrument_update','adapter_instrument_update','InstrumentUpdate'),
+                ('_publish_quote','adapter_quote_generation','QuoteGeneration'),
+                ('_publish_l2_snapshot_if_due','adapter_l2_snapshot_attempt','L2SnapshotAttempt'),
+                ('_queue_latest_quote','adapter_quote_coalescer','QuoteTick'),
+                ('_handle_data','adapter_data_publish','dynamic')):
+            installed = monitor.wrap(client,name,label,kind)
+            hooked[label] = hooked.get(label,False) or installed
         # The websocket captured its bound raw handler at client construction.
         ws = getattr(client,'_ws_client',None)
-        if ws is not None and hooked.get('adapter_raw_decoder'):
+        if ws is not None and callable(getattr(client,'_handle_raw_ws_message',None)):
             ws._handler = client._handle_raw_ws_message
     original_start = kernel.start_async
     @wraps(original_start)

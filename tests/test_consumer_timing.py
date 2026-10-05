@@ -58,7 +58,7 @@ def test_samples_keys_and_queue_metadata_are_bounded(monkeypatch):
     assert len(next(iter(m.states.values()))['samples']) == 512
     for n in range(100):
         m.observe(str(n), 'Other', 1)
-    assert len(m.states) == 40
+    assert len(m.states) == m.HANDLER_LIMIT
     objects = [object() for _ in range(100)]
     for event in objects:
         m.mark_enqueued(event)
@@ -134,6 +134,10 @@ def test_loop_lag_accurate_no_catchup_and_cancelled(monkeypatch):
     m.loop.calls[0][1](m.loop.calls[0][2])
     assert m.last_lag == {'scheduled_at':1.0, 'executed_at':3.5, 'lag_ms':2500.0, 'clock':'event_loop_monotonic'}
     assert m.loop.calls[-1][2] == 4.5
+    heartbeat = next(row for row in m.snapshot()['handlers'] if row['handler'] == 'loop_heartbeat_callback')
+    assert heartbeat['count'] == 1
+    assert heartbeat['total_exec_ms'] == 0
+    assert heartbeat['timing_scope'] == 'synchronous_inclusive'
     handle = m.loop.calls[-1][3]
     m.close()
     assert handle.cancelled
@@ -248,3 +252,124 @@ def test_async_helpers_measure_await_not_coroutine_creation(monkeypatch):
     assert row['max'] == 2000
     slow = [fields for kind, fields in events if kind == 'SLOW_CONSUMER_CALLBACK']
     assert slow[0]['callback_exec_ms'] is None
+
+
+@pytest.mark.parametrize('duration,threshold', [(101,100),(501,500),(1001,1000)])
+def test_slow_trace_persists_using_real_diagnostic_and_journal(tmp_path, duration, threshold):
+    import json
+    import sqlite3
+    journal = TradeJournalDB(str(tmp_path / 'diagnostics.db'))
+    host = SimpleNamespace(run_id='real-signature', trade_db=journal,
+        collection_identity={'process_instance_id':'test-process', 'cycle_idx':1})
+    m = timing.ConsumerTiming(host, Loop(), monotonic=lambda:0)
+    try:
+        m.observe('strategy_quote_callback','QuoteTick',duration,instrument='TEST.POLYMARKET')
+    finally:
+        journal.stop()
+    with sqlite3.connect(journal.db_path) as connection:
+        rows = connection.execute('select event_type,payload_json from strategy_events').fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == 'SLOW_CONSUMER_CALLBACK'
+    payload = json.loads(rows[0][1])
+    assert payload['consumer_event_type'] == 'QuoteTick'
+    assert payload['threshold_ms'] == threshold
+    assert payload['callback_exec_ms'] == duration
+    assert payload['run_id'] == 'real-signature'
+    assert payload['process_instance_id'] == 'test-process'
+    assert payload['cycle_idx'] == 1
+
+
+def test_cumulative_short_callback_load_visible_without_event_rows(monkeypatch):
+    m, clock, events = monitor(monkeypatch)
+    before = threading.active_count()
+    for _ in range(30000):
+        m.observe('adapter_raw_decoder','RawWebSocket',1.5)
+    assert events == []
+    clock.value = 60
+    row = m.snapshot()['handlers'][0]
+    assert row['count'] == row['count_per_min'] == 30000
+    assert row['total_exec_ms'] == row['total_exec_ms_per_min'] == 45000
+    assert row['mean_exec_ms'] == row['median_exec_ms'] == 1.5
+    assert row['share_of_window_pct'] == 75
+    assert row['sample_count'] == 512
+    assert row['slow_count'] == 0
+    assert threading.active_count() == before
+
+
+def test_inclusive_shares_are_independent_unclamped_and_zero_window_unknown(monkeypatch):
+    m, clock, events = monitor(monkeypatch)
+    m.observe('adapter_raw_decoder','RawWebSocket',800)
+    m.observe('adapter_price_change','PriceChangeMessage',600)
+    m.observe('fee_lookup_await','Decision',2500)
+    clock.value = 1
+    report = m.snapshot()
+    rows = {row['handler']:row for row in report['handlers']}
+    assert rows['adapter_raw_decoder']['share_of_window_pct'] == 80
+    assert rows['adapter_price_change']['share_of_window_pct'] == 60
+    assert rows['fee_lookup_await']['share_of_window_pct'] == 250
+    assert all(row['inclusive'] for row in rows.values())
+    assert report['cumulative_scope'] == 'per_handler_inclusive_elapsed_not_cpu'
+    assert 'must not be summed' in report['share_policy']
+    assert 'total_exec_ms' not in report  # No sum of nested handlers at report level.
+    m.observe('quote','QuoteTick',1)
+    assert m.snapshot()['handlers'][0]['share_of_window_pct'] is None
+
+
+def test_adapter_boundary_breakdown_preserves_book_and_publish_order(monkeypatch):
+    events = []
+    monkeypatch.setattr(timing, 'diagnostic', lambda *a, **k: None)
+    node, host, points = fake_node()
+    clock = Clock()
+    class QuoteTick:
+        pass
+    class OrderBookDeltas:
+        pass
+    class PolymarketQuotes:
+        pass
+    class Client:
+        def __init__(self):
+            self._ws_client = SimpleNamespace(_handler=None)
+        def _handle_raw_ws_message(self, raw):
+            events.append(('raw',raw))
+            if raw != b'PONG':
+                self._handle_ws_message(PolymarketQuotes())
+        def _handle_ws_message(self, message):
+            self._handle_quotes(message)
+        def _handle_quotes(self, message):
+            for value in [1,2,3]:
+                self._apply_quote_change(value)
+            self._publish_quote(message)
+            self._publish_l2_snapshot_if_due(message)
+        def _apply_quote_change(self, value):
+            events.append(('delta',value))
+            clock.value += .001
+        def _publish_quote(self, message):
+            events.append(('generate',None))
+            self._queue_latest_quote(QuoteTick())
+        def _queue_latest_quote(self, quote):
+            events.append(('coalesce',None))
+            self._handle_data(quote)
+        def _publish_l2_snapshot_if_due(self, message):
+            self._handle_data(OrderBookDeltas())
+        def _handle_data(self, data):
+            events.append(('publish',type(data).__name__))
+    client = Client()
+    node.kernel.data_engine._clients = {'client':client}
+    timing.bind_consumer_timing(node,host)
+    host._consumer_timing.now = clock
+    host._consumer_timing.started = 0
+    client._ws_client._handler(b'update')
+    client._ws_client._handler(b'PONG')
+    assert events == [('raw',b'update'),('delta',1),('delta',2),('delta',3),
+        ('generate',None),('coalesce',None),('publish','QuoteTick'),
+        ('publish','OrderBookDeltas'),('raw',b'PONG')]
+    clock.value = 60
+    rows = host._consumer_timing.snapshot()['handlers']
+    by_key = {(row['handler'],row['event_type']):row for row in rows}
+    assert by_key[('adapter_local_book_delta','LocalBookDelta')]['count'] == 3
+    assert by_key[('adapter_raw_decoder','RawWebSocket')]['count'] == 1
+    assert by_key[('adapter_raw_decoder','HeartbeatPong')]['count'] == 1
+    assert by_key[('adapter_data_publish','QuoteTick')]['count'] == 1
+    assert by_key[('adapter_data_publish','OrderBookDeltas')]['count'] == 1
+    assert by_key[('adapter_message_dispatch','PolymarketQuotes')]['count'] == 1
+    assert by_key[('adapter_price_change','PriceChangeMessage')]['total_exec_ms'] == pytest.approx(3)

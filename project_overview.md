@@ -2909,3 +2909,49 @@ Event-loop consumer stall diagnostics (source-only, not deployed):
   actual task termination and kernel stop success/failure. A final bounded timing
   snapshot travels through existing post-run lifecycle persistence after journal
   shutdown. Original awaits, timeouts and cancellation results remain unchanged.
+
+
+Owner-loop starvation load attribution (source-only, not deployed):
+- Slow traces retain the event discriminator `SLOW_CONSUMER_CALLBACK`; payload
+  event identity is `consumer_event_type`, avoiding the diagnostic function's
+  discriminator argument. Tests use its real signature and temporary journal
+  persistence for all three slow buckets.
+- Existing 60-second summaries add exact collected-call `total_exec_ms`,
+  `mean_exec_ms`, reservoir-estimated `median_exec_ms`, count/minute, elapsed
+  ms/minute and `share_of_window_pct = total_exec_ms / wall_window_ms * 100`.
+  The bounded key limit is now 96 to accommodate adapter categories; the
+  512-sample/key bound remains. Missing/contended observations are still dropped.
+  A zero-length window produces unknown shares/rates, not division by zero.
+- Every row is explicitly inclusive. Boundary-delay and await-inclusive rows
+  are elapsed measurements, not execution or CPU utilization, despite the shared
+  field names. Shares are unclamped and may exceed 100% for overlapping nested
+  calls, parallel background work, awaits or calls spanning window boundaries.
+  Completed-call costs belong to the window in which they are observed; they are
+  not clipped to window edges. No sum of nested handlers is exported as CPU load.
+- Adapter boundaries distinguish raw ingress/PONG, decoded message dispatch,
+  price-change messages, each local-book delta, snapshots, trades, instrument
+  updates, quote generation/coalescing, L2 snapshot attempts and actual data
+  publish handoff by event type. Generation/attempt counts are not successful
+  publish counts. There is no unsupported subscription/control category and
+  no private ready-queue inspection or global scheduler monkey-patch. Existing
+  loop-heartbeat callback execution cost is separate from scheduling lag.
+- Admission audit: one raw frame may decode to multiple messages; each price
+  message groups updates by asset, applies every delta in order, then attempts
+  one quote and L2 snapshot per asset. Quotes coalesce by instrument before
+  DataEngine. The existing coalescer has at most one pending delivery task per
+  client; ingress handlers do not create a task for every delta/message.
+  28k–38k raw callbacks/minute corresponds to roughly 467–633 frames/second;
+  for M price messages with D deltas across A asset-groups, local-book work is
+  D applications and quote/snapshot generation is up to A attempts. Those nested
+  counts do not represent additional raw ingress. Whether that ingress volume
+  is expected, duplicate transport or another source remains UNKNOWN without
+  feed/connection identity evidence and newly collected cumulative costs.
+- Refresh audit: strategy request -> DataEngine command queue -> public client
+  subscribe/unsubscribe method -> existing create_task -> observed adapter
+  coroutine starts -> original subscription await completes. Existing start
+  telemetry is at coroutine execution, not task creation; an installed public
+  method test verifies this boundary without changing ownership. A missing start
+  cannot distinguish command dequeue starvation, a created-but-unscheduled task,
+  request/command binding exclusions or optional telemetry rejection. The slow
+  trace signature bug does not affect refresh event payloads. Recovery policy
+  and subscription methods remain unchanged.
