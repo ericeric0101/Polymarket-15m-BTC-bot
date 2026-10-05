@@ -99,6 +99,11 @@ def test_refresh_request_completion_freshness_and_refcounts_are_distinct(refs,bl
             await getattr(client,name)(command)
     asyncio.run(refresh())
     assert [e for e,p in events].count('QUOTE_REFRESH_TASKS_COMPLETED')==1
+    assert [e for e,p in events].count('QUOTE_REFRESH_TASK_STARTED')==4
+    completed = [p for e,p in events if e == 'QUOTE_REFRESH_TASK_COMPLETED']
+    for payload in completed:
+        operation = payload['operation']
+        assert payload['operation_started_monotonic'][operation] <= payload['operation_completed_monotonic'][operation]
     assert 'QUOTE_REFRESH_FRESH_QUOTE_CONFIRMED' not in [e for e,p in events]
     confirm_fresh_quote(strategy,up,time.time())
     confirm_fresh_quote(strategy,up,time.time())

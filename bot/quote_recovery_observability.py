@@ -74,6 +74,13 @@ def observe_subscription(client, instrument, operation, original, command):
         if record is None or strategy is None:
             return await original(command)
         try:
+            record.setdefault('operation_started_at', {})[operation] = time.time()
+            record.setdefault('operation_started_monotonic', {})[operation] = time.monotonic()
+            diagnostic(strategy, 'QUOTE_REFRESH_TASK_STARTED', **record, operation=operation,
+                       task_queue_delay_ms=max(0.0,(time.time_ns()-command_ts)/1e6) if command_ts is not None else None)
+        except Exception:
+            pass
+        try:
             result = await original(command)
         except BaseException as exc:
             record['failed'] = True
@@ -81,6 +88,8 @@ def observe_subscription(client, instrument, operation, original, command):
                        operation=operation, exception_type=type(exc).__name__)
             raise
         try:
+            record.setdefault('operation_completed_at', {})[operation] = time.time()
+            record.setdefault('operation_completed_monotonic', {})[operation] = time.monotonic()
             if operation not in record['completed_operations']:
                 record['completed_operations'].append(operation)
             completed = set(record['completed_operations'])

@@ -11,6 +11,7 @@ from loguru import logger
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId
 
+from bot.consumer_timing import timed_call
 from bot.enums import ActiveSide
 from bot.adapter_overrides import quote_provenance_for_tick
 from bot.db_runtime import take_sync_journal_write_report
@@ -980,7 +981,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             )
         )
         if not quote_is_fresh:
-            _record_quote_transport_telemetry(
+            timed_call(strategy, "transport_telemetry", "QuoteTick", _record_quote_transport_telemetry,
                 strategy, tick=tick, received_ts=quote_received_ts,
                 event_ts=quote_event_ts, adapter_emitted_ts=adapter_emitted_ts,
                 source=quote_source, quote_is_fresh=False,
@@ -1012,7 +1013,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         if fast_follow is not None:
             stage_started = time.monotonic()
             try:
-                fast_follow.on_quote(
+                timed_call(strategy, "fast_follow_quote", "QuoteTick", fast_follow.on_quote,
                     instrument_id=tick.instrument_id,
                     best_bid=bid_decimal,
                     best_ask=ask_decimal,
@@ -1032,7 +1033,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # Research-only early-entry comparison. It is fed only a fresh quote,
         # writes to the asynchronous research DB, and has no venue authority.
         stage_started = time.monotonic()
-        record_strategy_quote(
+        timed_call(strategy, "trend_shadow_quote", "QuoteTick", record_strategy_quote,
             strategy,
             instrument_id=tick.instrument_id,
             now_ts=quote_received_ts,
@@ -1046,7 +1047,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # Separate prospective early-entry experiment; observation-only and
         # isolated from all order, cancel, ownership, and risk decisions.
         stage_started = time.monotonic()
-        record_forward_shadow_quote(
+        timed_call(strategy, "forward_shadow_quote", "QuoteTick", record_forward_shadow_quote,
             strategy,
             instrument_id=tick.instrument_id,
             now_ts=quote_received_ts,
@@ -1058,7 +1059,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         )
         callback_stage_ms["forward_shadow"] = (time.monotonic() - stage_started) * 1000.0
         stage_started = time.monotonic()
-        _record_quote_transport_telemetry(
+        timed_call(strategy, "transport_telemetry", "QuoteTick", _record_quote_transport_telemetry,
             strategy,
             tick=tick,
             received_ts=quote_received_ts,
@@ -1130,7 +1131,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             telemetry = getattr(strategy, "trade_telemetry", None)
             if telemetry is not None:
                 try:
-                    markouts = telemetry.observe(
+                    markouts = timed_call(strategy, "fill_markout_observe", "QuoteTick", telemetry.observe,
                         strategy._instrument_key(tick.instrument_id),
                         mid_price,
                         time.time(),
@@ -1150,7 +1151,7 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
             if len(strategy.price_history) > strategy.max_history:
                 strategy.price_history.pop(0)
         if strategy.maker_mode:
-            start_maker_worker(strategy, bid_decimal, ask_decimal)
+            timed_call(strategy, "maker_worker_lock_and_start", "QuoteTick", start_maker_worker, strategy, bid_decimal, ask_decimal)
             return
         logger.warning("Non-maker mode is no longer supported in the slimmed bot path.")
     except Exception as e:

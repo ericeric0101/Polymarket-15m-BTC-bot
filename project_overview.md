@@ -2879,3 +2879,33 @@ Quote reliability hardening (source-only, not deployed):
   synchronous quote telemetry caused the post-deploy failure. Async isolation
   is architectural hardening; runtime recovery and stop-latency improvement
   still require validation after separately authorized deployment.
+
+
+Event-loop consumer stall diagnostics (source-only, not deployed):
+- Inclusive timing covers DataEngine dispatch, native quote/L2 cache-and-bus
+  fan-out, strategy callbacks, adapter decoding, quote side effects, journal
+  enqueue/authority calls, decision computation, status, watchdog and lifecycle
+  helpers. `owner_loop` distinguishes main-loop work from existing workers.
+  Async decision/fee/cache helpers report await-inclusive elapsed time, not CPU
+  execution time; synchronous timings include nested handlers and must not be
+  summed as exclusive work. Native cache writes and message-bus publish cannot
+  be safely hooked separately
+  in the installed build; their inclusive timing is not exclusive attribution.
+- Every 60 seconds the existing journal worker receives bounded aggregates:
+  count, median, P95, P99, max and slow_count. Quantiles approximate a uniform
+  reservoir of at most 512 observations per handler, with at most 40 handler
+  keys. Queue metadata is capped at 32 records per boundary; missing records
+  mean queue wait is unknown, not zero. Collector lock contention drops evidence
+  rather than waiting. Optional journal enqueue also declines on lock contention.
+- Slow traces use >100/>500/>1000 ms diagnostic buckets, globally at most one
+  per 10 seconds, without payload bodies. A one-second callback on the existing
+  loop measures scheduled versus executed monotonic time, with no catch-up burst.
+  No thread, database, periodic console logger or per-event database write is added.
+- Refresh task start, operation completion and first fresh quote are distinct
+  journal-only observations; console absence is not proof of missing execution.
+  Request-to-task delay and loop lag support subsequent stall reconstruction,
+  but this source patch does not establish the cause of the existing live cohort.
+- Existing shutdown stages are supplemented with queue-worker stop requests,
+  actual task termination and kernel stop success/failure. A final bounded timing
+  snapshot travels through existing post-run lifecycle persistence after journal
+  shutdown. Original awaits, timeouts and cancellation results remain unchanged.

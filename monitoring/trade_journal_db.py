@@ -326,7 +326,9 @@ class TradeJournalDB:
 
     def enqueue_strategy_event(self, run_id: str, event_type: str, payload: Dict[str, Any]) -> bool:
         """Optional telemetry uses the existing journal worker, never caller SQLite I/O."""
-        with self._backup_lock:
+        if not self._backup_lock.acquire(blocking=False):
+            return False
+        try:
             if self._backup_stop.is_set():
                 return False
             try:
@@ -335,6 +337,8 @@ class TradeJournalDB:
                 return True
             except queue.Full:
                 return False
+        finally:
+            self._backup_lock.release()
 
     def _drain_telemetry(self) -> None:
         while True:

@@ -179,6 +179,12 @@ def enqueue_bounded_market_data(engine, data) -> bool:
         return False
     try:
         queue.put_nowait(data)
+        monitor = getattr(engine, "_consumer_timing", None)
+        if monitor is not None:
+            try:
+                monitor.mark_enqueued(data)
+            except Exception:
+                pass
         return True
     except asyncio.QueueFull:
         if kind == "QuoteTick":
@@ -289,6 +295,12 @@ def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> in
         except asyncio.QueueFull:
             break
         else:
+            monitor = getattr(engine, "_consumer_timing", None)
+            if monitor is not None:
+                try:
+                    monitor.mark_enqueued(quote)
+                except Exception:
+                    pass
             state["quotes"].pop(key, None)
             sent += 1
             try:

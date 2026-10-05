@@ -60,8 +60,10 @@ def _collection_strategies(node):
 
 
 def _collection_transition(node, transition, **context):
+    monitor = getattr(node, "_consumer_timing", None)
+    timing = monitor.snapshot() if monitor is not None else None
     for strategy in _collection_strategies(node):
-        collection_lifecycle(strategy, transition, synchronous=True,
+        collection_lifecycle(strategy, transition, synchronous=True, consumer_timing=timing,
                              shutdown_stages=dict(getattr(node, "_collection_shutdown_timestamps", {})), **context)
 
 
@@ -850,6 +852,8 @@ def run_integrated_bot(
             from bot.quote_recovery_observability import bind_collection_observers
             bind_collection_observers(node, strategy)
             strategy._collection_shutdown_point = node._collection_shutdown_point
+            from bot.consumer_timing import bind_consumer_timing
+            bind_consumer_timing(node, strategy)
         except Exception:
             logger.warning("Collection stage observers unavailable; trading setup continues")
         # Strategies are Actors and do not have a public back-reference to the
