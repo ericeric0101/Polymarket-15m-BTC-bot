@@ -409,3 +409,21 @@ def stop_event_threads(stop_events: list[Any], threads: list[Any], join_timeout_
     for thread in threads:
         if thread and thread.is_alive():
             thread.join(timeout=join_timeout_sec)
+
+
+def collection_lifecycle(strategy: Any, transition: str, *, synchronous: bool = False, **context: Any) -> bool:
+    """Single journal authority. Synchronous only after node.run, outside hot path."""
+    import time
+    try:
+        db = getattr(strategy, "trade_db", None)
+        payload = {
+            **getattr(strategy, "collection_identity", {}),
+            "run_id": getattr(strategy, "run_id", None),
+            "current_market_slug": getattr(strategy, "current_market_slug", None),
+            "transition": transition, "timestamp": time.time(),
+            "monotonic_ts": time.monotonic(), **context,
+        }
+        fn = db.log_strategy_event if synchronous else db.enqueue_strategy_event
+        return bool(fn(strategy.run_id, "COLLECTION_LIFECYCLE", payload))
+    except Exception:
+        return False

@@ -33,6 +33,8 @@ from nautilus_trader.config import (
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 
+from bot.ops import collection_lifecycle
+from bot.research.provenance import process_identity
 from bot.app_config import AppConfig
 from bot.adapter_overrides import begin_data_engine_shutdown
 from bot.compat_patches import apply_compatibility_patches
@@ -48,6 +50,18 @@ from run_bot import (
 )
 from telegram_bot import start_telegram_bot_thread
 from telegram_notifier import TelegramNotifier
+
+
+def _collection_strategies(node):
+    try:
+        return list(getattr(node, "_collection_strategy_refs", None) or node.trader.strategies())
+    except Exception:
+        return []
+
+
+def _collection_transition(node, transition, **context):
+    for strategy in _collection_strategies(node):
+        collection_lifecycle(strategy, transition, synchronous=True, **context)
 
 
 def idempotent_stop_callback(stop_fn):
@@ -91,6 +105,9 @@ def threadsafe_node_stop_callback(node: TradingNode):
         node.stop()
 
     def request_stop() -> None:
+        for strategy in _collection_strategies(node):
+            collection_lifecycle(strategy, "stop_request", stop_requested_at=time.time(),
+                                 **getattr(strategy, "_collection_stop_context", {"stop_request_source": "unknown"}))
         loop = getattr(getattr(node, "kernel", None), "loop", None)
         if loop is not None and not loop.is_closed() and loop.is_running():
             node._btc15m_stop_requested_monotonic = time.monotonic()
@@ -113,6 +130,7 @@ def request_auto_rollover_stop(node: TradingNode) -> bool:
     for strategy in strategies:
         callback = getattr(strategy, "_request_node_stop_callback", None)
         if callable(callback):
+            strategy._collection_stop_context = {"stop_request_source": "scheduled_auto_rollover"}
             callback()
             return True
     # Alternate node construction paths may not attach the callback to a
@@ -355,6 +373,7 @@ def dispose_node_and_wait_for_engines_disconnected(
     dispose_error: str | None = None
     if node is None:
         return False, ["node_missing"]
+    _collection_transition(node, "client_disconnect_drain_start")
     client_tasks_clean, client_task_errors = wait_for_client_disconnect_tasks(
         node,
         timeout_sec=client_disconnect_timeout_sec,
@@ -362,16 +381,20 @@ def dispose_node_and_wait_for_engines_disconnected(
     if not client_tasks_clean:
         cancel_errors = cancel_client_disconnect_tasks(node)
         client_task_errors.extend(cancel_errors)
+    _collection_transition(node, "client_disconnect_drain_complete", clean=client_tasks_clean)
+    _collection_transition(node, "node_dispose_start")
     try:
         node.dispose()
     except Exception as exc:
         dispose_error = f"dispose:{type(exc).__name__}"
+    _collection_transition(node, "node_dispose_complete", error=dispose_error)
     clean, pending = wait_for_node_engines_disconnected(
         node,
         timeout_sec=timeout_sec,
         sleep_fn=sleep_fn,
         monotonic_fn=monotonic_fn,
     )
+    _collection_transition(node, "engine_disconnect_complete", clean=clean, pending=pending)
     if dispose_error:
         pending = [*pending, dispose_error]
     pending = [*pending, *client_task_errors]
@@ -684,7 +707,12 @@ def run_integrated_bot(
     if telegram_thread is not None:
         logger.info("Telegram bot controller started in background thread.")
 
+    previous_strategy = None
+
     def _build_node_for_cycle(cycle_index: int) -> tuple[TradingNode, str]:
+        discovery_started_at = time.time()
+        if previous_strategy is not None:
+            collection_lifecycle(previous_strategy, "market_discovery_start", synchronous=True, next_cycle_idx=cycle_index)
         _install_fresh_main_thread_event_loop()
         btc_slugs = resolve_btc_15m_market_slugs()
         if not btc_slugs:
@@ -801,16 +829,21 @@ def run_integrated_bot(
             alert_watcher=alert_watcher,
         )
 
+        strategy.collection_identity = {**process_identity(), "cycle_idx": cycle_index,
+            "runtime_source_fingerprint": strategy.runtime_source_fingerprint,
+            "runtime_git_revision": strategy.runtime_git_revision}
         logger.info("Building Nautilus node...")
         node = TradingNode(config=config)
         node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
         node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
         node.trader.add_strategy(strategy)
+        node._collection_strategy_refs = [strategy]
         node.build()
         # Strategies are Actors and do not have a public back-reference to the
         # TradingNode. Give lifecycle/watchdog recovery an explicit stop hook so
         # a requested rollover actually returns node.run() to this launcher.
         strategy._request_node_stop_callback = threadsafe_node_stop_callback(node)
+        collection_lifecycle(strategy, "new_node_built", market_discovery_started_at=discovery_started_at)
         logger.info("Nautilus node built successfully")
         return node, primary_slug
 
@@ -876,6 +909,7 @@ def run_integrated_bot(
             logger.info(f"Bot cycle {cycle_idx} starting...")
             node.run()
             node_run_returned = True
+            _collection_transition(node, "node_run_return", stop_request_source=(rollover_source or (_strategy_rollover_source(node) if _strategy_requested_rollover(node) else "unexpected_node_exit")))
             stop_requested_at = float(getattr(node, "_btc15m_stop_requested_monotonic", 0.0) or 0.0)
             if stop_requested_at > 0:
                 logger.info(
@@ -883,6 +917,7 @@ def run_integrated_bot(
                     f"elapsed_sec={max(0.0, time.monotonic() - stop_requested_at):.3f}"
                 )
         except KeyboardInterrupt:
+            _collection_transition(node, "operator_stop", stop_request_source="operator_stop")
             user_stopped = True
             logger.info("Shutdown requested by user.")
         except MarketDiscoveryUnavailable as e:
@@ -892,12 +927,15 @@ def run_integrated_bot(
             # intentional cadence without consuming the crash-failure budget.
             rollover_requested.set()
             rollover_source = "market_discovery_retry"
+            if previous_strategy is not None:
+                collection_lifecycle(previous_strategy, "market_discovery_retry", synchronous=True, next_cycle_idx=cycle_idx, stop_request_source=rollover_source)
             retry_delay_sec = _MARKET_DISCOVERY_RETRY_SEC
             logger.warning(
                 f"Node cycle {cycle_idx} deferred: {e} "
                 f"Retrying market discovery in {retry_delay_sec:.0f}s."
             )
         except Exception as e:
+            _collection_transition(node, "exception", stop_request_source="exception", exception_type=type(e).__name__)
             consecutive_failures += 1
             recent_errors = list(dashboard_state.recent_errors)[-19:]
             recent_errors.append((datetime.now(timezone.utc), f"Node cycle {cycle_idx} failed: {e}"))
@@ -923,6 +961,9 @@ def run_integrated_bot(
                     # restart forever.
                     consecutive_failures += 1
             if node is not None:
+                strategies = _collection_strategies(node)
+                if strategies:
+                    previous_strategy = strategies[0]
                 # Dispose first: Nautilus versions differ on whether stop() or
                 # dispose() performs the final engine disconnect transition.
                 # Then verify before allowing another cycle to be constructed.

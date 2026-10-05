@@ -2820,3 +2820,38 @@ enqueue from persisted reference joins, and reconciliation diagnostics recognize
 redeem corrections. Optional-observer availability, per-filesystem storage and
 archival precondition reasons are explicit. These source-only corrections do
 not change trading/accounting authority or activate the running process.
+
+
+Collection continuity attribution (source-only, not deployed):
+- Run manifests reuse the loaded runtime fingerprint and runtime git revision,
+  plus one process-instance identity and launcher cycle index. Internal rebuilds
+  retain process identity while strategy run IDs remain instance scoped.
+- `strategy_events` owns `COLLECTION_LIFECYCLE`: stop request, strategy start,
+  research-writer stop, node return, client drain, dispose/disconnect, discovery,
+  node build and first accepted prediction. Payload wall/monotonic timestamps
+  record occurrence, independently of delayed journal insertion. The existing
+  journal background worker accepts bounded optional telemetry; post-run
+  teardown events use the same journal authority outside trading callbacks.
+- `strategy_requested` remains the existing rollover source, qualified by
+  `lifecycle_reason=stale_instrument_lifecycle`. Scheduled, watchdog, discovery,
+  unexpected return, exception and operator termination stay distinguishable.
+- Existing snapshotter metrics now enqueue a 30–60 second research health
+  projection (default 60 seconds). Counters describe eligible capture attempts
+  and queue acceptance, not durable snapshot writes. Queue age and last durable
+  persist time are unavailable/null. First-snapshot markers retry optional
+  journal acceptance while preserving the first accepted snapshot timestamp.
+- Telemetry is best effort: queue rejection or persistence failure can still
+  leave missing evidence. A stalled event loop cannot emit health; absent health
+  is itself diagnostic, not proof of a particular cause. Before the first
+  successfully built strategy, discovery retries have no journal owner; the
+  successful build records its discovery start, but earlier startup retries
+  remain log-only. No extra writer, database, schema or recovery authority exists.
+- Offline storage audit: prediction rows dominate (116,206/140,853, 82.50%;
+  436,533,793 UTF-8 payload bytes). Monday through the offline cutoff added
+  27,108 rows / 101,542,775 payload bytes, about 1,434 rows/hour and 5.37 MB/hour
+  over 18.91 elapsed hours. These are payload growth, not physical file growth.
+  The existing 500 MB guard suppresses optional high-frequency TWAP evidence
+  and checkpoint rows, preserves settlement summaries, and does not intercept
+  direct prediction enqueue. The cap is unchanged. Safe closed-copy retention
+  and archival execution require a separate design; readiness diagnostics alone
+  do not implement rotation.

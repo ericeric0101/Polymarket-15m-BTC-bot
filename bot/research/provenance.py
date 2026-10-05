@@ -9,6 +9,8 @@ import platform
 import socket
 import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -139,3 +141,15 @@ def build_run_manifest(
         "process_id": os.getpid(),
         "runtime_version": sys.version.split()[0],
     }
+
+
+def process_identity() -> dict[str, Any]:
+    """One identity per imported Python launcher process; no disk reads."""
+    return dict(_PROCESS_IDENTITY)
+
+
+_PROCESS_STARTED_AT = time.time()
+_PROCESS_IDENTITY = {
+    "process_instance_id": f"process_{int(_PROCESS_STARTED_AT)}_{os.getpid()}_{uuid.uuid4().hex[:8]}",
+    "pid": os.getpid(), "process_started_at": _PROCESS_STARTED_AT,
+}

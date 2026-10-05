@@ -184,12 +184,17 @@ class PredictionResearchSnapshotter:
         self.db = db
         self.run_id = str(run_id)
         self.interval_sec = max(1.0, float(interval_sec))
-        self.metrics_interval_sec = max(10.0, float(metrics_interval_sec))
+        self.metrics_interval_sec = min(60.0, max(30.0, float(metrics_interval_sec)))
         self._last_periodic: dict[str, float] = {}
         self._last_snapshot_ts: dict[str, float] = {}
         self._last_payload_by_slug: dict[str, dict[str, Any]] = {}
         self._last_side_by_slug: dict[str, str] = {}
         self._last_side_change_ts: dict[str, float] = {}
+        self._first_marker_accepted = False
+        self._first_snapshot_identity = None
+        self._collection_identity = {}
+        self._last_capture_ts = None
+        self._last_enqueue_ts = None
         self._last_metrics_ts = 0.0
         self._intervals: deque[float] = deque(maxlen=600)
         self._latencies_ms: deque[float] = deque(maxlen=600)
@@ -220,13 +225,18 @@ class PredictionResearchSnapshotter:
         now = float(now_ts if now_ts is not None else time.time())
         slug = str(getattr(strategy, "current_market_slug", "") or "")
         if not slug:
+            self._collection_identity = {**getattr(strategy, "collection_identity", {}), "run_id": self.run_id}
+            self._emit_metrics(now)
             return None
         if trigger == "periodic" and not force:
             last = self._last_periodic.get(slug, 0.0)
             if now - last < self.interval_sec:
+                self._emit_metrics(now)
                 return None
             self._last_periodic[slug] = now
         self._counters["eligible"] += 1
+        self._last_capture_ts = now
+        self._collection_identity = {**getattr(strategy, "collection_identity", {}), "run_id": self.run_id}
         try:
             end_ts = _number(getattr(strategy, "current_market_end_timestamp", None))
             start_ts = _number(getattr(strategy, "market_start_ts_by_slug", {}).get(slug))
@@ -239,6 +249,7 @@ class PredictionResearchSnapshotter:
             left = end_ts - now if end_ts is not None else None
             if trigger == "periodic" and ((start_ts is not None and now < start_ts)
                                            or (end_ts is not None and now >= end_ts)):
+                self._emit_metrics(now)
                 return None
             strike = getattr(strategy, "market_strike_cache_by_slug", {}).get(slug)
             twap = getattr(strategy, "_polymarket_chainlink_twap_price", None)
@@ -357,6 +368,13 @@ class PredictionResearchSnapshotter:
             self._recent_quality.append((now, bool(snapshot["joint_fresh"]), accepted, interval, slug))
             self._latencies_ms.append((time.perf_counter() - started) * 1000.0)
             if accepted:
+                self._last_enqueue_ts = now
+                if self._first_snapshot_identity is None:
+                    self._first_snapshot_identity = {"snapshot_ts": now, "market_slug": slug}
+                if not self._first_marker_accepted:
+                    from bot.ops import collection_lifecycle
+                    self._first_marker_accepted = collection_lifecycle(
+                        strategy, "first_prediction_snapshot", **self._first_snapshot_identity)
                 self._last_snapshot_ts[slug] = now
                 self._last_payload_by_slug[slug] = snapshot
                 self._intervals.append(interval if interval is not None else self.interval_sec)
@@ -366,6 +384,7 @@ class PredictionResearchSnapshotter:
             return snapshot if accepted else None
         except Exception as exc:
             self._counters["errors"] += 1
+            self._emit_metrics(now)
             if self._counters["errors"] == 1:
                 logger.warning(f"Prediction research snapshot disabled/skipped: {type(exc).__name__}: {exc}")
             return None
@@ -413,6 +432,20 @@ class PredictionResearchSnapshotter:
         health = {}
         try:
             health = self.db.research_health() if self.db is not None else {}
+        except Exception:
+            pass
+        try:
+            if self.db is not None:
+                self.db.enqueue_decision(run_id=self.run_id, slug="", market_id=None,
+                    decision_epoch_ns=int(now * 1_000_000_000), payload={
+                        "event_type": "PREDICTION_RESEARCH_HEALTH", **self._collection_identity,
+                        "timestamp": now, "capture_attempts_total": self._counters["eligible"],
+                        "accepted_total": self._counters["written"],
+                        "dropped_total": self._counters["dropped"], "errors_total": self._counters["errors"],
+                        "queue_depth": None, "queue_capacity": None,
+                        **health, "oldest_queue_age_sec": None, "last_persist_ts": None,
+                        "unavailable_metrics": ["oldest_queue_age_sec", "last_persist_ts"],
+                        "last_capture_ts": self._last_capture_ts, "last_enqueue_ts": self._last_enqueue_ts})
         except Exception:
             pass
         logger.info("prediction_snapshot: "

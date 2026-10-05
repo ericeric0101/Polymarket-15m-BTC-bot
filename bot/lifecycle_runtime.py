@@ -468,6 +468,12 @@ class StrategyLifecycleMixin:
                 max_waiting_misses = 3
 
                 def _request_rollover() -> None:
+                    self._collection_stop_context = {
+                        "stop_request_source": "strategy_requested",
+                        "lifecycle_reason": "stale_instrument_lifecycle",
+                        "waiting_miss_count": self._waiting_miss_count,
+                        "next_market_slug": self.next_market_slug,
+                    }
                     self._waiting_miss_count = 0
                     self._stopping = True
                     self._rollover_requested_flag = True

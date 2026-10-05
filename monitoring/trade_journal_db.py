@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import os
 import sqlite3
 import threading
@@ -146,6 +147,7 @@ class TradeJournalDB:
         self._monthly_report_cache = {}
         self._last_health_probe_monotonic = 0.0
         self._backup_interval_sec = max(1.0, float(backup_interval_sec))
+        self._telemetry_queue = queue.Queue(maxsize=256)
         self._backup_dirty = False
         # Coalesce the initial burst of startup telemetry too; a caller can
         # still force a synchronous snapshot via stop()/flush_backup().
@@ -322,19 +324,36 @@ class TradeJournalDB:
             self._last_backup_monotonic = time.monotonic()
             return True
 
+    def enqueue_strategy_event(self, run_id: str, event_type: str, payload: Dict[str, Any]) -> bool:
+        """Optional telemetry uses the existing journal worker, never caller SQLite I/O."""
+        with self._backup_lock:
+            if self._backup_stop.is_set():
+                return False
+            try:
+                self._telemetry_queue.put_nowait((run_id, event_type, dict(payload)))
+                self._backup_wakeup.set()
+                return True
+            except queue.Full:
+                return False
+
+    def _drain_telemetry(self) -> None:
+        while True:
+            try:
+                args = self._telemetry_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.log_strategy_event(*args)
+
     def _backup_worker(self) -> None:
         while not self._backup_stop.is_set():
             self._backup_wakeup.wait(timeout=1.0)
             self._backup_wakeup.clear()
+            self._drain_telemetry()
             with self._backup_lock:
                 dirty = self._backup_dirty
-            if not dirty:
-                continue
-            elapsed = time.monotonic() - self._last_backup_monotonic
-            if elapsed < self._backup_interval_sec:
-                self._backup_stop.wait(self._backup_interval_sec - elapsed)
-            if not self._backup_stop.is_set():
+            if dirty and time.monotonic() - self._last_backup_monotonic >= self._backup_interval_sec:
                 self.flush_backup()
+        self._drain_telemetry()
 
     def stop(self) -> None:
         self._monthly_report_stop.set()
@@ -343,7 +362,8 @@ class TradeJournalDB:
             self._monthly_report_thread.join(timeout=2.0)
             if self._monthly_report_thread.is_alive():
                 logger.warning("Monthly reporting worker has not terminated; no execution authority")
-        self._backup_stop.set()
+        with self._backup_lock:
+            self._backup_stop.set()
         self._backup_wakeup.set()
         self._backup_thread.join(timeout=2.0)
         self.flush_backup()

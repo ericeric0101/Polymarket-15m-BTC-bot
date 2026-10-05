@@ -3872,6 +3872,10 @@ class IntegratedBTCStrategy(
             # Reproducibility metadata is optional; it must never affect startup
             # or the live authority boundary.
             logger.warning(f"Run provenance manifest unavailable: {type(exc).__name__}")
+        if run_manifest is not None:
+            run_manifest.update(getattr(self, "collection_identity", {}))
+        from bot.ops import collection_lifecycle
+        collection_lifecycle(self, "new_strategy_started")
         log_strategy_run_start(
             trade_db=self.trade_db,
             run_id=self.run_id,
@@ -4234,6 +4238,7 @@ class IntegratedBTCStrategy(
             stop_node = getattr(self, "_request_node_stop_callback", None)
             if not callable(stop_node):
                 raise RuntimeError("launcher node-stop callback is not configured")
+            self._collection_stop_context = {"stop_request_source": "quote_watchdog_recovery", "watchdog_trigger": trigger}
             stop_node()
             return True
         except Exception as exc:

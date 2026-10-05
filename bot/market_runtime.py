@@ -1287,6 +1287,8 @@ def handle_stop(strategy: Any) -> None:
     )
     log_shutdown_stage("orders_and_final_journal_events", stage_started)
     stage_started = time.monotonic()
+    from bot.ops import collection_lifecycle
+    collection_lifecycle(strategy, "research_writer_stop_start")
     seen_writers = set()
     for writer_name in ("lead_lag_db", "twap_research_db"):
         writer = getattr(strategy, writer_name, None)
@@ -1298,6 +1300,7 @@ def handle_stop(strategy: Any) -> None:
                 logger.warning(f"Research writer shutdown incomplete or data lost: writer={writer_name}")
         except Exception:
             logger.warning(f"Research writer shutdown failed: writer={writer_name}", exc_info=True)
+    collection_lifecycle(strategy, "research_writer_stop_complete")
     log_shutdown_stage("research_writers", stage_started)
     stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=trade_journal_final_backup")

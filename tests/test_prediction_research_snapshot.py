@@ -166,6 +166,14 @@ def test_snapshotter_forces_entry_snapshot_and_caps_periodic_rate_without_live_a
     db = DB()
     snapshotter = PredictionResearchSnapshotter(db=db, run_id="r", interval_sec=1)
     strategy = Strategy()
+    markers = []
+    strategy.run_id = "r"
+    strategy.collection_identity = {"process_instance_id": "p", "cycle_idx": 1}
+    class Journal:
+        def enqueue_strategy_event(self, *args):
+            markers.append(args)
+            return True
+    strategy.trade_db = Journal()
     first = snapshotter.capture(strategy, now_ts=100, trigger="periodic")
     assert first is not None
     assert snapshotter.capture(strategy, now_ts=100.5, trigger="periodic") is None
@@ -173,7 +181,10 @@ def test_snapshotter_forces_entry_snapshot_and_caps_periodic_rate_without_live_a
                                  entry_context={"entry_side": "UP", "entry_price": .61})
     assert forced["snapshot_trigger"] == "entry_decision"
     assert forced["entry_side"] == "UP"
-    assert len(db.rows) == 2
+    assert len(markers) == 1
+    assert markers[0][2]["transition"] == "first_prediction_snapshot"
+    assert markers[0][2]["snapshot_ts"] == 100
+    assert len([row for row in db.rows if row["payload"]["event_type"] == "PREDICTION_RESEARCH_SNAPSHOT"]) == 2
     assert not hasattr(strategy, "live_authority_changed")
 
     class BrokenDB:
