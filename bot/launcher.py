@@ -675,9 +675,9 @@ def run_integrated_bot(
     logger.info("Starting integrated Polymarket BTC 15-min trading bot.")
 
     auto_rollover_enabled = os.getenv("AUTO_NODE_ROLLOVER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
-    # Node rollover is operational recovery, not strategy tuning. Preserve the
-    # established hourly policy without carrying three profile readers.
-    auto_rollover_sec = 3600
+    # Node rollover is operational recovery, not strategy tuning. Use a bounded
+    # three-hour refresh to reduce research gaps while retaining recovery.
+    auto_rollover_sec = 10800
     auto_rollover_cooldown_sec = 3
     auto_rollover_max_failures = 5
     logger.info(
