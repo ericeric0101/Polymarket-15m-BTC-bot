@@ -975,8 +975,11 @@ class SpotPricerMixin:
         path_spot_source, path_spot_age = "unavailable", None
         raw_price = getattr(self, "_polymarket_chainlink_price", None)
         raw_ts = float(getattr(self, "_polymarket_chainlink_price_observation_ts", 0.0) or 0.0)
-        if raw_price is not None and raw_ts > 0:
-            age = float(now_ts) - raw_ts
+        raw_received_ts = float(getattr(self, "_polymarket_chainlink_price_ts", 0.0) or 0.0)
+        if raw_price is not None and raw_ts > 0 and raw_received_ts > 0:
+            # Research freshness uses the locally received tick, not a remote
+            # Chainlink timestamp against the local wall clock.
+            age = float(now_ts) - raw_received_ts
             if 0.0 <= age < self._RAW_SPOT_FRESHNESS_SEC and Decimal(str(raw_price)) > 0:
                 path_spot, path_spot_source, path_spot_age = Decimal(str(raw_price)), "polymarket_chainlink_spot", age
         if path_spot is None:
@@ -997,6 +1000,9 @@ class SpotPricerMixin:
         quote_update_ts = getattr(self, "last_quote_update_ts_by_inst", {})
         max_age = max(0.1, float(getattr(self, "quote_max_delivery_delay_sec", 2.0)))
 
+        from bot.research.clocks import observed_source_reference
+        source_reference_ts = observed_source_reference(quote_ts, quote_received_ts, (up_inst, down_inst), float(now_ts))
+
         def fresh_book(inst: str) -> tuple[Decimal | None, Decimal | None, float | None, float | None, str | None]:
             if not inst:
                 return None, None, None, None, "instrument_unavailable"
@@ -1007,9 +1013,9 @@ class SpotPricerMixin:
             received_ts = float(quote_received_ts.get(inst, 0.0) or 0.0)
             if source_ts <= 0 or received_ts <= 0:
                 return None, None, None, None, "quote_timestamp_missing"
-            source_age = float(now_ts) - source_ts
+            source_age = source_reference_ts - source_ts if source_reference_ts is not None else None
             received_age = float(now_ts) - received_ts
-            if source_age < 0 or received_age < 0:
+            if source_age is None or source_age < 0 or received_age < 0:
                 return None, None, source_age, received_age, "quote_timestamp_future"
             if source_age > max_age or received_age > max_age:
                 return None, None, source_age, received_age, "quote_stale"
@@ -1079,11 +1085,18 @@ class SpotPricerMixin:
         raw_sigma = self._estimate_polymarket_raw_spot_sigma_annualized()
         sigma_history = raw_history[-int(getattr(self, "maker_digital_vol_window", 30) or 30):]
         sigma_window_sec = float(sigma_history[-1][0]) - float(sigma_history[0][0]) if len(sigma_history) > 1 else None
-        sigma_ex_market_age = (float(now_ts) - float(sigma_history[-1][0])
-                               if raw_sigma is not None and sigma_history else None)
+        # The sigma estimator/math is unchanged. Its input value age belongs
+        # to the raw Chainlink clock; receipt age belongs to the local clock.
+        sigma_reference_ts = raw_ts  # exact raw tick, with its local receipt above
+        sigma_value_age = (sigma_reference_ts - float(sigma_history[-1][0])
+                           if raw_sigma is not None and sigma_history and raw_ts > 0 else None)
+        sigma_transport_age = float(now_ts) - raw_received_ts if raw_received_ts > 0 else None
+        sigma_ages_valid = (sigma_value_age is not None and sigma_transport_age is not None
+                            and sigma_value_age >= 0 and sigma_transport_age >= 0)
+        sigma_ex_market_age = max(sigma_value_age, sigma_transport_age) if sigma_ages_valid else None
         sigma_ex_market_fresh = bool(
             raw_sigma is not None and sigma_ex_market_age is not None
-            and 0.0 <= float(now_ts) - float(sigma_history[-1][0]) < self._RAW_SPOT_FRESHNESS_SEC
+            and sigma_ex_market_age < self._RAW_SPOT_FRESHNESS_SEC
         )
         try:
             settlement_twap_value = float(official_twap)
@@ -1104,6 +1117,8 @@ class SpotPricerMixin:
                 "sigma_ex_market_source": "polymarket_chainlink_spot_history" if raw_sigma is not None else "unavailable",
                 "sigma_ex_market_available": raw_sigma is not None,
                 "sigma_ex_market_age_sec": sigma_ex_market_age,
+                "sigma_ex_market_transport_age_sec": sigma_transport_age,
+                "sigma_ex_market_value_age_sec": sigma_value_age,
                 "sigma_ex_market_fresh": sigma_ex_market_fresh,
                 "sigma_ex_market_sample_count": len(sigma_history),
                 "sigma_ex_market_window_sec": sigma_window_sec,
@@ -1226,6 +1241,8 @@ class SpotPricerMixin:
             "sigma_ex_market_source": "polymarket_chainlink_spot_history" if raw_sigma is not None else "unavailable",
             "sigma_ex_market_available": raw_sigma is not None,
             "sigma_ex_market_age_sec": sigma_ex_market_age,
+            "sigma_ex_market_transport_age_sec": sigma_transport_age,
+            "sigma_ex_market_value_age_sec": sigma_value_age,
             "sigma_ex_market_fresh": sigma_ex_market_fresh,
             "sigma_ex_market_sample_count": len(sigma_history),
             "sigma_ex_market_window_sec": sigma_window_sec,

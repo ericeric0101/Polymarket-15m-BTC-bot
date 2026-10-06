@@ -1,4 +1,5 @@
 from decimal import Decimal
+import pytest
 
 from bot.twap_forward_shadow import TwapForwardShadow
 from bot.spot_pricer import SpotPricerMixin
@@ -347,7 +348,7 @@ def test_stale_raw_sigma_fails_closed_even_with_fresh_binance_path_spot():
         slug="m", official_twap=Decimal("99"), strike=Decimal("100"), time_left_sec=121, now_ts=1000.0)
     assert out["path_spot_source"] == "polymarket_chainlink_spot"
     assert out["sigma_ex_market"] is not None
-    assert out["sigma_ex_market_age_sec"] == 20.0
+    assert out["sigma_ex_market_age_sec"] == 19.0
     assert out["sigma_ex_market_fresh"] is False
     assert out["p_up_ex_market"] is None and out["p_down_ex_market"] is None
     assert out["required_move_sigma"] is None
@@ -657,4 +658,44 @@ def test_probability_path_uses_fresh_binance_if_raw_chainlink_stale_and_never_tw
     out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now)
     assert out["path_spot_source"] == "unavailable"
     assert out["fast_spot"] is None
+    assert out["p_up_ex_market"] is None
+
+
+@pytest.mark.parametrize("offset", [.5, -.5])
+def test_research_probability_freshness_uses_receipt_and_same_chainlink_clock(offset):
+    host = _probability_host()
+    host._polymarket_chainlink_price_observation_ts = 1000 + offset
+    host._polymarket_chainlink_price_ts = 1000
+    host.polymarket_chainlink_history = [(970 + offset, Decimal("99")),
+        (980 + offset, Decimal("101")), (1000 + offset, Decimal("100"))]
+    out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("99"),
+        strike=Decimal("100"), time_left_sec=121, now_ts=1000.2)
+    assert out["path_spot_source"] == "polymarket_chainlink_spot"
+    assert out["path_spot_age_sec"] == pytest.approx(.2)
+    assert out["sigma_ex_market_age_sec"] == pytest.approx(.2)
+    assert out["sigma_ex_market_fresh"] is True
+    assert out["p_up_ex_market"] is not None
+
+
+def test_research_sigma_still_rejects_old_value_and_missing_local_receipt():
+    host = _probability_host()
+    host._polymarket_chainlink_price_observation_ts = 1020
+    out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("99"),
+        strike=Decimal("100"), time_left_sec=121, now_ts=1000)
+    assert out["sigma_ex_market_age_sec"] == 21
+    assert out["sigma_ex_market_fresh"] is False
+    host._polymarket_chainlink_price_ts = 0
+    out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("99"),
+        strike=Decimal("100"), time_left_sec=121, now_ts=1000)
+    assert out["sigma_ex_market_fresh"] is False
+
+
+def test_research_sigma_negative_same_domain_order_is_invalid_not_clamped():
+    host = _probability_host()
+    host._polymarket_chainlink_price_observation_ts = 998
+    out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("99"),
+        strike=Decimal("100"), time_left_sec=121, now_ts=1000)
+    assert out["sigma_ex_market_value_age_sec"] == -1
+    assert out["sigma_ex_market_age_sec"] is None
+    assert out["sigma_ex_market_fresh"] is False
     assert out["p_up_ex_market"] is None

@@ -37,6 +37,9 @@ def _context(**updates):
         "best_ask_down": 0.40,
         "btc_spot": 100_000,
         "btc_source_ts": 99.5,
+        "btc_received_ts": 99.6,
+        "btc_source_reference_ts": 99.5,
+        "market_source_reference_ts": 100.0,
         "btc_max_age_sec": 10,
         "btc_return_1s_bps": 1,
         "btc_return_1s_prior_age_sec": 0.1,
@@ -49,6 +52,7 @@ def _context(**updates):
         "btc_return_60s_bps": 5,
         "btc_return_60s_prior_age_sec": 2,
         "twap_source_ts": 99.5,
+        "twap_received_ts": 99.5,
         "official_twap": 100_001,
         "settlement_state_side": "UP",
         "active_side": "UP",
@@ -74,7 +78,7 @@ def test_stale_probability_or_market_quote_cannot_form_residual():
     assert stale_probability["residual_up"] is None
     assert stale_probability["p_ex_unavailable_reason"] == "p_ex_source_stale"
 
-    stale_quote = build_prediction_snapshot(_context(market_up_source_age_sec=3))
+    stale_quote = build_prediction_snapshot(_context(market_up_source_ts=97))
     assert stale_quote["market_mid_up"] is None
     assert stale_quote["residual_up"] is None
     assert stale_quote["market_mid_down"] == 0.39
@@ -133,6 +137,7 @@ def test_snapshotter_forces_entry_snapshot_and_caps_periodic_rate_without_live_a
         market_strike_cache_by_slug = {current_market_slug: 100_000}
         _polymarket_chainlink_twap_price = 100_001
         _polymarket_chainlink_twap_observation_ts = 99.5
+        _polymarket_chainlink_twap_price_ts = 99.5
         _binance_ws_price = 100_000
         _binance_ws_price_source_ts = 99.5
         _binance_ws_price_ts = 99.6
@@ -227,3 +232,119 @@ def test_residual_analysis_uses_fixed_bins_and_reports_independent_clusters():
     assert positive["episodes"] == 2
     assert positive["markets"] == 2
     assert positive["directional_hit_rate"] == 1
+
+
+@pytest.mark.parametrize("source_ts", [100.50, 99.50])
+def test_remote_clock_offset_does_not_define_transport_age(source_ts):
+    row = build_prediction_snapshot(_context(
+        snapshot_ts=100.20, market_up_received_ts=100.0, market_down_received_ts=100.0,
+        market_up_source_ts=source_ts, market_down_source_ts=source_ts,
+        market_source_reference_ts=source_ts, btc_source_ts=source_ts,
+        btc_source_reference_ts=source_ts, btc_received_ts=100.0,
+        twap_source_ts=source_ts, twap_received_ts=100.0))
+    assert row["market_quote_up_receive_age_sec"] == pytest.approx(.20)
+    assert row["market_quote_up_source_age_sec"] == 0
+    assert row["btc_transport_age_sec"] == pytest.approx(.20)
+    assert row["btc_value_age_sec"] == 0
+    assert row["twap_age_sec"] == pytest.approx(.20)
+    assert row["joint_fresh"] is True
+    assert row["freshness_clock_semantics_version"] == 2
+
+
+def test_behind_remote_clock_is_not_transport_latency():
+    row = build_prediction_snapshot(_context(snapshot_ts=100.3, btc_received_ts=100,
+        btc_source_ts=99.5, btc_source_reference_ts=99.5, market_up_received_ts=100))
+    assert row["btc_age_sec"] == pytest.approx(.3)
+    assert row["market_quote_up_receive_age_sec"] == pytest.approx(.3)
+
+
+@pytest.mark.parametrize("updates,component", [
+    ({"market_up_received_ts": 95, "market_down_received_ts": 95}, "market_mid_fresh"),
+    ({"btc_received_ts": 89}, "btc_fresh"),
+    ({"btc_received_ts": 101}, "btc_fresh"),
+    ({"btc_source_reference_ts": 110, "btc_source_ts": 95}, "btc_fresh"),
+    ({"btc_source_reference_ts": 95, "btc_source_ts": 110}, "btc_fresh"),
+    ({"market_source_reference_ts": 110}, "market_mid_fresh"),
+    ({"market_source_reference_ts": 95}, "market_mid_fresh"),
+    ({"twap_received_ts": 89}, "twap_fresh"),
+    ({"sigma_ex_market_fresh": False}, "p_ex_fresh"),
+    ({"p_ex_age_sec": -0.3}, "p_ex_fresh"),
+    ({"btc_received_ts": None}, "btc_fresh"),
+    ({"btc_source_reference_ts": None}, "btc_fresh"),
+    ({"twap_received_ts": None}, "twap_fresh"),
+])
+def test_each_component_remains_required_without_clamping(updates, component):
+    row = build_prediction_snapshot(_context(**updates))
+    assert row[component] is False
+    assert row["joint_fresh"] is False
+    if updates.get("btc_source_reference_ts") == 95:
+        assert row["btc_value_age_sec"] == -15
+
+
+def test_no_market_source_reference_is_explicitly_unavailable_not_offset_fitted():
+    row = build_prediction_snapshot(_context(market_source_reference_ts=None,
+        market_up_source_ts=100.5, market_down_source_ts=100.5))
+    assert row["market_source_age_sec"] is None
+    assert row["market_quote_up_fresh"] is True  # validated receipt + BBO; no invented source clock
+    missing = build_prediction_snapshot(_context(market_up_source_ts=None))
+    assert missing["market_quote_up_fresh"] is False
+
+
+def _clock_capture_strategy(history):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        current_market_slug="btc-updown-15m-1", current_market_end_timestamp=901,
+        market_start_ts_by_slug={}, market_strike_cache_by_slug={"btc-updown-15m-1": 100},
+        _polymarket_chainlink_twap_price=101, _polymarket_chainlink_twap_observation_ts=100.5,
+        _polymarket_chainlink_twap_price_ts=100,
+        _binance_ws_price_source_ts=100.5, _binance_ws_price_ts=100,
+        _prediction_btc_research_history=deque(history),
+        last_quote_source_ts_by_inst={"up":100.5,"down":100.5},
+        last_quote_received_ts_by_inst={"up":100,"down":100},
+        latest_quote_by_inst={"up":(.6,.62),"down":(.38,.4)},
+        _research_market_quote_instruments=lambda **_: ("up","down"),
+        _settlement_probability_shadow_inputs=lambda **_: {
+            "path_spot_source":"binance_ws", "p_up_ex_market":.7,
+            "sigma_ex_market_fresh":True, "sigma_ex_market_age_sec":.2},
+    )
+
+
+def test_capture_uses_received_ticks_not_remote_wall_clock_and_keeps_denominator():
+    class DB:
+        def __init__(self): self.accept = True
+        def enqueue_decision(self, **kwargs): return self.accept
+    db = DB()
+    strategy = _clock_capture_strategy([(95.5, 99, 95), (100.5, 100, 100), (200, 999, 101)])
+    snapper = PredictionResearchSnapshotter(db=db, run_id="r")
+    row = snapper.capture(strategy, now_ts=100.2, force=True)
+    assert row["btc_source_ts"] == 100.5
+    assert row["btc_source_reference_ts"] == 100.5  # future receipt excluded
+    assert row["btc_return_5s_bps"] == pytest.approx((100/99 - 1)*10000)
+    assert row["joint_fresh"] is True
+    assert row["p_ex_age_sec"] == pytest.approx(.2)
+    assert snapper._counters["written"] == 1 and snapper._fresh["joint"] == 1
+    db.accept = False
+    assert snapper.capture(strategy, now_ts=101.2, force=True) is None
+    assert snapper._counters["written"] == 1 and snapper._fresh["joint"] == 1
+    assert snapper._counters["dropped"] == 1
+    db.accept = True
+    strategy.last_quote_received_ts_by_inst = {"up":95,"down":95}
+    assert snapper.capture(strategy, now_ts=102.2, force=True)["joint_fresh"] is False
+    assert snapper._counters["written"] == 2 and snapper._fresh["joint"] == 1
+    assert snapper.recent_health(102.2)["persisted_joint_fresh_pct"] == 50
+
+
+def test_capture_out_of_order_btc_value_is_stale_with_recent_receipt():
+    strategy = _clock_capture_strategy([(110, 100, 99), (95, 99, 100)])
+    class DB:
+        def enqueue_decision(self, **_): return True
+    row = PredictionResearchSnapshotter(db=DB(), run_id="r").capture(strategy, now_ts=100.2, force=True)
+    assert row["btc_transport_age_sec"] == pytest.approx(.2)
+    assert row["btc_value_age_sec"] == 15
+    assert row["btc_fresh"] is False
+
+
+def test_source_reference_never_admits_future_local_receipt():
+    from bot.research.clocks import observed_source_reference
+    assert observed_source_reference({"up":100.5,"down":200},
+        {"up":100,"down":101}, ("up","down"), 100.2) == 100.5

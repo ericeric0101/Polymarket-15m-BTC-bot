@@ -11,6 +11,7 @@ from statistics import mean
 from typing import Any
 
 from bot.research.provenance import PREDICTION_SCHEMA_VERSION
+from bot.research.clocks import observed_source_reference
 import math
 import time
 
@@ -37,7 +38,17 @@ def _fresh(age: float | None, max_age: float) -> bool:
 
 
 def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
-    """Create one compact snapshot; stale probability/quotes cannot form residuals."""
+    """One freshness authority: local transport and optional same-stream value age.
+
+    Source timestamps are metadata, never subtracted from the local snapshot.
+    Legacy age field names remain, with semantics version 2 identifying the
+    corrected authority: btc_age_sec/twap_age_sec are local transport ages;
+    market source ages are relative to an already received CLOB observation;
+    p_ex_age_sec is the maximum of individually validated component ages.
+    Without a CLOB reference source age is explicitly unavailable metadata,
+    never an invented remote wall clock. Required local receipts/BTC source
+    references fail closed. This does not rewrite legacy snapshots.
+    """
     now = float(context["snapshot_ts"])
     pex_max_age = float(context.get("pex_max_age_sec", 10.0))
     market_max_age = float(context.get("market_max_age_sec", 2.0))
@@ -52,33 +63,32 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
     def quote(side: str) -> tuple[float | None, float | None, float | None, float | None, float | None, float | None, float | None, bool]:
         bid = _number(context.get(f"best_bid_{side}"))
         ask = _number(context.get(f"best_ask_{side}"))
-        source_age = _number(context.get(f"market_{side}_source_age_sec"))
-        receive_age = _number(context.get(f"market_{side}_receive_age_sec"))
+        reference_ts = _number(context.get("market_source_reference_ts"))
+        source_age = _age(reference_ts, context.get(f"market_{side}_source_ts")) if reference_ts is not None else None
+        receive_age = _age(now, context.get(f"market_{side}_received_ts"))
         source_ts = _number(context.get(f"market_{side}_source_ts"))
         received_ts = _number(context.get(f"market_{side}_received_ts"))
         fresh = (bid is not None and ask is not None and 0 <= bid <= ask <= 1
-                 and _fresh(source_age, market_max_age) and _fresh(receive_age, market_max_age))
+                 and source_ts is not None and source_ts > 0
+                 and (context.get("market_source_reference_ts") is None or _fresh(source_age, market_max_age))
+                 and _fresh(receive_age, market_max_age))
         if not fresh:
             return None, None, None, source_ts, received_ts, source_age, receive_age, False
         return bid, ask, (bid + ask) / 2.0, source_ts, received_ts, source_age, receive_age, True
 
     bid_up, ask_up, mid_up, up_ts, up_received_ts, up_input_age, up_input_receive_age, up_fresh = quote("up")
     bid_down, ask_down, mid_down, down_ts, down_received_ts, down_input_age, down_input_receive_age, down_fresh = quote("down")
-    # Freshness ages are recomputed against the actual common snapshot time.
-    up_source_age, up_receive_age = _age(now, up_ts), _age(now, up_received_ts)
-    down_source_age, down_receive_age = _age(now, down_ts), _age(now, down_received_ts)
-    up_fresh = up_fresh and _fresh(up_source_age, market_max_age) and _fresh(up_receive_age, market_max_age)
-    down_fresh = down_fresh and _fresh(down_source_age, market_max_age) and _fresh(down_receive_age, market_max_age)
-    if not up_fresh:
-        bid_up = ask_up = mid_up = None
-    if not down_fresh:
-        bid_down = ask_down = mid_down = None
+    up_source_age, up_receive_age = up_input_age, up_input_receive_age
+    down_source_age, down_receive_age = down_input_age, down_input_receive_age
 
     residual_up = p_up - mid_up if p_up is not None and mid_up is not None else None
     residual_down = p_down - mid_down if p_down is not None and mid_down is not None else None
     btc_ts = _number(context.get("btc_source_ts"))
-    btc_age = _age(now, btc_ts)
-    btc_fresh = _fresh(btc_age, btc_max_age)
+    btc_received_ts = _number(context.get("btc_received_ts"))
+    btc_reference_ts = _number(context.get("btc_source_reference_ts"))
+    btc_age = _age(now, btc_received_ts)
+    btc_value_age = _age(btc_reference_ts, btc_ts) if btc_reference_ts is not None else None
+    btc_fresh = _fresh(btc_age, btc_max_age) and _fresh(btc_value_age, btc_max_age)
     btc_spot = _number(context.get("btc_spot")) if btc_fresh else None
     returns = {}
     for horizon in (1, 5, 10, 30, 60):
@@ -94,8 +104,8 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
             (ret < 0 if side == "UP" else ret > 0 if side == "DOWN" else None)
             if ret is not None else None
         )
-    twap_age = _age(now, context.get("twap_source_ts"))
-    twap_fresh = _fresh(twap_age, pex_max_age)
+    twap_age = _age(now, context.get("twap_received_ts"))
+    twap_fresh = _fresh(twap_age, pex_max_age) and (_number(context.get("twap_source_ts")) or 0) > 0
     twap_value = _number(context.get("official_twap")) if twap_fresh else None
     probability_reason = (None if p_up is not None else
                           "p_ex_unavailable" if pex_raw is None else
@@ -105,12 +115,14 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
     result = {
         "event_type": "PREDICTION_RESEARCH_SNAPSHOT",
         "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
+        "freshness_clock_semantics_version": 2,
         "snapshot_ts": now,
         "snapshot_trigger": str(context.get("trigger") or "periodic"),
         "snapshot_interval_sec": _number(context.get("snapshot_interval_sec")),
         **identity,
         "p_ex_source_ts": _number(context.get("p_ex_source_ts")),
         "p_ex_age_sec": pex_age,
+        "p_ex_received_ts": _number(context.get("p_ex_received_ts")),
         "p_ex_fresh": p_up is not None,
         "p_ex_unavailable_reason": probability_reason,
         "p_up_ex_market": p_up,
@@ -120,6 +132,9 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "sigma_ex_market": _number(context.get("sigma_ex_market")),
         "sigma_ex_market_fresh": pex_sigma_fresh,
         "sigma_ex_market_age_sec": _number(context.get("sigma_ex_market_age_sec")),
+        "sigma_ex_market_transport_age_sec": _number(context.get("sigma_ex_market_transport_age_sec")),
+        "sigma_ex_market_value_age_sec": _number(context.get("sigma_ex_market_value_age_sec")),
+        "market_source_reference_ts": _number(context.get("market_source_reference_ts")),
         "market_quote_source_ts": max((x for x in (up_ts, down_ts) if x is not None), default=None),
         "market_quote_received_ts": max((x for x in (up_received_ts, down_received_ts) if x is not None), default=None),
         "market_quote_up_source_ts": up_ts, "market_quote_up_received_ts": up_received_ts,
@@ -144,11 +159,14 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "edge_vs_bid_up": p_up - bid_up if p_up is not None and bid_up is not None else None,
         "edge_vs_bid_down": p_down - bid_down if p_down is not None and bid_down is not None else None,
         "btc_spot": btc_spot, "btc_source_ts": btc_ts, "btc_age_sec": btc_age,
+        "btc_received_ts": btc_received_ts, "btc_source_reference_ts": btc_reference_ts,
+        "btc_transport_age_sec": btc_age, "btc_value_age_sec": btc_value_age,
         "btc_fresh": btc_spot is not None,
         **returns, **disagreement,
         **{f"btc_return_{horizon}s_prior_age_sec": _number(context.get(f"btc_return_{horizon}s_prior_age_sec"))
            for horizon in (1, 5, 10, 30, 60)},
         "twap_source_ts": _number(context.get("twap_source_ts")),
+        "twap_received_ts": _number(context.get("twap_received_ts")),
         "twap_age_sec": twap_age, "twap_fresh": twap_fresh,
         "official_twap": twap_value,
         "settlement_state_side": context.get("settlement_state_side") if twap_fresh else "UNKNOWN",
@@ -254,6 +272,7 @@ class PredictionResearchSnapshotter:
             strike = getattr(strategy, "market_strike_cache_by_slug", {}).get(slug)
             twap = getattr(strategy, "_polymarket_chainlink_twap_price", None)
             twap_ts = _number(getattr(strategy, "_polymarket_chainlink_twap_observation_ts", None))
+            twap_received_ts = _number(getattr(strategy, "_polymarket_chainlink_twap_price_ts", None))
             diagnostics = {}
             if twap is not None and callable(getattr(strategy, "_settlement_probability_shadow_inputs", None)):
                 diagnostics = strategy._settlement_probability_shadow_inputs(
@@ -263,13 +282,15 @@ class PredictionResearchSnapshotter:
             spot_source = str(diagnostics.get("path_spot_source") or "")
             if spot_source == "polymarket_chainlink_spot":
                 pex_source_ts = _number(getattr(strategy, "_polymarket_chainlink_price_observation_ts", None))
+                pex_received_ts = _number(getattr(strategy, "_polymarket_chainlink_price_ts", None))
             elif spot_source == "binance_ws":
-                pex_source_ts = _number(getattr(strategy, "_binance_ws_price_source_ts", None)) or _number(getattr(strategy, "_binance_ws_price_ts", None))
+                pex_source_ts = _number(getattr(strategy, "_binance_ws_price_source_ts", None))
+                pex_received_ts = _number(getattr(strategy, "_binance_ws_price_ts", None))
             else:
                 pex_source_ts = None
-            pex_source_age = _age(now, pex_source_ts)
+                pex_received_ts = None
+            pex_transport_age = _age(now, pex_received_ts)
             sigma_age = _number(diagnostics.get("sigma_ex_market_age_sec"))
-            pex_age = max((x for x in (pex_source_age, sigma_age, _age(now, twap_ts)) if x is not None), default=None)
             pair = strategy._research_market_quote_instruments(slug=slug, runtime_slug=str(getattr(strategy, "current_market_slug", "") or ""))
             up_inst, down_inst = pair or ("", "")
             quote_ts_map = getattr(strategy, "last_quote_source_ts_by_inst", {}) or {}
@@ -284,14 +305,23 @@ class PredictionResearchSnapshotter:
                 bid, ask = (book[0], book[1]) if book and len(book) >= 2 else (None, None)
                 return {f"best_bid_{side}": bid, f"best_ask_{side}": ask,
                         f"market_{side}_source_ts": src_ts, f"market_{side}_received_ts": recv_ts,
-                        f"market_{side}_source_age_sec": _age(now, src_ts),
                         f"market_{side}_receive_age_sec": _age(now, recv_ts)}
 
             raw_history = getattr(strategy, "_prediction_btc_research_history", ())
-            btc_points = list(raw_history)
+            # Only ticks already locally received may supply a source reference.
+            btc_points = [point for point in list(raw_history)
+                          if len(point) >= 3 and _fresh(_age(now, point[2]), float("inf"))]
             btc = btc_points[-1] if btc_points else None
-            btc_source_ts = btc[0] if btc else _number(getattr(strategy, "_binance_ws_price_source_ts", None))
-            btc_spot = btc[1] if btc else getattr(strategy, "_binance_ws_price", None)
+            btc_source_ts = btc[0] if btc else None
+            btc_received_ts = btc[2] if btc else None
+            btc_reference_ts = max((point[0] for point in btc_points), default=None)
+            btc_spot = btc[1] if btc else None
+            market_reference_ts = observed_source_reference(quote_ts_map, receive_ts_map, (up_inst, down_inst), now)
+            pex_ages = [pex_transport_age, sigma_age, _age(now, twap_received_ts)]
+            if spot_source == "binance_ws":
+                pex_ages.append(_age(btc_reference_ts, pex_source_ts) if btc_reference_ts is not None else None)
+            pex_max_age = float(getattr(strategy, "_RAW_SPOT_FRESHNESS_SEC", 10.0))
+            pex_age = max(pex_ages) if all(_fresh(age, pex_max_age) for age in pex_ages) else None
             trend = getattr(strategy, "side_decision_inputs", {}) or {}
             side_obj = getattr(strategy, "active_side", "NONE")
             side = str(getattr(side_obj, "value", side_obj) or "NONE").upper()
@@ -313,12 +343,15 @@ class PredictionResearchSnapshotter:
                              "down_instrument_id": down_inst or None},
                 "p_up_ex_market": diagnostics.get("p_up_ex_market"),
                 "p_ex_age_sec": pex_age, "p_ex_source_ts": pex_source_ts,
+                "p_ex_received_ts": pex_received_ts, "market_source_reference_ts": market_reference_ts,
                 "sigma_ex_market": diagnostics.get("sigma_ex_market"),
                 "sigma_ex_market_fresh": diagnostics.get("sigma_ex_market_fresh"),
                 "sigma_ex_market_age_sec": diagnostics.get("sigma_ex_market_age_sec"),
+                "sigma_ex_market_transport_age_sec": diagnostics.get("sigma_ex_market_transport_age_sec"),
+                "sigma_ex_market_value_age_sec": diagnostics.get("sigma_ex_market_value_age_sec"),
                 "probability_model_mode": diagnostics.get("probability_model_mode"),
                 "probability_model_version": diagnostics.get("probability_model_version"),
-                "official_twap": twap, "twap_source_ts": twap_ts,
+                "official_twap": twap, "twap_source_ts": twap_ts, "twap_received_ts": twap_received_ts,
                 "settlement_state_side": diagnostics.get("settlement_state_side"),
                 "strike": strike, "required_move_mode": diagnostics.get("required_move_mode"),
                 "required_future_avg_to_flip": diagnostics.get("required_future_avg_to_flip"),
@@ -327,7 +360,8 @@ class PredictionResearchSnapshotter:
                 "required_move_sigma": diagnostics.get("required_move_sigma"),
                 "remaining_final_window_sec": diagnostics.get("remaining_final_window_sec"),
                 "btc_spot": btc_spot, "btc_source_ts": btc_source_ts,
-                **self._btc_returns(btc_points, now),
+                "btc_received_ts": btc_received_ts, "btc_source_reference_ts": btc_reference_ts,
+                **(self._btc_returns(btc_points, btc_source_ts) if btc_source_ts is not None else {}),
                 **quote_context("up", up_inst), **quote_context("down", down_inst),
                 "active_side": side,
                 "side_score": getattr(strategy, "side_decision_score", None),

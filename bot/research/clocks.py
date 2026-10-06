@@ -63,3 +63,18 @@ def compare_clocks(left: dict, right: dict, *, justification: str | None = None)
     return {'status': 'COMPARABLE' if compatible and a is not None and b is not None else 'CLOCKS_NOT_COMPARABLE',
             'delta_sec': b - a if compatible and a is not None and b is not None else None,
             'justification': justification}
+
+
+def observed_source_reference(source_times: dict, receipt_times: dict, instruments: Iterable,
+                              snapshot_ts: float) -> float | None:
+    """Latest existing CLOB source observation, admitted by LOCAL receipt only.
+
+    This is relative value age, not an estimate of remote current wall time.
+    Source timestamps ahead of the local clock are valid metadata.
+    """
+    sources = []
+    for instrument in instruments:
+        source, receipt = epoch(source_times.get(instrument)), epoch(receipt_times.get(instrument))
+        if source is not None and source > 0 and receipt is not None and 0 < receipt <= snapshot_ts:
+            sources.append(source)
+    return max(sources, default=None)
