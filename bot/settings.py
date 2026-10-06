@@ -823,6 +823,11 @@ def initialize_strategy_settings(
     strategy._lead_lag_cancel_started_ns_by_order_id = {}
     strategy.lead_lag_db = LeadLagDB()
     strategy.twap_research_db = build_twap_research_db()
+    for writer_name in ("lead_lag_db", "twap_research_db"):
+        getattr(strategy, writer_name).set_failure_diagnostics(
+            journal=strategy.trade_db, writer_name=writer_name, run_id=strategy.run_id,
+            identity=lambda: getattr(strategy, "collection_identity", {}),
+        )
     strategy.twap_forward_shadow = TwapForwardShadow(
         db=strategy.twap_research_db, run_id=strategy.run_id, max_samples=180,
         max_db_mb=float(os.getenv("TWAP_RESEARCH_MAX_DB_MB", "500")),
