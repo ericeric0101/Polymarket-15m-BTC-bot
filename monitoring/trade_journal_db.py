@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import math
 import queue
+import shutil
+from contextlib import closing
 import os
 import sqlite3
 import threading
@@ -149,6 +151,8 @@ class TradeJournalDB:
         self._backup_interval_sec = max(1.0, float(backup_interval_sec))
         self._telemetry_queue = queue.Queue(maxsize=256)
         self._backup_dirty = False
+        self._backup_retry_after_monotonic = 0.0
+        self._backup_health: Dict[str, Any] = {"state": "NOT_ATTEMPTED", "failures_total": 0}
         # Coalesce the initial burst of startup telemetry too; a caller can
         # still force a synchronous snapshot via stop()/flush_backup().
         self._last_backup_monotonic = time.monotonic()
@@ -283,22 +287,69 @@ class TradeJournalDB:
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
+    def backup_health_snapshot(self) -> Dict[str, Any]:
+        """Cached backup diagnostics only; never changes primary journal readiness."""
+        with self._backup_lock:
+            return dict(self._backup_health)
+
     def _backup_after_write(self) -> bool:
-        """Snapshot through SQLite's backup API, then atomically publish it."""
+        """Bounded SQLite backup with a read-only source and atomic publication.
+
+        Keep one published target plus one temporary target. Require room for
+        the new image, any rollback of an existing temporary image, and another
+        image-sized reserve for primary writes. This is a size-derived backup
+        budget, not a change to the research/BTC storage guard thresholds.
+        """
         backup = Path(self.backup_path)
         temporary = backup.with_name(f".{backup.name}.tmp")
+        stage = "directory"
+        temporary_opened = False
+        details: Dict[str, Any] = {"destination": str(backup), "free_bytes": None,
+                                   "required_free_bytes": None, "image_bytes": None,
+                                   "temporary_rollback_bytes": None}
         try:
             backup.parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as source, sqlite3.connect(str(temporary)) as destination:
-                source.backup(destination)
+            stage = "source_open"
+            uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=10)) as source:
+                stage = "space_check"
+                image_bytes = source.execute("PRAGMA page_count").fetchone()[0] * source.execute("PRAGMA page_size").fetchone()[0]
+                rollback_bytes = temporary.stat().st_size if temporary.is_file() else 0
+                required_bytes = 2 * image_bytes + rollback_bytes
+                free_bytes = shutil.disk_usage(backup.parent).free
+                details.update(free_bytes=free_bytes, required_free_bytes=required_bytes,
+                               image_bytes=image_bytes, temporary_rollback_bytes=rollback_bytes)
+                if free_bytes < required_bytes:
+                    raise OSError(f"backup free space insufficient: free={free_bytes} required={required_bytes}")
+                stage = "destination_open"
+                temporary_opened = True
+                with closing(sqlite3.connect(str(temporary))) as destination:
+                    stage = "sqlite_backup"
+                    source.backup(destination)
+            stage = "publish"
             os.replace(temporary, backup)
+            with self._backup_lock:
+                self._backup_health.update(details, state="HEALTHY", last_success_ts=time.time(),
+                                           failure_stage=None, error=None, sqlite_errorname=None,
+                                           sqlite_errorcode=None, exception_class=None)
             return True
-        except Exception as e:
-            try:
-                temporary.unlink(missing_ok=True)
-            except Exception:
-                pass
-            logger.error(f"TradeJournalDB backup failed after write: {e}")
+        except Exception as exc:
+            # A low-space preflight must not delete a previously existing file.
+            if temporary_opened:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            with self._backup_lock:
+                self._backup_health.update(details, state="FAILED", last_failure_ts=time.time(),
+                    failure_stage=stage, error=str(exc), exception_class=type(exc).__name__,
+                    sqlite_errorname=getattr(exc, "sqlite_errorname", None),
+                    sqlite_errorcode=getattr(exc, "sqlite_errorcode", None),
+                    failures_total=self._backup_health["failures_total"] + 1)
+            logger.error(f"TradeJournalDB backup failed: destination={backup} stage={stage} "
+                         f"exception={type(exc).__name__} sqlite_errorname={getattr(exc, 'sqlite_errorname', None)} "
+                         f"free_bytes={details.get('free_bytes')} required_free_bytes={details.get('required_free_bytes')} "
+                         f"error={exc}")
             return False
 
     def _schedule_backup(self) -> None:
@@ -307,20 +358,28 @@ class TradeJournalDB:
             self._backup_dirty = True
         self._backup_wakeup.set()
 
-    def flush_backup(self) -> bool:
-        """Synchronously publish one snapshot; intended for shutdown/tests."""
+    def flush_backup(self, *, force: bool = True) -> bool:
+        """Publish a snapshot; explicit shutdown/manual flush may bypass cooldown.
+
+        The worker passes force=False, so telemetry wakeups cannot retry a
+        failed backup until the existing backup interval has elapsed.
+        """
         # A caller at shutdown must not observe a clean dirty flag while the
         # background worker is still publishing the same snapshot.
         with self._backup_flush_lock:
             with self._backup_lock:
                 if not self._backup_dirty:
                     return True
+                if not force and time.monotonic() < self._backup_retry_after_monotonic:
+                    return False
                 self._backup_dirty = False
             success = self._backup_after_write()
             if not success:
                 with self._backup_lock:
                     self._backup_dirty = True
+                    self._backup_retry_after_monotonic = time.monotonic() + self._backup_interval_sec
                 return False
+            self._backup_retry_after_monotonic = 0.0
             self._last_backup_monotonic = time.monotonic()
             return True
 
@@ -356,7 +415,7 @@ class TradeJournalDB:
             with self._backup_lock:
                 dirty = self._backup_dirty
             if dirty and time.monotonic() - self._last_backup_monotonic >= self._backup_interval_sec:
-                self.flush_backup()
+                self.flush_backup(force=False)
         self._drain_telemetry()
 
     def stop(self) -> None:
