@@ -168,7 +168,7 @@ def test_backup_retention_is_one_published_image_and_source_is_read_only(tmp_pat
             write_primary(db, n)
             assert db.flush_backup()
         assert source_uris and all(str(path).endswith('?mode=ro') for path in source_uris)
-        assert sorted(p.name for p in Path(db.backup_path).parent.iterdir()) == ['journal.db']
+        assert sorted(p.name for p in Path(db.backup_path).parent.glob('*.db')) == ['journal.db']
         with real_connect(db.backup_path) as conn:
             assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
             assert conn.execute('SELECT COUNT(*) FROM strategy_events').fetchone()[0] == 4

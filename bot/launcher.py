@@ -1099,7 +1099,8 @@ def main():
         logger.remove()
         log_dir = Path("logs/bot")
         log_dir.mkdir(parents=True, exist_ok=True)
-        logger.add(str(log_dir / "terminal_bot.log"), rotation="20 MB", retention="5 days", level="DEBUG")
+        from monitoring.storage_retention import StoragePolicy, logging_options
+        logger.add(str(log_dir / "terminal_bot.log"), **logging_options(log_dir, StoragePolicy.from_env()))
         print(f"\n[INFO] Terminal dashboard enabled.")
         print(f"[INFO] Background logs are re-routed to: {log_dir}/terminal_bot.log")
         print(f"[INFO] Tip: Run 'tail -f {log_dir}/terminal_bot.log' in another terminal to view live logs.\n")

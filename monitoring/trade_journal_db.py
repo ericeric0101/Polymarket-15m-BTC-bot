@@ -22,6 +22,8 @@ from typing import Any, Dict, Optional
 from bot.entry_session_policy import MARKOUT_CALIBRATION_START_UTC, is_taipei_weeknight_entry_session
 
 from loguru import logger
+from monitoring.storage_retention import StoragePolicy, maintenance_lock, record_completed_backup
+from bot.research.storage import StorageSummary
 
 
 def _utc_now_iso() -> str:
@@ -149,6 +151,11 @@ class TradeJournalDB:
         self._monthly_report_cache = {}
         self._last_health_probe_monotonic = 0.0
         self._backup_interval_sec = max(1.0, float(backup_interval_sec))
+        self._storage_policy = StoragePolicy.from_env()
+        self._storage_summary = StorageSummary()
+        self._last_storage_state = None
+        self._storage_root = next((parent for parent in target.resolve().parents
+                                   if (parent / "monitoring/trade_journal_db.py").is_file()), None)
         self._telemetry_queue = queue.Queue(maxsize=256)
         self._backup_dirty = False
         self._backup_retry_after_monotonic = 0.0
@@ -293,6 +300,17 @@ class TradeJournalDB:
             return dict(self._backup_health)
 
     def _backup_after_write(self) -> bool:
+        try:
+            with maintenance_lock(Path(self.backup_path).parent):
+                return self._publish_backup()
+        except (OSError, ValueError) as exc:
+            logger.error(f"TradeJournalDB backup ownership unavailable: {exc}")
+            with self._backup_lock:
+                self._backup_health.update(state="FAILED", failure_stage=("ownership_lock" if Path(self.backup_path).parent.is_dir() else "directory"), error=str(exc),
+                                           failures_total=self._backup_health["failures_total"] + 1)
+            return False
+
+    def _publish_backup(self) -> bool:
         """Bounded SQLite backup with a read-only source and atomic publication.
 
         Keep one published target plus one temporary target. Require room for
@@ -315,7 +333,7 @@ class TradeJournalDB:
                 stage = "space_check"
                 image_bytes = source.execute("PRAGMA page_count").fetchone()[0] * source.execute("PRAGMA page_size").fetchone()[0]
                 rollback_bytes = temporary.stat().st_size if temporary.is_file() else 0
-                required_bytes = 2 * image_bytes + rollback_bytes
+                required_bytes = self._storage_policy.backup_required_bytes(image_bytes, rollback_bytes)
                 free_bytes = shutil.disk_usage(backup.parent).free
                 details.update(free_bytes=free_bytes, required_free_bytes=required_bytes,
                                image_bytes=image_bytes, temporary_rollback_bytes=rollback_bytes)
@@ -328,6 +346,12 @@ class TradeJournalDB:
                     source.backup(destination)
             stage = "publish"
             os.replace(temporary, backup)
+            try:
+                record_completed_backup(backup, Path(self.db_path))
+            except (OSError, ValueError, TypeError) as exc:
+                # Publication remains successful; missing metadata prevents
+                # pruning, never downgrades primary/exposure authority.
+                logger.warning(f"Backup retention metadata unavailable; preserve backups: {exc}")
             with self._backup_lock:
                 self._backup_health.update(details, state="HEALTHY", last_success_ts=time.time(),
                                            failure_stage=None, error=None, sqlite_errorname=None,
@@ -407,11 +431,29 @@ class TradeJournalDB:
                 return
             self.log_strategy_event(*args[:3], event_ts=args[3])
 
+    def _emit_storage_telemetry(self) -> None:
+        if self._storage_root is None:
+            return
+        try:
+            result = self._storage_summary.measure_runtime(
+                root=self._storage_root, journal=Path(self.db_path), backup=Path(self.backup_path),
+                policy=self._storage_policy, backup_health=self.backup_health_snapshot())
+            if result.get("cached"):
+                return
+            state = result["storage_state"]
+            if state != self._last_storage_state:
+                logger.warning(f"STORAGE {self._last_storage_state or 'UNKNOWN'} -> {state}")
+                self._last_storage_state = state
+            logger.info(f"storage_health: {json.dumps(result, sort_keys=True)}")
+        except Exception as exc:
+            logger.warning(f"Storage measurement unavailable: {type(exc).__name__}: {exc}")
+
     def _backup_worker(self) -> None:
         while not self._backup_stop.is_set():
             self._backup_wakeup.wait(timeout=1.0)
             self._backup_wakeup.clear()
             self._drain_telemetry()
+            self._emit_storage_telemetry()
             with self._backup_lock:
                 dirty = self._backup_dirty
             if dirty and time.monotonic() - self._last_backup_monotonic >= self._backup_interval_sec:

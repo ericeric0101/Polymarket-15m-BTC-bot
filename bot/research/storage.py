@@ -53,6 +53,39 @@ class StorageSummary:
         self._cache = result
         return dict(result)
 
+    def measure_runtime(self, *, root, journal, backup, policy, backup_health, now_monotonic=None):
+        """Five-minute observational telemetry on the existing journal worker.
+
+        Folder walks never run in STATUS, a quote callback, or order execution.
+        State uses the shared policy; existing component guards remain intact.
+        """
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        if now < getattr(self, '_runtime_next', 0):
+            return {**self._runtime_cache, 'cached': True}
+        self._runtime_next = now + self.interval_sec
+        # Failed observations are throttled too, not retried every worker wakeup.
+        self._runtime_cache = {'storage_state': 'UNKNOWN', 'cached': False}
+        def size(path):
+            return path.stat().st_size if path.is_file() and not path.is_symlink() else 0
+        def tree(directory):
+            return sum(size(p) for p in directory.rglob('*') if p.is_file()) if directory.is_dir() else 0
+        journal_bytes = size(journal)
+        wal_bytes = size(Path(str(journal) + '-wal'))
+        image = max(journal_bytes + wal_bytes, backup_health.get('image_bytes') or 0)
+        required = policy.backup_required_bytes(image, size(backup.with_name('.' + backup.name + '.tmp')))
+        # Cover the actual primary/backup volumes, not just the repository volume.
+        free = min(shutil.disk_usage(journal.parent).free, shutil.disk_usage(backup.parent if backup.parent.exists() else root).free)
+        gib = 1024 ** 3
+        result = {'cached': False, 'filesystem_free_gib': free/gib, 'journal_db_gib': journal_bytes/gib,
+                  'journal_wal_gib': wal_bytes/gib,
+                  'backup_dir_gib': tree(backup.parent)/gib,
+                  'backup_count': sum(1 for p in backup.parent.glob('*.db') if p.is_file() and not p.is_symlink()),
+                  'analysis_snapshot_dir_gib': tree(root/'data/analysis_snapshots')/gib,
+                  'log_dir_gib': tree(root/'logs')/gib,
+                  'storage_state': policy.state(free, image, required), 'next_backup_required_gib': required/gib}
+        self._runtime_cache = result
+        return dict(result)
+
 
 def archival_readiness(*, collection_closed: bool, writers_stopped: bool,
                        integrity_verified: bool, backup_verified: bool) -> dict:
