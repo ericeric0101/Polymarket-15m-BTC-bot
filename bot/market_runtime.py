@@ -615,6 +615,9 @@ def _find_btc_instrument_unlocked(strategy: Any) -> bool:
         instruments=instruments,
         startup_verbose=strategy.startup_verbose,
     )
+    admission = getattr(strategy, "_instrument_admission", None)
+    if admission is not None:
+        btc_instruments = [item for item in btc_instruments if admission.selectable(item["slug"])]
 
     if not btc_instruments:
         logger.error("NO BTC 15-MIN INSTRUMENTS FOUND!")
@@ -707,6 +710,9 @@ def _find_btc_instrument_unlocked(strategy: Any) -> bool:
         current_start_ts=start_ts,
         extract_outcome=strategy._extract_outcome_from_instrument,
     )
+    if not prewarm_instruments and start_ts:
+        from bot.instrument_admission import request_instrument_admission
+        request_instrument_admission(strategy, f"btc-updown-15m-{int(start_ts) + 900}")
     strategy.quote_prewarm_instruments = {str(inst) for inst in prewarm_instruments}
     preserve_side_state = bool(
         strategy.bi_side_enabled
@@ -1227,6 +1233,8 @@ def handle_stop(strategy: Any) -> None:
         )
 
     strategy._stopping = True
+    from bot.instrument_admission import stop_instrument_admission
+    stop_instrument_admission(strategy)
     stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=outcome_observers")
     outcome_observer = getattr(strategy, "hyperliquid_outcome_observer", None)

@@ -409,6 +409,8 @@ class StrategyLifecycleMixin:
             if best_slug:
                 self.next_market_slug = best_slug
                 self.next_market_start_ts = best_start_ts
+                from bot.instrument_admission import request_instrument_admission
+                request_instrument_admission(self, best_slug)
                 time_until = best_start_ts - now_ts if best_start_ts else 0
                 logger.info(
                     f"Next market found: {best_slug} "

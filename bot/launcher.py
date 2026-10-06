@@ -115,6 +115,8 @@ def threadsafe_node_stop_callback(node: TradingNode):
         if callable(point):
             point("stop_dispatch")
         for strategy in _collection_strategies(node):
+            from bot.instrument_admission import stop_instrument_admission
+            stop_instrument_admission(strategy)
             collection_lifecycle(strategy, "stop_request", stop_requested_at=time.time(),
                                  **getattr(strategy, "_collection_stop_context", {"stop_request_source": "unknown"}))
         loop = getattr(getattr(node, "kernel", None), "loop", None)
@@ -848,6 +850,8 @@ def run_integrated_bot(
         node.trader.add_strategy(strategy)
         node._collection_strategy_refs = [strategy]
         node.build()
+        from bot.instrument_admission import bind_instrument_admission
+        bind_instrument_admission(node, strategy)
         try:
             from bot.quote_recovery_observability import bind_collection_observers
             bind_collection_observers(node, strategy)
