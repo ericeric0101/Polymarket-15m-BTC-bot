@@ -903,18 +903,29 @@ def _install_polymarket_data_overrides() -> None:
         if not hasattr(self, "_btc15m_l2_depth"):
             self._btc15m_l2_depth = bounded_l2_depth()
 
+    def l2_publish_state(self, instrument_id):
+        """Complete partial skip-state without resetting existing backoff.
+
+        These synchronous adapter callbacks run on the same owner loop. Every
+        producer uses this initializer, including quote-only prewarm and late
+        stopping callbacks, before the instrument can gain an L2 subscription.
+        """
+        state = self._btc15m_l2_publish_state.setdefault(instrument_id, {})
+        for key, value in (("last_attempt", 0.0), ("last_success", 0.0),
+                           ("failures", 0), ("retry_at", 0.0)):
+            state.setdefault(key, value)
+        return state
+
     def publish_l2_snapshot_if_due(self, instrument, ws_message) -> bool:
         """Publish a bounded current local book with failure backoff."""
         if getattr(self, "_btc15m_disconnecting", False):
-            self._btc15m_l2_publish_state.setdefault(instrument.id, {})["last_status"] = "skipped_stopping"
+            l2_publish_state(self, instrument.id)["last_status"] = "skipped_stopping"
             return False
         if instrument.id not in self.subscribed_order_book_deltas():
-            self._btc15m_l2_publish_state.setdefault(instrument.id, {})["last_status"] = "skipped_unsubscribed"
+            l2_publish_state(self, instrument.id)["last_status"] = "skipped_unsubscribed"
             return False
         now_monotonic = time.monotonic()
-        state = self._btc15m_l2_publish_state.setdefault(instrument.id, {
-            "last_attempt": 0.0, "last_success": 0.0, "failures": 0, "retry_at": 0.0,
-        })
+        state = l2_publish_state(self, instrument.id)
         interval = l2_publish_interval_sec()
         if now_monotonic < state["retry_at"]:
             state["last_status"] = "skipped_backoff"
@@ -1203,9 +1214,7 @@ def _install_polymarket_data_overrides() -> None:
         local_book = data_mod.OrderBook(instrument.id, book_type=data_mod.BookType.L2_MBP)
         local_book.apply_deltas(deltas)
         self._local_books[instrument.id] = local_book
-        self._btc15m_l2_publish_state.setdefault(instrument.id, {
-            "last_attempt": 0.0, "last_success": 0.0, "failures": 0, "retry_at": 0.0,
-        })
+        l2_publish_state(self, instrument.id)
         request_quote_generation(self, instrument, ws_message, source="ws_snapshot")
         self._publish_l2_snapshot_if_due(instrument, ws_message)
 

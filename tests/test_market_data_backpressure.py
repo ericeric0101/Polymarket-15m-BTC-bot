@@ -737,3 +737,83 @@ def test_quote_publish_timestamp_is_set_only_when_queue_admits_buffered_quote():
     assert flush_coalesced_quote_ticks(engine) == 1
     latency = record_quote_data_engine_latency(quote, time.time())
     assert latency is not None and latency >= 0
+
+
+def _retry_state_client(monkeypatch):
+    install_runtime_compatibility_overrides()
+    from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
+    inst = _instrument()
+    book = OrderBook(inst, BookType.L2_MBP)
+    _apply_level(book, inst, OrderSide.BUY, '100', '3')
+    _apply_level(book, inst, OrderSide.SELL, '101', '4')
+    subscriptions = set()
+    published = []
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(adapter_overrides, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    fake = SimpleNamespace(
+        _local_books={inst: book}, _btc15m_l2_publish_state={},
+        _btc15m_l2_snapshot_publish_ts={}, _btc15m_l2_depth=2,
+        _btc15m_disconnecting=False, _clock=SimpleNamespace(timestamp_ns=lambda: 11),
+        _log=SimpleNamespace(warning=lambda *_: None),
+        subscribed_order_book_deltas=lambda: subscriptions,
+        _handle_data=published.append,
+    )
+    fake._publish_l2_snapshot_if_due = lambda instrument, message: PolymarketDataClient._publish_l2_snapshot_if_due(fake, instrument, message)
+    return fake, SimpleNamespace(id=inst), SimpleNamespace(timestamp=1000.0), subscriptions, published, clock
+
+
+def test_quote_only_prewarm_then_l2_promotion_initializes_retry_state(monkeypatch):
+    fake, inst, msg, subscriptions, published, _ = _retry_state_client(monkeypatch)
+    assert not fake._publish_l2_snapshot_if_due(inst, msg)
+    assert fake._btc15m_l2_publish_state[inst.id]['last_status'] == 'skipped_unsubscribed'
+    subscriptions.add(inst.id)  # existing market handoff promotes quote-only pair
+    assert fake._publish_l2_snapshot_if_due(inst, msg)
+    assert len(published) == 1
+
+
+def test_first_subscribed_and_partial_retry_state(monkeypatch):
+    for partial in [None, {}, {'last_status': 'skipped_unsubscribed'}, {'retry_at': 0.0}]:
+        fake, inst, msg, subscriptions, published, _ = _retry_state_client(monkeypatch)
+        if partial is not None:
+            fake._btc15m_l2_publish_state[inst.id] = partial
+        subscriptions.add(inst.id)
+        assert fake._publish_l2_snapshot_if_due(inst, msg)
+        assert len(published) == 1
+        assert fake._btc15m_l2_publish_state[inst.id]['retry_at'] == 0.0
+
+
+def test_existing_backoff_survives_unsubscribe_resubscribe_and_reconnect(monkeypatch):
+    from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
+    fake, inst, msg, subscriptions, published, clock = _retry_state_client(monkeypatch)
+    state = {'retry_at': 12.0, 'last_attempt': 10.0, 'last_success': 9.0, 'failures': 2}
+    fake._btc15m_l2_publish_state[inst.id] = state
+    assert not fake._publish_l2_snapshot_if_due(inst, msg)
+    subscriptions.add(inst.id)
+    clock.now = 11.99
+    # Full/reconnect snapshot must fill missing state, not reset retry deadline.
+    msg.parse_to_snapshot = lambda **_: build_bounded_order_book_snapshot(
+        instrument_id=inst.id, book=fake._local_books[inst.id], depth=2, ts_event=10, ts_init=11)
+    fake.subscribed_quote_ticks = lambda: set()
+    fake._publish_quote = lambda *a, **k: None
+    PolymarketDataClient._handle_book_snapshot(fake, inst, msg)
+    assert not published
+    assert state['retry_at'] == 12.0 and state['failures'] == 2
+    assert state['last_attempt'] == 10.0 and state['last_success'] == 9.0
+    clock.now = 12.0
+    assert fake._publish_l2_snapshot_if_due(inst, msg)
+    assert state['retry_at'] == 0 and state['failures'] == 0
+
+
+def test_stopping_missing_book_and_removed_instrument_remain_fail_closed(monkeypatch):
+    fake, inst, msg, subscriptions, published, _ = _retry_state_client(monkeypatch)
+    fake._btc15m_disconnecting = True
+    assert not fake._publish_l2_snapshot_if_due(inst, msg)
+    assert fake._btc15m_l2_publish_state[inst.id]['retry_at'] == 0
+    fake._btc15m_disconnecting = False
+    subscriptions.add(inst.id)
+    fake._local_books.pop(inst.id)
+    assert not fake._publish_l2_snapshot_if_due(inst, msg)
+    assert fake._btc15m_l2_publish_state[inst.id]['last_status'] == 'skipped_missing_local_book'
+    subscriptions.clear()
+    assert not fake._publish_l2_snapshot_if_due(inst, msg)
+    assert not published  # cannot resurrect removed instrument subscription
