@@ -25,6 +25,8 @@ from loguru import logger
 from monitoring.storage_retention import StoragePolicy, maintenance_lock, record_completed_backup
 from bot.research.storage import StorageSummary
 
+DEFAULT_BACKUP_INTERVAL_SEC = 15 * 60
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -109,7 +111,7 @@ class TradeJournalDB:
     }
 
     def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
-                 backup_interval_sec: float = 30.0, legacy_db_path: Optional[str | Path] = None,
+                 backup_interval_sec: float = DEFAULT_BACKUP_INTERVAL_SEC, legacy_db_path: Optional[str | Path] = None,
                  journal_meta_path: Optional[str | Path] = None) -> None:
         self.db_path = str(Path(db_path))
         target = Path(self.db_path)
@@ -392,7 +394,9 @@ class TradeJournalDB:
         # background worker is still publishing the same snapshot.
         with self._backup_flush_lock:
             with self._backup_lock:
-                if not self._backup_dirty:
+                if not self._backup_dirty and not force:
+                    self._backup_health.update(last_skip_reason="BACKUP_SKIPPED_UNCHANGED",
+                                               last_skip_ts=time.time())
                     return True
                 if not force and time.monotonic() < self._backup_retry_after_monotonic:
                     return False
@@ -405,7 +409,31 @@ class TradeJournalDB:
                 return False
             self._backup_retry_after_monotonic = 0.0
             self._last_backup_monotonic = time.monotonic()
+            health = self.backup_health_snapshot()
+            logger.info("TradeJournal backup completed: reason={} interval_sec={} image_bytes={} free_bytes_before={} last_success_ts={}",
+                        "forced_boundary" if force else "periodic", self._backup_interval_sec,
+                        health.get("image_bytes"), health.get("free_bytes"), health.get("last_success_ts"))
             return True
+
+    def _periodic_backup(self) -> None:
+        """One scheduler for full images; committed writes set the dirty flag.
+
+        No mtime/page-count heuristic: updates to existing risk/session rows
+        also schedule a backup. Writes racing publication leave dirty set for
+        the next image. Explicit boundary flushes bypass this interval.
+        """
+        if time.monotonic() - self._last_backup_monotonic < self._backup_interval_sec:
+            return
+        with self._backup_lock:
+            dirty = self._backup_dirty
+        if not dirty:
+            self._last_backup_monotonic = time.monotonic()
+            with self._backup_lock:
+                self._backup_health.update(last_skip_reason="BACKUP_SKIPPED_UNCHANGED",
+                                           last_skip_ts=time.time())
+            logger.info("TradeJournal BACKUP_SKIPPED_UNCHANGED interval_sec={}", self._backup_interval_sec)
+            return
+        self.flush_backup(force=False)
 
     def enqueue_strategy_event(self, run_id: str, event_type: str, payload: Dict[str, Any]) -> bool:
         """Optional telemetry uses the existing journal worker, never caller SQLite I/O."""
@@ -454,10 +482,7 @@ class TradeJournalDB:
             self._backup_wakeup.clear()
             self._drain_telemetry()
             self._emit_storage_telemetry()
-            with self._backup_lock:
-                dirty = self._backup_dirty
-            if dirty and time.monotonic() - self._last_backup_monotonic >= self._backup_interval_sec:
-                self.flush_backup(force=False)
+            self._periodic_backup()
         self._drain_telemetry()
 
     def stop(self) -> None:
@@ -558,6 +583,7 @@ class TradeJournalDB:
                 elif int(version[0]) < self.SCHEMA_VERSION:
                     conn.execute("UPDATE journal_schema SET version=?", (self.SCHEMA_VERSION,))
                 conn.commit()
+            self._schedule_backup()
         except Exception as e:
             self._schema_init_error = str(e)
             logger.warning(f"TradeJournalDB schema init failed: {e}")
@@ -636,6 +662,7 @@ class TradeJournalDB:
                     ),
                 )
                 conn.commit()
+            self._schedule_backup()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_start failed: {e}")
 
@@ -1158,6 +1185,7 @@ class TradeJournalDB:
                         (_json_dumps(cycle_payload), int(row[0])),
                     )
                 conn.commit()
+            self._schedule_backup()
             self._request_current_monthly_report_refresh()
             return {**reconciliation, "wrote_cycle_pnl": wrote_cycle_pnl}
         except Exception as e:

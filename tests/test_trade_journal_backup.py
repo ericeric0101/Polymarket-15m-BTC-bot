@@ -201,3 +201,84 @@ def test_same_instance_backup_flushes_do_not_overlap_and_new_dirty_write_is_kept
         assert len(attempts) == 2
         assert primary_count(db) == 2
         assert db._backup_dirty is False
+
+
+def test_default_periodic_rpo_is_fifteen_minutes():
+    import inspect
+    assert inspect.signature(TradeJournalDB).parameters['backup_interval_sec'].default == 900
+
+
+def test_periodic_interval_unchanged_suppression_and_committed_updates(tmp_path, monkeypatch):
+    with stopped_worker_db(tmp_path) as db:
+        db._backup_interval_sec = journal.DEFAULT_BACKUP_INTERVAL_SEC
+        clock = [100.0]
+        monkeypatch.setattr(journal.time, 'monotonic', lambda: clock[0])
+        db._last_backup_monotonic = clock[0]
+        write_primary(db)
+        calls = []
+        real_backup = db._backup_after_write
+        def backup():
+            calls.append(clock[0])
+            return real_backup()
+        monkeypatch.setattr(db, '_backup_after_write', backup)
+        clock[0] = 130
+        db._periodic_backup()
+        clock[0] = 999.99
+        db._periodic_backup()
+        assert calls == []
+        clock[0] = 1000
+        db._periodic_backup()
+        assert calls == [1000]
+        original = Path(db.backup_path).read_bytes()
+        clock[0] = 1900
+        db._periodic_backup()
+        assert calls == [1000]
+        assert Path(db.backup_path).read_bytes() == original
+        assert db.backup_health_snapshot()['last_skip_reason'] == 'BACKUP_SKIPPED_UNCHANGED'
+        # A committed journal write schedules the next due full image.
+        write_primary(db, 2)
+        clock[0] = 2800
+        db._periodic_backup()
+        assert calls == [1000, 2800]
+        with sqlite3.connect(db.backup_path) as conn:
+            assert conn.execute('SELECT COUNT(*) FROM strategy_events').fetchone()[0] == 2
+
+
+def test_force_boundary_bypasses_interval_even_without_new_rows(tmp_path, monkeypatch):
+    with stopped_worker_db(tmp_path) as db:
+        write_primary(db)
+        assert db.flush_backup()
+        calls = []
+        monkeypatch.setattr(db, '_backup_after_write', lambda: calls.append(True) or True)
+        db._periodic_backup()
+        assert not calls
+        assert db.flush_backup(force=True)  # explicit recovery / rollover boundary
+        assert calls == [True]
+        db.stop()  # clean shutdown retains the same forced authority
+        assert calls == [True, True]
+
+
+def test_unchanged_skip_logging_is_interval_bounded(tmp_path, monkeypatch):
+    with stopped_worker_db(tmp_path) as db:
+        db._backup_dirty = False
+        clock = [100.0]
+        monkeypatch.setattr(journal.time, 'monotonic', lambda: clock[0])
+        db._last_backup_monotonic = 70
+        calls = []
+        monkeypatch.setattr(journal.logger, 'info', lambda *a, **k: calls.append(a))
+        db._periodic_backup()
+        for _ in range(50):
+            db._periodic_backup()
+        assert len(calls) == 1
+        assert 'BACKUP_SKIPPED_UNCHANGED' in calls[0][0]
+
+
+def test_run_metadata_changes_mark_source_dirty(tmp_path):
+    with stopped_worker_db(tmp_path) as db:
+        assert db.flush_backup()
+        assert not db._backup_dirty
+        db.log_run_start('run', 'TEST', True, True)
+        assert db._backup_dirty
+        assert db.flush_backup()
+        db.log_run_stop('run')
+        assert db._backup_dirty

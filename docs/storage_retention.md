@@ -39,14 +39,14 @@ dirty state, cooldown and the last published backup remain the recovery path.
 ## Backups
 
 Runtime retains its existing single fixed completed target (below the cap of 2),
-30-second interval, worker serialization, atomic replacement, read-only source,
+15-minute interval, worker serialization, atomic replacement, read-only source,
 space guard, failure cooldown and forced final shutdown flush. No additional
 full image is created merely to implement retention.
 
 An interprocess advisory lock serializes runtime publication with maintenance.
 After successful SQLite online backup, connection close and atomic publication,
 `backup_retention.json` records the completed file identity, source path and time.
-No expensive integrity scan runs every 30 seconds. Crash-before-metadata or an
+No expensive integrity scan runs per backup. Crash-before-metadata or an
 invalid/stale manifest makes maintenance retain the file. Metadata uses a fixed
 bounded temporary file and fsync/atomic rename. Backup content durability and
 journal-write semantics are unchanged.
@@ -111,3 +111,31 @@ next estimated backup budget. State transitions are logged once per change;
 failed measurements are throttled too. No active-data cleanup was run during
 implementation. Configuration/source changes take effect on the next operator-
 controlled startup; implementation does not restart the bot.
+
+## Full-backup write amplification
+
+`DEFAULT_BACKUP_INTERVAL_SEC` in TradeJournalDB is the sole production default
+(900 seconds); constructor overrides remain available for tests/explicit callers.
+The launcher does not supply another interval. The primary journal remains WAL
+with synchronous=NORMAL; normal restart reads the primary, not the backup.
+The 15-minute RPO is a recovery-image target for primary loss/corruption, not a
+guarantee under disk pressure or failed backups; lost risk/session evidence may
+require operator reconciliation before trading. This is a deliberate increase
+from the previous 30-second backup RPO. WAL does not replace an independent backup
+or guarantee power-loss durability of every recent NORMAL transaction.
+
+Committed schema/run/order/event/session/reconciliation changes mark the existing
+dirty flag. A clean interval records BACKUP_SKIPPED_UNCHANGED without reading DB
+pages or relying on mtime, page count, data_version or max row IDs (updates need
+coverage too). This covers this class's writes, not unsupported external writers.
+Writes during publication keep the next interval dirty. Clean shutdown, including
+scheduled rollover teardown, forces the same serialized publisher even when clean;
+there is no additional before/after rollover backup system. Startup schema writes
+mark dirty, but startup does not force another full image.
+
+Successful backup and unchanged skip logs occur only per publication/interval,
+never per journal write. Existing cached health retains success age, image size,
+preflight free space, failure stage and retry state. Atomic replacement, one fixed
+completed target, cap <=2, conservative space budget and primary-write priority
+remain unchanged. No APFS/Time Machine snapshot deletion is performed. The live
+Python process keeps its old backup cadence until an operator-controlled restart.
