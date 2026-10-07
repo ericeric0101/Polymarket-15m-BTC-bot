@@ -38,6 +38,14 @@ class TwapSample:
     settlement_diagnostics: dict[str, Any] | None = None
 
 
+# These observations are required for crossing/checkpoint/settlement research.
+# A historical total-size cap must never silently discard them.
+REQUIRED_EVENT_TYPES = frozenset({
+    "MARKET_OPENING_TWAP_SAMPLE", "TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE",
+    "TMINUS_CHECKPOINT", "SETTLEMENT_PATH_THRESHOLD_CROSS", "MARKET_TWAP_SUMMARY",
+})
+
+
 class TwapForwardShadow:
     """Per-market fixed-memory official-TWAP projection experiment."""
 
@@ -61,6 +69,8 @@ class TwapForwardShadow:
         self._last_threshold_state: dict[str, dict[str, dict[float, bool]]] = defaultdict(dict)
         self._storage_guard_triggered = False
         self._storage_guard_reason = ""
+        self._persistence_counters = {"accepted": 0, "queue_drops": 0, "write_errors": 0, "optional_suppressed": 0}
+        self._last_storage_health = {}
         self._last_storage_check_ts = 0.0
         self._lock = Lock()
 
@@ -167,19 +177,14 @@ class TwapForwardShadow:
     def _persist(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
         if self.db is None:
             return
-        # Compact settlement summaries remain permitted after a storage guard;
-        # all optional material/checkpoint traffic is suppressed.
-        if self._storage_guard_triggered and event_type != "MARKET_TWAP_SUMMARY":
+        if self._storage_guard_triggered and event_type not in REQUIRED_EVENT_TYPES:
+            self._persistence_counters["optional_suppressed"] += 1
+            self._update_persistence_health()
             return
-        try:
-            self.db.enqueue_decision(run_id=self.run_id, slug=slug, market_id=None,
-                                     decision_epoch_ns=int(ts * 1_000_000_000),
-                                     payload={"event_type": event_type, **payload})
-        except Exception:
-            pass
+        self._persist_raw(slug, ts, event_type, payload)
 
     def _storage_health(self, now_ts: float) -> dict[str, Any]:
-        """Throttle filesystem checks; storage pressure is sticky to restart."""
+        """Throttle filesystem checks; distinguish optional cap from write safety."""
         if self.db is None:
             return {"checked": False, "triggered": False}
         if now_ts - self._last_storage_check_ts < self.storage_check_interval_sec:
@@ -192,9 +197,10 @@ class TwapForwardShadow:
             main_mb, wal_mb, shm_mb = size_mb(path), size_mb(Path(f"{path}-wal")), size_mb(Path(f"{path}-shm"))
             total_mb = main_mb + wal_mb + shm_mb
             free_gb = shutil.disk_usage(path.parent if path.parent.exists() else Path(".")).free / 1024 / 1024 / 1024
-            reason = "db_size_cap" if total_mb >= self.max_db_mb else "free_disk_low" if free_gb < self.min_free_disk_gb else ""
-            if reason and not self._storage_guard_triggered:
-                self._storage_guard_triggered, self._storage_guard_reason = True, reason
+            reason = "free_disk_low" if free_gb < self.min_free_disk_gb else "db_size_cap" if total_mb >= self.max_db_mb else ""
+            prior_reason = self._storage_guard_reason
+            self._storage_guard_triggered, self._storage_guard_reason = bool(reason), reason
+            if reason and reason != prior_reason:
                 # This is a single compact state event, intentionally allowed
                 # before optional event suppression begins.
                 self._persist_raw("", now_ts, "RESEARCH_STORAGE_GUARD_TRIGGERED", {
@@ -207,19 +213,36 @@ class TwapForwardShadow:
                     "reason": self._storage_guard_reason, "observed_ts": now_ts,
                     "db_main_mb": main_mb, "db_wal_mb": wal_mb, "db_shm_mb": shm_mb,
                     "db_total_disk_mb": total_mb, "db_size_mb": total_mb, "disk_free_gb": free_gb}
+            self._update_persistence_health()
             return dict(self._last_storage_health)
         except Exception:
             self._last_storage_health = {"checked": True, "triggered": self._storage_guard_triggered,
                                          "observation_unavailable": True, "observed_ts": now_ts}
             return dict(self._last_storage_health)
 
+    def _update_persistence_health(self) -> None:
+        # research_health is the shared writer's cached counters, not a DB scan.
+        try:
+            writer = getattr(self.db, "research_health", lambda: {})()
+        except Exception:
+            self._last_storage_health["observation_unavailable"] = True
+            writer = {}
+        errors = self._persistence_counters["write_errors"] + int(writer.get("write_errors", 0) or 0)
+        drops = self._persistence_counters["queue_drops"] + int(writer.get("queue_drops", 0) or 0)
+        detail = ("CRITICAL_CANONICAL_PERSISTENCE" if errors or drops or self._storage_guard_reason == "free_disk_low"
+                  else "DEGRADED_OPTIONAL_TELEMETRY" if self._storage_guard_triggered else "NORMAL")
+        self._last_storage_health.update({"storage_detail": detail, "write_errors": errors,
+            "queue_drops": drops, "persistence_counters": dict(self._persistence_counters)})
+
     def _persist_raw(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
         try:
-            self.db.enqueue_decision(run_id=self.run_id, slug=slug, market_id=None,
+            accepted = self.db.enqueue_decision(run_id=self.run_id, slug=slug, market_id=None,
                                      decision_epoch_ns=int(max(0.0, ts) * 1_000_000_000),
                                      payload={"event_type": event_type, **payload})
+            self._persistence_counters["queue_drops" if accepted is False else "accepted"] += 1
         except Exception:
-            pass
+            self._persistence_counters["write_errors"] += 1
+        self._update_persistence_health()
 
     def _persist_material(self, result: dict[str, Any]) -> None:
         slug, ts = str(result["market_slug"]), float(result["observed_ts"])
@@ -404,4 +427,5 @@ class TwapForwardShadow:
 
     def storage_guard_status(self) -> dict[str, Any]:
         return {"triggered": self._storage_guard_triggered, "reason": self._storage_guard_reason,
-                "optional_research_writes_enabled": not self._storage_guard_triggered}
+                "optional_research_writes_enabled": not self._storage_guard_triggered,
+                **self._last_storage_health}

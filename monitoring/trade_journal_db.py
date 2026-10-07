@@ -25,7 +25,7 @@ from loguru import logger
 from monitoring.storage_retention import StoragePolicy, maintenance_lock, record_completed_backup
 from bot.research.storage import StorageSummary
 
-DEFAULT_BACKUP_INTERVAL_SEC = 15 * 60
+DEFAULT_BACKUP_INTERVAL_SEC = 3 * 60 * 60
 
 
 def _utc_now_iso() -> str:

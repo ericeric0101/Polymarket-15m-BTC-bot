@@ -23,8 +23,13 @@ def component_health(metrics: dict | None, *, domain: str) -> dict:
                 'reason_codes': [availability], 'source_metrics': metrics}
     if availability == 'FAILED' or metrics.get('enabled') is False or metrics.get('failure_reason'):
         mark('WRITER_UNAVAILABLE', 'CRITICAL')
+    if metrics.get('storage_detail') == 'CRITICAL_CANONICAL_PERSISTENCE':
+        mark('CANONICAL_PERSISTENCE_AT_RISK', 'CRITICAL')
     if metrics.get('triggered') is True:
-        mark('EXISTING_STORAGE_GUARD_ACTIVE', 'CRITICAL')
+        if metrics.get('storage_detail') == 'DEGRADED_OPTIONAL_TELEMETRY':
+            mark('OPTIONAL_TELEMETRY_STORAGE_LIMIT', 'DEGRADED')
+        else:
+            mark('EXISTING_STORAGE_GUARD_ACTIVE', 'CRITICAL')
     if metrics.get('write_errors', 0) or metrics.get('errors', 0):
         mark('WRITE_OR_CAPTURE_ERROR', 'CRITICAL')
     if metrics.get('queue_drops', 0) or metrics.get('drops', 0):

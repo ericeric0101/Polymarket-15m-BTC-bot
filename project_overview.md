@@ -7,8 +7,8 @@ Current maker, flip/invalidation, session risk, settlement and prediction author
 remain unchanged. Required trend-entry, forward-shadow, smart-money trajectory and
 order-latency evidence now share `data/research/twap_forward_shadow.db` with
 prediction/TWAP evidence. `data/research/hyperliquid_lead_lag.db` is historical-only;
-this patch neither mutates nor archives it. BTC1s Parquet and the 900-second journal
-backup policy remain unchanged. See [Phase B ownership](docs/outcome_decommission_phase_b.md).
+this patch neither mutates nor archives it. BTC1s Parquet remains unchanged. The current periodic journal backup default is
+10800 seconds; forced lifecycle backups remain enabled. See [Phase B ownership](docs/outcome_decommission_phase_b.md).
 Historical entries below describe their recorded checkpoints, not current Outcome
 execution authority. Deployment and a new dry-run validation remain separate.
 

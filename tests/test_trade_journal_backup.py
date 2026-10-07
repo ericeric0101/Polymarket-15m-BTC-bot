@@ -203,9 +203,9 @@ def test_same_instance_backup_flushes_do_not_overlap_and_new_dirty_write_is_kept
         assert db._backup_dirty is False
 
 
-def test_default_periodic_rpo_is_fifteen_minutes():
+def test_default_periodic_rpo_is_three_hours():
     import inspect
-    assert inspect.signature(TradeJournalDB).parameters['backup_interval_sec'].default == 900
+    assert inspect.signature(TradeJournalDB).parameters['backup_interval_sec'].default == 10800
 
 
 def test_periodic_interval_unchanged_suppression_and_committed_updates(tmp_path, monkeypatch):
@@ -223,23 +223,25 @@ def test_periodic_interval_unchanged_suppression_and_committed_updates(tmp_path,
         monkeypatch.setattr(db, '_backup_after_write', backup)
         clock[0] = 130
         db._periodic_backup()
-        clock[0] = 999.99
-        db._periodic_backup()
-        assert calls == []
         clock[0] = 1000
         db._periodic_backup()
-        assert calls == [1000]
-        original = Path(db.backup_path).read_bytes()
-        clock[0] = 1900
+        clock[0] = 10899.99
         db._periodic_backup()
-        assert calls == [1000]
+        assert calls == []
+        clock[0] = 10900
+        db._periodic_backup()
+        assert calls == [10900]
+        original = Path(db.backup_path).read_bytes()
+        clock[0] = 21700
+        db._periodic_backup()
+        assert calls == [10900]
         assert Path(db.backup_path).read_bytes() == original
         assert db.backup_health_snapshot()['last_skip_reason'] == 'BACKUP_SKIPPED_UNCHANGED'
         # A committed journal write schedules the next due full image.
         write_primary(db, 2)
-        clock[0] = 2800
+        clock[0] = 32500
         db._periodic_backup()
-        assert calls == [1000, 2800]
+        assert calls == [10900, 32500]
         with sqlite3.connect(db.backup_path) as conn:
             assert conn.execute('SELECT COUNT(*) FROM strategy_events').fetchone()[0] == 2
 

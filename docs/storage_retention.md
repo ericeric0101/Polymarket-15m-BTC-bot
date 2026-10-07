@@ -115,13 +115,13 @@ controlled startup; implementation does not restart the bot.
 ## Full-backup write amplification
 
 `DEFAULT_BACKUP_INTERVAL_SEC` in TradeJournalDB is the sole production default
-(900 seconds); constructor overrides remain available for tests/explicit callers.
+(10800 seconds); constructor overrides remain available for tests/explicit callers.
 The launcher does not supply another interval. The primary journal remains WAL
 with synchronous=NORMAL; normal restart reads the primary, not the backup.
-The 15-minute RPO is a recovery-image target for primary loss/corruption, not a
+The 3-hour RPO is a recovery-image target for primary loss/corruption, not a
 guarantee under disk pressure or failed backups; lost risk/session evidence may
 require operator reconciliation before trading. This is a deliberate increase
-from the previous 30-second backup RPO. WAL does not replace an independent backup
+from the previous 900-second backup RPO (an earlier implementation used 30 seconds). WAL does not replace an independent backup
 or guarantee power-loss durability of every recent NORMAL transaction.
 
 Committed schema/run/order/event/session/reconciliation changes mark the existing
@@ -139,3 +139,31 @@ preflight free space, failure stage and retry state. Atomic replacement, one fix
 completed target, cap <=2, conservative space budget and primary-write priority
 remain unchanged. No APFS/Time Machine snapshot deletion is performed. The live
 Python process keeps its old backup cadence until an operator-controlled restart.
+
+
+## Research capture policy version 2
+
+Forward shadow optional BBO trajectories now capture at most once every five
+seconds per market/token. Separate sub-second material BBO events are no longer
+emitted. Position trajectories capture every five seconds, retaining the prior
+one-second minimum for material peak/risk transitions. Calculations, entries,
+exits, reversals, loss warnings and settlement still process each quote. Payloads
+and hourly capture health identify this policy; historical version-1 rows remain
+readable. This loses sub-second BBO trajectory detail, so it is not a substitute
+for decision-point L2 or canonical crossing observations.
+
+The existing 500 MiB TWAP cap is unchanged. It now indicates optional telemetry
+degradation, not a blanket veto on required opening/crossing/checkpoint/path/
+settlement observations. Cached health distinguishes NORMAL,
+DEGRADED_OPTIONAL_TELEMETRY and CRITICAL_CANONICAL_PERSISTENCE while retaining
+the external HEALTHY/DEGRADED/CRITICAL vocabulary. Low free space, enqueue
+rejections and shared writer failures remain critical. Enqueue acceptance is not
+proof of persistence; shared writer error counters remain authoritative.
+
+Periodic backup recovery-image RPO increased from about 15 minutes to 3 hours;
+forced rollover/shutdown backups still run. Exact forced-skip proof is absent
+(the dirty flag is not a source-generation identity), so forced backups remain
+unconditional. This reduces full-image amplification, not primary journal
+durability or deterministic APFS snapshot growth. No historical rows are pruned;
+new optional traffic is rate-bounded, but total canonical history still grows
+and needs a separately reviewed archive/partition policy for indefinite use.

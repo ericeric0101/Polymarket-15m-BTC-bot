@@ -96,12 +96,14 @@ def test_summary_uses_settlement_timestamp_not_epoch_zero():
     assert row["payload"]["settlement_reference_source"] == "polymarket_chainlink_twap_60s_ws"
 
 
-def test_storage_guard_suppresses_optional_events_but_keeps_summary(monkeypatch, tmp_path):
+def test_storage_guard_preserves_observed_crossing_checkpoint_and_summary(monkeypatch, tmp_path):
     db = FakeDb(); db.db_path = str(tmp_path / "research.db"); (tmp_path / "research.db").write_bytes(b"x")
     model = TwapForwardShadow(db=db, max_db_mb=0.0, min_free_disk_gb=0, storage_check_interval_sec=1)
-    sample(model, 100, twap="100")
+    sample(model, 100, twap="101")
     sample(model, 101, twap="99")
     assert model.storage_guard_status()["triggered"] is True
+    emitted = {row["payload"]["event_type"] for row in db.rows}
+    assert {"TWAP_STRIKE_CROSS", "TMINUS_CHECKPOINT"} <= emitted
     assert any(row["payload"]["event_type"] == "RESEARCH_STORAGE_GUARD_TRIGGERED" for row in db.rows)
     model.finalize_market("m", settlement_side="DOWN", settlement_ts=102)
     assert any(row["payload"]["event_type"] == "MARKET_TWAP_SUMMARY" for row in db.rows)
@@ -699,3 +701,51 @@ def test_research_sigma_negative_same_domain_order_is_invalid_not_clamped():
     assert out["sigma_ex_market_age_sec"] is None
     assert out["sigma_ex_market_fresh"] is False
     assert out["p_up_ex_market"] is None
+
+@pytest.mark.parametrize('event', sorted(__import__('bot.twap_forward_shadow', fromlist=['REQUIRED_EVENT_TYPES']).REQUIRED_EVENT_TYPES))
+def test_cap_never_suppresses_required_evidence(tmp_path, event):
+    from bot.research.health import component_health
+    db = FakeDb(); db.db_path = str(tmp_path / 'research.db')
+    (tmp_path / 'research.db').write_bytes(b'x')
+    model = TwapForwardShadow(db=db, max_db_mb=0, min_free_disk_gb=0)
+    model._storage_health(100)
+    model._persist('m', 101, event, {'marker': event})
+    assert db.rows[-1]['payload']['marker'] == event
+    model._persist('m', 102, 'OPTIONAL_DIAGNOSTIC', {})
+    assert db.rows[-1]['payload']['event_type'] == event
+    status = model.storage_guard_status()
+    assert status['persistence_counters']['optional_suppressed'] == 1
+    assert component_health(status, domain='Storage')['state'] == 'DEGRADED'
+
+@pytest.mark.parametrize('failure', ['reject', 'exception', 'worker'])
+def test_canonical_persistence_failure_is_critical_not_optional_degradation(failure):
+    from bot.research.health import component_health
+    class FailingDb(FakeDb):
+        def enqueue_decision(self, **kwargs):
+            if failure == 'exception':
+                raise OSError('disk full')
+            return failure != 'reject'
+        def research_health(self):
+            return {'write_errors': int(failure == 'worker')}
+    model = TwapForwardShadow(db=FailingDb())
+    model._persist('m', 100, 'TWAP_STRIKE_CROSS', {})
+    assert component_health(model.storage_guard_status(), domain='Storage')['state'] == 'CRITICAL'
+
+
+def test_free_space_warning_overrides_cap_and_recovers(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from bot.research.health import component_health
+    db = FakeDb(); db.db_path = str(tmp_path / 'research.db')
+    (tmp_path / 'research.db').write_bytes(b'x')
+    model = TwapForwardShadow(db=db, max_db_mb=0, storage_check_interval_sec=1)
+    monkeypatch.setattr('bot.twap_forward_shadow.shutil.disk_usage', lambda _: SimpleNamespace(free=9 * 1024**3))
+    model._storage_health(100)
+    assert model.storage_guard_status()['reason'] == 'free_disk_low'
+    assert component_health(model.storage_guard_status(), domain='Storage')['state'] == 'CRITICAL'
+    # Required evidence is attempted, never silently suppressed under pressure.
+    model._persist('m', 101, 'TWAP_STRIKE_CROSS', {})
+    assert db.rows[-1]['payload']['event_type'] == 'TWAP_STRIKE_CROSS'
+    monkeypatch.setattr('bot.twap_forward_shadow.shutil.disk_usage', lambda _: SimpleNamespace(free=20 * 1024**3))
+    model._storage_health(102)
+    assert component_health(model.storage_guard_status(), domain='Storage')['state'] == 'DEGRADED'
+    assert len([r for r in db.rows if r['payload']['event_type'] == 'RESEARCH_STORAGE_GUARD_TRIGGERED']) == 2

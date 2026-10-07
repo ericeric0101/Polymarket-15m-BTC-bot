@@ -14,6 +14,9 @@ from zoneinfo import ZoneInfo
 CONFIGS = (("120_0", 120, 0), ("120_2", 120, 2), ("120_5", 120, 5))
 EXIT_POLICIES = ("HOLD", "TP20", "TRAIL5", "TRAIL10", "COMBINED180", "COMBINED300")
 NOTIONAL_USDC = 5.0
+# Optional trajectory persistence only; all quote-driven calculations still run.
+OPTIONAL_SNAPSHOT_INTERVAL_SEC = 5.0
+CAPTURE_POLICY_VERSION = 2
 PROFIT_LOCK_LADDER = ((.05, 0.0), (.10, .03), (.15, .05), (.20, .10), (.30, .15))
 
 
@@ -97,8 +100,6 @@ class ForwardShadowExperiment:
         self._candidates: dict[str, dict[str, Any]] = {}
         self._tracked_tokens: set[tuple[str, str]] = set()
         self._last_bbo_ts: dict[tuple[str, str], float] = {}
-        self._last_bbo_change_ts: dict[tuple[str, str], float] = {}
-        self._last_bbo_signature: dict[tuple[str, str], tuple[Any, ...]] = {}
         self._last_snapshot: dict[str, float] = {}
         self._last_health_hour: int | None = None
         self._last_health_counters = {"events_enqueued": 0, "events_suppressed": 0, "queue_drops": 0, "write_errors": 0}
@@ -294,24 +295,12 @@ class ForwardShadowExperiment:
                     bids: list[tuple[float, float]], asks: list[tuple[float, float]],
                     time_left: float | None, quote_ts: float | None, reference_ts: float | None) -> None:
         token_key = (slug, instrument_id)
-        signature = (round(bid, 4), round(ask, 4), bid_size, ask_size)
-        previous = self._last_bbo_signature.get(token_key)
-        if now - self._last_bbo_ts.get(token_key, 0.0) < 1.0:
-            if previous is not None and signature != previous and now - self._last_bbo_change_ts.get(token_key, 0.0) >= 0.25:
-                self._last_bbo_change_ts[token_key] = now
-                self._last_bbo_signature[token_key] = signature
-                self._emit(slug, now, {"event_type": "SHADOW_BBO_MATERIAL_CHANGE", "slug": slug,
-                    "instrument_id": instrument_id, "side": side, "event_ts": now,
-                    "best_bid": bid, "best_bid_size": bid_size, "best_ask": ask, "best_ask_size": ask_size,
-                    "change_from_prior": list(previous), "quote_source_ts": quote_ts,
-                    "authority": "research_only_no_order_or_ownership"})
-            else:
-                self.counters["events_suppressed"] += 1
+        if now - self._last_bbo_ts.get(token_key, 0.0) < OPTIONAL_SNAPSHOT_INTERVAL_SEC:
+            self.counters["events_suppressed"] += 1
             return
         self._last_bbo_ts[token_key] = now
-        self._last_bbo_change_ts[token_key] = now
-        self._last_bbo_signature[token_key] = signature
         self._emit(slug, now, {"event_type": "SHADOW_BBO_SNAPSHOT", "slug": slug,
+            "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": OPTIONAL_SNAPSHOT_INTERVAL_SEC,
             "candidate_ids": [s["candidate_id"] for s in self._candidates.values()
                               if s["slug"] == slug and s["token"] == instrument_id],
             "instrument_id": instrument_id, "side": side, "event_ts": now,
@@ -343,6 +332,7 @@ class ForwardShadowExperiment:
             "db_write_errors": db_errors, "db_decision_rows_written": db_rows_written}
         self._emit(slug, now, {"event_type": "FORWARD_SHADOW_CAPTURE_HEALTH", "run_id": self.run_id,
             "hour_epoch": hour * 3600, **self.counters, **deltas, **db_health,
+            "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": OPTIONAL_SNAPSHOT_INTERVAL_SEC,
             "authority": "research_only_no_order_or_ownership"})
 
     def _mark(self, state: dict[str, Any], now: float, bid: float, ask: float,
@@ -395,12 +385,13 @@ class ForwardShadowExperiment:
                 "position_id": state["position_id"], "entry_variant": state["entry_variant"],
                 "signal_side": prod_side, "signal_score": score, "trend_bps": trend_bps,
                 "event_ts": now, "authority": "research_only_no_order_or_ownership"})
-        # Write at most once/sec, except material BBO/peak/risk-state changes.
+        # Periodic trajectory every five seconds; peak/risk transitions retain the
+        # existing one-second bound. Exit/reversal/loss events remain independent.
         signature = (round(bid, 2), round(ask, 2), round(state["mfe"], 2), round(state["mae"], 2), reversed_now, leader)
         key = state["position_id"]
         previous = getattr(self, "_last_signature", {}).get(key)
         elapsed_since_snapshot = now - state["last_mark_ts"]
-        due = elapsed_since_snapshot >= 1.0
+        due = elapsed_since_snapshot >= OPTIONAL_SNAPSHOT_INTERVAL_SEC
         prior_mfe, prior_mae = previous[2:4] if previous is not None else (None, None)
         material = previous is not None and (
             abs(round(state["mfe"], 2) - prior_mfe) >= 0.01
@@ -411,6 +402,7 @@ class ForwardShadowExperiment:
         if due or (material and elapsed_since_snapshot >= 1.0):
             age_ref = max(0.0, now - reference_ts) if reference_ts else None
             self._emit(state["slug"], now, {"event_type": "SHADOW_POSITION_MARK", "candidate_id": state["candidate_id"],
+                "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": OPTIONAL_SNAPSHOT_INTERVAL_SEC,
                 "position_id": key, "entry_variant": state["entry_variant"],
                 "slug": state["slug"], "entry_config": state["config"], "side": position_side,
                 "instrument_id": state["token"], "event_ts": now, "best_bid": bid,
@@ -547,11 +539,10 @@ class ForwardShadowExperiment:
                     "authority": "research_only_no_order_or_ownership"})
             ended += 1
             self._candidates.pop(position_id, None)
+            getattr(self, "_last_signature", {}).pop(position_id, None)
         if not any(state["slug"] == slug for state in self._candidates.values()):
             self._tracked_tokens = {key for key in self._tracked_tokens if key[0] != slug}
             self._last_bbo_ts = {key: value for key, value in self._last_bbo_ts.items() if key[0] != slug}
-            self._last_bbo_change_ts = {key: value for key, value in self._last_bbo_change_ts.items() if key[0] != slug}
-            self._last_bbo_signature = {key: value for key, value in self._last_bbo_signature.items() if key[0] != slug}
         self._maybe_emit_health(slug, float(settlement_ts))
         return ended
 

@@ -196,7 +196,7 @@ def test_mark_snapshots_are_rate_limited_and_count_suppressed_updates():
     assert len(events(db, "SHADOW_BBO_SNAPSHOT")) == 1
     quote(exp, now=1_000_000_120.3, bid=.47, ask=.48)
     assert len(events(db, "SHADOW_BBO_SNAPSHOT")) == 1
-    assert len(events(db, "SHADOW_BBO_MATERIAL_CHANGE")) == 1
+    assert len(events(db, "SHADOW_BBO_MATERIAL_CHANGE")) == 0
     assert exp.counters["events_suppressed"] > 0
 
 
@@ -249,3 +249,22 @@ def test_combined_shadow_no_progress_needs_time_and_two_thesis_components():
     exits = [row for row in events(db, "SHADOW_EXIT") if row["exit_policy"].startswith("COMBINED")]
     assert {row["exit_policy"] for row in exits} == {"COMBINED180"}
     assert exits[0]["exit_reason"] == "no_progress_180s_with_thesis_weakening"
+
+
+def test_optional_five_second_sampling_preserves_quote_driven_extrema_and_exits():
+    db = ResearchDB(); exp = ForwardShadowExperiment(db=db, run_id='test')
+    quote(exp, now=1_000_000_120)
+    marks = len(events(db, 'SHADOW_POSITION_MARK'))
+    for second in (121, 122, 123, 124):
+        quote(exp, now=1_000_000_000 + second)
+    assert len(events(db, 'SHADOW_POSITION_MARK')) == marks
+    assert len(events(db, 'SHADOW_BBO_SNAPSHOT')) == 1
+    quote(exp, now=1_000_000_125)
+    assert len(events(db, 'SHADOW_POSITION_MARK')) > marks
+    assert len(events(db, 'SHADOW_BBO_SNAPSHOT')) == 2
+    # TP can trigger between sampled BBO rows; its exact event is retained.
+    quote(exp, now=1_000_000_126, bid=.60, ask=.61)
+    assert any(r['exit_policy'] == 'TP20' for r in events(db, 'SHADOW_EXIT'))
+    assert len(events(db, 'SHADOW_BBO_SNAPSHOT')) == 2
+    assert any(r['mfe_bid_pct'] > .19 for r in events(db, 'SHADOW_POSITION_MARK'))
+    assert all(r['capture_policy_version'] == 2 for r in events(db, 'SHADOW_POSITION_MARK'))

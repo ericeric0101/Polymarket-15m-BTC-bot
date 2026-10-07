@@ -38,7 +38,7 @@ def test_normal_dry_run_initialization_has_one_writer_and_no_outcome_runtime(tmp
                      'outcome_lead_lag_runtime','outcome_lead_lag_shadow'):
             assert not hasattr(h,name)
         assert h.l2_update_ts_by_inst=={} and h.quote_max_delivery_delay_sec==2.0
-        assert h.trade_db._backup_interval_sec==900
+        assert h.trade_db._backup_interval_sec==10800
         assert not list(tmp_path.rglob('hyperliquid_lead_lag.db'))
         assert not hasattr(h.app_config,'outcome_lead_lag')
         # Retained non-Outcome stream payloads survive the same writer.
