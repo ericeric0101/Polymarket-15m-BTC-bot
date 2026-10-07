@@ -13,7 +13,7 @@ def percentile(values, point):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="logs/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", required=True, help="Explicit historical DB path; restore archive first if needed")
     args = parser.parse_args()
     with sqlite3.connect(f"file:{args.db}?mode=ro", uri=True) as conn:
         names = [row[0] for row in conn.execute("SELECT DISTINCT name FROM latency_spans")]

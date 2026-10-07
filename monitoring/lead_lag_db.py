@@ -1,4 +1,7 @@
-"""Asynchronous, dedicated persistence for cross-market lead/lag research."""
+"""Shared asynchronous research persistence; runtime callers supply an explicit path.
+
+Legacy table names/columns remain for historical readers. No default legacy DB.
+"""
 from __future__ import annotations
 
 import json
@@ -18,7 +21,7 @@ class LeadLagDB:
     # Cross-market references have no Outcome market id, so persist a stable
     # sentinel instead of NULL to make one-second upserts real.
     GLOBAL_MARKET_ID = -1
-    def __init__(self, db_path: str = "data/research/hyperliquid_lead_lag.db") -> None:
+    def __init__(self, db_path: str) -> None:
         self.db_path = str(Path(db_path))
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._queue: queue.Queue[tuple[str, str, int | None, int, dict[str, Any]]] = queue.Queue(maxsize=20_000)

@@ -19,7 +19,7 @@ def _ints(raw: str) -> list[int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="logs/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", required=True, help="Explicit historical DB path; restore archive first if needed")
     parser.add_argument("--shock", default="300,400,500,700,1000")
     parser.add_argument("--residual", default="200,250,300,400,500")
     parser.add_argument("--debounce", default="1,2")

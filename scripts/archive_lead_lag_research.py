@@ -113,7 +113,7 @@ def apply_retention(db_path: str, archive_dir: str, raw_retention_days: int) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="logs/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", required=True, help="Explicit historical DB path; restore archive first if needed")
     parser.add_argument("--archive-dir", default="logs/lead_lag_archive")
     parser.add_argument("--raw-retention-days", type=int, default=7)
     parser.add_argument("--apply", action="store_true", help="export verified partitions and then prune raw rows")

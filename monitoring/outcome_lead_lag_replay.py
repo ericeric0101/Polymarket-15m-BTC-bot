@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from bot.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
-from bot.outcome_lead_lag_types import ReferenceTick
+from monitoring.legacy.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
+from monitoring.legacy.outcome_lead_lag_types import ReferenceTick
 
 
 @dataclass(frozen=True)

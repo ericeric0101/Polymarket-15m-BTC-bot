@@ -56,10 +56,7 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
         "bot/order_events.py",
         "bot/trade_telemetry.py",
         "monitoring/trade_journal_db.py",
-        "bot/lead_lag_observation.py",
-        "bot/hyperliquid_outcome_observer.py",
         "bot/order_submission.py",
-        "bot/outcome_lead_lag_exit_handoff.py",
         "bot/adapter_overrides.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",
@@ -139,7 +136,6 @@ from bot.recovery import StrategyRecoveryMixin
 from bot.shadow_simulation import ShadowSimulationMixin
 from bot.depth_risk_shadow import DepthRiskShadowMixin
 from bot.depth_risk import cap_buy_quantity
-from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
     evaluate_market_phase,
@@ -173,7 +169,6 @@ from bot.entry_session_policy import new_buy_session_decision
 from bot.quoting import (
     apply_quote_plan_guards,
 )
-from bot.fast_follow_economics import evaluate_fast_follow_economics
 from bot.quote_service import (
     apply_entry_quality_quote_placement,
     parse_quote_plan,
@@ -281,7 +276,6 @@ class IntegratedBTCStrategy(
     StrategyRecoveryMixin,
     ShadowSimulationMixin,
     DepthRiskShadowMixin,
-    LeadLagObservationMixin,
     StrategyLifecycleMixin,
     Strategy,
 ):
@@ -417,10 +411,7 @@ class IntegratedBTCStrategy(
         top_depth = ask_size if ask_size is not None else ask_depth
         depth_adequate = top_depth >= quantity if top_depth is not None and quantity is not None else None
         entry_source = str(candidate_context.get("entry_source") or "normal_maker")
-        edge_method = (
-            "fast_follow_resolution_ev_minus_fee_minus_markout"
-            if entry_source == "outcome_fast_follow" else "maker_quote_economics"
-        )
+        edge_method = "maker_quote_economics"
         edge_data = edge_semantics(
             probability=probability, entry_price=price, fee_per_share=fee_ps,
             execution_penalty_per_share=penalty_ps, method=edge_method,
@@ -483,135 +474,7 @@ class IntegratedBTCStrategy(
             **labels,
         }
 
-    def _log_fast_follow_economics_block_throttled(
-        self, *, instrument_id, reason: str, message: str, now_ts: float | None = None,
-    ) -> None:
-        """Keep repeated quote-level economics vetoes out of the terminal flood."""
-        now_ts = time.time() if now_ts is None else float(now_ts)
-        interval_sec = max(1.0, float(getattr(self, "fast_follow_economics_log_interval_sec", 30.0)))
-        slug = str(getattr(self, "current_market_slug", None) or getattr(self, "selected_slug", None) or "-")
-        key = (slug, str(instrument_id), str(reason))
-        states = getattr(self, "_fast_follow_economics_log_state_by_key", None)
-        if not isinstance(states, dict):
-            states = {}
-            self._fast_follow_economics_log_state_by_key = states
 
-        state = states.get(key)
-        if state is not None and now_ts - state["last_log_ts"] < interval_sec:
-            state["suppressed"] += 1
-            return
-
-        suppressed = int(state["suppressed"]) if state is not None else 0
-        suffix = f" suppressed={suppressed} in_last={interval_sec:.0f}s" if suppressed else ""
-        logger.warning(message + suffix)
-        states[key] = {"last_log_ts": now_ts, "suppressed": 0}
-
-        # Keep the per-process diagnostic cache bounded across market rolls.
-        if len(states) > 128:
-            stale_before = now_ts - interval_sec * 2
-            for old_key, old_state in list(states.items()):
-                if old_state["last_log_ts"] < stale_before:
-                    states.pop(old_key, None)
-                    if len(states) <= 96:
-                        break
-            while len(states) > 128:
-                states.pop(next(iter(states)))
-
-    def fast_follow_execution_penalty_allows(self, *, candidate, instrument_id, limit_price, quantity) -> bool:
-        """Apply the canonical cached forecast and empirical penalty to a FOK BUY.
-
-        The quote callback is synchronous, so it deliberately consumes only
-        the current forecast produced by the normal quote cycle; it never
-        issues price or fee I/O while deciding whether to send an order.
-        """
-        forecast = None
-        current_forecast = getattr(self, "_build_fast_follow_forecast_state", None)
-        max_forecast_age_sec = float(getattr(self, "fast_follow_max_forecast_age_sec", 5.0))
-        if callable(current_forecast):
-            try:
-                forecast = current_forecast(
-                    instrument_id=instrument_id,
-                    market_mid=Decimal(str(limit_price)),
-                    max_source_age_sec=max_forecast_age_sec,
-                )
-            except Exception as exc:
-                logger.warning(f"Fast-follow current forecast unavailable; using cached forecast if fresh: {exc}")
-            source_diagnostic = getattr(self, "_last_fast_follow_forecast_source_diagnostic", {})
-            if forecast is None and isinstance(source_diagnostic, dict) and source_diagnostic.get("reason") == "fast_follow_source_stale":
-                self._last_fast_follow_economics_context = {
-                    "economics_reason": "fast_follow_source_stale",
-                    **source_diagnostic,
-                }
-                logger.error(
-                    "Fast-follow economics unavailable: stale underlying TWAP "
-                    f"source_age={source_diagnostic.get('source_age_sec')} "
-                    f"max_age={source_diagnostic.get('max_source_age_sec')}"
-                )
-                return False
-        forecast = forecast or getattr(self, "last_forecast_state", None)
-        self._last_fast_follow_economics_context = {}
-        side = getattr(self._side_for_instrument_id(instrument_id), "value", "NONE").lower()
-        probability_for_outcome = getattr(forecast, "probability_for_outcome", None)
-        adverse_markout = getattr(self, "fast_follow_execution_penalty_per_share", None)
-        if not callable(probability_for_outcome) or side not in {"up", "down"}:
-            logger.error("Fast-follow economics unavailable: no current directional forecast")
-            return False
-        forecast_age_sec = time.time() - float(getattr(forecast, "created_ts", 0.0) or 0.0)
-        if forecast_age_sec < 0 or forecast_age_sec > max_forecast_age_sec:
-            self._last_fast_follow_economics_context = {
-                "economics_reason": "stale_forecast",
-                "forecast_age_sec": float(forecast_age_sec),
-                "max_forecast_age_sec": float(max_forecast_age_sec),
-            }
-            logger.error(
-                "Fast-follow economics unavailable: stale forecast "
-                f"age={forecast_age_sec:.3f}s max_age={max_forecast_age_sec:.3f}s"
-            )
-            return False
-        try:
-            result = evaluate_fast_follow_economics(
-                fair_price=Decimal(str(probability_for_outcome(side))),
-                limit_price=Decimal(str(limit_price)), quantity=Decimal(str(quantity)),
-                adverse_markout_per_share=(Decimal(str(adverse_markout)) if adverse_markout is not None else None),
-                min_expected_net_usdc=Decimal(str(self.maker_min_expected_net_usdc)),
-            )
-        except (ArithmeticError, TypeError, ValueError) as exc:
-            logger.error(f"Fast-follow economics evaluation failed: {exc}")
-            return False
-        self._last_fast_follow_economics = result
-        self._last_fast_follow_economics_context = {
-            "economics_reason": result.reason,
-            "forecast_age_sec": float(forecast_age_sec),
-            "max_forecast_age_sec": float(max_forecast_age_sec),
-            "fair_price": float(probability_for_outcome(side)),
-            "limit_price": float(limit_price),
-            "quantity": float(quantity),
-            "resolution_ev_usdc": float(result.resolution_ev_usdc),
-            "taker_fee_usdc": float(result.taker_fee_usdc),
-            "execution_penalty_usdc": float(result.execution_penalty_usdc),
-            "execution_penalty_source": str(
-                getattr(self, "fast_follow_execution_penalty_source", "unavailable")
-            ),
-            "expected_net_usdc": float(result.expected_net_usdc),
-            "min_expected_net_usdc": float(self.maker_min_expected_net_usdc),
-        }
-        if not result.allowed:
-            IntegratedBTCStrategy._log_fast_follow_economics_block_throttled(
-                self,
-                instrument_id=instrument_id,
-                reason=result.reason,
-                message=(
-                    "Fast-follow BUY blocked by economics: "
-                    f"reason={result.reason} fair={float(probability_for_outcome(side)):.6f} "
-                    f"limit={float(limit_price):.6f} qty={float(quantity):.4f} "
-                    f"resolution_ev={float(result.resolution_ev_usdc):+.6f} "
-                    f"taker_fee={float(result.taker_fee_usdc):.6f} "
-                    f"markout_penalty={float(result.execution_penalty_usdc):.6f} "
-                    f"net={float(result.expected_net_usdc):+.6f} "
-                    f"min={float(self.maker_min_expected_net_usdc):.6f}"
-                ),
-            )
-        return result.allowed
     """
     Integrated BTC Strategy combining:
     - Nautilus trading framework
@@ -3608,7 +3471,7 @@ class IntegratedBTCStrategy(
                                     "time_left_sec": float(time_left_sec_global) if time_left_sec_global is not None else None,
                                 })
                                 try:
-                                    self.lead_lag_db.enqueue_decision(
+                                    self.twap_research_db.enqueue_decision(
                                         run_id=self.run_id, slug=str(self.current_market_slug or ""), market_id=None,
                                         decision_epoch_ns=int(now_ts * 1_000_000_000), payload=payload,
                                     )
@@ -3861,9 +3724,7 @@ class IntegratedBTCStrategy(
             logger.warning(f"Run provenance manifest unavailable: {type(exc).__name__}")
         if run_manifest is not None:
             run_manifest.update(getattr(self, "collection_identity", {}))
-            from bot.outcome_lead_lag_exit_handoff import FAST_FOLLOW_EXECUTION_ENABLED
-            run_manifest["fast_follow_execution_enabled"] = FAST_FOLLOW_EXECUTION_ENABLED
-            run_manifest["effective_outcome_lead_lag_mode"] = self.outcome_lead_lag_mode
+            run_manifest["outcome_subsystem_retired"] = True
         from bot.ops import collection_lifecycle
         collection_lifecycle(self, "new_strategy_started")
         log_strategy_run_start(
@@ -3877,15 +3738,6 @@ class IntegratedBTCStrategy(
             maker_quote_sides=self.maker_quote_sides,
             maker_quote_size_usdc=self.maker_quote_size_usdc,
             run_manifest=run_manifest,
-        )
-        self.hyperliquid_outcome_observer.start()
-        self._db_strategy_event(
-            "HYPERLIQUID_OUTCOME_OBSERVER_STARTED",
-            {
-                "read_only": True,
-                "source": "hyperliquid_outcome_mainnet_ws",
-                "market_id": self.hyperliquid_outcome_observer.market_id,
-            },
         )
         entry_session = new_buy_session_decision(time.time())
         self._db_strategy_event(
@@ -4667,24 +4519,7 @@ class IntegratedBTCStrategy(
         ref_age = float(selected_ref_age) if selected_ref_age is not None else -1.0
         binance_spot_txt = f"{float(self._binance_ws_price):.2f}" if self._binance_ws_price is not None else "None"
         binance_age = max(0.0, now_ts - float(self._binance_ws_price_ts or 0.0)) if self._binance_ws_price_ts > 0 else -1.0
-        fast_follow_status = " fast_follow_exec=disabled"
 
-        outcome_ws_status = ""
-        outcome_observer = getattr(self, "hyperliquid_outcome_observer", None)
-        if outcome_observer is not None:
-            try:
-                outcome_health = outcome_observer.snapshot()
-                mids_age = outcome_health.get("mids_age_sec")
-                mids_age_txt = f"{float(mids_age):.1f}s" if mids_age is not None else "n/a"
-                outcome_ws_status = (
-                    " "
-                    f"outcome_ws={'up' if outcome_health.get('stream_connected') else 'down'}"
-                    f"/{'ready' if outcome_health.get('stream_ready') else 'waiting'} "
-                    f"outcome_mids_age={mids_age_txt} "
-                    f"outcome_disc={int(outcome_health.get('consecutive_disconnects') or 0)}"
-                )
-            except Exception as outcome_status_error:
-                logger.debug(f"Outcome WebSocket status snapshot skipped: {outcome_status_error}")
 
         pnl_target_txt = (
             f"{pnl_decision.normalized_target_usdc:.2f}"
@@ -4760,8 +4595,6 @@ class IntegratedBTCStrategy(
             f"active_orders={active_orders}"
             f"{pnl_status}"
             f"{derived_health_status}"
-            f"{fast_follow_status}"
-            f"{outcome_ws_status}"
             f"{self._format_time_left()}"
         )
         if "active_side_none" in reasons and self.bi_side_enabled:

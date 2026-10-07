@@ -54,12 +54,11 @@ def test_stop_loss_master_switch_is_operator_configurable(monkeypatch):
     assert config.exit.stop_loss_enabled is False
 
 
-def test_fast_follow_forecast_freshness_is_independently_configurable(monkeypatch):
+def test_outcome_config_is_no_longer_a_runtime_section(monkeypatch):
     monkeypatch.setenv("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", "4.5")
-
     config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert not hasattr(config, "outcome_lead_lag")
 
-    assert config.outcome_lead_lag.live_max_forecast_age_sec == 4.5
 
 
 def test_entry_quality_size_down_is_configurable(monkeypatch):

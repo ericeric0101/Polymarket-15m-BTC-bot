@@ -31,7 +31,7 @@ def _read(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error:
         return []
     with conn:
@@ -319,7 +319,7 @@ def _group_summary(positions: list[dict[str, Any]], *, weekend: bool) -> list[di
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Summarize forward shadow experiment telemetry")
-    parser.add_argument("--db", default="data/research/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", default="data/research/twap_forward_shadow.db")
     parser.add_argument("--output", default="reports/forward_shadow")
     parser.add_argument("--status", action="store_true", help="print compact collection status")
     parser.add_argument("--trade-db", default="data/trading/trade_journal.db")

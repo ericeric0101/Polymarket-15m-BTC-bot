@@ -110,7 +110,7 @@ DASHBOARD_THEME=light ./.venv/bin/python dashboard.py
 
 # 前瞻 shadow 收集狀態與報表。
 ./.venv/bin/python scripts/forward_shadow_report.py --status
-./.venv/bin/python scripts/forward_shadow_report.py --db data/research/hyperliquid_lead_lag.db --trade-db data/trading/trade_journal.db
+./.venv/bin/python scripts/forward_shadow_report.py --db data/research/twap_forward_shadow.db --trade-db data/trading/trade_journal.db
 
 # 完整測試套件。
 ./.venv/bin/python -m pytest -q

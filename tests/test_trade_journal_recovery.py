@@ -483,13 +483,6 @@ def test_fast_follow_markout_calibration_excludes_maker_rows_and_deduplicates_ma
     db.stop()
 
 
-def test_fast_follow_calibration_never_uses_maker_snapshot_as_fallback():
-    strategy = _FallbackCalibrationStrategy()
-
-    strategy._apply_fast_follow_execution_penalty_calibration()
-
-    assert strategy.fast_follow_execution_penalty_per_share is None
-    assert strategy.fast_follow_execution_penalty_source == "unavailable"
 
 
 def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):

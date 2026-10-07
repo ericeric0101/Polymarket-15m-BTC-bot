@@ -448,7 +448,8 @@ def test_shutdown_stops_producers_before_shared_research_writer_and_reports_fail
         setattr(strategy, f"_{stem}_stop_event", None)
         setattr(strategy, f"_{stem}_thread", None)
     market_runtime.handle_stop(strategy)
-    assert calls.index("observer") < calls.index("producers") < calls.index("writer")
+    assert "observer" not in calls and "runtime" not in calls
+    assert calls.index("producers") < calls.index("writer")
     assert calls.index("final-event") < calls.index("writer")
     assert calls.count("writer") == 1
     assert any("incomplete or data lost" in message for message in warnings)

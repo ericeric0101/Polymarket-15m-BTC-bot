@@ -40,7 +40,6 @@ from bot.price_streams import (
     rtds_silent_stall_due,
 )
 from bot.forecast_state import ForecastState, build_forecast_state
-from bot.outcome_lead_lag_ingress import publish_strategy_tick
 from execution.maker_engine import MakerEngine
 
 
@@ -249,7 +248,6 @@ class SpotPricerMixin:
                                 tick.received_at_ts,
                                 source="polymarket_chainlink_ws",
                             )
-                            publish_strategy_tick(self, source="polymarket_spot", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         if self._is_twap_spot_source(tick.source):
                             tick_monotonic = time.monotonic()
                             last_valid_twap_monotonic = tick_monotonic
@@ -335,7 +333,6 @@ class SpotPricerMixin:
                                 except Exception:
                                     # Research telemetry cannot interfere with feed ingestion.
                                     pass
-                            publish_strategy_tick(self, source="polymarket_twap", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                             if bool(getattr(self, "_polymarket_chainlink_twap_pending_recovery", False)):
                                 disconnected_at = float(
                                     getattr(self, "_polymarket_chainlink_twap_last_disconnect_monotonic", 0.0) or 0.0
@@ -535,7 +532,6 @@ class SpotPricerMixin:
                                     source="binance_ws",
                                 )
                                 self._observe_btc_1s_history(tick)
-                                publish_strategy_tick(self, source="binance", price=tick.price, source_event_ts_ms=tick.updated_at_ms)
                         except Exception as exc:
                             logger.warning(f"Binance WS tick processing failed: {exc}")
             except Exception as e:
@@ -1661,57 +1657,6 @@ class SpotPricerMixin:
         self.last_forecast_state = state
         return state
 
-    def _build_fast_follow_forecast_state(
-        self, *, instrument_id: Any, market_mid: Decimal, max_source_age_sec: float
-    ) -> Optional[ForecastState]:
-        """Build a current shared forecast from the already-live TWAP cache.
-
-        This performs no network I/O and deliberately uses the exact shared
-        pricing builder used by maker quoting. A fast-follow decision therefore
-        does not wait for a previous maker quote cycle merely to obtain a
-        `ForecastState`.
-        """
-        now = time.time()
-        spot = getattr(self, "_polymarket_chainlink_twap_price", None)
-        observed_ts = float(getattr(self, "_polymarket_chainlink_twap_observation_ts", 0.0) or 0.0)
-        source_age_sec = now - observed_ts if observed_ts > 0 else float("inf")
-        allowed_source_age_sec = min(10.0, max(0.0, float(max_source_age_sec)))
-        self._last_fast_follow_forecast_source_diagnostic = {
-            "source_observed_ts": observed_ts if observed_ts > 0 else None,
-            "source_age_sec": source_age_sec if observed_ts > 0 else None,
-            "max_source_age_sec": allowed_source_age_sec,
-        }
-        if (
-            spot is None
-            or observed_ts <= 0
-            or source_age_sec < 0
-            or source_age_sec > allowed_source_age_sec
-        ):
-            self._last_fast_follow_forecast_source_diagnostic["reason"] = "fast_follow_source_stale"
-            return None
-        slug = str(getattr(self, "current_market_slug", "") or "")
-        if not slug or not self._market_strike_is_entry_eligible(slug):
-            return None
-        strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug)
-        end_ts = getattr(self, "current_market_end_timestamp", None)
-        instrument = self.cache.instrument(self._normalize_instrument_id(instrument_id))
-        outcome = self._extract_outcome_from_instrument(instrument) if instrument is not None else ""
-        if strike is None or end_ts is None or outcome not in {"up", "down"}:
-            return None
-        return self._build_forecast_state(
-            spot=Decimal(str(spot)),
-            strike=Decimal(str(strike)),
-            time_left_sec=max(0.0, float(end_ts) - now),
-            market_mid=Decimal(str(market_mid)),
-            outcome=outcome,
-            reference_source=(
-                f"polymarket_chainlink_twap_"
-                f"{int(getattr(self, '_polymarket_chainlink_twap_window_sec', 60) or 60)}s_ws"
-            ),
-            now_ts=now,
-            source_observed_ts=observed_ts,
-            source_age_sec=source_age_sec,
-        )
 
     async def _compute_fair_probability(self, market_mid: Decimal, instrument_id: Optional[Any] = None) -> Decimal:
         """

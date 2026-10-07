@@ -140,11 +140,6 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     filled_entry_mode = "value"
     filled_limit_price = Decimal("0")
     maker_matched = False
-    fast_follow_owner = getattr(strategy, "outcome_fast_follow_live", None)
-    fast_follow_metadata = (
-        fast_follow_owner.order_metadata(filled_id)
-        if fast_follow_owner is not None else None
-    )
     pending_fill_qty_dec = Decimal(str(float(getattr(event, "last_qty", 0.0) or 0.0)))
     for order_key, state in list(strategy.active_maker_orders.items()):
         side = str(state.get("side", "") or "")
@@ -171,16 +166,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             if total_qty <= 0 or accumulated >= total_qty:
                 strategy.active_maker_orders.pop(order_key, None)
             break
-    if fast_follow_metadata is not None:
-        filled_side = "buy"
-        filled_entry_mode = "fast_follow"
-        filled_limit_price = Decimal(str(fast_follow_metadata.get("limit_price", "0")))
-        filled_directional_snapshot = {
-            "entry_mode": "fast_follow",
-            "entry_source": "outcome_fast_follow",
-            "outcome_fast_follow": fast_follow_metadata,
-        }
-    elif filled_id.startswith("BTC-15M-FAST-FOLLOW-BUY-"):
+    if filled_id.startswith("BTC-15M-FAST-FOLLOW-BUY-"):
         # A process may have restarted after durable intent but before the
         # venue fill callback. The client-order-id namespace preserves the
         # entry source for that late callback.
@@ -198,21 +184,6 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 
     fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
     fill_qty_dec = pending_fill_qty_dec
-    if fast_follow_metadata is not None:
-        requested_qty = Decimal(str(fast_follow_metadata.get("quantity", "0") or "0"))
-        if requested_qty > 0 and fill_qty_dec > requested_qty:
-            strategy._db_strategy_event("FAST_FOLLOW_OVERFILL_ACCEPTED", {
-                "client_order_id": filled_id,
-                "instrument_id": str(filled_inst or ""),
-                "requested_qty": float(requested_qty),
-                "venue_fill_qty": float(fill_qty_dec),
-                "excess_qty": float(fill_qty_dec - requested_qty),
-            })
-            logger.warning(
-                "Accepted venue-reported fast-follow overfill for reconciliation: "
-                f"order={filled_id} requested={float(requested_qty):.6f} "
-                f"filled={float(fill_qty_dec):.6f}"
-            )
     raw_commission_dec = Decimal(str(float(getattr(event, "commission", 0.0) or 0.0)))
     taker_exit_reason = getattr(strategy, "taker_exit_reason_by_client_order_id", {}).get(filled_id)
     taker_exit_execution = getattr(
@@ -344,13 +315,6 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
                 entry_mode=filled_entry_mode,
                 now_ts=time.time(),
             )
-    if fast_follow_owner is not None and fill_side_norm:
-        fast_follow_owner.on_fill(
-            client_order_id=filled_id,
-            side=fill_side_norm,
-            instrument_id=str(strategy._instrument_key(filled_inst)),
-            realized_net_usdc=realized_net_usdc,
-        )
     telemetry = getattr(strategy, "trade_telemetry", None)
     if telemetry is not None and fill_side_norm and fill_qty_dec > 0:
         try:
@@ -648,13 +612,10 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 def handle_order_canceled(strategy: Any, event: Any) -> None:
     """Handle cancel acknowledgements to clear pending-cancel state."""
     canceled_id = str(getattr(event, "client_order_id", "") or "")
-    fast_follow_owner = getattr(strategy, "outcome_fast_follow_live", None)
-    if fast_follow_owner is not None:
-        fast_follow_owner.on_order_terminal(canceled_id)
-    cancel_started_ns = getattr(strategy, "_lead_lag_cancel_started_ns_by_order_id", {}).pop(canceled_id, None)
-    lead_lag_db = getattr(strategy, "lead_lag_db", None)
-    if cancel_started_ns is not None and lead_lag_db is not None:
-        lead_lag_db.enqueue_latency(
+    cancel_started_ns = getattr(strategy, "_cancel_started_ns_by_order_id", {}).pop(canceled_id, None)
+    twap_research_db = getattr(strategy, "twap_research_db", None)
+    if cancel_started_ns is not None and twap_research_db is not None:
+        twap_research_db.enqueue_latency(
             run_id=str(getattr(strategy, "run_id", "")), client_order_id=canceled_id,
             name="cancel_request_to_ack", started_monotonic_ns=int(cancel_started_ns),
             ended_monotonic_ns=time.perf_counter_ns(), created_epoch_ns=time.time_ns(),
@@ -743,9 +704,6 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
     logger.error("=" * 80)
 
     denied_id = str(event.client_order_id)
-    fast_follow_owner = getattr(strategy, "outcome_fast_follow_live", None)
-    if fast_follow_owner is not None:
-        fast_follow_owner.on_order_terminal(denied_id)
     taker_exit_reason = getattr(
         strategy,
         "taker_exit_reason_by_client_order_id",

@@ -182,7 +182,7 @@ class OrderRuntimeMixin:
             else:
                 cancel_started_ns = time.perf_counter_ns()
                 self.cancel_order(order)
-                starts = getattr(self, "_lead_lag_cancel_started_ns_by_order_id", None)
+                starts = getattr(self, "_cancel_started_ns_by_order_id", None)
                 if isinstance(starts, dict):
                     starts[str(order.client_order_id)] = cancel_started_ns
                 state["pending_cancel"] = True
@@ -348,7 +348,7 @@ class OrderRuntimeMixin:
                 if retries < self.maker_cancel_max_retries and order is not None:
                     try:
                         self.cancel_order(order)
-                        starts = getattr(self, "_lead_lag_cancel_started_ns_by_order_id", None)
+                        starts = getattr(self, "_cancel_started_ns_by_order_id", None)
                         if isinstance(starts, dict):
                             starts[coid] = time.perf_counter_ns()
                         state["last_cancel_ts"] = now_ts

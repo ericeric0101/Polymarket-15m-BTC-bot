@@ -136,7 +136,7 @@ def build_report(snapshots: list[dict[str, Any]], *, snapshot_interval_sec: floa
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Read-only Outcome BTC mark → Polymarket TWAP lead/lag report")
-    parser.add_argument("--db", default="logs/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", required=True, help="Explicit historical DB path; restore archive first if needed")
     print(json.dumps(build_report(load_snapshots(parser.parse_args().db)), indent=2, sort_keys=True))
 
 

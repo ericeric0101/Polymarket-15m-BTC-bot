@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
 
@@ -46,7 +47,7 @@ def percentile(values: list[float], point: float) -> float | None:
 def build_report(db_path: str) -> dict[str, dict]:
     submissions: dict[str, dict] = {}
     outcomes: dict[str, list[dict]] = defaultdict(list)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         rows = conn.execute(
             """SELECT ts, event_type, client_order_id, price, qty, reason, payload_json
                FROM order_events

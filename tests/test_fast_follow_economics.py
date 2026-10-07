@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from bot.fast_follow_economics import evaluate_fast_follow_economics
+from monitoring.legacy.fast_follow_economics import evaluate_fast_follow_economics
 
 
 def test_fast_follow_economics_requires_positive_resolution_ev_after_taker_fee_and_penalty():

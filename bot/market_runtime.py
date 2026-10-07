@@ -18,7 +18,6 @@ from bot.db_runtime import take_sync_journal_write_report
 from bot.edge_observation import build_quote_age_telemetry
 from bot.lifecycle import collect_btc_market_candidates, resolve_bi_side_market_selection
 from bot.ops import log_strategy_run_stop, stop_event_threads
-from bot.outcome_lead_lag_ingress import publish_strategy_tick
 from bot.trend_entry_shadow import record_strategy_quote
 from bot.forward_shadow import record_strategy_quote as record_forward_shadow_quote
 
@@ -1011,7 +1010,6 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # Quote plans need the local time at which a current CLOB book was
         # emitted, not the book's last internal market-update timestamp.
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = adapter_emitted_ts
-        publish_strategy_tick(strategy, source="polymarket_bbo", price=(bid_decimal + ask_decimal) / 2, bid=bid_decimal, ask=ask_decimal, bid_size=bid_size_decimal, ask_size=ask_size_decimal)
         # Research-only early-entry comparison. It is fed only a fresh quote,
         # writes to the asynchronous research DB, and has no venue authority.
         stage_started = time.monotonic()
@@ -1080,10 +1078,6 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
                     )
         mid_price = (bid_decimal + ask_decimal) / 2
         strategy._append_real_mid_price(tick.instrument_id, mid_price)
-        stage_started = time.monotonic()
-        if hasattr(strategy, "_lead_lag_observation_on_quote"):
-            strategy._lead_lag_observation_on_quote(quote_received_ts)
-        callback_stage_ms["lead_lag"] = (time.monotonic() - stage_started) * 1000.0
         stage_started = time.monotonic()
         if hasattr(strategy, "_shadow_simulation_on_quote"):
             strategy._shadow_simulation_on_quote(
@@ -1212,21 +1206,6 @@ def handle_stop(strategy: Any) -> None:
     from bot.instrument_admission import stop_instrument_admission
     stop_instrument_admission(strategy)
     stage_started = time.monotonic()
-    logger.info("Strategy shutdown stage started: stage=outcome_observers")
-    outcome_observer = getattr(strategy, "hyperliquid_outcome_observer", None)
-    if outcome_observer is not None:
-        try:
-            outcome_observer.stop()
-        except Exception:
-            logger.debug("Failed to stop Hyperliquid Outcome observer", exc_info=True)
-    lead_lag_runtime = getattr(strategy, "outcome_lead_lag_runtime", None)
-    if lead_lag_runtime is not None:
-        try:
-            lead_lag_runtime.stop()
-        except Exception:
-            logger.debug("Failed to stop Outcome lead/lag runtime", exc_info=True)
-    log_shutdown_stage("outcome_observers", stage_started)
-    stage_started = time.monotonic()
     logger.info("Strategy shutdown stage started: stage=background_threads")
     stop_event_threads(
         stop_events=[
@@ -1294,7 +1273,7 @@ def handle_stop(strategy: Any) -> None:
     from bot.ops import collection_lifecycle
     collection_lifecycle(strategy, "research_writer_stop_start")
     seen_writers = set()
-    for writer_name in ("lead_lag_db", "twap_research_db"):
+    for writer_name in ("twap_research_db",):
         writer = getattr(strategy, writer_name, None)
         if writer is None or id(writer) in seen_writers:
             continue

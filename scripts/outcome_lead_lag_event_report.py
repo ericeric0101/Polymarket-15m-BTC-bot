@@ -51,7 +51,7 @@ def summarize(rows: list[tuple[int, int, int, int]]) -> dict[str, dict[str, floa
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="logs/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", required=True, help="Explicit historical DB path; restore archive first if needed")
     args = parser.parse_args()
     print(json.dumps({
         "research_question": "Do calibrated Outcome shocks precede Polymarket TWAP moves?",

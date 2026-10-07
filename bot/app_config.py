@@ -519,50 +519,6 @@ class OperationsConfig:
             raise ValueError("MONTHLY_NET_TARGET_USDC must be positive when SESSION_PNL_GUARD_MODE is V2")
 
 
-@dataclass(frozen=True)
-class OutcomeLeadLagConfig:
-    mode: str
-    feature_version: str
-    max_source_age_ms: int
-    shock_cents: int
-    residual_cents: int
-    debounce_ticks: int
-    baseline_window_samples: int
-    baseline_warmup_samples: int
-    markout_max_delay_ms: int
-    raw_retention_days: int
-    compact_retention_days: int
-    follower_confirm_window_ms: int
-    follower_confirm_cents: int
-    max_outcome_return_interval_ms: int
-    high_frequency_shadow_enabled: bool
-    bypass_execution_penalty: bool
-    live_signal_ttl_ms: int
-    live_max_entry_price: Decimal
-    live_max_slippage_ticks: int
-    live_max_entries_per_night: int
-    live_max_loss_usdc_per_night: Decimal
-    live_l2_depth_buffer: Decimal
-    live_l2_max_age_sec: float
-    live_max_forecast_age_sec: float
-
-    def __post_init__(self) -> None:
-        if self.mode not in {"off", "shadow", "live_entry_only"}:
-            raise ValueError("OUTCOME_LEAD_LAG_MODE must be off, shadow, or live_entry_only")
-        if self.baseline_warmup_samples > self.baseline_window_samples:
-            raise ValueError("OUTCOME_LEAD_LAG_BASELINE_WARMUP_SAMPLES cannot exceed baseline window")
-        if self.live_max_entry_price <= 0 or self.live_max_entry_price > 1:
-            raise ValueError("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE must be in (0, 1]")
-        if self.live_l2_depth_buffer < 1:
-            raise ValueError("OUTCOME_FAST_FOLLOW_L2_DEPTH_BUFFER must be >= 1")
-        if self.live_l2_max_age_sec <= 0:
-            raise ValueError("OUTCOME_FAST_FOLLOW_L2_MAX_AGE_SEC must be positive")
-        if self.live_max_forecast_age_sec <= 0:
-            raise ValueError("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC must be positive")
-        if self.live_max_forecast_age_sec > self.live_signal_ttl_ms / 1000.0:
-            raise ValueError(
-                "OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC cannot exceed OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS"
-            )
 
 
 @dataclass(frozen=True)
@@ -575,10 +531,13 @@ class AppConfig:
     risk: RiskConfig
     market_data: MarketDataConfig
     operations: OperationsConfig
-    outcome_lead_lag: OutcomeLeadLagConfig
 
     @classmethod
     def from_env(cls, *, enable_terminal_dashboard: bool) -> "AppConfig":
+        retired = sorted(key for key in os.environ if key.startswith(("OUTCOME_", "HYPERLIQUID_", "FAST_FOLLOW_")))
+        if retired:
+            from loguru import logger
+            logger.warning("Retired Outcome configuration ignored; remove these legacy keys: {}", ", ".join(retired))
         startup_verbose = _env_bool("STARTUP_VERBOSE", False)
         terminal_dashboard_enabled = bool(enable_terminal_dashboard)
         terminal_dashboard_refresh_sec = max(0.5, _env_float("TERMINAL_DASHBOARD_REFRESH_SEC", 1.0))
@@ -1150,42 +1109,6 @@ class AppConfig:
                 monthly_net_target_usdc=(
                     _env_decimal("MONTHLY_NET_TARGET_USDC", "0")
                     if os.getenv("MONTHLY_NET_TARGET_USDC") is not None else None
-                ),
-            ),
-            outcome_lead_lag=OutcomeLeadLagConfig(
-                mode=_env_str("OUTCOME_LEAD_LAG_MODE", "shadow").strip().lower(),
-                feature_version=_env_str("OUTCOME_LEAD_LAG_FEATURE_VERSION", "outcome_lead_lag_v2").strip() or "outcome_lead_lag_v2",
-                max_source_age_ms=max(50, _env_int("OUTCOME_LEAD_LAG_MAX_SOURCE_AGE_MS", 1000)),
-                shock_cents=max(1, _env_int("OUTCOME_LEAD_LAG_SHOCK_CENTS", 500)),
-                residual_cents=max(1, _env_int("OUTCOME_LEAD_LAG_RESIDUAL_CENTS", 300)),
-                debounce_ticks=max(1, _env_int("OUTCOME_LEAD_LAG_DEBOUNCE_TICKS", 2)),
-                baseline_window_samples=max(2, _env_int("OUTCOME_LEAD_LAG_BASELINE_WINDOW_SAMPLES", 120)),
-                baseline_warmup_samples=max(1, _env_int("OUTCOME_LEAD_LAG_BASELINE_WARMUP_SAMPLES", 30)),
-                markout_max_delay_ms=max(0, _env_int("OUTCOME_LEAD_LAG_MARKOUT_MAX_DELAY_MS", 1000)),
-                raw_retention_days=max(2, _env_int("OUTCOME_LEAD_LAG_RAW_RETENTION_DAYS", 7)),
-                compact_retention_days=max(7, _env_int("OUTCOME_LEAD_LAG_COMPACT_RETENTION_DAYS", 90)),
-                follower_confirm_window_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_WINDOW_MS", 5000)),
-                follower_confirm_cents=max(1, _env_int("OUTCOME_FAST_FOLLOW_CONFIRM_CENTS", 100)),
-                max_outcome_return_interval_ms=max(
-                    250, _env_int("OUTCOME_LEAD_LAG_MAX_RETURN_INTERVAL_MS", 6000)
-                ),
-                high_frequency_shadow_enabled=_env_bool("OUTCOME_HIGH_FREQUENCY_SHADOW_ENABLED", False),
-                bypass_execution_penalty=_env_bool("OUTCOME_BYPASS_EXECUTION_PENALTY", False),
-                live_signal_ttl_ms=max(250, _env_int("OUTCOME_FAST_FOLLOW_SIGNAL_TTL_MS", 6000)),
-                live_max_entry_price=_env_decimal("OUTCOME_FAST_FOLLOW_MAX_ENTRY_PRICE", "0.90"),
-                live_max_slippage_ticks=max(0, _env_int("OUTCOME_FAST_FOLLOW_MAX_SLIPPAGE_TICKS", 1)),
-                live_max_entries_per_night=max(1, _env_int("OUTCOME_FAST_FOLLOW_MAX_ENTRIES_PER_NIGHT", 15)),
-                live_max_loss_usdc_per_night=max(
-                    Decimal("0"), _env_decimal("OUTCOME_FAST_FOLLOW_MAX_LOSS_USDC_PER_NIGHT", "5")
-                ),
-                live_l2_depth_buffer=max(
-                    Decimal("1"), _env_decimal("OUTCOME_FAST_FOLLOW_L2_DEPTH_BUFFER", "1.20")
-                ),
-                live_l2_max_age_sec=max(
-                    0.05, _env_float("OUTCOME_FAST_FOLLOW_L2_MAX_AGE_SEC", 1.0)
-                ),
-                live_max_forecast_age_sec=max(
-                    0.05, _env_float("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", 5.0)
                 ),
             ),
         )

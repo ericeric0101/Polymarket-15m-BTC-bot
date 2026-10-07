@@ -5,7 +5,7 @@ from collections import defaultdict, deque
 from statistics import median
 from dataclasses import dataclass
 
-from bot.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
+from monitoring.legacy.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
 
 
 @dataclass(frozen=True)

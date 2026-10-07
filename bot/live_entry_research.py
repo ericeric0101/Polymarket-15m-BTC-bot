@@ -168,6 +168,7 @@ def edge_semantics(*, probability: float | None, entry_price: float | None,
                    method: str) -> dict[str, Any]:
     """Calculate gross edge independently; never substitute missing costs with zero."""
     gross = probability - entry_price if probability is not None and entry_price is not None else None
+    # Historical evidence parser only; current maker emits maker_quote_economics.
     comparable = str(method) == "fast_follow_resolution_ev_minus_fee_minus_markout"
     complete = bool(comparable and gross is not None and fee_per_share is not None
                     and execution_penalty_per_share is not None)

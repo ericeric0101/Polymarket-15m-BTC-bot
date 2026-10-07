@@ -572,9 +572,9 @@ def submit_maker_quote(
 
     submit_started_ns = time.perf_counter_ns()
     strategy.submit_order(order)
-    lead_lag_db = getattr(strategy, "lead_lag_db", None)
-    if lead_lag_db is not None:
-        lead_lag_db.enqueue_latency(
+    twap_research_db = getattr(strategy, "twap_research_db", None)
+    if twap_research_db is not None:
+        twap_research_db.enqueue_latency(
             run_id=str(getattr(strategy, "run_id", "")), client_order_id=str(order.client_order_id),
             name="order_handoff", started_monotonic_ns=submit_started_ns,
             ended_monotonic_ns=time.perf_counter_ns(), created_epoch_ns=time.time_ns(),

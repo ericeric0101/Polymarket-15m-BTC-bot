@@ -1,4 +1,4 @@
-"""Conservative, synchronous economics gate for Outcome FOK entries."""
+"""Offline historical Outcome economics reconstruction; no runtime execution caller."""
 from __future__ import annotations
 
 from dataclasses import dataclass

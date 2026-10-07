@@ -90,7 +90,6 @@ def strategy_health(strategy: Any, now_ts: float) -> dict:
         return aggregate_health({
             'Data': {'quote_transport': quote, 'data_engine': queue, 'watchdog': watchdog},
             'Research': {'prediction': read('prediction_research_snapshotter', 'recent_health', now_ts, slug=getattr(strategy, 'current_market_slug', None) or None),
-                         'lead_lag': read('lead_lag_db', 'research_health'),
                          'twap': read('twap_research_db', 'research_health'),
                          'btc': read('btc_1s_history_collector', 'research_health')},
             'Storage': {'twap_guard': storage, 'btc_guard': btc_storage},

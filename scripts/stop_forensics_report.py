@@ -11,7 +11,7 @@ from pathlib import Path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="data/research/hyperliquid_lead_lag.db")
+    parser.add_argument("--db", default="data/research/twap_forward_shadow.db")
     parser.add_argument("--output-dir", default="reports/stop_forensics")
     args = parser.parse_args(); outdir = Path(args.output_dir); outdir.mkdir(parents=True, exist_ok=True)
     db_path = Path(args.db)
@@ -19,7 +19,7 @@ def main() -> int:
         db_path = Path("logs/hyperliquid_lead_lag.db")
     if not db_path.is_file():
         parser.error(f"research database not found: {args.db}")
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         rows = conn.execute("SELECT decision_epoch_ns, payload_json FROM lead_lag_decisions ORDER BY id").fetchall()
     checkpoints, candidates, smart = [], [], []
     actual_stops, post_stop_checkpoints, post_stop_settlements = [], [], []

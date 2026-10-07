@@ -17,7 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 
-_CONFIG_SECTIONS = ("maker", "side", "exit", "risk", "market_data", "operations", "outcome_lead_lag")
+_CONFIG_SECTIONS = ("maker", "side", "exit", "risk", "market_data", "operations")
 _SENSITIVE_KEY_PARTS = ("secret", "private", "password", "passphrase", "token", "credential", "api_key", "apikey", "wallet", "seed")
 _SCHEMA_VERSIONS = {
     "prediction_schema_version": 1,

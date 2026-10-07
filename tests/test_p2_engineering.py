@@ -274,7 +274,7 @@ def test_health_projection_never_probes_journal_and_writer_failure_no_buy_veto(t
     try:
         journal._runtime_health={'state':'DEGRADED','ready':False,'reason':'existing_failure'}
         monkeypatch.setattr(journal,'_probe_runtime_health',lambda:pytest.fail('projection did blocking probe'))
-        host=SimpleNamespace(trade_db=journal,lead_lag_db=SimpleNamespace(research_health=lambda:{'write_errors':3}))
+        host=SimpleNamespace(trade_db=journal,twap_research_db=SimpleNamespace(research_health=lambda:{'write_errors':3}))
         view=strategy_health(host,100)
         assert view['domains']['Execution']['state']=='CRITICAL'
         guard=SessionPnlGuard(SessionPnlGuardConfig(),session_date='synthetic')

@@ -1,8 +1,16 @@
 # Polymarket BTC 15-Minute Trading Bot — Current Authority
 
-> 實作基準：分支 `codex/db-resilience-and-stoploss-priority`，目前已提交版本
-> `b84f249adcdef47afd56b8b5093122095397929f`。台北時間週一至週五全天允許新進場；週六、週日只觀察，maker BUY 與 Outcome fast-follow BUY 均受 gate 阻擋，SELL／止損／緊急出場及資料蒐集仍運作。fast-follow 風控額度仍按台北日曆日分桶。
-> 研究證據基準仍為 `d8b6e29572a27807bfd87dfbf4e356dccafa08b8`，可重現輸出位於 `reports/unified_strategy_research/`。本文件是目前實作解讀、研究結論、核准後續證據與已知技術債的唯一權威；歷史文件在核准清理前保留作為證據。
+## Phase B runtime authority (2026-10-07)
+
+Outcome/Hyperliquid network ingestion and Fast Follow runtime have been retired.
+Current maker, flip/invalidation, session risk, settlement and prediction authorities
+remain unchanged. Required trend-entry, forward-shadow, smart-money trajectory and
+order-latency evidence now share `data/research/twap_forward_shadow.db` with
+prediction/TWAP evidence. `data/research/hyperliquid_lead_lag.db` is historical-only;
+this patch neither mutates nor archives it. BTC1s Parquet and the 900-second journal
+backup policy remain unchanged. See [Phase B ownership](docs/outcome_decommission_phase_b.md).
+Historical entries below describe their recorded checkpoints, not current Outcome
+execution authority. Deployment and a new dry-run validation remain separate.
 
 ## Offline empirical probability study (2026-10-01)
 

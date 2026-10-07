@@ -1,5 +1,9 @@
 # Outcome Fast Follow retirement — Phase A
 
+Historical Phase A checkpoint. Runtime retention described below is superseded by
+[Phase B](outcome_decommission_phase_b.md); the observer and Fast Follow runtime
+are now removed. This document preserves the earlier engineering rationale.
+
 Outcome / Hyperliquid ingestion, observational lead-lag research, shared LeadLagDB
 writers and historical databases remain. This change requires a subsequent manual
 runtime restart to take effect; it does not alter an already running process.

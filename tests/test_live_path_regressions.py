@@ -39,7 +39,6 @@ from bot.entry_session_policy import EntrySessionDecision, TAIPEI
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle_runtime import StrategyLifecycleMixin
-from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import (
     find_btc_instrument,
@@ -128,122 +127,12 @@ class DummyOrder:
         self.client_order_id = client_order_id
 
 
-def test_fast_follow_economics_uses_configured_forecast_freshness(monkeypatch):
-    now = 1_000.0
-    monkeypatch.setattr("run_bot.time.time", lambda: now)
-
-    host = SimpleNamespace(
-        last_forecast_state=SimpleNamespace(
-            created_ts=now - 3.0,
-            probability_for_outcome=lambda _side: Decimal("0.90"),
-        ),
-        maker_engine=SimpleNamespace(
-            config=SimpleNamespace(maker_execution_empirical_adverse_markout_per_share=Decimal("0.01")),
-        ),
-        maker_min_expected_net_usdc=Decimal("0.001"),
-        fast_follow_execution_penalty_per_share=Decimal("0.01"),
-        fast_follow_max_forecast_age_sec=5.0,
-        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="UP"),
-    )
-
-    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
-        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
-    ) is True
-    assert host._last_fast_follow_economics_context["forecast_age_sec"] == 3.0
-    assert host._last_fast_follow_economics_context["resolution_ev_usdc"] == 0.3
-
-    host.fast_follow_max_forecast_age_sec = 2.0
-    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
-        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
-    ) is False
-    assert host._last_fast_follow_economics_context == {
-        "economics_reason": "stale_forecast",
-        "forecast_age_sec": 3.0,
-        "max_forecast_age_sec": 2.0,
-    }
 
 
-def test_fast_follow_cached_forecast_cannot_bypass_stale_current_source(monkeypatch):
-    now = 1_000.0
-    monkeypatch.setattr("run_bot.time.time", lambda: now)
-    cached = SimpleNamespace(
-        created_ts=now,
-        probability_for_outcome=lambda _side: Decimal("0.90"),
-    )
-    host = SimpleNamespace(
-        _build_fast_follow_forecast_state=lambda **_kwargs: None,
-        _last_fast_follow_forecast_source_diagnostic={
-            "reason": "fast_follow_source_stale", "source_observed_ts": 994.0,
-            "source_age_sec": 6.0, "max_source_age_sec": 5.0,
-        },
-        last_forecast_state=cached,
-        maker_min_expected_net_usdc=Decimal("0.001"),
-        fast_follow_execution_penalty_per_share=Decimal("0.01"),
-        fast_follow_max_forecast_age_sec=5.0,
-        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="UP"),
-    )
-
-    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
-        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
-    ) is False
-    assert host._last_fast_follow_economics_context["economics_reason"] == "fast_follow_source_stale"
 
 
-def test_fast_follow_refuses_missing_outcome_specific_execution_penalty(monkeypatch):
-    now = 1_000.0
-    monkeypatch.setattr("run_bot.time.time", lambda: now)
-    host = SimpleNamespace(
-        last_forecast_state=SimpleNamespace(
-            created_ts=now, probability_for_outcome=lambda _side: Decimal("0.90"),
-        ),
-        maker_min_expected_net_usdc=Decimal("0.001"),
-        fast_follow_execution_penalty_per_share=None,
-        fast_follow_execution_penalty_source="unavailable",
-        fast_follow_max_forecast_age_sec=5.0,
-        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="UP"),
-    )
-
-    assert IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
-        host, candidate=object(), instrument_id="up-token", limit_price=Decimal("0.60"), quantity=Decimal("1"),
-    ) is False
-    assert host._last_fast_follow_economics_context["economics_reason"] == "execution_penalty_unavailable"
-    assert host._last_fast_follow_economics_context["execution_penalty_source"] == "unavailable"
 
 
-def test_fast_follow_economics_block_warnings_are_throttled(monkeypatch):
-    now = 1_000.0
-    monkeypatch.setattr("run_bot.time.time", lambda: now)
-    warnings = []
-    monkeypatch.setattr("run_bot.logger.warning", warnings.append)
-    host = SimpleNamespace(
-        current_market_slug="btc-updown-15m-test",
-        last_forecast_state=SimpleNamespace(
-            created_ts=now, probability_for_outcome=lambda _side: Decimal("0.65"),
-        ),
-        maker_min_expected_net_usdc=Decimal("0.001"),
-        fast_follow_execution_penalty_per_share=Decimal("0.01"),
-        fast_follow_max_forecast_age_sec=5.0,
-        _side_for_instrument_id=lambda _instrument_id: SimpleNamespace(value="DOWN"),
-    )
-
-    check = lambda: IntegratedBTCStrategy.fast_follow_execution_penalty_allows(
-        host,
-        candidate=object(),
-        instrument_id="down-token",
-        limit_price=Decimal("0.69"),
-        quantity=Decimal("10"),
-    )
-
-    assert check() is False
-    now += 0.25
-    assert check() is False
-    assert len(warnings) == 1
-
-    now += 30.0
-    host.last_forecast_state.created_ts = now
-    assert check() is False
-    assert len(warnings) == 2
-    assert "suppressed=1" in warnings[-1]
 
 
 def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
@@ -5348,49 +5237,6 @@ def test_forecast_snapshot_telemetry_preserves_shadow_payload_and_serializes_dec
     assert payload["forecast_strike_lock_state"] == "authoritative"
 
 
-def test_external_lead_lag_observation_enqueues_raw_snapshots_only():
-    class Harness(LeadLagObservationMixin):
-        def __init__(self):
-            self.run_id = "run-test"
-            self.current_market_slug = "btc-updown-15m-test"
-            self.current_market_end_timestamp = 1_000.0
-            self.current_up_instrument_id = "up-token"
-            self.latest_quote_by_inst = {"up-token": (Decimal("0.49"), Decimal("0.51"))}
-            self._binance_ws_price = Decimal("100.0")
-            self._binance_ws_price_ts = 100.0
-            self._polymarket_chainlink_twap_price = Decimal("99.0")
-            self._polymarket_chainlink_twap_price_ts = 100.0
-            self.latest_external_spot = Decimal("99.0")
-            self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
-            self.latest_external_spot_source_ts = 100.0
-            self.hyperliquid_outcome_observer = type("Observer", (), {
-                "snapshot": lambda _self: {
-                    "available": True, "analysis_available": True, "stream_connected": True,
-                    "mids_age_sec": 0.1, "side0_book_age_sec": 0.1, "side1_book_age_sec": 0.1,
-                    "source": "test", "market_id": 99, "side0_all_mid": 0.60,
-                    "side1_all_mid": 0.40, "side0_bbo_mid": 0.60, "side1_bbo_mid": 0.40,
-                    "side0_bid": 0.59, "side0_ask": 0.61, "btc_mark": 100.0,
-                },
-            })()
-            self.rows = []
-            self.lead_lag_db = type("LeadLagDB", (), {
-                "enqueue_snapshot": lambda _self, **row: self.rows.append(row),
-            })()
-
-    strategy = Harness()
-    strategy._lead_lag_observation_on_quote(100.0)
-    strategy.latest_quote_by_inst["up-token"] = (Decimal("0.54"), Decimal("0.56"))
-    strategy._binance_ws_price = Decimal("101.0")
-    strategy._polymarket_chainlink_twap_price = Decimal("99.5")
-    for timestamp in (105.0, 115.0, 130.0, 160.0):
-        strategy._lead_lag_observation_on_quote(timestamp)
-
-    assert len(strategy.rows) == 5
-    assert [row["observed_ts"] for row in strategy.rows] == [100.0, 105.0, 115.0, 130.0, 160.0]
-    assert all(row["run_id"] == "run-test" for row in strategy.rows)
-    assert all(row["polymarket_slug"] == "btc-updown-15m-test" for row in strategy.rows)
-    assert all(row["hyperliquid_market_id"] == 99 for row in strategy.rows)
-    assert all(row["payload"]["hyperliquid_outcome_side0_bbo_mid"] == 0.60 for row in strategy.rows)
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():

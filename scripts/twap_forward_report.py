@@ -167,7 +167,7 @@ def main() -> int:
         db = Path("logs/hyperliquid_lead_lag.db")
     if not db.is_file(): parser.error(f"research DB not found: {args.db}")
     out = Path(args.output_dir); out.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db) as conn:
+    with sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True) as conn:
         raw = conn.execute("SELECT decision_epoch_ns,payload_json FROM lead_lag_decisions ORDER BY id").fetchall()
     rows = []
     for ts, text in raw:

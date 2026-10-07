@@ -35,13 +35,7 @@ from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEng
 from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 from bot.trade_telemetry import TradeTelemetry
-from bot.hyperliquid_outcome_observer import HyperliquidOutcomeObserver
-from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
-from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
 from bot.twap_forward_shadow import TwapForwardShadow
-from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
-from bot.outcome_lead_lag_exit_handoff import observational_outcome_mode
-from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
 from bot.trend_entry_shadow import TrendEntryShadow
 from bot.forward_shadow import ForwardShadowExperiment
 from bot.btc_1s_history import BTC1sHistoryCollector
@@ -52,14 +46,13 @@ TWAP_RESEARCH_DB_DEFAULT = "data/research/twap_forward_shadow.db"
 
 
 def build_twap_research_db() -> LeadLagDB:
-    """Create the bounded TWAP writer outside the shared Outcome research DB.
-
-    Outcome snapshots are intentionally high volume and can be much larger
-    than the compact TWAP experiment.  Keeping their SQLite files separate
-    lets the TWAP storage cap protect its own evidence collection instead of
-    disabling it because unrelated research retained historical rows.
-    """
-    return LeadLagDB(db_path=os.getenv("TWAP_RESEARCH_DB_PATH", TWAP_RESEARCH_DB_DEFAULT))
+    """One async store for retained prediction, TWAP and non-Outcome research."""
+    path = Path(os.getenv("TWAP_RESEARCH_DB_PATH", TWAP_RESEARCH_DB_DEFAULT))
+    historical = Path(__file__).resolve().parents[1] / "data/research/hyperliquid_lead_lag.db"
+    same_historical = path.exists() and historical.exists() and path.samefile(historical)
+    if path.resolve().name == "hyperliquid_lead_lag.db" or same_historical:
+        raise ValueError("Historical Hyperliquid DB cannot be used as a runtime research store")
+    return LeadLagDB(db_path=str(path))
 
 
 def initialize_strategy_settings(
@@ -819,11 +812,9 @@ def initialize_strategy_settings(
     strategy._fair_edge_bucket_shadow_by_id = {}
     strategy._depth_risk_shadow_states = {}
     strategy._depth_risk_shadow_last_ts_by_inst = {}
-    strategy._lead_lag_last_snapshot_ts_by_slug = {}
-    strategy._lead_lag_cancel_started_ns_by_order_id = {}
-    strategy.lead_lag_db = LeadLagDB()
+    strategy._cancel_started_ns_by_order_id = {}
     strategy.twap_research_db = build_twap_research_db()
-    for writer_name in ("lead_lag_db", "twap_research_db"):
+    for writer_name in ("twap_research_db",):
         getattr(strategy, writer_name).set_failure_diagnostics(
             journal=strategy.trade_db, writer_name=writer_name, run_id=strategy.run_id,
             identity=lambda: getattr(strategy, "collection_identity", {}),
@@ -841,12 +832,12 @@ def initialize_strategy_settings(
     # Research-only comparison of early BTC trend-entry schedules. This
     # recorder has no venue/order ownership and persists through the async DB.
     strategy.trend_entry_shadow = TrendEntryShadow(
-        db=strategy.lead_lag_db,
+        db=strategy.twap_research_db,
         run_id=strategy.run_id,
     )
     weekday_only = os.getenv("FORWARD_SHADOW_WEEKDAY_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
     strategy.forward_shadow_experiment = ForwardShadowExperiment(
-        db=strategy.lead_lag_db, run_id=strategy.run_id, weekday_only=weekday_only,
+        db=strategy.twap_research_db, run_id=strategy.run_id, weekday_only=weekday_only,
     )
     from bot.stop_forensics_shadow import StopForensicsShadow
     # Research-only: receives raw production invalidation observations but has
@@ -856,59 +847,6 @@ def initialize_strategy_settings(
         # snapshots.  The legacy lead/lag DB remains readable offline, but
         # cross-DB joins made a canonical stop timeline ambiguous.
         db=strategy.twap_research_db, run_id=strategy.run_id,
-    )
-    lead_lag = config.outcome_lead_lag
-    strategy.outcome_lead_lag_mode = observational_outcome_mode(lead_lag.mode)
-    outcome_mode = strategy.outcome_lead_lag_mode
-    strategy.outcome_high_frequency_shadow_enabled = lead_lag.high_frequency_shadow_enabled
-    strategy.outcome_bypass_execution_penalty = lead_lag.bypass_execution_penalty
-    strategy.fast_follow_max_forecast_age_sec = lead_lag.live_max_forecast_age_sec
-    # Populated from Outcome FOK/taker journal evidence during on_start.  A
-    # static maker-derived default here would allow a cross-strategy fallback.
-    strategy.fast_follow_execution_penalty_per_share = None
-    strategy.fast_follow_execution_penalty_source = "unavailable"
-    strategy.outcome_lead_lag_runtime = None
-    strategy.outcome_fast_follow_live = None
-    candidate_handler = None
-    tick_handler = None
-    if outcome_mode == "shadow":
-        # Legacy live_entry_only is now observational shadow mode.
-        # Retain observations without creating an execution owner.
-        strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(
-            strategy, max_markout_delay_ms=lead_lag.markout_max_delay_ms,
-        )
-        tick_handler = strategy.outcome_lead_lag_shadow.on_tick
-    if outcome_mode == "shadow":
-        candidate_handler = strategy.outcome_lead_lag_shadow.record_candidate
-    if outcome_mode == "shadow":
-        strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
-            config=OutcomeLeadLagStateConfig(
-                feature_version=lead_lag.feature_version, max_source_age_ms=lead_lag.max_source_age_ms,
-                shock_cents=lead_lag.shock_cents, residual_cents=lead_lag.residual_cents,
-                debounce_ticks=lead_lag.debounce_ticks,
-                baseline_window_samples=lead_lag.baseline_window_samples,
-                baseline_warmup_samples=lead_lag.baseline_warmup_samples,
-                follower_confirm_window_ms=lead_lag.follower_confirm_window_ms,
-                follower_confirm_cents=lead_lag.follower_confirm_cents,
-                max_outcome_return_interval_ms=lead_lag.max_outcome_return_interval_ms,
-            ),
-            db=strategy.lead_lag_db,
-            candidate_handler=candidate_handler,
-            tick_handler=tick_handler,
-        )
-        strategy.outcome_lead_lag_runtime.start()
-    strategy.hyperliquid_outcome_observer = HyperliquidOutcomeObserver(
-        tick_listener=(lambda price, _market_id, epoch: publish_strategy_tick(
-            strategy, source="outcome_btc_mark", price=price, connection_epoch=epoch,
-        )) if strategy.outcome_lead_lag_runtime is not None else None,
-        probe_listener=(lambda source, price, event_ts_ms, bid, ask, epoch: record_hyperliquid_btc_probe(
-            strategy, source=source, price=price, source_event_ts_ms=event_ts_ms,
-            bid=bid, ask=ask, connection_epoch=epoch,
-        )) if lead_lag.high_frequency_shadow_enabled else None,
-        lifecycle_listener=lambda event, payload: strategy._db_strategy_event(
-            f"HYPERLIQUID_OUTCOME_OBSERVER_{event.upper()}",
-            {"read_only": True, **payload},
-        ),
     )
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0
