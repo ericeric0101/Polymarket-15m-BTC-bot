@@ -23,6 +23,17 @@ from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
 from bot.outcome_lead_lag_types import LeadLagCandidate, LeadLagDecision
 
 
+@pytest.fixture(autouse=True)
+def historical_fast_follow_execution_only(monkeypatch):
+    """Preserve legacy execution regressions pending Phase B removal.
+
+    Only these historical tests override the retired authority. Production has
+    no config/env switch, and current default-disable coverage lives separately
+    in test_fast_follow_retirement.py without this fixture.
+    """
+    monkeypatch.setattr("bot.outcome_lead_lag_exit_handoff.FAST_FOLLOW_EXECUTION_ENABLED", True)
+
+
 def tick(source, price, ms):
     return ReferenceTick(source=source, price_cents=price, received_epoch_ns=ms * 1_000_000, received_monotonic_ns=ms * 1_000_000)
 
@@ -347,7 +358,7 @@ def _live_harness(*, ask: Decimal, submit_automatically: bool = True):
         _twap_reference_degraded=False,
         _market_strike_is_entry_eligible=lambda _slug: True,
         cache=SimpleNamespace(instrument=lambda _inst: instrument, order_book=lambda _inst: book),
-        fast_follow_l2_update_ts_by_inst={"UP.INST": now_ts},
+        l2_update_ts_by_inst={"UP.INST": now_ts},
         _instrument_for_side=lambda side: "UP.INST" if getattr(side, "value", str(side)) == "UP" else "DOWN.INST",
         _side_for_instrument_id=lambda inst: SimpleNamespace(
             value="UP" if str(inst) == "UP.INST" else "DOWN" if str(inst) == "DOWN.INST" else "NONE"
@@ -393,7 +404,7 @@ def test_fast_follow_allows_weekday_daytime_and_uses_local_date_risk_bucket():
     now = datetime(2026, 8, 31, 10, 0, tzinfo=ZoneInfo("Asia/Taipei"))
     owner.strategy.current_market_slug = "weekday-day"
     owner.strategy.current_market_end_timestamp = now.timestamp() + 600
-    owner.strategy.fast_follow_l2_update_ts_by_inst = {"UP.INST": now.timestamp()}
+    owner.strategy.l2_update_ts_by_inst = {"UP.INST": now.timestamp()}
     decision = LeadLagDecision(
         "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
         "twap_followed_outcome", follower_price_cents=7_700_100,
@@ -419,7 +430,7 @@ def test_fast_follow_blocks_weekend_but_keeps_candidate_observable():
         )
         owner.strategy.current_market_slug = "weekend"
         owner.strategy.current_market_end_timestamp = local.timestamp() + 600
-        owner.strategy.fast_follow_l2_update_ts_by_inst = {"UP.INST": local.timestamp()}
+        owner.strategy.l2_update_ts_by_inst = {"UP.INST": local.timestamp()}
         decision = LeadLagDecision(
             "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
             "twap_followed_outcome", follower_price_cents=7_700_100,
@@ -445,7 +456,7 @@ def test_fast_follow_rechecks_session_immediately_before_reservation():
     now = datetime(2026, 8, 31, 23, 59, 59, tzinfo=ZoneInfo("Asia/Taipei"))
     owner.strategy.current_market_slug = "session-boundary"
     owner.strategy.current_market_end_timestamp = now.timestamp() + 600
-    owner.strategy.fast_follow_l2_update_ts_by_inst = {"UP.INST": now.timestamp()}
+    owner.strategy.l2_update_ts_by_inst = {"UP.INST": now.timestamp()}
     decision = LeadLagDecision(
         "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
         "twap_followed_outcome", follower_price_cents=7_700_100,
@@ -1100,3 +1111,29 @@ def test_entry_only_fast_follow_never_cancels_an_existing_order_owner():
     assert not submitted
     assert not cancelled
     assert any(event == "FAST_FOLLOW_ENTRY_BLOCKED" for event, _ in events)
+
+
+def test_historical_economics_rejection_accepts_payload_reason_without_typeerror():
+    owner, submitted, kwargs, events = _live_harness(
+        ask=Decimal("0.60"), submit_automatically=False,
+    )
+    now_ts = datetime(2026, 9, 8, 21, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    owner.strategy.outcome_bypass_execution_penalty = False
+    owner.strategy.fast_follow_execution_penalty_allows = lambda **_kwargs: False
+    owner.strategy._last_fast_follow_economics_context = {
+        "reason": "insufficient_net_ev", "economics_reason": "net_ev",
+    }
+    decision = LeadLagDecision(
+        "follower_confirmed", 1, 500, 300, 2, "v3", time.perf_counter_ns(),
+        "twap_followed_outcome", follower_price_cents=7_700_100,
+    )
+    owner.record_candidate(LeadLagCandidate(decision, "r", "s", 1, time.time_ns()))
+    assert owner.on_quote(
+        instrument_id="UP.INST", best_bid=Decimal("0.59"), best_ask=Decimal("0.60"),
+        ask_size=Decimal("100"), now_ts=now_ts,
+    ) is False
+    blocked = [payload for name, payload in events if name == "FAST_FOLLOW_ENTRY_BLOCKED"]
+    assert blocked[-1]["reason"] == "fast_follow_economics_rejected"
+    assert blocked[-1]["reason_detail"] == "insufficient_net_ev"
+    assert not submitted and not kwargs
+    assert not owner.blocks_normal_buy("s")

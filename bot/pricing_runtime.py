@@ -30,7 +30,7 @@ class PricingRuntimeHost(Protocol):
     live_inventory_cost: dict[str, Any]
     current_token_id: Optional[str]
     _balance_clob_client: Any
-    fast_follow_l2_update_ts_by_inst: dict[str, float]
+    l2_update_ts_by_inst: dict[str, float]
     quote_max_delivery_delay_sec: float
 
     def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
@@ -271,7 +271,7 @@ class PricingRuntimeMixin:
         inst_id = self._normalize_instrument_id(instrument_id)
         inst_key = str(instrument_id or "")
         last_l2_ts = float(
-            getattr(self, "fast_follow_l2_update_ts_by_inst", {}).get(inst_key, 0.0) or 0.0
+            getattr(self, "l2_update_ts_by_inst", {}).get(inst_key, 0.0) or 0.0
         )
         max_age_sec = max(0.1, float(getattr(self, "quote_max_delivery_delay_sec", 2.0)))
         age_sec = time.time() - last_l2_ts if last_l2_ts > 0 else None

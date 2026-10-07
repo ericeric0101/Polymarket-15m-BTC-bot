@@ -22,6 +22,15 @@ from bot.live_entry_research import build_shadow_labels, edge_semantics
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 
+# Phase A: retired execution authority. No environment or config can re-enable
+# it. Legacy execution code remains for historical regression until Phase B.
+FAST_FOLLOW_EXECUTION_ENABLED = False
+
+
+def observational_outcome_mode(requested_mode: str) -> str:
+    """Retain legacy configuration compatibility without execution authority."""
+    return "shadow" if requested_mode == "live_entry_only" else requested_mode
+
 
 @dataclass(frozen=True)
 class FastFollowLiveConfig:
@@ -125,7 +134,11 @@ def fast_follow_l2_precheck(
 
 
 class OutcomeFastFollowLive:
-    """Queue a confirmed signal off-thread; submit only on a quote callback."""
+    """Retired owner retained for historical compatibility, never production BUY."""
+
+    @property
+    def execution_enabled(self) -> bool:
+        return FAST_FOLLOW_EXECUTION_ENABLED
 
     def __init__(self, strategy, config: FastFollowLiveConfig) -> None:
         self.strategy = strategy
@@ -152,6 +165,8 @@ class OutcomeFastFollowLive:
         self._research_snapshots_by_candidate: dict[int, dict] = {}
 
     def _ensure_night_loaded(self, night: str) -> bool:
+        if not self.execution_enabled:
+            return False
         if not self._runtime_journal_ready():
             return False
         if night in self._loaded_nights:
@@ -209,6 +224,8 @@ class OutcomeFastFollowLive:
 
     def _persist_night(self, night: str) -> bool:
         """Persist reservations before an entry; a failure must block the FOK."""
+        if not self.execution_enabled:
+            return False
         if not self._runtime_journal_ready():
             return False
         try:
@@ -264,9 +281,13 @@ class OutcomeFastFollowLive:
             "realized_pnl_usdc": float(self._night_realized_pnl.get(night, Decimal("0"))),
         }
 
-    def _record_blocked(self, candidate, reason: str, **payload) -> None:
+    def _record_blocked(self, candidate, block_reason: str, **payload) -> None:
         """Record one decision diagnostic without quote-path event spam."""
-        key = (int(candidate.created_epoch_ns), reason)
+        # Economics diagnostics may already contain `reason`. Keep the canonical
+        # block reason distinct, instead of colliding at the Python call boundary.
+        if "reason" in payload:
+            payload.setdefault("reason_detail", payload.pop("reason"))
+        key = (int(candidate.created_epoch_ns), block_reason)
         if key in self._blocked_candidate_reasons:
             return
         self._blocked_candidate_reasons.add(key)
@@ -277,7 +298,7 @@ class OutcomeFastFollowLive:
             research_snapshot["candidate_update_count"] = max(1, int(research_snapshot.get("candidate_update_count") or 1))
         self.strategy._db_strategy_event("FAST_FOLLOW_ENTRY_BLOCKED", {
             "slug": candidate.slug,
-            "reason": reason,
+            "reason": block_reason,
             "direction": candidate.decision.direction,
             "research_candidate_id": f"{candidate.slug}|{int(candidate.created_epoch_ns)}",
             "research_snapshot": research_snapshot,
@@ -287,6 +308,9 @@ class OutcomeFastFollowLive:
 
     def record_candidate(self, candidate) -> None:
         if candidate.decision.state != "follower_confirmed":
+            return
+        if not self.execution_enabled:
+            self._record_blocked(candidate, "execution_disabled")
             return
         wanted = ActiveSide.UP if candidate.decision.direction > 0 else ActiveSide.DOWN
         matched_attr = "current_up_instrument_matched" if wanted == ActiveSide.UP else "current_down_instrument_matched"
@@ -426,9 +450,13 @@ class OutcomeFastFollowLive:
             self.strategy._db_strategy_event(event_type, payload)
 
     def order_metadata(self, client_order_id: str) -> dict | None:
+        if not self.execution_enabled:
+            return None
         return self._pending_order_ids.get(client_order_id)
 
     def on_order_terminal(self, client_order_id: str) -> None:
+        if not self.execution_enabled:
+            return
         metadata = self._pending_order_ids.pop(client_order_id, None)
         if metadata is None:
             return
@@ -450,9 +478,11 @@ class OutcomeFastFollowLive:
         # A signal, an eligibility rejection, and a rejected FOK have not
         # created exposure. The normal maker owns its independent path until a
         # fast-follow reservation has become a durable venue intent.
-        return slug in self._attempted_slugs
+        return self.execution_enabled and slug in self._attempted_slugs
 
     def on_fill(self, *, client_order_id: str, side: str, instrument_id: str, realized_net_usdc=None) -> None:
+        if not self.execution_enabled:
+            return
         metadata = self._pending_order_ids.pop(client_order_id, None)
         if metadata is not None and side == "buy":
             self._position_instruments.add(instrument_id)
@@ -479,6 +509,10 @@ class OutcomeFastFollowLive:
 
     def on_quote(self, *, instrument_id, best_bid: Decimal, best_ask: Decimal,
                  ask_size: Decimal | None, now_ts: float, bid_size: Decimal | None = None) -> bool:
+        if not self.execution_enabled:
+            with self._lock:
+                self._pending = None
+            return False
         self._observe_counterfactual_quote(
             instrument_id=instrument_id, best_bid=best_bid, best_ask=best_ask,
             bid_size=bid_size, ask_size=ask_size, now_ts=now_ts,
@@ -720,7 +754,7 @@ class OutcomeFastFollowLive:
             return False
 
         l2_update_ts = float(
-            getattr(self.strategy, "fast_follow_l2_update_ts_by_inst", {}).get(inst_key, 0.0) or 0.0
+            getattr(self.strategy, "l2_update_ts_by_inst", {}).get(inst_key, 0.0) or 0.0
         )
         l2_age_sec = max(0.0, now_ts - l2_update_ts) if l2_update_ts > 0 else None
         book = None

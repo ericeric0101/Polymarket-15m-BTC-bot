@@ -2420,19 +2420,6 @@ class IntegratedBTCStrategy(
                     int(self.market_buy_count_by_slug.get(market_buy_budget_key, 0)),
                     int(getattr(self, "market_buy_count_total_by_slug", {}).get(current_slug, 0)),
                 )
-                fast_follow_owner = getattr(self, "outcome_fast_follow_live", None)
-                if (
-                    side == "buy"
-                    and fast_follow_owner is not None
-                    and fast_follow_owner.blocks_normal_buy(current_slug)
-                ):
-                    self._db_order_event(
-                        event_type="ORDER_SKIP_FAST_FOLLOW_OWNERSHIP",
-                        side="BUY", status="SKIPPED",
-                        reason="fast_follow_owns_market_buy",
-                        payload={"slug": current_slug, "instrument_id": str(inst_id)},
-                    )
-                    continue
                 if (
                     side == "buy"
                     and current_slug
@@ -3874,6 +3861,9 @@ class IntegratedBTCStrategy(
             logger.warning(f"Run provenance manifest unavailable: {type(exc).__name__}")
         if run_manifest is not None:
             run_manifest.update(getattr(self, "collection_identity", {}))
+            from bot.outcome_lead_lag_exit_handoff import FAST_FOLLOW_EXECUTION_ENABLED
+            run_manifest["fast_follow_execution_enabled"] = FAST_FOLLOW_EXECUTION_ENABLED
+            run_manifest["effective_outcome_lead_lag_mode"] = self.outcome_lead_lag_mode
         from bot.ops import collection_lifecycle
         collection_lifecycle(self, "new_strategy_started")
         log_strategy_run_start(
@@ -4677,20 +4667,7 @@ class IntegratedBTCStrategy(
         ref_age = float(selected_ref_age) if selected_ref_age is not None else -1.0
         binance_spot_txt = f"{float(self._binance_ws_price):.2f}" if self._binance_ws_price is not None else "None"
         binance_age = max(0.0, now_ts - float(self._binance_ws_price_ts or 0.0)) if self._binance_ws_price_ts > 0 else -1.0
-        fast_follow_status = ""
-        fast_follow_owner = getattr(self, "outcome_fast_follow_live", None)
-        if fast_follow_owner is not None:
-            try:
-                fast_follow_risk = fast_follow_owner.night_risk_snapshot(now_ts)
-                risk_day_key = fast_follow_risk.get("risk_day_key") or "off_session"
-                fast_follow_status = (
-                    " "
-                    f"fast_follow={fast_follow_risk['filled_entries']}/{fast_follow_risk['max_entries']} "
-                    f"pending={fast_follow_risk['pending_entries']} "
-                    f"risk_day={risk_day_key}"
-                )
-            except Exception as fast_follow_status_error:
-                logger.debug(f"Fast-follow status snapshot skipped: {fast_follow_status_error}")
+        fast_follow_status = " fast_follow_exec=disabled"
 
         outcome_ws_status = ""
         outcome_observer = getattr(self, "hyperliquid_outcome_observer", None)

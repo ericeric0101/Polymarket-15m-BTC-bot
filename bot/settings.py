@@ -40,7 +40,7 @@ from bot.outcome_lead_lag_runtime import OutcomeLeadLagRuntime
 from bot.outcome_lead_lag_state import OutcomeLeadLagStateConfig
 from bot.twap_forward_shadow import TwapForwardShadow
 from bot.outcome_lead_lag_shadow import OutcomeLeadLagShadow
-from bot.outcome_lead_lag_exit_handoff import FastFollowLiveConfig, OutcomeFastFollowLive
+from bot.outcome_lead_lag_exit_handoff import observational_outcome_mode
 from bot.outcome_lead_lag_ingress import publish_strategy_tick, record_hyperliquid_btc_probe
 from bot.trend_entry_shadow import TrendEntryShadow
 from bot.forward_shadow import ForwardShadowExperiment
@@ -766,7 +766,7 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_twap_connection_monotonic = 0.0
     strategy._polymarket_chainlink_twap_pending_recovery = False
     strategy._polymarket_chainlink_twap_connection_epoch = 0
-    strategy.fast_follow_l2_update_ts_by_inst = {}
+    strategy.l2_update_ts_by_inst = {}
     strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd
     strategy.active_side_lock_score_abs = Decimal("0")
     from bot.signal_engine import SignalEngine, SignalEngineConfig
@@ -858,7 +858,8 @@ def initialize_strategy_settings(
         db=strategy.twap_research_db, run_id=strategy.run_id,
     )
     lead_lag = config.outcome_lead_lag
-    strategy.outcome_lead_lag_mode = lead_lag.mode
+    strategy.outcome_lead_lag_mode = observational_outcome_mode(lead_lag.mode)
+    outcome_mode = strategy.outcome_lead_lag_mode
     strategy.outcome_high_frequency_shadow_enabled = lead_lag.high_frequency_shadow_enabled
     strategy.outcome_bypass_execution_penalty = lead_lag.bypass_execution_penalty
     strategy.fast_follow_max_forecast_age_sec = lead_lag.live_max_forecast_age_sec
@@ -870,35 +871,16 @@ def initialize_strategy_settings(
     strategy.outcome_fast_follow_live = None
     candidate_handler = None
     tick_handler = None
-    if lead_lag.mode in {"shadow", "live_entry_only"}:
-        # Research capture is intentionally retained in live-entry mode.  It
-        # writes asynchronously and has no order authority, but prevents a
-        # switch to FOK execution from creating a markout-data blind spot.
+    if outcome_mode == "shadow":
+        # Legacy live_entry_only is now observational shadow mode.
+        # Retain observations without creating an execution owner.
         strategy.outcome_lead_lag_shadow = OutcomeLeadLagShadow(
             strategy, max_markout_delay_ms=lead_lag.markout_max_delay_ms,
         )
         tick_handler = strategy.outcome_lead_lag_shadow.on_tick
-    if lead_lag.mode == "shadow":
+    if outcome_mode == "shadow":
         candidate_handler = strategy.outcome_lead_lag_shadow.record_candidate
-    elif lead_lag.mode == "live_entry_only":
-        strategy.outcome_fast_follow_live = OutcomeFastFollowLive(
-            strategy,
-            FastFollowLiveConfig(
-                signal_ttl_ms=lead_lag.live_signal_ttl_ms,
-                max_entry_price=lead_lag.live_max_entry_price,
-                max_slippage_ticks=lead_lag.live_max_slippage_ticks,
-                max_entries_per_night=lead_lag.live_max_entries_per_night,
-                max_loss_usdc_per_night=lead_lag.live_max_loss_usdc_per_night,
-                l2_depth_buffer=lead_lag.live_l2_depth_buffer,
-                l2_max_age_sec=lead_lag.live_l2_max_age_sec,
-            ),
-        )
-        def candidate_handler(candidate):
-            # Publish the signal to its live owner first. The research shadow
-            # remains asynchronous and cannot delay the quote handoff or trade.
-            strategy.outcome_fast_follow_live.record_candidate(candidate)
-            strategy.outcome_lead_lag_shadow.record_candidate(candidate)
-    if lead_lag.mode in {"shadow", "live_entry_only"}:
+    if outcome_mode == "shadow":
         strategy.outcome_lead_lag_runtime = OutcomeLeadLagRuntime(
             config=OutcomeLeadLagStateConfig(
                 feature_version=lead_lag.feature_version, max_source_age_ms=lead_lag.max_source_age_ms,

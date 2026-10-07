@@ -56,7 +56,7 @@ class _DepthHost(PricingRuntimeMixin):
 
     def __init__(self, *, l2_ts=None):
         self.cache = type("Cache", (), {"order_book": lambda _self, inst: _LiveBook() if inst == "UP" else None})()
-        self.fast_follow_l2_update_ts_by_inst = {"UP": l2_ts} if l2_ts is not None else {}
+        self.l2_update_ts_by_inst = {"UP": l2_ts} if l2_ts is not None else {}
         self._balance_clob_client = type(
             "RestClient",
             (),

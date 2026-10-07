@@ -573,7 +573,7 @@ def promote_prewarm_quotes_to_current_market(strategy: Any, *, now_ts: float | N
 
 
 def handle_order_book_deltas(strategy: Any, deltas: Any) -> None:
-    """Stamp fresh native L2 delivery for fast-follow's FOK precheck.
+    """Stamp fresh native L2 delivery for shared maker depth eligibility.
 
     The DataEngine/cache owns book reconstruction. This callback intentionally
     performs no pricing, database I/O, or order action.
@@ -581,10 +581,10 @@ def handle_order_book_deltas(strategy: Any, deltas: Any) -> None:
     instrument_id = getattr(deltas, "instrument_id", None)
     if instrument_id is None:
         return
-    updates = getattr(strategy, "fast_follow_l2_update_ts_by_inst", None)
+    updates = getattr(strategy, "l2_update_ts_by_inst", None)
     if not isinstance(updates, dict):
         updates = {}
-        strategy.fast_follow_l2_update_ts_by_inst = updates
+        strategy.l2_update_ts_by_inst = updates
     updates[str(instrument_id)] = time.time()
 
 
@@ -1012,30 +1012,6 @@ def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:
         # emitted, not the book's last internal market-update timestamp.
         getattr(strategy, "last_quote_update_ts_by_inst", {})[str(tick.instrument_id)] = adapter_emitted_ts
         publish_strategy_tick(strategy, source="polymarket_bbo", price=(bid_decimal + ask_decimal) / 2, bid=bid_decimal, ask=ask_decimal, bid_size=bid_size_decimal, ask_size=ask_size_decimal)
-        # A confirmed FOK candidate has a short TTL. Run its handoff before
-        # optional shadow/research work and before the per-tick telemetry DB
-        # write, while the fresh L2 state is already available.
-        fast_follow = getattr(strategy, "outcome_fast_follow_live", None)
-        if fast_follow is not None:
-            stage_started = time.monotonic()
-            try:
-                timed_call(strategy, "fast_follow_quote", "QuoteTick", fast_follow.on_quote,
-                    instrument_id=tick.instrument_id,
-                    best_bid=bid_decimal,
-                    best_ask=ask_decimal,
-                    bid_size=bid_size_decimal,
-                    ask_size=ask_size_decimal,
-                    now_ts=quote_received_ts,
-                )
-            except Exception as fast_follow_error:
-                strategy._db_strategy_event("FAST_FOLLOW_ERROR", {
-                    "slug": str(getattr(strategy, "current_market_slug", "") or ""),
-                    "instrument_id": str(tick.instrument_id),
-                    "error": f"{type(fast_follow_error).__name__}: {fast_follow_error}",
-                })
-                logger.error(f"Fast-follow handoff failed: {fast_follow_error}")
-            finally:
-                callback_stage_ms["fast_follow"] = (time.monotonic() - stage_started) * 1000.0
         # Research-only early-entry comparison. It is fed only a fresh quote,
         # writes to the asynchronous research DB, and has no venue authority.
         stage_started = time.monotonic()
