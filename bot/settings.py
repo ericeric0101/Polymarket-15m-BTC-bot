@@ -837,8 +837,13 @@ def initialize_strategy_settings(
         run_id=strategy.run_id,
     )
     weekday_only = os.getenv("FORWARD_SHADOW_WEEKDAY_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+    def research_storage_pressure() -> str:
+        status = strategy.twap_forward_shadow.storage_guard_status()
+        return str(status.get("reason") or "") if status.get("triggered") else ""
+
     strategy.forward_shadow_experiment = ForwardShadowExperiment(
         db=strategy.twap_research_db, run_id=strategy.run_id, weekday_only=weekday_only,
+        storage_pressure=research_storage_pressure,
     )
     from bot.stop_forensics_shadow import StopForensicsShadow
     # Research-only: receives raw production invalidation observations but has

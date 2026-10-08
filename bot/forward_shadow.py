@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from math import floor
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 
@@ -16,6 +16,10 @@ EXIT_POLICIES = ("HOLD", "TP20", "TRAIL5", "TRAIL10", "COMBINED180", "COMBINED30
 NOTIONAL_USDC = 5.0
 # Optional trajectory persistence only; all quote-driven calculations still run.
 OPTIONAL_SNAPSHOT_INTERVAL_SEC = 5.0
+# Under research storage pressure the optional trajectory slows down; exits,
+# reversals, loss warnings and settlements are never thinned.
+PRESSURE_SNAPSHOT_INTERVAL_SEC = {"db_size_cap": 30.0, "free_disk_low": 60.0}
+PRESSURE_MATERIAL_MIN_GAP_SEC = {"db_size_cap": 5.0, "free_disk_low": 15.0}
 CAPTURE_POLICY_VERSION = 2
 PROFIT_LOCK_LADDER = ((.05, 0.0), (.10, .03), (.15, .05), (.20, .10), (.30, .15))
 
@@ -92,8 +96,10 @@ class ForwardShadowExperiment:
         run_id: str,
         weekday_only: bool = True,
         canonical_wait_sec: float = 15.0,
+        storage_pressure: Callable[[], str] | None = None,
     ) -> None:
         self.db, self.run_id = db, str(run_id)
+        self._storage_pressure = storage_pressure
         self.weekday_only = bool(weekday_only)
         self.canonical_wait_sec = max(0.0, float(canonical_wait_sec))
         self._attempted: set[tuple[str, str]] = set()
@@ -290,17 +296,29 @@ class ForwardShadowExperiment:
         self._maybe_emit_health(slug, now)
         return emitted
 
+    def _capture_policy(self) -> tuple[float, float, str]:
+        """Return (periodic interval, material-change min gap, policy label)."""
+        try:
+            reason = str(self._storage_pressure() or "") if self._storage_pressure is not None else ""
+        except Exception:
+            reason = ""
+        if reason in PRESSURE_SNAPSHOT_INTERVAL_SEC:
+            return PRESSURE_SNAPSHOT_INTERVAL_SEC[reason], PRESSURE_MATERIAL_MIN_GAP_SEC[reason], f"storage_{reason}"
+        return OPTIONAL_SNAPSHOT_INTERVAL_SEC, 1.0, "normal"
+
     def _record_bbo(self, *, slug: str, now: float, instrument_id: str, side: str,
                     bid: float, ask: float, bid_size: float | None, ask_size: float | None,
                     bids: list[tuple[float, float]], asks: list[tuple[float, float]],
                     time_left: float | None, quote_ts: float | None, reference_ts: float | None) -> None:
         token_key = (slug, instrument_id)
-        if now - self._last_bbo_ts.get(token_key, 0.0) < OPTIONAL_SNAPSHOT_INTERVAL_SEC:
+        interval, _, policy = self._capture_policy()
+        if now - self._last_bbo_ts.get(token_key, 0.0) < interval:
             self.counters["events_suppressed"] += 1
             return
         self._last_bbo_ts[token_key] = now
         self._emit(slug, now, {"event_type": "SHADOW_BBO_SNAPSHOT", "slug": slug,
-            "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": OPTIONAL_SNAPSHOT_INTERVAL_SEC,
+            "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": interval,
+            "capture_policy": policy,
             "candidate_ids": [s["candidate_id"] for s in self._candidates.values()
                               if s["slug"] == slug and s["token"] == instrument_id],
             "instrument_id": instrument_id, "side": side, "event_ts": now,
@@ -391,7 +409,8 @@ class ForwardShadowExperiment:
         key = state["position_id"]
         previous = getattr(self, "_last_signature", {}).get(key)
         elapsed_since_snapshot = now - state["last_mark_ts"]
-        due = elapsed_since_snapshot >= OPTIONAL_SNAPSHOT_INTERVAL_SEC
+        interval, material_gap, policy = self._capture_policy()
+        due = elapsed_since_snapshot >= interval
         prior_mfe, prior_mae = previous[2:4] if previous is not None else (None, None)
         material = previous is not None and (
             abs(round(state["mfe"], 2) - prior_mfe) >= 0.01
@@ -399,10 +418,11 @@ class ForwardShadowExperiment:
             or signature[4] != previous[4]
             or signature[5] != previous[5]
         )
-        if due or (material and elapsed_since_snapshot >= 1.0):
+        if due or (material and elapsed_since_snapshot >= material_gap):
             age_ref = max(0.0, now - reference_ts) if reference_ts else None
             self._emit(state["slug"], now, {"event_type": "SHADOW_POSITION_MARK", "candidate_id": state["candidate_id"],
-                "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": OPTIONAL_SNAPSHOT_INTERVAL_SEC,
+                "capture_policy_version": CAPTURE_POLICY_VERSION, "snapshot_interval_sec": interval,
+                "capture_policy": policy,
                 "position_id": key, "entry_variant": state["entry_variant"],
                 "slug": state["slug"], "entry_config": state["config"], "side": position_side,
                 "instrument_id": state["token"], "event_ts": now, "best_bid": bid,

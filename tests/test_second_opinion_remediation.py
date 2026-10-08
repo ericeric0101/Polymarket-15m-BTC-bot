@@ -398,10 +398,18 @@ def test_all_repo_order_submission_sites_resolve_public_strategy_choke():
     assert IntegratedBTCStrategy.submit_order is ExecutionSafetyMixin.submit_order
 
 
-def test_opening_waits_for_new_strike_and_complete_pair_instead_of_borrowing_prior_state():
+def test_opening_writes_strike_pending_row_and_waits_for_complete_pair_without_borrowing_prior_state():
     host = opening_host()
     host.market_strike_cache_by_slug = {'btc-updown-15m-900': 100}
-    assert capture_open(host) is None
+    seen = []
+    original = host._settlement_probability_shadow_inputs
+    host._settlement_probability_shadow_inputs = lambda **kw: (seen.append((kw['slug'], kw['strike'])), original(**kw))[1]
+    row = capture_open(host)
+    # The open is observed immediately; the prior market's strike is never borrowed
+    # (the real model returns no p_ex for strike=None: spot_pricer strike guard).
+    assert row['market_slug'] == 'btc-updown-15m-1800'
+    assert row['strike'] is None and row['strike_available'] is False
+    assert seen == [('btc-updown-15m-1800', None)]
     host.market_strike_cache_by_slug = {'btc-updown-15m-1800':100}
     host.research_market_instruments_by_slug['btc-updown-15m-1800'] = {'UP':'up'}
     assert capture_open(host) is None

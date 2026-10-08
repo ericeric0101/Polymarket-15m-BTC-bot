@@ -275,6 +275,49 @@ def align_price_to_tick(strategy: Any, price: Decimal, side: str, instrument: Op
     return aligned
 
 
+def wall_open_market_slug(strategy: Any, now_ts: float) -> str | None:
+    """Return the wall-clock market when trading still holds an expired one."""
+    runtime_slug = str(getattr(strategy, "current_market_slug", "") or "")
+    try:
+        prefix, start = runtime_slug.rsplit("-", 1)
+        if now_ts < float(start) + 900:
+            return None
+    except (TypeError, ValueError):
+        return None
+    wall_slug = f"{prefix}-{int(now_ts // 900) * 900}"
+    known = getattr(strategy, "research_market_instruments_by_slug", {}) or {}
+    return wall_slug if wall_slug != runtime_slug and wall_slug in known else None
+
+
+def resolve_open_market_strike_early(strategy: Any, *, now_ts: float) -> bool:
+    """Start the authoritative Price To Beat lookup at the wall-clock open.
+
+    Trading holds the expired market through its settlement grace and only
+    asked for the next strike after handoff (~19 s after open). The same
+    market-scoped resolver (Gamma identity check + frontend TWAP open, with its
+    own retry throttle) now starts as soon as the next market opens, so both
+    research rows and the trading handoff find the strike earlier. Nothing is
+    promoted, subscribed or quoted here.
+    """
+    slug = wall_open_market_slug(strategy, now_ts)
+    if slug is None or slug in (getattr(strategy, "market_strike_cache_by_slug", {}) or {}):
+        return False
+    pair = (getattr(strategy, "research_market_instruments_by_slug", {}) or {}).get(slug) or {}
+    instrument_id = pair.get("UP") or pair.get("DOWN")
+    resolver = getattr(strategy, "_get_market_strike_for_instrument", None)
+    if not instrument_id or not callable(resolver):
+        return False
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(resolver(instrument_id))
+    except Exception as exc:
+        logger.debug(f"Early open-market strike lookup failed for {slug}: {exc}")
+        return False
+    finally:
+        loop.close()
+    return slug in (getattr(strategy, "market_strike_cache_by_slug", {}) or {})
+
+
 def start_maker_worker(strategy: Any, bid_decimal: Decimal, ask_decimal: Decimal, *, research_only: bool = False) -> None:
     with strategy._maker_worker_lock:
         if strategy._maker_worker_running or strategy._stopping:
@@ -292,6 +335,8 @@ def start_maker_worker(strategy: Any, bid_decimal: Decimal, ask_decimal: Decimal
             if research_only:
                 # Reuse the same bounded worker/lock without running maker logic
                 # on a prewarm BBO or adding owner-loop calculation/persistence.
+                if not strategy._stopping:
+                    resolve_open_market_strike_early(strategy, now_ts=time.time())
                 if not strategy._stopping:
                     strategy.prediction_research_snapshotter.capture(strategy, now_ts=time.time(), trigger="periodic")
             else:

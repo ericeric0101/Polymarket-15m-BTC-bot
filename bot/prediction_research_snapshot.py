@@ -179,6 +179,7 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "official_twap": twap_value,
         "settlement_state_side": context.get("settlement_state_side") if twap_fresh else "UNKNOWN",
         "strike": _number(context.get("strike")),
+        "strike_available": _number(context.get("strike")) is not None,
         "required_move_mode": context.get("required_move_mode") if twap_fresh else "UNAVAILABLE",
         "required_future_avg_to_flip": _number(context.get("required_future_avg_to_flip")) if twap_fresh else None,
         "required_move_usd": _number(context.get("required_move_usd")) if twap_fresh else None,
@@ -322,9 +323,11 @@ class PredictionResearchSnapshotter:
                                            or (end_ts is not None and now >= end_ts)):
                 self._emit_metrics(now)
                 return None
+            # Only this market's own strike is ever used; until it is published
+            # the row is written with strike unavailable (never the prior one).
             strike = getattr(strategy, "market_strike_cache_by_slug", {}).get(slug)
-            if research_ahead_of_handoff and (_number(strike) is None or float(strike) <= 0):
-                return None  # wait for this market's strike, never borrow the prior one
+            if _number(strike) is None or float(strike) <= 0:
+                strike = None
             twap = getattr(strategy, "_polymarket_chainlink_twap_price", None)
             twap_ts = _number(getattr(strategy, "_polymarket_chainlink_twap_observation_ts", None))
             twap_received_ts = _number(getattr(strategy, "_polymarket_chainlink_twap_price_ts", None))

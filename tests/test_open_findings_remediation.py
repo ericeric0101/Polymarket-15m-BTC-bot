@@ -239,7 +239,7 @@ def test_diagnostic_bucket_never_contains_exposure_or_risk_events():
     from monitoring.trade_journal_db import TradeJournalDB
     for event in TradeJournalDB._CRITICAL_ORDER_EVENTS:
         assert diagnostic_bucket("order", event) is None
-    for event in TradeJournalDB._CRITICAL_STRATEGY_EVENTS | {"LIVE_SIGNAL_COMPARE", "MARKET_CYCLE_PNL"}:
+    for event in TradeJournalDB._CRITICAL_STRATEGY_EVENTS | {"LIVE_SIGNAL_COMPARE", "MARKET_CYCLE_PNL", "ENTRY_DECISION_TRACE"}:
         assert diagnostic_bucket("strategy", event) is None
     assert diagnostic_bucket("order", "ORDER_SKIP_DIRECTIONAL_ENTRY_GATE") == "ORDER_SKIP_*"
 
@@ -262,13 +262,13 @@ def test_journal_samples_diagnostics_but_always_persists_exposure_events(tmp_pat
     db = TradeJournalDB(tmp_path / "journal.db")
     big = {"blob": "x" * 400}
     for _ in range(20):
-        assert db.log_strategy_event("run", "ENTRY_DECISION_TRACE", big) is True
+        assert db.log_strategy_event("run", "QUOTE_TRANSPORT_TELEMETRY", big) is True
         assert db.log_order_event("run", "ORDER_FILLED", client_order_id="f", side="BUY", payload=big) is True
     db._diagnostic_budget._last_summary -= 7200
-    db.log_strategy_event("run", "ENTRY_DECISION_TRACE", big)
+    db.log_strategy_event("run", "QUOTE_TRANSPORT_TELEMETRY", big)
     db.stop()
     with sqlite3.connect(tmp_path / "journal.db") as conn:
-        traces = conn.execute("SELECT count(*) FROM strategy_events WHERE event_type='ENTRY_DECISION_TRACE'").fetchone()[0]
+        traces = conn.execute("SELECT count(*) FROM strategy_events WHERE event_type='QUOTE_TRANSPORT_TELEMETRY'").fetchone()[0]
         fills = conn.execute("SELECT count(*) FROM order_events WHERE event_type='ORDER_FILLED'").fetchone()[0]
         summaries = conn.execute("SELECT count(*) FROM strategy_events WHERE event_type='DIAGNOSTIC_SAMPLING_SUMMARY'").fetchone()[0]
     assert fills == 20

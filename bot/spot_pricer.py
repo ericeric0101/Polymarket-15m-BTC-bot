@@ -50,7 +50,9 @@ class SpotPricerMixin:
         "polymarket_crypto_price_twap_open",
     }
     _MARKET_STRIKE_INITIAL_RETRY_INTERVAL_SEC = 3.0
-    _MARKET_STRIKE_INITIAL_RESOLUTION_WINDOW_SEC = 30.0
+    # Lookups now start at the wall-clock open instead of the trading handoff
+    # (~19 s later); 60 s keeps the retry deadline later than before.
+    _MARKET_STRIKE_INITIAL_RESOLUTION_WINDOW_SEC = 60.0
     # Existing freshness window used by the external/raw spot path diagnostics.
     _RAW_SPOT_FRESHNESS_SEC = 10.0
 

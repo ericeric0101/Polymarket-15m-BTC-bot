@@ -40,6 +40,9 @@ class TwapSample:
 
 # These observations are required for crossing/checkpoint/settlement research.
 # A historical total-size cap must never silently discard them.
+# Leave-band for SETTLEMENT_PATH_THRESHOLD_CROSS (probability points / sigma).
+THRESHOLD_HYSTERESIS = {"p_up_ex_market": 0.02, "market_mid_probability_up": 0.02, "required_move_sigma": 0.25}
+
 REQUIRED_EVENT_TYPES = frozenset({
     "MARKET_OPENING_TWAP_SAMPLE", "TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE",
     "TMINUS_CHECKPOINT", "SETTLEMENT_PATH_THRESHOLD_CROSS", "MARKET_TWAP_SUMMARY",
@@ -317,10 +320,19 @@ class TwapForwardShadow:
     def _emit_threshold_crossings(self, slug: str, result: dict[str, Any], measure: str,
                                   value: float, thresholds: tuple[float, ...]) -> None:
         state = self._last_threshold_state[slug].setdefault(measure, {})
+        margin = THRESHOLD_HYSTERESIS.get(measure, 0.0)
         for threshold in thresholds:
             is_probability = measure != "required_move_sigma"
-            qualifies = (value <= threshold) if is_probability and threshold <= .10 else value >= threshold
+            below = is_probability and threshold <= .10
+            qualifies = (value <= threshold) if below else value >= threshold
             previous = state.get(threshold)
+            # Schmitt trigger: entering is immediate (first-beyond timing stays
+            # exact) but leaving needs `margin` past the threshold, so tick
+            # noise around a level cannot emit an entered/left pair per update.
+            if previous is True and not qualifies:
+                still_inside = (value <= threshold + margin) if below else (value >= threshold - margin)
+                if still_inside:
+                    qualifies = True
             if previous is None and qualifies:
                 self._persist(slug, float(result["observed_ts"]), "SETTLEMENT_PATH_THRESHOLD_CROSS",
                               {**result, "measure": measure, "threshold": threshold, "crossing_direction": "first_observed_beyond"})

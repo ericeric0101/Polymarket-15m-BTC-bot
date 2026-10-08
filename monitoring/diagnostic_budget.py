@@ -14,8 +14,11 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 # Types never read back by runtime code (verified by grep of journal loaders).
+# ENTRY_DECISION_TRACE is deliberately absent: it is the primary entry-research
+# evidence, already emitted only on material candidate change by
+# ResearchCandidateLifecycle, and its write counters must stay truthful.
 DIAGNOSTIC_STRATEGY_EVENTS = frozenset({
-    "ENTRY_DECISION_TRACE", "QUOTE_TRANSPORT_TELEMETRY", "EVENT_LOOP_CONSUMER_TIMING",
+    "QUOTE_TRANSPORT_TELEMETRY", "EVENT_LOOP_CONSUMER_TIMING",
     "SIDE_DECISION_OBSERVATION", "BUY_PATH_DIAGNOSTIC", "ENTRY_CONFIRMATION_OBSERVATION",
     "SMART_MONEY_OBSERVATION", "SHADOW_SIGNAL_CANDIDATE_LIVE", "MAIN_SIGNAL_CANDIDATE_LIVE",
     "ENTRY_REGIME_OBSERVATION",
