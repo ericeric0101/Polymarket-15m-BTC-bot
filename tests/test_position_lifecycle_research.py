@@ -59,7 +59,7 @@ def test_offline_lifecycle_joins_entry_snapshots_stop_and_settlement(tmp_path):
         def event(ts, payload):
             conn.execute("INSERT INTO lead_lag_decisions VALUES (NULL, ?, ?, NULL, ?, ?)", (run, slug, int(ts * 1e9), json.dumps(payload)))
         for ts, sigma, p_up, mid, leader in ((100, 2.1, .95, .80, "UP"), (110, 1.4, .80, .74, "UP"), (120, .4, .70, .70, "DOWN")):
-            event(ts, {"event_type":"PREDICTION_RESEARCH_SNAPSHOT", "market_slug":slug, "snapshot_ts":ts,
+            event(ts, {"event_type":"PREDICTION_RESEARCH_SNAPSHOT", "freshness_clock_semantics_version": 2, "market_slug":slug, "snapshot_ts":ts,
                        "joint_fresh":True, "p_ex_fresh":True, "p_up_ex_market":p_up, "p_down_ex_market":1-p_up,
                        "required_move_sigma":sigma, "required_move_bps":sigma, "market_mid_up":mid,
                        "best_ask_up":mid+.01, "market_mid_up_fresh":True, "up_mid":mid,

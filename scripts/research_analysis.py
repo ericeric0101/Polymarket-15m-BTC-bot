@@ -99,7 +99,9 @@ def normalized_event_threshold(moves: Iterable[float]) -> float | None:
     return values[max(0, math.ceil(0.8 * len(values)) - 1)]
 
 
-def _load_selection(db_path: Path, selected: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+def _load_selection(db_path: Path, selected: list[dict[str, Any]], *, exclusions: dict | None = None) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    report_exclusions = exclusions is None
+    exclusions = exclusions if exclusions is not None else {}
     by_run: dict[str, set[str]] = defaultdict(set)
     for row in selected:
         by_run[row["run_id"]].add(row["market_slug"])
@@ -118,6 +120,11 @@ def _load_selection(db_path: Path, selected: list[dict[str, Any]]) -> tuple[dict
                 if probability is not None and payload["up_mid"] is not None else None
             )
             timelines.setdefault(market_slug, []).append(payload)
+        for reason, count in store.prediction_exclusions.items():
+            exclusions[reason] = exclusions.get(reason, 0) + count
+    if report_exclusions:
+        import sys
+        print(json.dumps({"native_v2_prediction_exclusions": exclusions, "scope": "selected_runs"}), file=sys.stderr)
     for payload in store.get_settlements():
         market_slug = payload["market_slug"]
         if market_slug not in by_run.get(payload["run_id"], set()):

@@ -1449,6 +1449,7 @@ class DummyRejectRecoveryStrategy:
 
 class DummyUrgentExitStrategy(TakerExitMixin):
     def __init__(self) -> None:
+        self.test_mode = False
         self.maker_urgent_exit_enabled = True
         self._maker_urgent_exit_last_ts = 0.0
         self.maker_urgent_exit_cooldown_sec = 0

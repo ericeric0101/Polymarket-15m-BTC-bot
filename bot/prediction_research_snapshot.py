@@ -242,6 +242,23 @@ class PredictionResearchSnapshotter:
         started = time.perf_counter()
         now = float(now_ts if now_ts is not None else time.time())
         slug = str(getattr(strategy, "current_market_slug", "") or "")
+        runtime_slug = slug
+        research_ahead_of_handoff = False
+        # Trading intentionally holds its prior market through settlement grace.
+        # Research may observe the wall-open market only through its already
+        # admitted pair. This never promotes/subscribes an instrument or changes
+        # trading lifecycle state.
+        if trigger == "periodic" and slug:
+            try:
+                runtime_start = float(slug.rsplit("-", 1)[-1])
+                if now >= runtime_start + 900:
+                    wall_slug = f"{slug.rsplit('-', 1)[0]}-{int(now // 900) * 900}"
+                    known = getattr(strategy, "research_market_instruments_by_slug", {}) or {}
+                    if wall_slug in known:
+                        slug = wall_slug
+                        research_ahead_of_handoff = slug != runtime_slug
+            except (TypeError, ValueError):
+                pass
         if not slug:
             self._collection_identity = {**getattr(strategy, "collection_identity", {}), "run_id": self.run_id}
             self._emit_metrics(now)
@@ -256,7 +273,7 @@ class PredictionResearchSnapshotter:
         self._last_capture_ts = now
         self._collection_identity = {**getattr(strategy, "collection_identity", {}), "run_id": self.run_id}
         try:
-            end_ts = _number(getattr(strategy, "current_market_end_timestamp", None))
+            end_ts = None if research_ahead_of_handoff else _number(getattr(strategy, "current_market_end_timestamp", None))
             start_ts = _number(getattr(strategy, "market_start_ts_by_slug", {}).get(slug))
             if start_ts is None:
                 try:
@@ -270,6 +287,8 @@ class PredictionResearchSnapshotter:
                 self._emit_metrics(now)
                 return None
             strike = getattr(strategy, "market_strike_cache_by_slug", {}).get(slug)
+            if research_ahead_of_handoff and (_number(strike) is None or float(strike) <= 0):
+                return None  # wait for this market's strike, never borrow the prior one
             twap = getattr(strategy, "_polymarket_chainlink_twap_price", None)
             twap_ts = _number(getattr(strategy, "_polymarket_chainlink_twap_observation_ts", None))
             twap_received_ts = _number(getattr(strategy, "_polymarket_chainlink_twap_price_ts", None))
@@ -291,11 +310,22 @@ class PredictionResearchSnapshotter:
                 pex_received_ts = None
             pex_transport_age = _age(now, pex_received_ts)
             sigma_age = _number(diagnostics.get("sigma_ex_market_age_sec"))
-            pair = strategy._research_market_quote_instruments(slug=slug, runtime_slug=str(getattr(strategy, "current_market_slug", "") or ""))
+            pair = strategy._research_market_quote_instruments(slug=slug, runtime_slug=runtime_slug)
             up_inst, down_inst = pair or ("", "")
-            quote_ts_map = getattr(strategy, "last_quote_source_ts_by_inst", {}) or {}
-            receive_ts_map = getattr(strategy, "last_quote_received_ts_by_inst", {}) or {}
-            q_source = getattr(strategy, "latest_quote_by_inst", {}) or {}
+            if research_ahead_of_handoff and (not up_inst or not down_inst):
+                return None
+            quote_ts_map = dict(getattr(strategy, "last_quote_source_ts_by_inst", {}) or {})
+            receive_ts_map = dict(getattr(strategy, "last_quote_received_ts_by_inst", {}) or {})
+            q_source = dict(getattr(strategy, "latest_quote_by_inst", {}) or {})
+            if research_ahead_of_handoff:
+                # Read the existing bounded quote-only prewarm authority; preserve
+                # its real receipt/source clocks. Freshness stays in build_snapshot.
+                for inst in (up_inst, down_inst):
+                    prewarm = (getattr(strategy, "quote_prewarm_latest_by_inst", {}) or {}).get(inst)
+                    if prewarm and prewarm.get("received_ts", 0) > receive_ts_map.get(inst, 0):
+                        quote_ts_map[inst] = prewarm.get("source_ts")
+                        receive_ts_map[inst] = prewarm.get("received_ts")
+                        q_source[inst] = (prewarm.get("bid"), prewarm.get("ask"))
             max_quote_age = max(0.1, float(getattr(strategy, "quote_max_delivery_delay_sec", 2.0)))
 
             def quote_context(side: str, inst: str) -> dict[str, Any]:
@@ -322,9 +352,9 @@ class PredictionResearchSnapshotter:
                 pex_ages.append(_age(btc_reference_ts, pex_source_ts) if btc_reference_ts is not None else None)
             pex_max_age = float(getattr(strategy, "_RAW_SPOT_FRESHNESS_SEC", 10.0))
             pex_age = max(pex_ages) if all(_fresh(age, pex_max_age) for age in pex_ages) else None
-            trend = getattr(strategy, "side_decision_inputs", {}) or {}
+            trend = {} if research_ahead_of_handoff else (getattr(strategy, "side_decision_inputs", {}) or {})
             side_obj = getattr(strategy, "active_side", "NONE")
-            side = str(getattr(side_obj, "value", side_obj) or "NONE").upper()
+            side = "NONE" if research_ahead_of_handoff else str(getattr(side_obj, "value", side_obj) or "NONE").upper()
             previous_side = self._last_side_by_slug.get(slug)
             if previous_side is not None and side != previous_side:
                 self._last_side_change_ts[slug] = now
@@ -340,7 +370,8 @@ class PredictionResearchSnapshotter:
                 "identity": {"run_id": self.run_id, "market_slug": slug,
                              "market_start_ts": start_ts, "market_end_ts": end_ts,
                              "time_left_sec": left, "up_instrument_id": up_inst or None,
-                             "down_instrument_id": down_inst or None},
+                             "down_instrument_id": down_inst or None,
+                             "research_before_trading_handoff": research_ahead_of_handoff},
                 "p_up_ex_market": diagnostics.get("p_up_ex_market"),
                 "p_ex_age_sec": pex_age, "p_ex_source_ts": pex_source_ts,
                 "p_ex_received_ts": pex_received_ts, "market_source_reference_ts": market_reference_ts,
@@ -364,8 +395,8 @@ class PredictionResearchSnapshotter:
                 **(self._btc_returns(btc_points, btc_source_ts) if btc_source_ts is not None else {}),
                 **quote_context("up", up_inst), **quote_context("down", down_inst),
                 "active_side": side,
-                "side_score": getattr(strategy, "side_decision_score", None),
-                "side_reason": getattr(strategy, "side_decision_reason", None),
+                "side_score": None if research_ahead_of_handoff else getattr(strategy, "side_decision_score", None),
+                "side_reason": "research_before_trading_handoff" if research_ahead_of_handoff else getattr(strategy, "side_decision_reason", None),
                 "signal_confidence": trend.get("confidence") if isinstance(trend, dict) else None,
                 "market_component": trend.get("market_consensus") if isinstance(trend, dict) else None,
                 "btc_component": trend.get("btc_trend") if isinstance(trend, dict) else None,
@@ -385,7 +416,8 @@ class PredictionResearchSnapshotter:
             context["identity"] = {"run_id": self.run_id, "market_slug": slug,
                                    "market_start_ts": start_ts, "market_end_ts": end_ts,
                                    "time_left_sec": left, "up_instrument_id": up_inst or None,
-                                   "down_instrument_id": down_inst or None}
+                                   "down_instrument_id": down_inst or None,
+                                   "research_before_trading_handoff": research_ahead_of_handoff}
             context["pex_max_age_sec"] = float(getattr(strategy, "_RAW_SPOT_FRESHNESS_SEC", 10.0))
             context["market_max_age_sec"] = max_quote_age
             context["btc_max_age_sec"] = float(getattr(strategy, "side_signal_btc_trend_primary_stale_sec", 10.0))

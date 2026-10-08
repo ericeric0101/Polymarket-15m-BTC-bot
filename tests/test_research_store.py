@@ -11,7 +11,7 @@ from bot.research.store import ResearchStore
 def _db(path):
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE lead_lag_decisions (run_id TEXT, slug TEXT, market_id INTEGER, decision_epoch_ns INTEGER, payload_json TEXT)")
-        payload = {"event_type": "PREDICTION_RESEARCH_SNAPSHOT", "market_slug": "btc-updown-15m-1", "snapshot_ts": 10}
+        payload = {"event_type": "PREDICTION_RESEARCH_SNAPSHOT", "freshness_clock_semantics_version": 2, "market_slug": "btc-updown-15m-1", "snapshot_ts": 10}
         conn.execute("INSERT INTO lead_lag_decisions VALUES (?, ?, ?, ?, ?)", ("r1", "btc-updown-15m-1", None, 10_000_000_000, json.dumps(payload)))
         conn.execute("INSERT INTO lead_lag_decisions VALUES (?, ?, ?, ?, ?)", ("r1", "btc-updown-15m-1", None, 10_000_000_001, json.dumps(payload)))
 
@@ -26,7 +26,7 @@ def test_store_is_read_only_and_deduplicates_snapshot_keys(tmp_path):
 
 
 def test_market_evidence_preserves_captured_values_without_recalculation():
-    evidence = MarketEvidence.from_snapshot({"market_slug": "m", "snapshot_ts": 1, "p_up_ex_market": .7},
+    evidence = MarketEvidence.from_snapshot({"market_slug": "m", "snapshot_ts": 1, "p_up_ex_market": .7, "freshness_clock_semantics_version": 2},
                                             run_id="r", market_start_taipei="2026-10-03T00:00:00+08:00",
                                             session_regime="WEEKEND")
     assert evidence.get("p_up_ex_market") == .7

@@ -213,7 +213,7 @@ def dbs(tmp_path):
     with sqlite3.connect(research) as conn:
         conn.execute('CREATE TABLE lead_lag_decisions(run_id TEXT,slug TEXT,decision_epoch_ns INTEGER,payload_json TEXT)')
         for run,ts in [('r',100),('r',100),('other',95),('r',105)]:
-            payload={'event_type':'PREDICTION_RESEARCH_SNAPSHOT','snapshot_ts':ts,'joint_fresh':True,'market_slug':'m'}
+            payload={'event_type':'PREDICTION_RESEARCH_SNAPSHOT', "freshness_clock_semantics_version": 2,'snapshot_ts':ts,'joint_fresh':True,'market_slug':'m'}
             conn.execute('INSERT INTO lead_lag_decisions VALUES(?,?,?,?)',(run,'m',int(ts*1e9),json.dumps(payload)))
     with sqlite3.connect(journal) as conn:
         conn.execute('CREATE TABLE order_events(id INTEGER PRIMARY KEY,ts TEXT,run_id TEXT,event_type TEXT,side TEXT,instrument_id TEXT,price REAL,qty REAL,commission_usdc REAL,payload_json TEXT)')
@@ -371,7 +371,7 @@ def test_real_redeem_tag_repeats_same_tx_but_allows_distinct_partial_redemptions
 def test_snapshot_replay_revision_after_decision_is_never_backfilled(tmp_path):
     research,journal=dbs(tmp_path)
     with sqlite3.connect(research) as conn:
-        payload={'event_type':'PREDICTION_RESEARCH_SNAPSHOT','snapshot_ts':100,'p_up_ex_market':.99,'market_slug':'m'}
+        payload={'event_type':'PREDICTION_RESEARCH_SNAPSHOT', "freshness_clock_semantics_version": 2,'snapshot_ts':100,'p_up_ex_market':.99,'market_slug':'m'}
         conn.execute('INSERT INTO lead_lag_decisions VALUES(?,?,?,?)',('r','m',int(105e9),json.dumps(payload)))
     result=canonical_replay(research,journal,kind='MARKET',decision_ts=100,run_id='r')
     assert len(result['rows'])==1

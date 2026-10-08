@@ -77,7 +77,7 @@ def research_db(tmp_path, snapshots=(), stops=()):
 
 
 def snapshot(ts=100, **kwargs):
-    return {"event_type": "PREDICTION_RESEARCH_SNAPSHOT", "market_slug": SLUG,
+    return {"event_type": "PREDICTION_RESEARCH_SNAPSHOT", "freshness_clock_semantics_version": 2, "market_slug": SLUG,
             "snapshot_ts": ts, "joint_fresh": True, "p_ex_fresh": True,
             "market_mid_up_fresh": True, "market_mid_up": .7,
             "p_up_ex_market": .8, "p_down_ex_market": .2, "settlement_state_side": "UP",

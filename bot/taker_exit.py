@@ -116,14 +116,21 @@ class TakerExitMixin:
         return True
 
     async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
-        if is_simulation or not self.taker_exit_enabled:
+        if is_simulation:
             return
         stop_loss_enabled = bool(getattr(self, "stop_loss_enabled", True))
-        if not stop_loss_enabled:
+        engine_config = getattr(getattr(self, "exit_policy_engine", None), "config", None)
+        hard_loss_enabled = bool(getattr(self, "absolute_max_loss_enabled",
+                                        getattr(engine_config, "absolute_max_loss_enabled", False))) or bool(
+            getattr(self, "catastrophic_stop_loss_enabled",
+                    getattr(engine_config, "catastrophic_stop_loss_enabled", False)))
+        if not self.taker_exit_enabled and not hard_loss_enabled:
+            return
+        if not stop_loss_enabled and not hard_loss_enabled:
             return
         hold_to_redeem = bool(getattr(self, "hold_to_redeem_enabled", False))
         invalidation_recovery_enabled = bool(getattr(self, "taker_exit_only_after_invalidation", False))
-        if hold_to_redeem and not invalidation_recovery_enabled:
+        if hold_to_redeem and not invalidation_recovery_enabled and not hard_loss_enabled:
             return
         if self.taker_exit_cooldown_sec < 0:
             return
@@ -595,6 +602,12 @@ class TakerExitMixin:
                 adverse_thesis_weakening_count=int(current_stop_votes.get("weakening_count", 0)),
                 adverse_thesis_available_count=int(current_stop_votes.get("available_count", 0)),
             )
+            # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
+            # independently configured hard breaker may pass this boundary.
+            if (not stop_loss_enabled or not self.taker_exit_enabled or
+                    (hold_to_redeem and not invalidation_recovery_enabled)) and exit_decision.reason not in {
+                        "absolute_max_loss_breaker", "catastrophic_stop_loss_confirming", "catastrophic_stop_loss_confirmed"}:
+                continue
             net_if_exit = exit_decision.net_if_exit
             breaker_threshold = abs(Decimal(str(getattr(self, "absolute_max_loss_usdc", "2.00"))))
             if (
@@ -1395,6 +1408,9 @@ class TakerExitMixin:
 
     async def _maybe_maker_urgent_exit(self, now_ts: float) -> None:
         """Evaluate and execute maker-style urgent exit for wrong-side positions."""
+        from bot.execution_safety import real_order_submission_allowed
+        if not real_order_submission_allowed(self):
+            return
         if not bool(getattr(self, "stop_loss_enabled", True)) or not getattr(self, "maker_urgent_exit_enabled", False):
             return
         # NOTE: intentionally NOT gated on taker_exit_enabled —

@@ -264,7 +264,11 @@ class LockedSideRuntimeState:
     entry_block_reason: str = ""
 
 
+from bot.execution_safety import ExecutionSafetyMixin
+
+
 class IntegratedBTCStrategy(
+    ExecutionSafetyMixin,
     SideDecisionMixin,
     SpotPricerMixin,
     TakerExitMixin,
@@ -1176,9 +1180,21 @@ class IntegratedBTCStrategy(
                     )
             except Exception as exc:
                 logger.debug(f"Stop forensics shadow observation failed: {exc}")
-        if invalidated:
-            self._side_invalidation_hits_by_slug[slug] = int(self._side_invalidation_hits_by_slug.get(slug, 0)) + 1
-        else:
+        # now_ts is the shared receipt/wall timestamp passed to every token and
+        # BUY/SELL evaluation in one _evaluate_quote_targets invocation. Keep
+        # only the latest cycle identity, never a per-callback confirmation.
+        cycle = (slug, side.value, float(now_ts))
+        prior_cycle = getattr(self, "_side_invalidation_last_cycle", None)
+        if cycle != prior_cycle:
+            if prior_cycle is not None and prior_cycle[:2] != cycle[:2]:
+                self._side_invalidation_hits_by_slug[slug] = 0
+            self._side_invalidation_last_cycle = cycle
+            if invalidated and spot is not None and strike is not None:
+                self._side_invalidation_hits_by_slug[slug] = int(self._side_invalidation_hits_by_slug.get(slug, 0)) + 1
+            else:
+                self._side_invalidation_hits_by_slug[slug] = 0
+        elif not invalidated or spot is None or strike is None:
+            # Contradictory/missing sibling evidence may clear, never increment.
             self._side_invalidation_hits_by_slug[slug] = 0
         hits = int(self._side_invalidation_hits_by_slug.get(slug, 0))
         confirmed = hits >= int(getattr(self, "maker_side_invalidation_confirm_cycles", 2))

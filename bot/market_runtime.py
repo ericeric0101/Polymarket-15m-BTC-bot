@@ -275,15 +275,27 @@ def align_price_to_tick(strategy: Any, price: Decimal, side: str, instrument: Op
     return aligned
 
 
-def start_maker_worker(strategy: Any, bid_decimal: Decimal, ask_decimal: Decimal) -> None:
+def start_maker_worker(strategy: Any, bid_decimal: Decimal, ask_decimal: Decimal, *, research_only: bool = False) -> None:
     with strategy._maker_worker_lock:
         if strategy._maker_worker_running or strategy._stopping:
             return
+        if research_only:
+            now = time.time()
+            snapshotter = getattr(strategy, "prediction_research_snapshotter", None)
+            if snapshotter is None or now - getattr(strategy, "_opening_research_request_ts", 0.0) < snapshotter.interval_sec:
+                return
+            strategy._opening_research_request_ts = now
         strategy._maker_worker_running = True
 
     def _worker() -> None:
         try:
-            maker_quote_sync(strategy, float(bid_decimal), float(ask_decimal))
+            if research_only:
+                # Reuse the same bounded worker/lock without running maker logic
+                # on a prewarm BBO or adding owner-loop calculation/persistence.
+                if not strategy._stopping:
+                    strategy.prediction_research_snapshotter.capture(strategy, now_ts=time.time(), trigger="periodic")
+            else:
+                maker_quote_sync(strategy, float(bid_decimal), float(ask_decimal))
         finally:
             with strategy._maker_worker_lock:
                 strategy._maker_worker_running = False
@@ -876,6 +888,12 @@ def _capture_fresh_prewarm_quote(strategy: Any, tick: QuoteTick) -> None:
         "adapter_emitted_ts": adapter_ts,
         "source": source,
     }
+    # Expired current instruments may stop ticking during settlement grace.
+    # A received prewarm quote can wake research, but never maker execution.
+    end_ts = getattr(strategy, "current_market_end_timestamp", None)
+    if (end_ts is not None and received_ts >= float(end_ts)
+            and getattr(strategy, "prediction_research_snapshotter", None) is not None):
+        start_maker_worker(strategy, bid, ask, research_only=True)
 
 
 def handle_quote_tick(strategy: Any, tick: QuoteTick) -> None:

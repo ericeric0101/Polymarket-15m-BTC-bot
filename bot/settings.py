@@ -300,8 +300,9 @@ def initialize_strategy_settings(
     strategy.stop_loss_enabled = config.exit.stop_loss_enabled
     if not strategy.stop_loss_enabled:
         logger.warning(
-            "STOP_LOSS_ENABLED=0: loss-triggered exits are paused; positions may lose their full stake at settlement. "
-            "Profitable take-profit orders, hold-to-redeem, and redemption remain enabled."
+            "STOP_LOSS_ENABLED=0: adaptive/strategy loss exits are paused. "
+            "Configured absolute and catastrophic breakers retain their existing confirmation gates; "
+            "take-profit, hold-to-redeem, and redemption remain enabled."
         )
     strategy.hold_to_redeem_enabled = config.exit.hold_to_redeem_enabled
     strategy.tail_protect_tp_enabled = config.exit.tail_protect_tp_enabled

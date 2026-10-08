@@ -16,6 +16,7 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+from bot.research.freshness import accept_native_v2
 
 
 RESIDUAL_BINS = [(-math.inf, -.10, "<= -0.10"), (-.10, -.05, "-0.10 to -0.05"),
@@ -34,7 +35,8 @@ def _num(value: Any) -> float | None:
         return None
 
 
-def read_snapshots(db_path: str | Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def read_snapshots(db_path: str | Path, *, exclusions: dict | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    exclusions = exclusions if exclusions is not None else {}
     path = Path(db_path).resolve()
     uri = f"file:{path}?mode=ro"
     rows: list[dict[str, Any]] = []
@@ -48,6 +50,8 @@ def read_snapshots(db_path: str | Path) -> tuple[list[dict[str, Any]], dict[str,
                 continue
             event_type = payload.get("event_type")
             if event_type == "PREDICTION_RESEARCH_SNAPSHOT":
+                if not accept_native_v2(payload, exclusions):
+                    continue
                 payload.setdefault("market_slug", record["slug"])
                 payload.setdefault("snapshot_ts", int(record["decision_epoch_ns"]) / 1e9)
                 rows.append(payload)
@@ -249,7 +253,8 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], columns: list[str] | None
 
 
 def analyze(db_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
-    rows, settlements = read_snapshots(db_path)
+    exclusions = {}
+    rows, settlements = read_snapshots(db_path, exclusions=exclusions)
     rows = attach_future_repricing(rows)
     valid_residual = [r for r in rows if _num(r.get("residual_up")) is not None and _num(r.get("mid_repricing_30s")) is not None]
     bins = summarize_residual_bins(valid_residual)
@@ -273,9 +278,10 @@ def analyze(db_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
     _write_csv(out / "btc_disagreement_30s.csv", disagreement)
     _write_csv(out / "entry_snapshots.csv", entry_rows)
     summary = _summary(rows, valid_residual, bins, episodes, disagreement, entry_rows)
+    summary += "\nNative-v2 exclusion counts: " + json.dumps(exclusions, sort_keys=True) + "\n"
     (out / "summary.md").write_text(summary, encoding="utf-8")
     return {"snapshots": len(rows), "residual_observations": len(valid_residual), "entries": len(entry_rows),
-            "output_dir": str(out)}
+            "output_dir": str(out), "freshness_exclusions": exclusions}
 
 
 def _quality(rows):

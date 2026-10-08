@@ -24,6 +24,10 @@ class MarketEvidence:
     @classmethod
     def from_snapshot(cls, payload: dict[str, Any], *, run_id: str,
                       market_start_taipei: str | None, session_regime: str) -> "MarketEvidence":
+        from .freshness import native_v2_exclusion_reason
+        reason = native_v2_exclusion_reason(payload)
+        if reason is not None:
+            raise ValueError(f"native prediction evidence excluded: {reason}")
         value = dict(payload)
         return cls(
             market_slug=str(value.get("market_slug") or ""),

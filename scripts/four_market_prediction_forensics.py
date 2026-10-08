@@ -16,6 +16,7 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
+from bot.research.freshness import accept_native_v2
 
 
 RUN_ID_DEFAULT = "run_1790985778_95f5cc02"
@@ -112,7 +113,8 @@ def _first_after(rows: list[dict[str, Any]], start: float, predicate) -> dict[st
     return None
 
 
-def _load(db_path: Path, run_id: str, slugs: set[str]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+def _load(db_path: Path, run_id: str, slugs: set[str], *, exclusions: dict | None = None) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    exclusions = exclusions if exclusions is not None else {}
     timeline: dict[str, list[dict[str, Any]]] = defaultdict(list)
     summaries: dict[str, dict[str, Any]] = {}
     uri = f"file:{db_path.resolve()}?mode=ro"
@@ -130,6 +132,8 @@ def _load(db_path: Path, run_id: str, slugs: set[str]) -> tuple[dict[str, list[d
                 continue
             event_type = payload.get("event_type")
             if event_type == "PREDICTION_RESEARCH_SNAPSHOT":
+                if not accept_native_v2(payload, exclusions):
+                    continue
                 payload["snapshot_ts"] = _num(payload.get("snapshot_ts")) or record[1] / 1e9
                 payload["market_slug"] = slug
                 payload["up_mid"], payload["up_mid_source"] = _up_mid(payload)
@@ -409,7 +413,8 @@ def _lead_ranking(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def analyze(db_path: Path, journal_path: Path, output: Path, run_id: str) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     slugs = set(COMPLETE_SLUGS_DEFAULT)
-    timelines, summaries = _load(db_path, run_id, slugs)
+    exclusions = {}
+    timelines, summaries = _load(db_path, run_id, slugs, exclusions=exclusions)
     complete = [slug for slug in COMPLETE_SLUGS_DEFAULT if slug in summaries]
     timelines = {slug: timelines[slug] for slug in complete}
     quality = []
@@ -472,6 +477,8 @@ def analyze(db_path: Path, journal_path: Path, output: Path, run_id: str) -> dic
     # BTC is the only early directional variable available in multiple events.
     # This is a descriptive selection, not a live recommendation.
     report = f"""# Four-market prediction forensics
+
+Native-v2 exclusion counts: {json.dumps(exclusions, sort_keys=True)}
 
 Run: `{run_id}`.  Analysis scope is exactly the four completed market slugs in
 `data_quality.csv`; the subsequent partial market is excluded.  Repricing is

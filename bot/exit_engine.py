@@ -322,8 +322,7 @@ class ExitPolicyEngine:
             and gross_if_exit < 0
         )
         if (
-            self.config.stop_loss_enabled
-            and self.config.absolute_max_loss_enabled
+            self.config.absolute_max_loss_enabled
             and position.hold_sec >= max(0, self.config.absolute_max_loss_min_hold_sec)
             and _price_adverse_raw
             and adverse_trend_confirmed
@@ -501,8 +500,7 @@ class ExitPolicyEngine:
             stop_loss_threshold *= max(Decimal("1"), self.config.conviction_stop_loss_multiplier)
             required_confirmations += max(0, self.config.conviction_extra_confirmations)
         catastrophic_stop_loss_candidate = (
-            self.config.stop_loss_enabled
-            and self.config.catastrophic_stop_loss_enabled
+            self.config.catastrophic_stop_loss_enabled
             and not snapshot.stop_loss_disabled_in_tail
             and position.hold_sec >= effective_min_hold_sec
             and price_adverse

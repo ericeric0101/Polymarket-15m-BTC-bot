@@ -334,8 +334,9 @@ def test_feature_flag_disabled_does_not_fire():
     print(f"PASS: feature disabled → {result.decision_type.value}/{result.reason} (no breaker)")
 
 
-def test_master_stop_loss_switch_disables_every_loss_exit_decision():
-    engine = ExitPolicyEngine(_make_config(stop_loss_enabled=False))
+def test_adaptive_stop_disabled_with_both_independent_breakers_disabled_has_no_loss_exit():
+    engine = ExitPolicyEngine(_make_config(stop_loss_enabled=False,
+        absolute_max_loss_enabled=False, catastrophic_stop_loss_enabled=False))
     result = engine.evaluate(
         _snapshot(best_bid="0.20", fair="0.21", time_left_sec=900.0),
         _position(avg_entry="0.69", hold_sec=900, confirm_hits=5),

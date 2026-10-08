@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 from bot.research.clocks import epoch
+from bot.research.freshness import accept_native_v2
 
 
 class ResearchStore:
@@ -16,6 +17,7 @@ class ResearchStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self.path = Path(db_path)
+        self.prediction_exclusions: dict[str, int] = {}
 
     @staticmethod
     def open_readonly(path: str | Path) -> sqlite3.Connection:
@@ -52,10 +54,17 @@ class ResearchStore:
                     continue
 
     def get_prediction_snapshots(self, *, run_id: str | None = None, slug: str | None = None,
-                                 start_ts: float | None = None, end_ts: float | None = None) -> list[dict[str, Any]]:
+                                 start_ts: float | None = None, end_ts: float | None = None,
+                                 provenance: str = "NATIVE_V2") -> list[dict[str, Any]]:
+        if provenance not in {"NATIVE_V2", "HISTORICAL_RECOMPUTATION_INPUT"}:
+            raise ValueError("explicit native-v2 or historical-recomputation provenance required")
+        self.prediction_exclusions = {}
         # Same run/market/snapshot key is deduped deterministically by latest DB row.
         dedup: dict[tuple[str, str, float], dict[str, Any]] = {}
         for run, row_slug, epoch, payload in self.rows(run_id=run_id, slug=slug, event_type="PREDICTION_RESEARCH_SNAPSHOT", start_ts=start_ts, end_ts=end_ts):
+            if provenance == "NATIVE_V2" and not accept_native_v2(payload, self.prediction_exclusions):
+                continue
+            payload = {**payload, "freshness_provenance_class": provenance}
             market = str(payload.get("market_slug") or row_slug)
             ts = float(payload.get("snapshot_ts") or epoch / 1e9)
             dedup[(run, market, ts)] = {**payload, "run_id": run, "market_slug": market, "snapshot_ts": ts}
@@ -76,6 +85,8 @@ class ResearchStore:
         a reconnecting process, the latest database row for the same run,
         market, timestamp, type, and lifecycle identity wins deterministically.
         """
+        if event_type == "PREDICTION_RESEARCH_SNAPSHOT":
+            return self.get_prediction_snapshots(slug=slug)
         dedup: dict[tuple[str, str, float, str, str], dict[str, Any]] = {}
         for run, row_slug, epoch, payload in self.rows(slug=slug, event_type=event_type):
             timestamp = float(
@@ -126,7 +137,7 @@ class ResearchStore:
                     malformed += 1
         coverage = self.get_market_coverage()
         intervals = [row["largest_gap_sec"] for row in coverage]
-        return {"quick_check": quick, "decision_rows_total": total,
+        return {"quick_check": quick, "decision_rows_total": total, "native_v2_prediction_exclusions": dict(self.prediction_exclusions),
                 "malformed_json_rows": malformed, "non_object_payload_rows": non_object,
                 "excluded_payload_rows": malformed + non_object,
                 "markets_with_snapshots": len(coverage),

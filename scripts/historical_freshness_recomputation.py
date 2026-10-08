@@ -121,6 +121,7 @@ def classify_row(original, ticks):
     Original true values remain explicitly ORIGINAL, not independently repaired.
     """
     r = dict(original)
+    r["freshness_provenance_class"] = "HISTORICAL_RECOMPUTED"
     labels, reasons = {}, {}
     required = {"p_ex": ("p_up_ex_market", "p_ex_source_ts"),
                 "market": ("market_quote_up_received_ts", "market_quote_down_received_ts"),
@@ -177,7 +178,7 @@ def classify_row(original, ticks):
 def load_inputs(db, journal, cutoff, run_id=None):
     groups = defaultdict(list)
     store = ra.ResearchStore(db)
-    for r in store.get_prediction_snapshots(end_ts=cutoff, run_id=run_id):
+    for r in store.get_prediction_snapshots(end_ts=cutoff, run_id=run_id, provenance="HISTORICAL_RECOMPUTATION_INPUT"):
         if ra.market_context(r["market_slug"])["market_start_taipei"][:10] in {"2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06"}:
             groups[r["market_slug"]].append(r)
     summaries = {}
