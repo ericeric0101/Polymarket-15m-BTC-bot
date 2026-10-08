@@ -106,17 +106,38 @@ class OrderRuntimeMixin:
             return None
         bid_decimal = quote.bid_price.as_decimal() if quote.bid_price is not None else None
         ask_decimal = quote.ask_price.as_decimal() if quote.ask_price is not None else None
+        # Exit/telemetry callers keep the historical repaired quote, but the
+        # repair is recorded so a BUY can never be priced from a fabricated side.
+        synthesis = None
         if bid_decimal is None and ask_decimal is not None:
             bid_decimal = max(Decimal("0.01"), ask_decimal - Decimal("0.01"))
+            synthesis = "missing_bid"
         if ask_decimal is None and bid_decimal is not None:
             ask_decimal = min(Decimal("0.99"), bid_decimal + Decimal("0.01"))
+            synthesis = synthesis or "missing_ask"
         if bid_decimal is None or ask_decimal is None:
             return None
         if bid_decimal > ask_decimal:
             mid_tmp = (bid_decimal + ask_decimal) / 2
             bid_decimal = max(Decimal("0.01"), mid_tmp - Decimal("0.005"))
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
+            synthesis = "crossed_book"
+        synthesized = getattr(self, "quote_synthesis_by_inst", None)
+        if not isinstance(synthesized, dict):
+            synthesized = {}
+            self.quote_synthesis_by_inst = synthesized
+        if synthesis is None:
+            synthesized.pop(str(inst), None)
+        else:
+            synthesized[str(inst)] = synthesis
         return bid_decimal, ask_decimal
+
+    def _quote_synthesis_reason(self: OrderRuntimeHost, instrument_id: Any) -> Optional[str]:
+        """Return why the latest quote was repaired, or None for a real two-sided book."""
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return "unknown_instrument"
+        return (getattr(self, "quote_synthesis_by_inst", None) or {}).get(str(inst))
 
     def _activate_maker_kill_switch(self: OrderRuntimeHost, reason: str) -> None:
         self.maker_kill_switch = True

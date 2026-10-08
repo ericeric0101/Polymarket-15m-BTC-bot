@@ -286,6 +286,60 @@ class StrategyRecoveryMixin:
             }
         return None
 
+    def _cancel_orphan_venue_orders_on_startup(self) -> int:
+        """Cancel resting BTC 15-min orders that no strategy state owns.
+
+        The live process lock makes this bot the only writer for the wallet, so
+        an open order on a BTC 15-min market at startup can only be a leftover
+        from a crashed or killed process. Venue reconciliation re-creates such
+        orders with framework-generated ids, so ownership is decided by market,
+        not by client-order-id prefix. Dry-run never sends a cancel.
+        """
+        from bot.execution_safety import real_order_submission_allowed
+
+        if not real_order_submission_allowed(self):
+            return 0
+        try:
+            open_orders = list(self.cache.orders_open() or [])
+        except Exception as exc:
+            logger.error(f"Startup orphan-order scan failed; blocking new BUYs: {exc}")
+            block = getattr(self, "_block_new_buys_for_trade_db", None)
+            if callable(block):
+                block("startup_orphan_order_scan_failed")
+            return 0
+        tracked = {
+            str(getattr(state.get("order"), "client_order_id", "") or "")
+            for state in getattr(self, "active_maker_orders", {}).values()
+        }
+        cancelled = 0
+        for order in open_orders:
+            coid = str(getattr(order, "client_order_id", "") or "")
+            if coid in tracked:
+                continue
+            instrument = self.cache.instrument(order.instrument_id)
+            slug = self._extract_market_slug_from_instrument(instrument) if instrument is not None else ""
+            if not slug.startswith("btc-updown-15m-"):
+                continue
+            try:
+                self.cancel_order(order)
+                cancelled += 1
+            except Exception as exc:
+                logger.error(f"Startup orphan-order cancel failed for {coid}: {exc}")
+                continue
+            logger.warning(
+                f"Cancelled orphan venue order on startup: coid={coid} slug={slug} "
+                f"side={getattr(order, 'side', '')} qty={getattr(order, 'quantity', '')}"
+            )
+            self._db_order_event(
+                event_type="ORDER_ORPHAN_CANCEL_ON_START",
+                client_order_id=coid,
+                side=str(getattr(getattr(order, "side", None), "name", "") or ""),
+                status="PENDING_CANCEL",
+                reason="untracked_open_order_at_startup",
+                payload={"slug": slug, "instrument_id": str(order.instrument_id)},
+            )
+        return cancelled
+
     def _rehydrate_inventory_state_on_startup(self) -> None:
         if self.live_inventory_cost or self.inventory_delta_shares > 0:
             return

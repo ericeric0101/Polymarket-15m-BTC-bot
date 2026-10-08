@@ -74,24 +74,75 @@ def _git_metadata(repo_root: Path) -> dict[str, Any]:
     commit = git("rev-parse", "HEAD")
     branch = git("branch", "--show-current")
     status = git("status", "--porcelain")
-    diff_hash = None
-    if status:
+    if status is None:
+        return {
+            "git_commit": commit, "git_branch": branch or None, "git_dirty": None,
+            "git_dirty_tracked": None, "untracked_file_count": None, "untracked_runtime_files": [],
+            "dirty_diff_hash": None, "dirty_diff_hash_scope": _DIRTY_SCOPE, "dirty_diff_archive": None,
+        }
+    lines = [line for line in status.splitlines() if line.strip()]
+    tracked_dirty = any(not line.startswith("??") for line in lines)
+    untracked = [line[3:].strip() for line in lines if line.startswith("??")]
+    # `git status` collapses untracked directories; list files explicitly so a
+    # new module inside an untracked package is still part of the runtime hash.
+    untracked_files = (git("ls-files", "--others", "--exclude-standard") or "").splitlines()
+    runtime_files = sorted(path for path in untracked_files if _is_runtime_source(path))
+    payload = b""
+    if tracked_dirty:
         try:
-            diff = subprocess.run(
+            payload += subprocess.run(
                 ["git", "-C", str(repo_root), "diff", "HEAD", "--binary"],
                 capture_output=True, timeout=5.0, check=True,
             ).stdout
-            if diff:
-                diff_hash = hashlib.sha256(diff).hexdigest()
         except Exception:
-            pass
+            payload = b""
+    for path in runtime_files:
+        try:
+            payload += b"\0untracked:" + path.encode() + b"\0" + (repo_root / path).read_bytes()
+        except OSError:
+            payload += b"\0untracked-unreadable:" + path.encode()
+    diff_hash = hashlib.sha256(payload).hexdigest() if payload else None
     return {
         "git_commit": commit,
         "git_branch": branch or None,
-        "git_dirty": None if status is None else bool(status),
+        # Untracked research reports do not change the running code; only
+        # tracked edits or untracked runtime sources make a run irreproducible.
+        "git_dirty": bool(tracked_dirty or runtime_files),
+        "git_dirty_tracked": tracked_dirty,
+        "untracked_file_count": len(untracked),
+        "untracked_runtime_files": runtime_files[:50],
         "dirty_diff_hash": diff_hash,
-        "dirty_diff_hash_scope": "tracked_files_only",
+        "dirty_diff_hash_scope": _DIRTY_SCOPE,
+        "dirty_diff_archive": _archive_dirty_payload(repo_root, diff_hash, payload),
     }
+
+
+_DIRTY_SCOPE = "tracked_diff_plus_untracked_runtime_sources"
+_RUNTIME_SOURCE_DIRS = ("bot/", "execution/", "monitoring/", "core/", "config/", "py_clob_client/")
+_RUNTIME_SOURCE_FILES = ("run_bot.py",)
+_MAX_ARCHIVED_DIFF_BYTES = 5 * 1024 * 1024
+
+
+def _is_runtime_source(path: str) -> bool:
+    if path in _RUNTIME_SOURCE_FILES:
+        return True
+    return path.startswith(_RUNTIME_SOURCE_DIRS) and path.endswith((".py", ".pyx", ".json", ".env"))
+
+
+def _archive_dirty_payload(repo_root: Path, diff_hash: str | None, payload: bytes) -> str | None:
+    """Content-addressed, size-bounded copy of the exact uncommitted runtime code."""
+    if not diff_hash or len(payload) > _MAX_ARCHIVED_DIFF_BYTES:
+        return None
+    try:
+        target = repo_root / "logs" / "run_diffs" / f"{diff_hash}.patch"
+        if not target.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_suffix(".tmp")
+            temporary.write_bytes(payload)
+            os.replace(temporary, target)
+        return str(target.relative_to(repo_root))
+    except OSError:
+        return None
 
 
 def build_run_manifest(
@@ -112,7 +163,8 @@ def build_run_manifest(
     except Exception:
         git = {
             "git_commit": None, "git_branch": None, "git_dirty": None,
-            "dirty_diff_hash": None, "dirty_diff_hash_scope": "tracked_files_only",
+            "git_dirty_tracked": None, "untracked_file_count": None, "untracked_runtime_files": [],
+            "dirty_diff_hash": None, "dirty_diff_hash_scope": _DIRTY_SCOPE, "dirty_diff_archive": None,
         }
     guard_mode = str((safe_config.get("operations") or {}).get("session_pnl_guard_mode") or "legacy")
     return {

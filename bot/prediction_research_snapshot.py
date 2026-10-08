@@ -18,6 +18,14 @@ import time
 from loguru import logger
 
 
+OPENING_FULL_RATE_SEC = 30.0
+OVER_CAP_INTERVAL_SEC = 5.0
+LOW_DISK_INTERVAL_SEC = 15.0
+DIFFUSION_Z_NUMERIC_FIELDS = ("required_move_z_diffusion", "p_terminal_flip_diffusion",
+                              "required_move_z_variance_horizon_sec")
+DIFFUSION_Z_FIELDS = DIFFUSION_Z_NUMERIC_FIELDS + ("required_move_z_model", "required_move_z_sigma_source")
+
+
 def _number(value: Any) -> float | None:
     try:
         if value is None:
@@ -176,6 +184,9 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "required_move_usd": _number(context.get("required_move_usd")) if twap_fresh else None,
         "required_move_bps": _number(context.get("required_move_bps")) if twap_fresh else None,
         "required_move_sigma": _number(context.get("required_move_sigma")) if twap_fresh else None,
+        **{key: (_number(context.get(key)) if twap_fresh else None) for key in DIFFUSION_Z_NUMERIC_FIELDS},
+        "required_move_z_model": context.get("required_move_z_model") if twap_fresh else None,
+        "required_move_z_sigma_source": context.get("required_move_z_sigma_source") if twap_fresh else None,
         "remaining_final_window_sec": _number(context.get("remaining_final_window_sec")) if twap_fresh else None,
         "active_side": side,
         "side_score": _number(context.get("side_score")),
@@ -237,6 +248,30 @@ class PredictionResearchSnapshotter:
                                                        if current and prior else None)
         return result
 
+    def _effective_interval(self, strategy: Any, *, slug: str = "", now: float | None = None) -> tuple[float, str]:
+        """Slow periodic capture under research storage pressure; never stop it.
+
+        Event-triggered snapshots (entries, decision points) keep full fidelity.
+        The research store's guard is the single storage authority: over its
+        size cap 1 Hz becomes 5 s; low free disk becomes 15 s.
+        """
+        try:
+            market_start = float(slug.rsplit("-", 1)[-1])
+        except (TypeError, ValueError):
+            market_start = None
+        if market_start is not None and now is not None and 0.0 <= now - market_start < OPENING_FULL_RATE_SEC:
+            return self.interval_sec, "opening_full_rate"
+        try:
+            status = strategy.twap_forward_shadow.storage_guard_status()
+        except Exception:
+            return self.interval_sec, "normal"
+        reason = str(status.get("reason") or "") if status.get("triggered") else ""
+        if reason == "free_disk_low":
+            return max(self.interval_sec, LOW_DISK_INTERVAL_SEC), "storage_free_disk_low"
+        if reason:
+            return max(self.interval_sec, OVER_CAP_INTERVAL_SEC), "storage_db_size_cap"
+        return self.interval_sec, "normal"
+
     def capture(self, strategy: Any, *, now_ts: float | None = None, trigger: str = "periodic",
                 force: bool = False, entry_context: dict[str, Any] | None = None) -> dict[str, Any] | None:
         started = time.perf_counter()
@@ -263,9 +298,10 @@ class PredictionResearchSnapshotter:
             self._collection_identity = {**getattr(strategy, "collection_identity", {}), "run_id": self.run_id}
             self._emit_metrics(now)
             return None
+        interval_sec, interval_policy = self._effective_interval(strategy, slug=slug, now=now)
         if trigger == "periodic" and not force:
             last = self._last_periodic.get(slug, 0.0)
-            if now - last < self.interval_sec:
+            if now - last < interval_sec:
                 self._emit_metrics(now)
                 return None
             self._last_periodic[slug] = now
@@ -389,6 +425,7 @@ class PredictionResearchSnapshotter:
                 "required_move_usd": diagnostics.get("required_move_usd"),
                 "required_move_bps": diagnostics.get("required_move_bps"),
                 "required_move_sigma": diagnostics.get("required_move_sigma"),
+                **{key: diagnostics.get(key) for key in DIFFUSION_Z_FIELDS},
                 "remaining_final_window_sec": diagnostics.get("remaining_final_window_sec"),
                 "btc_spot": btc_spot, "btc_source_ts": btc_source_ts,
                 "btc_received_ts": btc_received_ts, "btc_source_reference_ts": btc_reference_ts,
@@ -424,7 +461,9 @@ class PredictionResearchSnapshotter:
             snapshot = build_prediction_snapshot(context)
             interval = now - self._last_snapshot_ts[slug] if self._last_snapshot_ts.get(slug) else None
             snapshot["snapshot_interval_sec"] = interval
-            if trigger == "periodic" and interval is not None and interval < self.interval_sec:
+            snapshot["snapshot_interval_policy"] = interval_policy
+            snapshot["snapshot_target_interval_sec"] = interval_sec
+            if trigger == "periodic" and interval is not None and interval < interval_sec:
                 return None
             accepted = bool(self.db is not None and self.db.enqueue_decision(
                 run_id=self.run_id, slug=slug, market_id=None,

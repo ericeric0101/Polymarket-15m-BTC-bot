@@ -5,6 +5,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import datetime
+import math
 from math import floor
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -343,6 +344,44 @@ def build_shadow_labels(*, edge_ps: float | None, robust_net_usdc: float | None,
             "shadow_size_multiplier": shadow_multiplier,
             "shadow_reject": bool(reject_reasons), "shadow_reject_reason": ";".join(reject_reasons) or None,
             "shadow_only": True, "shadow_has_order_authority": False}
+
+
+def build_diffusion_flip_z(*, spot: float | None, target: float | None, sigma_annual: float | None,
+                           time_left_sec: float | None, twap_window_sec: float | None,
+                           remaining_window_sec: float | None) -> dict[str, Any]:
+    """Driftless-diffusion z of the settlement average versus its flip boundary.
+
+    Settlement is the arithmetic average of the final ``W`` seconds. For a
+    Brownian log-price the variance of that average seen from ``T`` seconds
+    before expiry is ``sigma^2 * ((T - W) + W / 3)``; inside the final window,
+    only the unobserved ``tau`` seconds remain random, with variance
+    ``sigma^2 * tau / 3`` (the target is then the exact remaining-average
+    boundary). ``sigma_annual`` must be the raw past-only realized estimate:
+    no TTE decay, floor or implied-volatility adjustment. Under this model
+    P(terminal flip) = Phi(-z). It is a terminal-settlement quantity, not a
+    probability of touching the strike before expiry.
+    """
+    unavailable = {"required_move_z_diffusion": None, "p_terminal_flip_diffusion": None,
+                   "required_move_z_variance_horizon_sec": None,
+                   "required_move_z_sigma_source": "raw_realized_chainlink_no_decay",
+                   "required_move_z_model": "driftless_log_bm_final_average_v1"}
+    spot_v, target_v = _finite_float(spot), _finite_float(target)
+    sigma_v, tleft, window = _finite_float(sigma_annual), _finite_float(time_left_sec), _finite_float(twap_window_sec)
+    if None in (spot_v, target_v, sigma_v, tleft, window) or min(spot_v, target_v, sigma_v) <= 0 or window <= 0:
+        return unavailable
+    remaining = _finite_float(remaining_window_sec)
+    if remaining is not None:
+        horizon = max(0.0, remaining) / 3.0
+    elif tleft > window:
+        horizon = (tleft - window) + window / 3.0
+    else:
+        return unavailable  # final window without an observed partial integral
+    if horizon <= 0:
+        return unavailable
+    z = abs(math.log(target_v / spot_v)) / (sigma_v * math.sqrt(horizon / (365.25 * 24 * 3600)))
+    return {**unavailable, "required_move_z_diffusion": z,
+            "p_terminal_flip_diffusion": 0.5 * math.erfc(z / math.sqrt(2.0)),
+            "required_move_z_variance_horizon_sec": horizon}
 
 
 def build_safety_sigma(*, spot: float | None, strike: float | None,

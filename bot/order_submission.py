@@ -9,6 +9,7 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.order_ids import new_client_order_id
 from bot.entry_session_policy import new_buy_session_decision
 from bot.quote_service import (
     apply_sellable_inventory_guard,
@@ -118,6 +119,20 @@ def submit_maker_quote(
         return
 
     quote_now = strategy._get_quote_for_instrument(instrument_id)
+    synthesis_fn = getattr(strategy, "_quote_synthesis_reason", None)
+    synthesis_reason = synthesis_fn(instrument_id) if side == "buy" and callable(synthesis_fn) else None
+    if side == "buy" and quote_now is not None and synthesis_reason:
+        # Fail closed: a BUY is never priced from a one-sided or crossed book
+        # that _get_quote_for_instrument had to repair.
+        strategy._db_order_event(
+            event_type="ORDER_SKIP_UNREAL_QUOTE",
+            side="BUY",
+            price=float(limit_price),
+            status="SKIPPED",
+            reason=str(synthesis_reason),
+            payload={"instrument_id": str(instrument_id)},
+        )
+        return
     if quote_now is not None and side == "buy":
         if strategy._should_skip_buy_submit_for_quote_drift(
             instrument_id=instrument_id,
@@ -524,7 +539,7 @@ def submit_maker_quote(
     order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
     price_precision = int(getattr(instrument, "price_precision", 3))
     price = Price.from_str(f"{float(limit_price):.{price_precision}f}")
-    order_id = ClientOrderId(f"BTC-15M-MAKER-{side.upper()}-{int(time.time() * 1000)}")
+    order_id = new_client_order_id(f"MAKER-{side.upper()}")
 
     order_kwargs = dict(
         instrument_id=instrument_id,

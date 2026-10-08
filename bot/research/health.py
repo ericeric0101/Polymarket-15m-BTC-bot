@@ -115,7 +115,7 @@ def status_health(strategy: Any, now_ts: float) -> str:
         if signature != previous:
             strategy._derived_health_signature = signature
             if previous is not None or any(item['state'] in {'DEGRADED', 'CRITICAL'} for item in view['domains'].values()):
-                logger.info('Derived health transition: {}', signature)
+                logger.info('Derived health transition (observational only; not a BUY gate): {}', signature)
         return ''.join(f" {name}={item['state']}" for name, item in view['domains'].items())
     except Exception:
         return ' Data=UNKNOWN Research=UNKNOWN Storage=UNKNOWN Execution=UNKNOWN'

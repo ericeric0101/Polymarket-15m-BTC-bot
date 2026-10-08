@@ -3713,6 +3713,9 @@ class IntegratedBTCStrategy(
         if not self._wait_for_btc_instrument(timeout_sec=60, poll_interval_sec=2):
             raise RuntimeError("Startup check failed: no BTC 15-min instrument loaded")
 
+        # A crash can leave resting venue orders that this new strategy instance
+        # does not track. Cancel them before any new BUY authority is used.
+        self._cancel_orphan_venue_orders_on_startup()
         # Recover local inventory tracking if the strategy restarted mid-market.
         self._rehydrate_inventory_state_on_startup()
         # A process can be stopped after a filled BUY but before the expired

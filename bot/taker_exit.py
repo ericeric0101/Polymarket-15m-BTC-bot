@@ -16,6 +16,7 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.order_ids import new_client_order_id
 from bot.enums import ActiveSide
 from bot.endgame_twap_exit import evaluate_endgame_twap_exit
 from bot.exit_audit import build_invalidation_exit_audit
@@ -1027,7 +1028,7 @@ class TakerExitMixin:
         self._cancel_maker_order_side("sell", reason="taker_exit", instrument_id=inst)
 
         qty = Quantity(float(qty_dec), precision=precision)
-        coid = ClientOrderId(f"BTC-15M-TAKER-EXIT-{int(time.time() * 1000)}")
+        coid = new_client_order_id("TAKER-EXIT")
         if execution_mode in {"limit_fak", "limit_fok"}:
             price_precision = int(getattr(instrument, "price_precision", 2))
             order = self.order_factory.limit(
@@ -1269,7 +1270,7 @@ class TakerExitMixin:
         if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
             return False
         price_precision = int(getattr(instrument, "price_precision", 2))
-        coid = ClientOrderId(f"BTC-15M-RECOVERY-PASSIVE-{int(time.time() * 1000)}")
+        coid = new_client_order_id("RECOVERY-PASSIVE")
         order = self.order_factory.limit(
             instrument_id=instrument_id,
             order_side=OrderSide.SELL,
@@ -1614,7 +1615,7 @@ class TakerExitMixin:
             # FIX #3: Use maker_urgent_exit_ttl_sec (not maker_order_ttl_sec)
             urgent_ttl = getattr(self, "maker_urgent_exit_ttl_sec", 15)
 
-            coid = ClientOrderId(f"BTC-15M-URGENT-EXIT-{int(time.time() * 1000)}")
+            coid = new_client_order_id("URGENT-EXIT")
             order_kwargs = {
                 "instrument_id": self._normalize_instrument_id(inst_id),
                 "order_side": OrderSide.SELL,

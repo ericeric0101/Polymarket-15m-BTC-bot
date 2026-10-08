@@ -185,7 +185,12 @@ class BTC1sHistoryCollector:
         self._lock = threading.Lock()
         self._bars: dict[int, _Bar] = {}
         self._watermark_sec: int | None = None
+        # recv - source mixes two clocks (offset + latency); it is reported only
+        # under that name. Jitter compares each clock with itself.
         self._latencies_ms: deque[float] = deque(maxlen=600)
+        self._jitter_ms: deque[float] = deque(maxlen=600)
+        self._prev_arrival: tuple[int, int] | None = None
+        self._last_received_ms = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._enabled = True
@@ -246,6 +251,10 @@ class BTC1sHistoryCollector:
                 self._watermark_sec = max(ts_sec, self._watermark_sec or ts_sec)
                 self._last_source_ts = max(src_ms, self._last_source_ts)
                 self._latencies_ms.append(float(recv_ms - src_ms))
+                if self._prev_arrival is not None and src_ms >= self._prev_arrival[0]:
+                    self._jitter_ms.append(float((recv_ms - self._prev_arrival[1]) - (src_ms - self._prev_arrival[0])))
+                self._prev_arrival = (src_ms, recv_ms)
+                self._last_received_ms = max(recv_ms, self._last_received_ms)
                 bar = self._bars.get(ts_sec)
                 if bar is None:
                     self._bars[ts_sec] = _Bar.first(ts_sec, px, src_ms, recv_ms, qty, True)
@@ -352,19 +361,22 @@ class BTC1sHistoryCollector:
                     "bars_written": self._bars_written, "buffered_bars": len(self._bars)}
 
     def _emit_metrics(self) -> None:
-        latencies = sorted(self._latencies_ms)
-        def percentile(p: float) -> float | None:
-            if not latencies:
-                return None
-            return latencies[min(len(latencies) - 1, int((len(latencies) - 1) * p))]
-        age = max(0.0, time.time() - self._last_source_ts / 1000) if self._last_source_ts else None
+        def percentile(values: list[float], p: float) -> str:
+            if not values:
+                return "unknown"
+            return f"{values[min(len(values) - 1, int((len(values) - 1) * p))]:.1f}"
+        offset = sorted(self._latencies_ms)
+        jitter = sorted(self._jitter_ms)
+        # Local receipt age stays in one clock domain; a remote source timestamp
+        # is never subtracted from the local wall clock.
+        age = max(0.0, time.time() - self._last_received_ms / 1000) if self._last_received_ms else None
         logger.info(
             "BTC1S history: bars_completed={} buffered={} written={} dropped={} "
-            "last_source_age={} source_receive_p50_ms={} source_receive_p95_ms={} writer_queue_depth={} enabled={}",
+            "last_receive_age={} receive_jitter_p50_ms={} receive_jitter_p95_ms={} "
+            "cross_clock_recv_minus_source_p50_ms={} writer_queue_depth={} enabled={}",
             self._bars_completed, len(self._bars), self._bars_written, self._dropped_history_rows,
             f"{age:.2f}" if age is not None else "unknown",
-            f"{percentile(.50):.1f}" if percentile(.50) is not None else "unknown",
-            f"{percentile(.95):.1f}" if percentile(.95) is not None else "unknown",
+            percentile(jitter, .50), percentile(jitter, .95), percentile(offset, .50),
             self._queue.qsize(), self._enabled,
         )
 

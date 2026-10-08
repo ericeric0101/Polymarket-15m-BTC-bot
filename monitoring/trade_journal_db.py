@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from bot.entry_session_policy import MARKOUT_CALIBRATION_START_UTC, is_taipei_weeknight_entry_session
 
 from loguru import logger
+from monitoring.diagnostic_budget import SUMMARY_EVENT, DiagnosticBudget, diagnostic_bucket
 from monitoring.storage_retention import StoragePolicy, maintenance_lock, record_completed_backup
 from bot.research.storage import StorageSummary
 
@@ -159,6 +160,7 @@ class TradeJournalDB:
         self._storage_root = next((parent for parent in target.resolve().parents
                                    if (parent / "monitoring/trade_journal_db.py").is_file()), None)
         self._telemetry_queue = queue.Queue(maxsize=256)
+        self._diagnostic_budget = DiagnosticBudget.from_env()
         self._backup_dirty = False
         self._backup_retry_after_monotonic = 0.0
         self._backup_health: Dict[str, Any] = {"state": "NOT_ATTEMPTED", "failures_total": 0}
@@ -707,6 +709,27 @@ class TradeJournalDB:
                     """,
                     (slug,),
                 ).fetchone()
+                # A durable BUY intent with no terminal lifecycle event may still
+                # rest (or fill) at the venue after a crash; it consumes the
+                # market's BUY budget exactly like a fill until it is resolved.
+                unresolved_row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT intent.client_order_id)
+                    FROM order_events AS intent
+                    WHERE intent.event_type='ORDER_MAKER_INTENT'
+                      AND intent.side='BUY'
+                      AND json_extract(intent.payload_json, '$.slug')=?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM order_events AS done
+                          WHERE done.client_order_id=intent.client_order_id
+                            AND done.event_type IN (
+                                'ORDER_FILLED', 'ORDER_CANCELED', 'ORDER_REJECTED', 'ORDER_DENIED',
+                                'ORDER_EXPIRED', 'ORDER_CANCEL_RECONCILED'
+                            )
+                      )
+                    """,
+                    (slug,),
+                ).fetchone()
                 exit_row = conn.execute(
                     """
                     SELECT COUNT(DISTINCT fill.client_order_id)
@@ -722,58 +745,12 @@ class TradeJournalDB:
                     (slug,),
                 ).fetchone()
             return {
-                "buy_count": int(buy_row[0] or 0),
+                "buy_count": int(buy_row[0] or 0) + int(unresolved_row[0] or 0),
+                "unresolved_buy_intent_count": int(unresolved_row[0] or 0),
                 "protective_exit_count": int(exit_row[0] or 0),
             }
         except Exception as e:
             logger.error(f"TradeJournalDB load_market_guard_counts failed; BUYs must remain blocked: {e}")
-            return None
-
-    def load_fast_follow_night_risk(self, night_key: str) -> Optional[Dict[str, Any]]:
-        """Recover filled-entry limits after a process restart.
-
-        Older risk snapshots recorded submissions only. Their count is
-        returned separately to support a conservative one-night migration.
-        """
-        if not night_key:
-            return {
-                "filled_entries": 0, "pending_entries": 0,
-                "legacy_attempted_entries": 0, "attempted_entries": 0,
-                "open_position_instruments": [],
-                "realized_pnl_usdc": 0.0,
-            }
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT payload_json
-                    FROM strategy_events
-                    WHERE event_type='FAST_FOLLOW_RISK_STATE'
-                      AND json_extract(payload_json, '$.night_key')=?
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (night_key,),
-                ).fetchone()
-            payload = json.loads(row[0] or "{}") if row else {}
-            has_filled_entries = "filled_entries" in payload
-            filled_entries = max(0, int(payload.get("filled_entries") or 0)) if has_filled_entries else 0
-            legacy_attempted_entries = (
-                0 if has_filled_entries else max(0, int(payload.get("attempted_entries") or 0))
-            )
-            return {
-                "filled_entries": filled_entries,
-                "pending_entries": max(0, int(payload.get("pending_entries") or 0)),
-                "legacy_attempted_entries": legacy_attempted_entries,
-                # Retained for callers which only render the old field.
-                "attempted_entries": filled_entries,
-                "open_position_instruments": [
-                    str(item) for item in (payload.get("open_position_instruments") or [])
-                    if str(item or "")
-                ],
-                "realized_pnl_usdc": float(payload.get("realized_pnl_usdc") or 0.0),
-            }
-        except Exception as e:
-            logger.error(f"TradeJournalDB load_fast_follow_night_risk failed; fast-follow BUYs blocked: {e}")
             return None
 
     def load_maker_buy_markout_calibration(
@@ -822,53 +799,6 @@ class TradeJournalDB:
             )
         except Exception as e:
             logger.debug(f"TradeJournalDB load maker markout calibration failed: {e}")
-            return None
-
-    def load_fast_follow_buy_markout_calibration(self, *, lookback_hours: float,
-                                                 horizon_sec: int, min_samples: int) -> Optional[Dict[str, float | int | str]]:
-        """Return Outcome FOK/taker-only adverse markout evidence.
-
-        Maker fills are intentionally excluded.  One completed observation per
-        market prevents a multi-event fill lifecycle from inflating evidence.
-        """
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT CASE WHEN CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL) < 0
-                             THEN -CAST(json_extract(payload_json, '$.signed_markout_ps') AS REAL)
-                             ELSE 0 END, json_extract(payload_json, '$.slug')
-                    FROM order_events
-                    WHERE event_type='FILL_MARKOUT' AND side='BUY'
-                      AND json_extract(payload_json, '$.liquidity_class')='taker'
-                      AND json_extract(payload_json, '$.fill_id') LIKE 'BTC-15M-FAST-FOLLOW-BUY-%'
-                      AND CAST(json_extract(payload_json, '$.horizon_sec') AS INTEGER)=?
-                      AND CAST(json_extract(payload_json, '$.markout_context_schema_version') AS INTEGER)=2
-                      AND julianday(ts) >= julianday('now', ?)
-                    ORDER BY ts ASC, id ASC
-                    """,
-                    (int(horizon_sec), f"-{float(lookback_hours):g} hours"),
-                ).fetchall()
-            seen_slugs: set[str] = set()
-            values: list[float] = []
-            for value, slug_value in rows:
-                slug = str(slug_value or "")
-                if not slug or slug in seen_slugs:
-                    continue
-                seen_slugs.add(slug)
-                values.append(float(value or 0.0))
-            calibration = _summarize_adverse_markouts(
-                values, min_samples=min_samples, horizon_sec=horizon_sec,
-                lookback_hours=lookback_hours,
-            )
-            if calibration:
-                calibration["source"] = "outcome_fast_follow_taker_first_market"
-            return calibration
-        except Exception as e:
-            logger.error(
-                "TradeJournalDB load Outcome fast-follow markout failed; FOK BUYs remain blocked: "
-                f"{e}"
-            )
             return None
 
     def load_maker_buy_markout_calibrations(
@@ -1261,9 +1191,24 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load_fair_edge_bucket_shadow_simulations failed: {e}")
             return []
 
+    def _diagnostic_allowed(self, run_id: str, table: str, event_type: str, payload_json: str) -> bool:
+        bucket = diagnostic_bucket(table, event_type)
+        budget = getattr(self, "_diagnostic_budget", None)
+        if bucket is None or budget is None:
+            return True
+        allowed = budget.allow(bucket, len(payload_json))
+        summary = budget.take_summary()
+        if summary is not None:
+            # Never budgeted itself; at most one row per summary interval.
+            self.log_strategy_event(run_id, SUMMARY_EVENT, summary)
+        return allowed
+
     def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None,
                            *, event_ts: Optional[str] = None) -> bool:
         sql = "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)"
+        payload_json = _json_dumps(payload or {})
+        if not self._diagnostic_allowed(run_id, "strategy", event_type, payload_json):
+            return True  # sampled out by the diagnostic byte budget, not a failure
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = self._connect()
@@ -1273,7 +1218,7 @@ class TradeJournalDB:
                     event_ts or _utc_now_iso(),
                     run_id,
                     event_type,
-                    _json_dumps(payload or {}),
+                    payload_json,
                 ),
             )
             conn.commit()
@@ -1685,6 +1630,9 @@ class TradeJournalDB:
             instrument_id, token_id, fee_rate_bps, expected_net_usdc, commission_usdc, payload_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+        payload_json = _json_dumps(payload or {})
+        if not self._diagnostic_allowed(run_id, "order", event_type, payload_json):
+            return True  # sampled out by the diagnostic byte budget, not a failure
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = self._connect()
@@ -1706,7 +1654,7 @@ class TradeJournalDB:
                     fee_rate_bps,
                     expected_net_usdc,
                     commission_usdc,
-                    _json_dumps(payload or {}),
+                    payload_json,
                 ),
             )
             conn.commit()

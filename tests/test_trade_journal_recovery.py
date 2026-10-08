@@ -201,13 +201,6 @@ def test_failed_backup_stays_dirty_and_retries_without_marking_journal_unhealthy
     db.stop()
 
 
-def test_night_risk_query_error_returns_none_instead_of_zero_risk(monkeypatch, tmp_path):
-    db = TradeJournalDB(tmp_path / "journal.db")
-    monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
-
-    assert db.load_fast_follow_night_risk("2026-09-08") is None
-
-
 def test_critical_runtime_write_failure_marks_journal_not_buy_ready(monkeypatch, tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")))
@@ -330,6 +323,7 @@ def test_market_guard_counts_survive_restart_and_ignore_partial_fill_rows(tmp_pa
 
     assert db.load_market_guard_counts(slug) == {
         "buy_count": 1,
+        "unresolved_buy_intent_count": 0,
         "protective_exit_count": 1,
     }
 
@@ -445,44 +439,6 @@ def test_execution_penalty_snapshot_fails_closed_after_expiry():
     )
 
     assert snapshot is None
-
-
-def test_fast_follow_markout_calibration_excludes_maker_rows_and_deduplicates_markets(tmp_path):
-    db = TradeJournalDB(tmp_path / "journal.db")
-    for index in range(30):
-        db.log_order_event(
-            "run", "FILL_MARKOUT", side="BUY",
-            payload={
-                "fill_id": f"BTC-15M-FAST-FOLLOW-BUY-{index}",
-                "slug": f"outcome-{index}", "liquidity_class": "taker",
-                "horizon_sec": 10, "signed_markout_ps": -0.01,
-                "markout_context_schema_version": 2,
-            },
-        )
-    # Neither a maker fill nor a second observation from the same market is
-    # Outcome/FOK evidence.
-    db.log_order_event("run", "FILL_MARKOUT", side="BUY", payload={
-        "fill_id": "maker", "slug": "maker-only", "liquidity_class": "maker",
-        "horizon_sec": 10, "signed_markout_ps": -0.50,
-        "markout_context_schema_version": 2,
-    })
-    db.log_order_event("run", "FILL_MARKOUT", side="BUY", payload={
-        "fill_id": "BTC-15M-FAST-FOLLOW-BUY-duplicate", "slug": "outcome-0",
-        "liquidity_class": "taker", "horizon_sec": 10, "signed_markout_ps": -0.50,
-        "markout_context_schema_version": 2,
-    })
-
-    calibration = db.load_fast_follow_buy_markout_calibration(
-        lookback_hours=720, horizon_sec=10, min_samples=30,
-    )
-
-    assert calibration is not None
-    assert calibration["sample_count"] == 30
-    assert calibration["adverse_markout_per_share"] == 0.01
-    assert calibration["source"] == "outcome_fast_follow_taker_first_market"
-    db.stop()
-
-
 
 
 def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):

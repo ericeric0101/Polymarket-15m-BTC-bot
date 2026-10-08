@@ -963,7 +963,7 @@ class SpotPricerMixin:
         This intentionally does not assign ``last_forecast_state`` and never
         enters the quote/order decision path.
         """
-        from bot.live_entry_research import build_safety_sigma
+        from bot.live_entry_research import build_diffusion_flip_z, build_safety_sigma
 
         # Match the existing approved 10-second external-spot freshness window.
         # Official TWAP is settlement state and is never a future-path fallback.
@@ -1222,6 +1222,12 @@ class SpotPricerMixin:
             time_left_sec=(max(1.0, twap_window - observed_sec) if final_window and integral_available else float(time_left_sec)),
             sigma_source="forecast_sigma_after_time_decay_ex_market",
         ) if sigma_ex_market_fresh and target is not None else {"safety_sigma": None})
+        diffusion_z = build_diffusion_flip_z(
+            spot=path_spot_float, target=float(target) if target is not None else None,
+            sigma_annual=float(raw_sigma) if sigma_ex_market_fresh and raw_sigma is not None else None,
+            time_left_sec=float(time_left_sec), twap_window_sec=float(twap_window),
+            remaining_window_sec=(max(0.0, twap_window - observed_sec) if final_window and integral_available else None),
+        )
         move_usd = float(target) - path_spot_float if target is not None else None
         move_bps = move_usd / path_spot_float * 10000 if move_usd is not None and path_spot_float > 0 else None
         p_market = float(mid_up) if mid_up is not None else None
@@ -1266,6 +1272,10 @@ class SpotPricerMixin:
             "currently_dominant_side": settlement_state_side,
             "required_move_usd": move_usd, "required_move_bps": move_bps,
             "required_move_sigma": move_sigma["safety_sigma"],
+            # Legacy field above uses a TTE-decayed, floored sigma and sqrt(T);
+            # it is not a diffusion z-score. These fields are the model-
+            # consistent replacement for flip-difficulty research.
+            **diffusion_z,
             "sigma_final": float(conditioned.sigma_final),
             "sigma_after_time_decay_ex_market": float(conditioned.sigma_after_time_decay) if sigma_ex_market_fresh else None,
             "sigma_implied_floor_applied": bool(conditioned.implied_sigma_floor_applied),
