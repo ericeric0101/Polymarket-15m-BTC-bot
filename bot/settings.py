@@ -879,5 +879,18 @@ def initialize_strategy_settings(
         # cross-DB joins made a canonical stop timeline ambiguous.
         db=strategy.twap_research_db, run_id=strategy.run_id,
     )
+    from bot.stop_timing_telemetry import StopTimingTelemetry
+    from bot.entry_sizing import SIZING_RULE_VERSION
+    # Research-only prospective stop-timing telemetry. The sink is the existing
+    # bounded, non-blocking journal worker queue (never the order-path lock).
+    _stop_timing_db = getattr(strategy, "trade_db", None)
+    strategy.stop_timing_telemetry = StopTimingTelemetry(
+        emit=(
+            (lambda event_type, payload: _stop_timing_db.enqueue_strategy_event(
+                strategy.run_id, event_type, {"sizing_rule_version_runtime": SIZING_RULE_VERSION, **payload}))
+            if _stop_timing_db is not None and hasattr(_stop_timing_db, "enqueue_strategy_event") else None
+        ),
+        run_id=strategy.run_id,
+    )
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

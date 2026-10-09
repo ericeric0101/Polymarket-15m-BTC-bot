@@ -301,6 +301,14 @@ class StrategyLifecycleMixin:
                         f"{type(shadow_error).__name__}: {shadow_error}"
                     )
 
+            stop_timing = getattr(self, "stop_timing_telemetry", None)
+            if stop_timing is not None:
+                stop_timing.on_settlement_safe(
+                    slug=slug, outcome=settlement_outcome, settlement_ts=shadow_settlement_ts,
+                    reference_source=shadow_label["source"],
+                    reference_is_canonical=shadow_label["canonical"],
+                )
+
             trend_shadow = getattr(self, "trend_entry_shadow", None)
             if trend_shadow is not None:
                 try:

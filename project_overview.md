@@ -105,6 +105,55 @@ effect with the commit `fix(execution): size entries by sellable shares`.
     back-to-back DRY-RUNs for ≈ 24 h without re-checking free space.
   - HEAD has not been runtime-validated since the settlement fix `bbbdc09`.
 
+## Prospective stop-timing telemetry (2026-10-10; research-only)
+
+Commit `research: capture prospective stop timing telemetry`. Purpose: for every
+ACTUAL LIVE position, compare the held side's adverse cross of the strike
+(fresh official Chainlink TWAP vs strike; tie settles UP) with the conditional
+absolute-loss breaker, the catastrophic breaker and the final outcome. It is
+not Flip Stop and grants no SELL authority.
+
+- Module `bot/stop_timing_telemetry.py` (`StopTimingTelemetry`, schema
+  `stop_timing_v1`), constructed in `bot/settings.py`, fed once per protective
+  evaluation right after `ExitPolicyEngine.evaluate` in
+  `bot/taker_exit.py::_maybe_taker_exit_positions` (LIVE only; DRY-RUN never
+  evaluates exits), and closed from the settlement path in
+  `bot/lifecycle_runtime.py`.
+- Sink: `TradeJournalDB.enqueue_strategy_event` (non-blocking lock +
+  `put_nowait` onto the existing journal worker; never the order-path write
+  lock). Exceptions are swallowed and counted; a call slower than 50 ms is
+  counted and after 3 the recorder disables itself for the run.
+- `strategy_events` types, transition-only and bounded (≤ 80 per position
+  epoch, ≤ 12 crosses, ≤ 5,000 per run): `STOP_TIMING_POSITION_OPENED`,
+  `_ADVERSE_CROSS`, `_FAVORABLE_RECROSS`, `_PERSISTENCE_CHECKPOINT` (5/15/30 s,
+  telemetry only), `_COMPONENT_FIRST_TRUE` (`abs_min_hold`,
+  `abs_price_adverse`, `abs_adverse_trend_confirmed`, `abs_loss_threshold`,
+  `abs_tte_le_120`, `abs_persistence_ge_15s`, `abs_votes_ge_2_of_2`,
+  `catastrophic_candidate`, `required_move_mode_switch`),
+  `_BREAKER_FIRST_ELIGIBLE` (absolute / catastrophic), `_DECISION_CHANGE`
+  (stop/breaker reasons only), `_DEGRADED_FIRST`, `_POSITION_SETTLEMENT`
+  (runtime outcome, counterfactual hold gross PnL from max observed qty,
+  telemetry counters; official outcome stays `PENDING_OFFICIAL_RESOLUTION`).
+- Every row carries wall clock, monotonic clock and `obs_interval_sec`
+  (protective evaluation runs every `TAKER_EXIT_EVAL_INTERVAL_SEC`=5 s outside
+  the endgame window, so cross / eligibility timing resolution is ≈ 5 s), qty,
+  cost basis, bid/ask, engine `exit_px_effective`, `net_if_exit`,
+  `gross_if_exit`, TTE, strike, TWAP and its age/state, signed strike distance
+  (USD, bps; positive = in the held side's favour), legacy
+  `required_move_sigma` (TTE-decayed, floored safety sigma — **not** a
+  probability or a z-score), `required_move_z_diffusion` when available, sigma
+  source and target mode. Stale/missing inputs are `None` with
+  `UNKNOWN`/`DEGRADED`; no cross transition is created from them.
+- Breaker components are a pure mirror of the engine predicate
+  (`absolute_breaker_components`), regression-tested against
+  `ExitPolicyEngine.evaluate` over a grid. Submission / fill / reject are NOT
+  duplicated: they are joined from the existing `ORDER_TAKER_EXIT_SUBMIT`,
+  `ORDER_SUBMIT`, `ORDER_FILLED`, `ORDER_REJECTED` rows by
+  `scripts/stop_timing_report.py --db <journal> --run-id <run>` (read-only).
+- Not on the diagnostic allow-list: rows are core-retained. Expected volume is
+  a few dozen rows per held position.
+- Tests: `tests/test_stop_timing_telemetry.py`.
+
 ## Trade-journal diagnostic retention (2026-10-09)
 
 `monitoring/journal_retention.py` (CLI `scripts/journal_retention.py`) bounds

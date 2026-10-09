@@ -616,6 +616,23 @@ class TakerExitMixin:
                 adverse_thesis_weakening_count=int(current_stop_votes.get("weakening_count", 0)),
                 adverse_thesis_available_count=int(current_stop_votes.get("available_count", 0)),
             )
+            # Research-only stop-timing telemetry: transition events through the
+            # non-blocking journal queue; never raises and returns no decision.
+            stop_timing = getattr(self, "stop_timing_telemetry", None)
+            if stop_timing is not None:
+                stop_timing.observe_safe(
+                    now_ts=now_ts, slug=slug_for_confirmation, instrument_id=inst_key,
+                    held_side=held_side, state=state, qty=qty, sellable_qty=position.sellable_qty,
+                    best_bid=best_bid, best_ask=best_ask, time_left_sec=time_left_sec,
+                    market_end_ts=end_ts, strike=strike, reference_spot=reference_spot,
+                    reference_source=reference_source, reference_ts=reference_ts,
+                    twap_features=stop_twap_features, exit_decision=exit_decision,
+                    engine_config=engine_config, signal_decision=signal_decision,
+                    locked_side_invalidated=confirmed_locked_side_invalidated,
+                    adverse_persistence_sec=adverse_persistence_sec,
+                    thesis_votes=current_stop_votes, hold_sec=hold_sec,
+                    sizing_rule_version=state.get("sizing_version"),
+                )
             # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
             # independently configured hard breaker may pass this boundary.
             if (not stop_loss_enabled or not self.taker_exit_enabled or
