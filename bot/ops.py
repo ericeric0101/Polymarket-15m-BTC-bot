@@ -305,8 +305,9 @@ def run_auto_redeem_script(
                         condition_size_by_id[condition_id] = float(parts["size"])
                     except ValueError:
                         pass
-            # Parse: redeemPositions condition=0x... tx=0x... status=1
-            if line_s.startswith("redeemPositions "):
+            # Parse: redeemPositions condition=0x... tx=0x... status=1 (CTF)
+            #        routerRedeem condition=0x... outcome_index=0 ... tx=0x... status=1 protocol=v2
+            if line_s.startswith("redeemPositions ") or line_s.startswith("routerRedeem "):
                 parts: dict[str, str] = {}
                 for token in line_s.split():
                     if "=" in token:
@@ -318,6 +319,7 @@ def run_auto_redeem_script(
                     "condition_id": condition_id,
                     "tx_hash": parts.get("tx", ""),
                     "status": int(parts.get("status", "0")),
+                    "protocol": parts.get("protocol", "v1"),
                 }
                 if condition_id in condition_size_by_id:
                     # This is the size of the winning/losing position token,

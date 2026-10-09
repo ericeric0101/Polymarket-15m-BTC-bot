@@ -1212,6 +1212,10 @@ def main():
         enabled=compatibility.auto_apply_patches,
         mode=compatibility.patch_mode,
     )
+    # Protocol V2 routing is required for correctness, not an optional compatibility
+    # patch: V2 assets must be signed for ExchangeV3 and loaded from positionIds.
+    from bot.protocol_v2_runtime import install_protocol_v2_overrides
+    install_protocol_v2_overrides()
 
     auth = run_preflight_checks(simulation=simulation)
     if auth is None:

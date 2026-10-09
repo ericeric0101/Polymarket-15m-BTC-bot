@@ -335,7 +335,7 @@ def test_cache_failure_can_retry_without_new_ids_or_duplicate_subscriptions(setu
 def test_existing_async_gamma_parser_is_used(monkeypatch):
     async def fetch(s):
         assert s == slug(1)
-        return {"conditionId": "0x" + "a"*64,
+        return {"version": "v1", "conditionId": "0x" + "a"*64, "outcomes": '["Up", "Down"]',
                 "clobTokenIds": '["11111111111111111111", "22222222222222222222"]'}
     monkeypatch.setattr(admission, "fetch_gamma_market_by_slug", fetch)
     ids = asyncio.run(admission.resolve_pair_ids(slug(1)))

@@ -585,7 +585,7 @@ def test_startup_resolved_loss_reconciliation_writes_one_cycle_pnl(tmp_path):
         side="BUY",
         price=0.65,
         qty=10,
-        token_id="down-token",
+        token_id="222222222222222222222",
         payload={"slug": slug, "effective_fee_usdc": 0.0},
     )
 
@@ -655,10 +655,12 @@ def test_startup_settlement_reconciliation_applies_loss_to_persisted_profit_guar
     monkeypatch.setattr(
         "bot.recovery.fetch_gamma_market_by_slug_sync",
         lambda _slug: {
+            "version": "v1",
+            "conditionId": "0x" + "c" * 64,
             "closed": True,
             "outcomes": ["Up", "Down"],
             "outcomePrices": ["1", "0"],
-            "clobTokenIds": ["up-token", "down-token"],
+            "clobTokenIds": ["111111111111111111111", "222222222222222222222"],
         },
     )
     host = Host(db)

@@ -38,6 +38,15 @@ from bot.collateral_tokens import (
     get_ctf_collateral,
 )
 from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_next_cursor, v2_rows
+from bot.protocol_v2 import (
+    POSITION_MANAGER_ABI,
+    POSITION_MANAGER_ADDRESS,
+    PROTOCOL_V2,
+    ROUTER_ABI,
+    ROUTER_ADDRESS,
+    UnsupportedMarketProtocol,
+    select_market_assets,
+)
 
 DATA_API = DATA_API_V2_BASE_URL
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
@@ -302,6 +311,86 @@ def _print_user_report(user: str, positions: list[dict[str, Any]], slug_filter: 
             f"- condition={condition_id} redeemable={redeemable} size={total_size:.6f} "
             f"outcomes=[{outcomes}] slug={slug} title={title}"
         )
+
+
+GAMMA_API = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
+
+
+def _gamma_market_for_condition(condition_id: str) -> dict[str, Any] | None:
+    """Gamma market for a condition (closed or open); None when not found."""
+    for closed in ("true", "false"):
+        try:
+            r = requests.get(f"{GAMMA_API}/markets", params={"condition_ids": condition_id, "closed": closed}, timeout=20)
+            r.raise_for_status()
+            rows = r.json()
+        except Exception:
+            continue
+        for row in rows if isinstance(rows, list) else []:
+            if str(row.get("conditionId") or "").lower() == condition_id.lower():
+                return row
+    return None
+
+
+def split_conditions_by_protocol(condition_ids: list[str], market_lookup=_gamma_market_for_condition):
+    """-> (v1 condition ids, {condition id: MarketAssets} for v2, {condition id: reason} skipped).
+
+    The protocol comes from the market's Gamma ``version``; a condition whose
+    market cannot be read or has an unsupported version is skipped, never guessed.
+    """
+    v1: list[str] = []
+    v2: dict[str, Any] = {}
+    skipped: dict[str, str] = {}
+    for cid in condition_ids:
+        market = market_lookup(cid)
+        if market is None:
+            skipped[cid] = "gamma market not found"
+            continue
+        try:
+            assets = select_market_assets(market)
+        except UnsupportedMarketProtocol as exc:
+            skipped[cid] = str(exc)
+            continue
+        if assets.protocol == PROTOCOL_V2:
+            v2[cid] = assets
+        else:
+            v1.append(cid)
+    return v1, v2, skipped
+
+
+def _redeem_v2_conditions(private_key: str, owner_address: str, chain_id: int, rpc_url: str,
+                          markets: dict[str, Any]) -> None:
+    """Protocol V2: Router.redeem(bytes31 condition, outcomeIndex, amount) for each held outcome."""
+    from web3 import Web3
+    from web3.middleware import ExtraDataToPOAMiddleware
+
+    if not markets:
+        return
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    owner = Web3.to_checksum_address(owner_address)
+    manager = w3.eth.contract(address=Web3.to_checksum_address(POSITION_MANAGER_ADDRESS), abi=POSITION_MANAGER_ABI)
+    router_address = Web3.to_checksum_address(ROUTER_ADDRESS)
+    if not manager.functions.isApprovedForAll(owner, router_address).call():
+        print("Skip V2 redeem: Router is not approved on PositionManager "
+              "(run scripts/check_allowance.py --setup-v2-approvals --apply)")
+        return
+    router = w3.eth.contract(address=router_address, abi=ROUTER_ABI)
+    receipt_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_RECEIPT_TIMEOUT_SEC", "120")))
+    for cid, assets in markets.items():
+        for outcome_index, asset_id in enumerate(assets.asset_ids):
+            balance = int(manager.functions.balanceOf(owner, int(asset_id)).call())
+            if balance <= 0:
+                continue
+            tx = router.functions.redeem(assets.condition_bytes31, outcome_index, balance).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": w3.eth.get_transaction_count(owner, "pending"),
+            })
+            signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
+            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=receipt_timeout_sec)
+            print(f"routerRedeem condition={cid} outcome_index={outcome_index} amount={balance / 1_000_000:.6f} "
+                  f"tx={receipt.transactionHash.hex()} status={receipt.status} protocol=v2")
 
 
 def _redeem_conditions(
@@ -802,14 +891,26 @@ def main() -> int:
         print("Redeem flow complete.")
         return 0
 
+    v1_conditions, v2_markets, skipped_protocol = split_conditions_by_protocol(filtered_redeemable_conditions)
+    for cid, reason in skipped_protocol.items():
+        print(f"Skip condition={cid}: protocol unknown ({reason})")
+    if v2_markets:
+        print(f"Protocol V2 conditions: {json.dumps(sorted(v2_markets))}")
     _redeem_conditions(
         private_key=private_key,
         owner_address=owner,
         chain_id=chain_id,
         rpc_url=rpc_url,
-        condition_ids=filtered_redeemable_conditions,
+        condition_ids=v1_conditions,
         condition_sizes=redeemable_condition_sizes,
         wrap_existing_usdce=bool(args.wrap_existing_usdce),
+    )
+    _redeem_v2_conditions(
+        private_key=private_key,
+        owner_address=owner,
+        chain_id=chain_id,
+        rpc_url=rpc_url,
+        markets=v2_markets,
     )
     print("Redeem flow complete.")
     return 0

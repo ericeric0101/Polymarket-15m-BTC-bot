@@ -73,7 +73,14 @@ def interpret_fill_liquidity(
     fill_qty_dec: Decimal,
     filled_limit_price: Decimal,
     filled_id: str,
+    protocol: str = "v1",
 ) -> FillLiquidityInterpretation:
+    """Classify the fill and estimate its taker fee.
+
+    CTF (v1) takes the BUY fee in shares (fewer shares received).  Protocol V2's
+    Exchange takes the BUY fee in collateral on top of the spend, so the full
+    share quantity is received and the fee is booked in USDC like a SELL fee.
+    """
     liquidity_class = classify_fill_liquidity(
         liquidity_side=liquidity_side,
         raw_commission_dec=raw_commission_dec,
@@ -87,7 +94,9 @@ def interpret_fill_liquidity(
             shares=fill_qty_dec,
             probability=fill_price_dec,
         )
-        if side_for_ledger == "buy":
+        if side_for_ledger == "buy" and protocol == "v2":
+            effective_fee_usdc_dec = effective_fee_usdc_calc
+        elif side_for_ledger == "buy":
             effective_fee_shares_dec = estimate_taker_buy_fee_shares(
                 shares=fill_qty_dec,
                 probability=fill_price_dec,

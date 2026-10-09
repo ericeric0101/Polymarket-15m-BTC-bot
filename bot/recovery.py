@@ -13,6 +13,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.inventory import InventoryLedger
 from bot.market_data import fetch_gamma_market_by_slug_sync
+from bot.protocol_v2 import PROTOCOL_V2, UnsupportedMarketProtocol, select_market_assets
 from bot.wallet_ops import (
     ensure_balance_clob_client,
     fetch_conditional_balance,
@@ -50,22 +51,28 @@ class StrategyRecoveryMixin:
 
     @staticmethod
     def _resolved_gamma_winner_token_id(market: object) -> tuple[str, str] | None:
-        """Return (winner side, token id) only for an unambiguous Gamma result."""
+        """Return (winner side, asset id) only for an unambiguous Gamma result.
+
+        The asset ids come from the market's protocol (clobTokenIds for v1,
+        positionIds for v2).  A V2 market must also report
+        ``resolutionStatus == "resolved"``; ``closed`` alone is not settlement
+        evidence there.  Unknown versions are never treated as settled.
+        """
         if not isinstance(market, dict) or not bool(market.get("closed")):
             return None
         try:
-            outcomes = market.get("outcomes", [])
+            assets = select_market_assets(market)
+        except UnsupportedMarketProtocol:
+            return None
+        if assets.protocol == PROTOCOL_V2 and str(market.get("resolutionStatus") or "").lower() != "resolved":
+            return None
+        try:
             prices = market.get("outcomePrices", [])
-            tokens = market.get("clobTokenIds", [])
-            if isinstance(outcomes, str):
-                outcomes = json.loads(outcomes)
             if isinstance(prices, str):
                 prices = json.loads(prices)
-            if isinstance(tokens, str):
-                tokens = json.loads(tokens)
             values = {
                 str(side).strip().upper(): (float(price), str(token))
-                for side, price, token in zip(outcomes, prices, tokens)
+                for side, price, token in zip(assets.outcomes, prices, assets.asset_ids)
             }
         except (TypeError, ValueError, json.JSONDecodeError):
             return None

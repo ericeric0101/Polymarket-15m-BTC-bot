@@ -14,6 +14,7 @@ from bot.execution_events import (
     reconcile_rejected_order,
 )
 from bot.fill_ledger import interpret_fill_liquidity
+from bot.protocol_v2 import asset_protocol
 from bot.enums import ActiveSide
 from bot.post_trade import build_fill_order_event_payload
 from bot.research.lifecycle import fill_lifecycle_metadata
@@ -193,6 +194,12 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     ).get(filled_id, {})
     liquidity_side_raw = getattr(event, "liquidity_side", "")
     side_for_ledger = filled_side or strategy._normalize_side_text(getattr(event, "order_side", ""))
+    try:
+        fill_protocol = asset_protocol(
+            strategy._extract_token_id_from_instrument(strategy._instrument_key(filled_inst))
+        ) or "v1"
+    except Exception:
+        fill_protocol = "v1"
     fill_interpretation = interpret_fill_liquidity(
         liquidity_side=liquidity_side_raw,
         raw_commission_dec=raw_commission_dec,
@@ -202,6 +209,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         fill_qty_dec=fill_qty_dec,
         filled_limit_price=filled_limit_price,
         filled_id=filled_id,
+        protocol=fill_protocol,
     )
     liquidity_class = fill_interpretation.liquidity_class
     is_maker_fill = fill_interpretation.is_maker_fill

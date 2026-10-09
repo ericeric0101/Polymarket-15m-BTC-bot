@@ -87,6 +87,55 @@ def _wrap_usdce_to_pusd(
     return nonce + 1
 
 
+def execute_v2_merge_on_chain(
+    *,
+    pk: str,
+    condition_bytes31: bytes,
+    amount: int,
+    rpc_url: str,
+    chain_id: int,
+    logger_info_fn: Callable[[str], None],
+    logger_warning_fn: Callable[[str], None],
+) -> bool:
+    """Protocol V2 merge via Router.merge(bytes31, amount); pays pUSD to the caller.
+
+    Requires PositionManager.setApprovalForAll(Router) by the holder (set up with
+    scripts/check_allowance.py); without it nothing is sent.
+    """
+    try:
+        from eth_account import Account
+        from web3 import Web3
+        from web3.middleware import ExtraDataToPOAMiddleware
+
+        from bot.protocol_v2 import POSITION_MANAGER_ABI, POSITION_MANAGER_ADDRESS, ROUTER_ABI, ROUTER_ADDRESS
+
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        owner = w3.to_checksum_address(Account.from_key(pk).address)
+        manager = w3.eth.contract(address=w3.to_checksum_address(POSITION_MANAGER_ADDRESS), abi=POSITION_MANAGER_ABI)
+        router_address = w3.to_checksum_address(ROUTER_ADDRESS)
+        if not manager.functions.isApprovedForAll(owner, router_address).call():
+            logger_warning_fn("V2 merge skipped: Router is not approved on PositionManager (run check_allowance.py)")
+            return False
+        router = w3.eth.contract(address=router_address, abi=ROUTER_ABI)
+        tx = router.functions.merge(condition_bytes31, amount).build_transaction({
+            "chainId": chain_id,
+            "from": owner,
+            "nonce": w3.eth.get_transaction_count(owner, "pending"),
+        })
+        signed = w3.eth.account.sign_transaction(tx, private_key=pk)
+        txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=120)
+        logger_info_fn(
+            f"✓ V2 Merge {'SUCCESS' if receipt.status == 1 else 'FAILED'}: condition=0x{condition_bytes31.hex()[:16]}... "
+            f"recovered={amount / 1_000_000:.4f} pUSD tx={txh.hex()} status={receipt.status}"
+        )
+        return receipt.status == 1
+    except Exception as e:
+        logger_warning_fn(f"V2 merge on-chain failed: {e}")
+        return False
+
+
 def execute_merge_on_chain(
     *,
     pk: str,
@@ -173,7 +222,9 @@ def try_merge_yes_no_positions(
         if not pk or int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")) != 0:
             return
 
-        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams
+
+        from bot.protocol_v2 import conditional_asset_type, v2_condition_for_asset
 
         rpc_url = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
         chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
@@ -198,7 +249,7 @@ def try_merge_yes_no_positions(
             for token in tokens:
                 try:
                     params = BalanceAllowanceParams(
-                        asset_type=AssetType.CONDITIONAL,
+                        asset_type=conditional_asset_type(token["token_id"]),
                         token_id=token["token_id"],
                         signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
                     )
@@ -215,15 +266,30 @@ def try_merge_yes_no_positions(
                 f"Merge opportunity detected! condition={condition_id[:16]}... "
                 f"overlap={merge_amount_usdc:.4f} USDC — executing merge"
             )
-            success = execute_merge_on_chain(
-                pk=pk,
-                condition_id=condition_id,
-                amount=min_balance,
-                rpc_url=rpc_url,
-                chain_id=chain_id,
-                logger_info_fn=logger_info_fn,
-                logger_warning_fn=logger_warning_fn,
-            )
+            v2_conditions = {v2_condition_for_asset(token["token_id"]) for token in tokens}
+            if v2_conditions != {None}:
+                if len(v2_conditions) != 1 or None in v2_conditions:
+                    logger_warning_fn(f"Merge skipped: mixed or unknown protocol ids for condition={condition_id[:16]}...")
+                    continue
+                success = execute_v2_merge_on_chain(
+                    pk=pk,
+                    condition_bytes31=next(iter(v2_conditions)),
+                    amount=min_balance,
+                    rpc_url=rpc_url,
+                    chain_id=chain_id,
+                    logger_info_fn=logger_info_fn,
+                    logger_warning_fn=logger_warning_fn,
+                )
+            else:
+                success = execute_merge_on_chain(
+                    pk=pk,
+                    condition_id=condition_id,
+                    amount=min_balance,
+                    rpc_url=rpc_url,
+                    chain_id=chain_id,
+                    logger_info_fn=logger_info_fn,
+                    logger_warning_fn=logger_warning_fn,
+                )
             if success:
                 deduct_qty = Decimal(str(merge_amount_usdc))
                 old_delta, strategy.inventory_delta_shares = adjust_inventory_after_merge_fn(
