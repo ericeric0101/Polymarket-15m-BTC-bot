@@ -158,6 +158,44 @@ No commit/push or deployment was performed.
   work. This working-tree pass is not deployed; a future controlled restart is
   required before new run manifests/schema tags appear in runtime records.
 
+### Settlement and outcome-label authority (verified 2026-10-09)
+
+- **Retrospective payoff truth:** official Polymarket resolution, held in a
+  versioned, hash-sidecar cache (`data/research_export/official_resolution/`),
+  fetched once, read-only, for research. It never feeds runtime settlement.
+- **Runtime settlement authority:** the canonical official 60-second Chainlink
+  TWAP label (`bot/lifecycle_runtime.py::canonical_settlement_outcome`).
+  Missing, stale (>10 s), wrong-window, degraded or near-tie labels from a tick
+  not stamped at market end yield `UNKNOWN`; no latest-spot fallback exists.
+  With inventory, `UNKNOWN` writes only a pending `MARKET_SETTLEMENT` (no cycle
+  PnL or guard update); the bounded end-stamped-tick relabel or startup Gamma
+  reconciliation finalizes it.
+- **Research label priority:** official > canonical TWAP > journal. Journal
+  `MARKET_SETTLEMENT.outcome` is diagnostic only whenever a higher-authority
+  label exists. Realized LIVE cash PnL (fills, redemptions) is kept separate
+  from label-based reconstructed or counterfactual PnL.
+- **Bug and fix (verified in this pass from git and tests):** before `bbbdc09`
+  the runtime computed the canonical TWAP label but still derived settlement
+  outcome, cycle PnL, session/regime guard input and shadow settlement from
+  `latest_external_spot >= strike`. `tests/test_settlement_authority.py`
+  (13 cases) fails 13/13 behaviorally on the pre-fix tree (`git archive
+  5f40b14`): wrong side, guard +1.0 instead of −3.0, `UP` instead of `UNKNOWN`,
+  and an AST check finding spot-derived outcomes. The full suite at `86832a0`
+  passes (1313). The settlement modules (`bot/lifecycle_runtime.py`,
+  `bot/post_trade.py`) make no network calls. Follow-ups: `3ec077f` (near-tie
+  guard), `ebb044e` (deferred end-tick relabel), `b0c383f` (ledger fix).
+- **Known historical label defect** (re-derived in this pass from
+  `market_outcomes_5356cf95f81e.csv`, sha256 `ea744003…`): journal outcome
+  disagreed with official resolution in 68/895 markets (LIVE period 44/462,
+  DRY-RUN period 24/433); canonical TWAP disagreed in 2/437, both near-ties
+  labeled from ticks a few seconds before market end. Old journal rows are
+  retained unmodified for audit; research applies provenance priority instead
+  of rewriting history.
+- **Known ledger defect** (fixed going forward by `b0c383f`, not retroactive):
+  historical `MARKET_CYCLE_PNL` can double-count residual inventory after a SELL
+  or omit inventory held across a mid-market restart. Historical journal cycle
+  PnL is not truth.
+
 ## Audit scope and safety status
 
 - The 2026-09-24 lifecycle hardening pass changes quote freshness handling,
@@ -686,6 +724,140 @@ false reversals; combine flip risk with capital efficiency; only then assess a
 shadow-to-live decision integration. This section is the current authority for
 Entry + Stop-Loss research; it supersedes conflicting older roadmap wording.
 
+### 11. Accepted research state after the official-label rebuild (2026-10-09)
+
+This subsection supersedes conflicting numbers and wording in §§1–10 and in the
+2026-09-26 historical study below. The decision rules were frozen before the
+entry analyses ran: the market is the unit; mean PnL per trade is the primary
+metric; day-blocked bootstrap (2000 resamples, seed 11) is used only with ≥3
+days; `STRONG` needs the same direction on every day, in LIVE and DRY-RUN
+separately, after controls; DRY-RUN alone never upgrades a label; the 0.30 /
+0.75 / 480 thresholds are frozen and no threshold search is allowed.
+
+Cohorts: **LIVE** 2026-09-10..09-30 (11 days, 125 positions, real fills) and
+**DRY-RUN shadow** 2026-10-01..10-08 (8 days, 266 markets, optimistic simulated
+fills). The outcome source is the official resolution throughout.
+
+**Verified facts (regenerated in this pass):**
+- Reconstructed LIVE PnL (fills plus official payoff on residual shares; not
+  cash-reconciled with redemptions) is −$9.28, i.e. −$0.074 per position
+  (day-blocked 95% CI [−0.59, +0.37]).
+- DRY-RUN shadow PnL is −$9.60, i.e. −$0.036 per market ([−0.30, +0.40]).
+
+**Exploratory entry candidates (none production-approved; no thresholds may be changed):**
+- `score ≥ 0.30` — `WEAK_CANDIDATE`, the strongest current entry-quality
+  candidate. Same direction in LIVE and DRY-RUN on most days; the CIs include 0.
+- `entry price ≥ 0.75` — `UNRESOLVED`. In LIVE the effect survives
+  score/TTE/distance controls (CI excludes 0). In DRY-RUN it largely vanishes
+  after controlling for legacy sigma (price–sigma correlation ≈0.7), so it may
+  be a proxy for market confidence.
+- `TTE ≤ 480` — `PROXY_FOR_OTHER_FEATURES`. The raw LIVE effect is ≈0 and
+  reverses after controls; the DRY-RUN effect cannot upgrade the label on its
+  own. Treat it as a confounded timing candidate.
+- Combined score/price/TTE — `IN_SAMPLE_ONLY`. In LIVE the combined filter did
+  worse than the trades it excluded. Variants found after looking at the data
+  (e.g. dropping TTE) are pre-registered hypotheses only.
+
+**Rejected or invalidated prior conclusions:**
+- The weekday/weekend significance treated markets as independent, ignored
+  day clustering, and had weekend selection bias. Its status is now
+  `UNRESOLVED`. Do not tune on it; confirming it needs multi-week, day-blocked
+  validation.
+- "DRY-RUN shadow is profitable" and "the 0.75–0.80 bin is profitable" were
+  artifacts of journal labels.
+- The journal LIVE cycle PnL total is unreliable (see the ledger defect above).
+- The earlier −$19.79 LIVE figure used incomplete label coverage.
+
+**Flip / reversal / sigma:**
+- `required_move_sigma` is a legacy heuristic with TTE-dependent decay and a
+  floor, not a diffusion z-score. Its association with fewer final flips is
+  descriptive, not a calibrated probability. Distance ≥10 bps carries similar
+  information.
+- `required_move_z_diffusion`: the TWAP-average variance derivation was
+  checked offline, but the formula, units and settlement-variance assumptions
+  still need explicit validation. There is one day of data (8 markets), so it
+  is descriptive only; flip model not ready.
+- Keep these separate: strike crossing, projected side change, final
+  settlement flip, crossing then reversion, and final adverse outcome.
+  Projected side changes are far more frequent than TWAP crossings. Historical
+  pre-v2 incomplete paths over-represent flips (selection bias); use complete
+  native-v2 paths for rates.
+
+**Stop / risk:**
+- Effective runtime values (AppConfig profile plus `.env`, read 2026-10-09):
+  adaptive strategy stop `stop_loss_enabled=False`; absolute max loss ON at
+  $2.00 after a 60 s hold; catastrophic stop ON at $0.40, 2 confirmations,
+  |score| ≥ 0.50.
+- Stop alpha and stop risk control are separate questions.
+  - `STOP_ALPHA = INSUFFICIENT`: replayed DRY-RUN stop rules show
+    stop-minus-hold slightly positive, but every day-blocked CI includes 0.
+    LIVE has only 8 stops.
+  - `STOP_RISK_CONTROL = UNRESOLVED`: in replay, the hard-loss-equivalent rule
+    roughly halved max drawdown (≈59 → ≈32), but this is DRY-RUN only, 7 days,
+    and worst-case gap losses are unchanged.
+- Touching or crossing the strike does not imply a final adverse settlement.
+  Crosses with 300–480 s left reverted about half the time. Mid-range market
+  prices (0.2–0.6) were roughly fair, so the market already prices part of the
+  outcome. Stop-vs-hold must be evaluated in shadow (`STOP_SHADOW_*` events)
+  before any adaptive live use.
+
+**Four separate readiness judgments:**
+1. Code correctness: the settlement, label and ledger fixes are verified by tests.
+2. Runtime validation: the last 60-minute DRY-RUN validation (`14245c4`) predates
+   `bbbdc09` and every later change, so the current HEAD is unvalidated at runtime.
+3. Research validity: exploratory.
+4. Live readiness: no.
+
+**Data limitations:**
+- Short history and few independent days (LIVE 11, DRY 8, native-v2 paths 3).
+- DRY-RUN fills are optimistic.
+- LIVE PnL still needs fill/redemption reconciliation (a few redeemed
+  positions are not yet explained; not re-derived in this pass).
+- Historical settlement labels and cycle PnL are defective.
+- No claim of a 100% win rate is acceptable. Thresholds stay exploratory until
+  forward validation.
+
+**Approved next order:**
+1. A new 60-minute DRY-RUN validation on the current HEAD.
+2. Accumulate `CANDIDATE_POLICY_SHADOW` and `STOP_SHADOW_*` evidence over
+   multiple weeks, including weekends.
+3. Refresh the official cache and rerun the canonical pipeline.
+4. Only then consider a shadow-to-live proposal.
+
+No production entry, stop, maker, L2 or threshold change before that.
+
+**Evidence index** (the source reports may be removed; regenerate instead):
+
+| Claim | Reproduce with | Retained data |
+|---|---|---|
+| Label mismatch counts; official > TWAP > journal priority | `scripts/build_outcome_provenance.py --official <cache>` | official cache, tier A exports, trade journal |
+| LIVE / DRY-RUN PnL; price, TTE, weekday bins | stage 2 of `scripts/reproduce_research_iteration.py` (`final_research_analysis.py`) | provenance CSV, trade journal, tier P paths |
+| Score / price / TTE / combined labels | stage 3 (`research_entry_analysis.py`) | stage 2 tables, journal, tier P paths |
+| Flip, crossing, sigma, z, weekday/weekend | stage 4 (`research_flip_analysis.py`) | tier A summaries, tier P paths, provenance CSV |
+| Market calibration; stop-vs-hold replay; breaker values | stage 5 (`research_stop_analysis.py`) | tier P paths, journal, provenance CSV, AppConfig |
+| Cross-at-TTE stop state breakdown (exploratory) | `reports/final_research_iteration/20261009T042008Z/stage5/stage5_state_breakdown.py <iteration dir>` (one-off, not canonical) | stage 2 shadow table, tier P paths, journal |
+| Settlement bug and fix | `tests/test_settlement_authority.py` at HEAD and on `git archive 5f40b14` | git history |
+
+**Reproducibility:**
+- The canonical strategy-outcome entry point is
+  `scripts/reproduce_research_iteration.py`. It runs offline, verifies the
+  official cache against its sha256 sidecar, and writes
+  `reproduction_manifest.json` (git HEAD, script hashes, input fingerprints,
+  date ranges, content digests).
+- Command:
+  `.venv/bin/python scripts/reproduce_research_iteration.py --official
+  data/research_export/official_resolution/official_resolutions_20261009T041657Z.json
+  --out <dir> [--compare <previous run>]`
+- Source data:
+  - `data/research_export/{official_resolution,outcome_provenance,A_market_summary,B_decisions,P_paths,manifests}`
+  - `logs/trade_journal.db`
+  - tier C partitions in `data/research_partitions/` (seven-day retention)
+  - an iCloud mirror of A/B/P and the cache
+- Consolidated 2026-10-09 at HEAD `86832a0`. All five stage digests matched the
+  2026-10-09 run. The 10-09 handoff and iteration report in
+  `reports/work_handoff/` and `reports/final_research_iteration/` record the
+  frozen rules and the changed conclusions.
+
 ## Historical strategy evidence — unified BTC 15m research (2026-09-26)
 
 This is the canonical interpretation of the current historical strategy
@@ -787,7 +959,8 @@ For the 180-second / 5-bps research strategy, weekday results were N=46,
 80.43% wins, mean entry 0.7560, edge/share +0.0484, +$23.46 net and +5.10%
 ROI. Weekend results were N=27, 70.37% wins, mean entry 0.7358, edge/share
 -0.0321, -$16.68 net and -6.18% ROI. This is a research hypothesis, not enough
-evidence for a weekend live veto. One possible explanation is less reliable
+evidence for a weekend live veto (2026-10-09: invalidated as confirmatory
+evidence; weekday/weekend is `UNRESOLVED`, see §11 above). One possible explanation is less reliable
 early trend continuation on weekends; larger weekend samples are required.
 
 In the 200-market public sample, weekday mean trade count was about 928.8
@@ -2747,6 +2920,10 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
 
 ## Canonical offline prediction research and session regimes (2026-10-03)
 
+- Strategy-outcome analysis (official labels, LIVE/DRY-RUN entry, flip, stop,
+  calibration) has its own canonical offline entry point since 2026-10-09:
+  `scripts/reproduce_research_iteration.py` (see §11 of the Entry + Stop
+  authority). Folding it into `research_analysis.py` is open research debt.
 - `scripts/research_analysis.py` is the canonical offline entry point for
   `latest`, `run`, `market`, and `compare-regimes` analysis. It consumes the
   existing TWAP research journal and trade journal only; it has no runtime,

@@ -127,6 +127,7 @@ def cutoff_rows(paths, official, summaries):
                          "cutoff": k, "leader": leader, "final_flip": flip, "path_complete": complete,
                          "temporary_cross": temp_cross if complete else None, "cross_count_after": crosses if complete else None,
                          "cross_then_revert": (temp_cross and not flip) if complete else None,
+                         # required_move_sigma: legacy HEURISTIC (TTE-dependent decay/floor), not a diffusion z-score
                          "legacy_sigma": snap.get("required_move_sigma"), "z_diffusion": snap.get("required_move_z_diffusion"),
                          "p_flip_diffusion": snap.get("p_terminal_flip_diffusion"),
                          "distance_bps": abs(diff) / float(snap["strike"]) * 1e4,
