@@ -43,3 +43,7 @@ grafana-plugins/
 
 # test folders
 test/
+
+# Claude Code personal settings and worktrees
+.claude/settings.local.json
+.claude/worktrees/
