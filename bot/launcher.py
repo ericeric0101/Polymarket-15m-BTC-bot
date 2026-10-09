@@ -1008,13 +1008,13 @@ def run_integrated_bot(
             )
 
         if user_stopped:
-            break
+            return EXIT_OPERATOR_STOP
         if unsafe_engine_shutdown:
             logger.error(
                 "Automatic node rollover stopped after unclean engine shutdown; "
                 "operator restart is required after the old process has exited."
             )
-            break
+            return "unsafe_engine_shutdown"
         if unrequested_clean_node_return_requires_stop(
             node_run_returned=node_run_returned,
             rollover_requested=rollover_requested.is_set(),
@@ -1027,15 +1027,15 @@ def run_integrated_bot(
                 "Node returned without an explicit rollover request; "
                 "stopping instead of silently rebuilding."
             )
-            break
+            return EXIT_CLEAN_RETURN_NO_ROLLOVER
         if not auto_rollover_enabled:
-            break
+            return "auto_rollover_disabled"
         if consecutive_failures >= auto_rollover_max_failures:
             logger.error(
                 f"Auto rollover aborted after {consecutive_failures} consecutive failures "
                 f"(max={auto_rollover_max_failures})."
             )
-            break
+            return "failure_budget_exhausted"
 
         if rollover_requested.is_set():
             logger.info(
@@ -1061,6 +1061,78 @@ def acquire_live_process_lock() -> ProcessLock | None:
         "Refusing to start a second wallet writer."
     )
     return None
+
+
+EXIT_OPERATOR_STOP = "operator_stop"
+# Nautilus handles SIGINT/SIGTERM itself and returns node.run() cleanly without a rollover request.
+EXIT_CLEAN_RETURN_NO_ROLLOVER = "clean_return_without_rollover"
+GRACEFUL_EXIT_REASONS = frozenset({EXIT_OPERATOR_STOP, EXIT_CLEAN_RETURN_NO_ROLLOVER})
+DEFAULT_RETENTION_EXIT_TIMEOUT_SEC = 300.0
+
+
+def _env_on(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def run_exit_retention(project_root: Path, exit_reason: Optional[str], *, popen=None) -> Optional[str]:
+    """Final-exit research retention (RESEARCH_RETENTION_ON_EXIT, default OFF).
+
+    Called only from main() after run_integrated_bot() has returned for good, so a
+    node rollover can never reach it. Runs scripts/research_exit_retention.py in a
+    child process bounded by RESEARCH_RETENTION_EXIT_TIMEOUT_SEC; on timeout or a
+    second Ctrl+C the child is terminated and its open transaction rolls back.
+    Returns a short outcome label for logging/tests.
+    """
+    if not _env_on("RESEARCH_RETENTION_ON_EXIT"):
+        return None
+    if exit_reason not in GRACEFUL_EXIT_REASONS:
+        logger.info(f"Research exit retention skipped: exit_reason={exit_reason} is not a graceful final exit")
+        return "skipped_not_graceful"
+    try:
+        timeout_sec = float(os.getenv("RESEARCH_RETENTION_EXIT_TIMEOUT_SEC", DEFAULT_RETENTION_EXIT_TIMEOUT_SEC))
+    except ValueError:
+        timeout_sec = DEFAULT_RETENTION_EXIT_TIMEOUT_SEC
+    import subprocess
+    import sys
+    popen = popen or subprocess.Popen
+    log_path = project_root / "logs" / "research_retention_exit.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        f"Research exit retention starting (exit_reason={exit_reason}); adds at most {timeout_sec:.0f}s to shutdown. "
+        f"Press Ctrl+C again to abort (source data is preserved). log={log_path}"
+    )
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n=== exit retention {datetime.now(timezone.utc).isoformat()} reason={exit_reason} ===\n")
+        log_file.flush()
+        process = popen(
+            [sys.executable, str(project_root / "scripts" / "research_exit_retention.py"), "--timeout-sec", str(timeout_sec)],
+            cwd=project_root, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+        try:
+            code = process.wait(timeout=timeout_sec + 10)
+        except subprocess.TimeoutExpired:
+            _stop_child(process)
+            logger.warning("Research exit retention timed out and was aborted; source data preserved.")
+            return "timeout_aborted"
+        except KeyboardInterrupt:
+            _stop_child(process)
+            logger.warning("Research exit retention aborted by operator; source data preserved.")
+            return "operator_aborted"
+    logger.info(f"Research exit retention finished: exit_code={code} (details in {log_path})")
+    return "completed" if code == 0 else f"refused_or_aborted_exit_{code}"
+
+
+def _stop_child(process) -> None:
+    import subprocess
+    try:
+        process.terminate()  # SIGTERM -> child raises, open transaction rolls back
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()  # crash semantics: SQLite discards the uncommitted transaction
+        process.wait(timeout=5)
+    except KeyboardInterrupt:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def start_research_maintenance(project_root: Path) -> Optional[int]:
@@ -1163,12 +1235,14 @@ def main():
         return
     start_research_maintenance(Path(__file__).resolve().parent.parent)
     try:
-        run_integrated_bot(
+        exit_reason = run_integrated_bot(
             simulation=simulation,
             test_mode=test_mode,
             enable_terminal_dashboard=enable_terminal_dashboard,
             auth=auth,
         )
+        # Final process exit only (never a rollover); the node and its writers are already disposed.
+        run_exit_retention(Path(__file__).resolve().parent.parent, exit_reason)
     finally:
         if live_lock is not None:
             live_lock.release()
