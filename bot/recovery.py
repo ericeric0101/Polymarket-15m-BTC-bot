@@ -20,6 +20,25 @@ from bot.wallet_ops import (
 )
 
 
+def _startup_onchain_inventory_qty(strategy: Any, instrument_id: Any) -> Decimal:
+    from bot.execution_safety import real_order_submission_allowed
+
+    # Dry-run shares the wallet but must never adopt its real holdings.
+    if not real_order_submission_allowed(strategy):
+        return Decimal("0")
+    try:
+        token_id = strategy._extract_token_id_from_instrument(strategy._instrument_key(instrument_id))
+        balance = strategy._get_conditional_balance_for_token(token_id=token_id, force_refresh=True)
+    except Exception as exc:
+        logger.warning(f"Startup on-chain inventory lookup failed for {instrument_id}: {exc}")
+        return Decimal("0")
+    # Sub-share fee dust is not tradable inventory (same 1-share bar as
+    # the ghost-inventory reconciliation).
+    if balance is None or Decimal(str(balance)) < Decimal("1"):
+        return Decimal("0")
+    return Decimal(str(balance))
+
+
 class StrategyRecoveryMixin:
     """
     Startup recovery and balance/position cache helpers.
@@ -360,6 +379,14 @@ class StrategyRecoveryMixin:
         restored_items: List[Dict[str, Any]] = []
         for inst in restore_targets:
             open_qty = self._get_sellable_qty_for_current_instrument(instrument_id=inst)
+            qty_source = "cache_position"
+            if open_qty <= 0:
+                # The framework cache has no positions yet at on_start, so a
+                # mid-market restart used to drop held inventory entirely and
+                # settlement booked the cycle as flat.  The wallet's
+                # conditional-token balance is the authority for what we hold.
+                open_qty = _startup_onchain_inventory_qty(self, inst)
+                qty_source = "onchain_balance"
             if open_qty <= 0:
                 continue
             state = self._rebuild_inventory_state_from_db(inst, target_qty=open_qty)
@@ -383,6 +410,7 @@ class StrategyRecoveryMixin:
                     "qty": float(Decimal(str(state.get("qty", "0")))),
                     "avg_entry_price": float(Decimal(str(state.get("avg_entry_price", "0")))),
                     "cost_basis_status": str(state.get("cost_basis_status") or "recovered"),
+                    "qty_source": qty_source,
                 }
             )
 

@@ -217,7 +217,11 @@ class FillLedgerMixin:
             self._clear_profit_run_state(instrument_id)
             if inst_key:
                 self.recent_buy_fill_ts_by_inst.pop(inst_key, None)
-                self.recent_sell_fill_ts_by_inst.pop(inst_key, None)
+                # Keep the SELL timestamp: the conditional-token balance lags
+                # the fill, and the sellable-qty grace window keys on it.
+                # Dropping it on a full exit let a stale balance be "recovered"
+                # as ghost inventory with zero cost basis, which settlement
+                # then booked as free shares (market cycle PnL double count).
         return realized_net
 
     def _record_market_buy_count_if_needed(
