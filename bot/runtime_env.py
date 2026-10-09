@@ -82,6 +82,8 @@ CORE_ENV_KEYS = frozenset(
         "FAIR_EDGE_BUCKET_SHADOW_ENABLED",
         "SHADOW_SIMULATION_ENABLED",
         "STARTUP_VERBOSE",
+        # Host-local synced folder (e.g. iCloud Drive) for tier A/B research copies.
+        "RESEARCH_OFFSITE_DIR",
     }
 )
 
