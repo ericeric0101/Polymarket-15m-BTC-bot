@@ -31,9 +31,27 @@ effect with the commit `fix(execution): size entries by sellable shares`.
   quantity below 5.5 is skipped (never rounded up). A skip consumes no BUY count,
   starts no cooldown, does not mark the market as traded, and logs once per market
   per reason.
-- Existing quality multipliers (entry quality, confirmation, weak pfair) still only
-  shrink the L2/risk budget. `apply_high_entry_price_size_adjustment` now only sets
-  the share target; the old ×0.55 high-price multiplier is retired.
+- **Multiplier semantics (seam audit S2, `fix(risk): classify kill switch and
+  unify sizing multipliers`):** base share target → × strategy `size_multiplier`
+  (entry quality, confirmation, smart-money, weak pfair; combined with `min`,
+  never compounded, never above 1) → `min(strategy quantity, L2/risk/inventory
+  caps)` → round down to 0.01 → skip below 5.5. The caps are pure caps: the
+  depth/risk cap is built with `size_multiplier=1`
+  (`run_bot.depth_risk_cap_kwargs`), so the multiplier has the same effect with
+  `DEPTH_RISK_SIZING_ENABLED` on or off. Before this commit the multiplier only
+  scaled the $10 L2/risk budget, so with depth-risk on a 0.5 multiplier was a
+  no-op at 0.50 and 0.75–0.90 and a partial cut in 0.50–0.70; with depth-risk
+  off it skipped every entry.
+- Consequence (deliberate, accepted 2026-10-09): any multiplier < 1 in the 5.5
+  bucket, and < 0.55 in the 10 bucket, is a SKIP. The profile's
+  `MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER=0.5` therefore skips weak-pfair
+  entries at every price. Multiplier values were not changed.
+  `apply_high_entry_price_size_adjustment` only sets the share target; the old
+  ×0.55 high-price multiplier is retired.
+- **Second cohort boundary:** entries before and after the multiplier-semantics
+  commit cannot be pooled for entry-rate, per-trade PnL or size-dependent
+  statistics without adjustment (weak-pfair/quality-reduced entries were taken
+  before, are skipped after).
 - Rationale: 5.5 shares above 0.70 keeps every full fill sellable (≥ 5 after the
   haircut). It was documented in `df1594d` as a buffer above the 5-share exchange
   SELL minimum.
@@ -97,7 +115,7 @@ were reproduced red-first.
 **Architecture.** Every QuoteTick drives `_quote_maker_orders` →
 `_prepare_quote_cycle` (`bot/quote_runtime.py`):
 
-1. Kill switch → `_run_protective_exit_cycle` (reports only) → return.
+1. Kill switch → `_run_protective_exit_cycle` (class policy below) → return.
 2. Phase / side refresh.
 3. Entry-authority gate (`_entry_authority_block_reason`: Telegram pause,
    error pause) → cancel resting BUYs only → `_run_protective_exit_cycle` → return.
@@ -117,7 +135,9 @@ full quote outage is visible even without QuoteTicks.
 | Telegram pause (manual, or AlertWatcher after 3 consecutive losses) | blocked | **cancelled** | allowed | kept | yes |
 | Error pause, class (i) | blocked | cancelled | allowed | kept | yes |
 | Error pause, class (ii): SELL in unknown venue state on that instrument | blocked | cancelled | **not sent** | — | instrument skipped; `PROTECTIVE_EXIT_DEGRADED inventory_unreliable_sell_order_state_unknown` |
-| Kill switch | blocked | cancelled (existing: all maker orders) | **not sent (unchanged)** | cancelled (existing) | no; `PROTECTIVE_EXIT_DEGRADED kill_switch_active_exit_policy_unresolved` |
+| Kill switch A: `operational_entry` | blocked | cancelled | **hard breakers only** (`absolute_max_loss_breaker`, `catastrophic_stop_loss_*`; STOP_LOSS=0 semantics, no urgent/endgame/recovery exits) | **kept** | yes, hard reasons only |
+| Kill switch B: `execution_integrity` | blocked | cancelled (existing: all maker orders) | **not sent** | cancelled (existing) | no; `PROTECTIVE_EXIT_DEGRADED kill_switch_execution_integrity_reconcile_first`; watchdog reconciliation continues |
+| Kill switch `unresolved` | blocked | cancelled (existing) | **not sent** | cancelled (existing) | no; `PROTECTIVE_EXIT_DEGRADED kill_switch_active_exit_policy_unresolved` |
 | Polymarket order book stale (no fresh quote within `QUOTE_STALE_SEC`) | blocked by the existing watchdog/quote gates | watchdog cancels BUYs | not sent | kept | instrument skipped; `PROTECTIVE_EXIT_DEGRADED orderbook_stale` |
 | BTC / Chainlink reference stale (> 5 s) | blocked by the existing TWAP-degraded gate | per existing gates | allowed when other inputs are fresh | kept | yes. Stale TWAP votes count as unavailable (never adverse); `PROTECTIVE_EXIT_DEGRADED reference_feed_stale_partial_trend_inputs` (non-blocking) |
 
@@ -168,9 +188,30 @@ to the 3 % stop-loss spread guard. With `STOP_LOSS_ENABLED=0`, the adaptive
 stop, urgent exit, endgame TWAP exit, invalidation-recovery ladder and
 force-offside exit stay off; the absolute and catastrophic breakers stay on.
 
+**Kill-switch classes** (`bot/kill_switch.py`, decided 2026-10-09). Each
+`_activate_maker_kill_switch` call site passes a trigger code; classification
+is by execution semantics, never by free text, and anything not decided is
+`unresolved` (treated like B):
+
+| Trigger (call site) | Class | Why |
+|---|---|---|
+| Cancel reconcile unknown after max retries (`order_runtime.py`) | B `execution_integrity` | order state unknown; a new SELL could duplicate exposure |
+| Cancel reconcile failed, order still open (`order_runtime.py`) | B `execution_integrity` | a live order we cannot cancel |
+| Region/compliance 403 (`order_events.py`) | `unresolved` | whether a protective SELL would be accepted is not established |
+| Consecutive denied orders, streak entirely BUY (`order_events.py`) | A `operational_entry` | denied orders are terminal; nothing about held inventory or SELL authority is in doubt |
+| Consecutive denied orders, any SELL or unknown-side denial | `unresolved` | not decided |
+
+- Classes only escalate while active (A → B/unresolved, never back).
+- Defence in depth: `ExecutionSafetyMixin.submit_order` blocks every BUY under
+  any kill and every SELL unless the class is A (unknown order side = blocked).
+- `MAKER_KILL_SWITCH_RESET_ON_ROLLOVER` resets A as before; B/unresolved reset
+  on rollover only when no order is pending cancel or reconcile-unknown
+  (reconcile first). `MAKER_KILL_SWITCH_ACTIVATED` journals trigger, prior and
+  effective class.
+
 **UNRESOLVED (operator decision required):**
-- Exit policy under the kill switch. The existing code cancels all maker orders
-  and stops order activity; no document allows or forbids exits.
+- Region restriction and SELL/unknown-side denial streaks under the kill switch
+  (currently the most restrictive behaviour).
 - A stale-feed liquidation policy (for example, flatten after N seconds without
   a fresh book). Not implemented; no threshold was invented.
 
@@ -179,7 +220,43 @@ force-offside exit stay off; the absolute and catastrophic breakers stay on.
 - in-flight clearing on real events;
 - the kill-switch and orphan-order paths.
 
-Deterministic harnesses: `tests/test_protective_exit_availability.py`.
+Deterministic harnesses: `tests/test_protective_exit_availability.py`,
+`tests/test_kill_switch_classification.py`.
+
+## Journal location, writer lock and maintenance guards (2026-10-09)
+
+Same commit as the kill-switch classes (seam audit S3–S5).
+
+- **One resolver:** `bot/journal_path.resolve_trade_db_path` — explicit path >
+  shell > `.env` > profile > `DEFAULT_TRADE_DB_PATH`
+  (`./data/trading/trade_journal.db`), relative paths anchored at the repo root.
+  Used by the bot (`bot/settings.py`, `bot/launcher.py`), `dashboard.py`,
+  `build_outcome_provenance`, `fetch_official_resolutions`,
+  `research_daily_export`, `backfill_redeem_activity` and
+  `reset_session_pnl_guard`. Previously the scripts and dashboard fell back to
+  `logs/trade_journal.db` while the bot fell back to `data/trading/`, so a
+  missing key made the bot migrate (copy) the journal while readers kept the
+  stale copy. The `.env` on this host pins `TRADE_DB_PATH=./logs/trade_journal.db`,
+  so the effective path is unchanged.
+- **Writer lock:** `run_integrated_bot` holds `<journal>.writer.lock` (flock)
+  for the whole run in LIVE **and** DRY-RUN and returns
+  `journal_writer_lock_held` without starting a node when another process holds
+  it. A DRY-RUN can no longer run beside LIVE on the same journal. It is
+  released before the caller's exit-retention steps.
+- **Destructive maintenance** (`reset_session_pnl_guard --apply`,
+  `research_partition retention --apply`, `compact_research_db --vacuum`,
+  `archive_lead_lag_research --apply`, `backfill_redeem_activity` without
+  `--dry-run`) runs inside `require_bot_stopped()`: it refuses (exit 4 /
+  `REFUSED`) when the LIVE process lock or the journal writer lock is held, and
+  holds both for its whole run so the bot cannot start mid-maintenance.
+  Read-only/plan modes need no lock. Launcher-invoked exit retention and
+  `storage_maintenance.py` (own `maintenance_lock` + in-use checks) are
+  unchanged.
+
+Pre-existing, unrelated failure kept as-is:
+`tests/test_live_path_regressions.py::test_app_config_reads_extended_env`
+expects `TAKER_EXIT_MAX_TIME_LEFT_SEC`, renamed to
+`RECOVERY_EXIT_MAX_TIME_LEFT_SEC` in `f493c68` (2026-08-22).
 
 ## Offline empirical probability study (2026-10-01)
 

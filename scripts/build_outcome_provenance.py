@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot.runtime_env import load_runtime_env  # noqa: E402
+from bot.journal_path import resolve_trade_db_path  # noqa: E402
 
 FIELDS = ("market_slug", "market_start_utc_epoch", "official_outcome", "canonical_twap_outcome",
           "journal_outcome", "journal_outcome_rows", "journal_outcome_conflicting_rows", "journal_spot",
@@ -97,10 +98,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--official", required=True)
     ap.add_argument("--export", default="data/research_export")
-    ap.add_argument("--journal", default=os.getenv("TRADE_DB_PATH") or "logs/trade_journal.db")
+    ap.add_argument("--journal", default=None, help="trade journal (default: canonical TRADE_DB_PATH)")
     ap.add_argument("--out-dir", default="data/research_export/outcome_provenance")
     ap.add_argument("--no-offsite", action="store_true", help="do not mirror to RESEARCH_OFFSITE_DIR (reproduction runs)")
     a = ap.parse_args()
+    a.journal = str(resolve_trade_db_path(a.journal))
     rows, summary = build(Path(a.official), Path(a.export), Path(a.journal))
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

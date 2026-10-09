@@ -1454,9 +1454,10 @@ class DummyRejectRecoveryStrategy:
     def _db_order_event(self, **kwargs):
         self.order_events.append(kwargs)
 
-    def _activate_maker_kill_switch(self, reason):
+    def _activate_maker_kill_switch(self, reason, *, reason_code="unspecified"):
         self.maker_kill_switch = True
         self.kill_switch_reason = reason
+        self.kill_switch_reason_code = reason_code
 
 
 class DummyUrgentExitStrategy(TakerExitMixin):
@@ -2139,6 +2140,7 @@ def test_geoblock_rejection_stops_maker_quoting_without_retrying():
 
     assert strategy.maker_kill_switch is True
     assert "trading restricted" in strategy.kill_switch_reason.lower()
+    assert strategy.kill_switch_reason_code == "region_restricted"  # classified UNRESOLVED
     assert strategy.order_events[-1]["event_type"] == "ORDER_REJECTED"
 
 
@@ -4551,7 +4553,7 @@ def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
     assert "entry_quality_quote_placement join_bid 0.7400->0.7000" in out["diag_reason"]
 
 
-def test_weak_and_high_price_risk_caps_produce_share_target_not_quarter_size():
+def test_weak_and_high_price_risk_caps_do_not_compound_and_half_size_skips():
     desired = {
         "should_quote": True,
         "p_fair": Decimal("0.50"),
@@ -4567,16 +4569,20 @@ def test_weak_and_high_price_risk_caps_produce_share_target_not_quarter_size():
         multiplier=Decimal("0.5"),
     )
     desired = apply_high_entry_price_size_adjustment(desired_entry=desired, side="buy")
-    # Existing L2/risk cap at $10 x 0.5 / 0.75 = 6.67 shares; the 5.5 target binds.
+    # Seam audit S2 (2026-10-09): the multiplier applies to the share target
+    # before the (multiplier-free) $10 L2/risk cap, so 5.5 x 0.5 = 2.75 < 5.5
+    # is SKIPPED, never clamped back up to the minimum.
     desired, decision = apply_share_entry_sizing(
-        desired_entry=desired, side="buy", cap_quantity=Decimal("10") * Decimal("0.5") / Decimal("0.75"),
+        desired_entry=desired, side="buy", cap_quantity=Decimal("10") / Decimal("0.75"),
     )
 
+    # Risk reductions are caps (min), not compounding multipliers: 0.5, not 0.25.
     assert desired["size_multiplier"] == Decimal("0.5")
     assert desired["weak_pfair_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
     assert desired["high_entry_price_size_adjustment"]["target_shares"] == Decimal("5.5")
-    assert decision.final_quantity == Decimal("5.50")
-    assert desired["target_qty_override"] * desired["size_multiplier"] == Decimal("5.50")
+    assert decision.final_quantity == Decimal("2.75")
+    assert decision.skipped and desired["should_quote"] is False
+    assert desired["target_qty_override"] is None
 
 
 def test_negative_robust_net_cannot_be_recovered_by_entry_mode():

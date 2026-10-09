@@ -158,8 +158,10 @@ def test_interrupted_delete_transaction_preserves_source(env, monkeypatch):
 
 
 # 7 ---------------------------------------------------------------------------------------------
-def test_node_rollover_does_not_invoke_retention(monkeypatch):
+def test_node_rollover_does_not_invoke_retention(monkeypatch, tmp_path):
     invoked = []
+    # Keep the journal writer lock out of the repository.
+    monkeypatch.setenv("TRADE_DB_PATH", str(tmp_path / "trade_journal.db"))
     monkeypatch.setattr(launcher, "run_exit_retention", lambda *a, **k: invoked.append(a))
     monkeypatch.setattr(launcher, "TelegramNotifier", lambda: None)
     monkeypatch.setattr(launcher, "AlertWatcher", lambda: None)

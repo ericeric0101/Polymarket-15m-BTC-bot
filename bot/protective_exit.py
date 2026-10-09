@@ -11,9 +11,11 @@ It never invents data:
   ``PROTECTIVE_EXIT_DEGRADED``;
 * an instrument whose existing SELL order is in an unknown venue state is not
   sold again (inventory reservation unreliable, error-pause class ii);
-* the maker kill switch keeps its existing "no order activity" semantics; held
-  inventory is reported as degraded and the exit policy under kill switch is
-  an open decision (UNRESOLVED);
+* under a maker kill switch the policy depends on its class (bot.kill_switch):
+  an operational/entry kill still evaluates held inventory but lets only the
+  hard protective breakers SELL; an execution-integrity or unresolved kill
+  submits nothing new and reports the inventory as degraded until
+  reconciliation is done;
 * a position below the venue SELL minimum is reported once as
   ``PROTECTIVE_EXIT_UNSELLABLE`` and never retried.
 
@@ -27,10 +29,17 @@ from typing import Any, Dict
 
 from loguru import logger
 
+from bot.kill_switch import (
+    DEGRADED_REASON_BY_CLASS,
+    KILL_CLASS_UNRESOLVED,
+    allows_hard_protective_sell,
+    effective_kill_class,
+)
+
 DEGRADED_EVENT = "PROTECTIVE_EXIT_DEGRADED"
 UNSELLABLE_EVENT = "PROTECTIVE_EXIT_UNSELLABLE"
 
-REASON_KILL_SWITCH = "kill_switch_active_exit_policy_unresolved"
+REASON_KILL_SWITCH = DEGRADED_REASON_BY_CLASS[KILL_CLASS_UNRESOLVED]
 REASON_ORDERBOOK_STALE = "orderbook_stale"
 REASON_INVENTORY_UNRELIABLE = "inventory_unreliable_sell_order_state_unknown"
 REASON_REFERENCE_STALE = "reference_feed_stale_partial_trend_inputs"
@@ -153,9 +162,11 @@ class ProtectiveExitMixin:
         held = self._held_protective_positions()
         if not held:
             return
-        if bool(getattr(self, "maker_kill_switch", False)):
+        kill_class = effective_kill_class(self)
+        if not allows_hard_protective_sell(kill_class):
             for inst_key in held:
-                self._record_protective_exit_degraded(inst_key, REASON_KILL_SWITCH, now_ts)
+                self._record_protective_exit_degraded(inst_key, DEGRADED_REASON_BY_CLASS[kill_class], now_ts,
+                                                      kill_class=kill_class)
             return
         self._protective_exit_blocked_instruments(now_ts)
 
@@ -165,16 +176,20 @@ class ProtectiveExitMixin:
         held = self._held_protective_positions()
         if not held:
             return
-        if bool(getattr(self, "maker_kill_switch", False)):
-            # Existing kill-switch semantics (cancel everything, no new orders)
-            # are unchanged; report the unprotected inventory explicitly.
+        kill_class = effective_kill_class(self)
+        if not allows_hard_protective_sell(kill_class):
+            # Execution-integrity / unresolved kill: never submit a new SELL
+            # while order state is uncertain. The watchdog keeps reconciling.
             for inst_key in held:
-                self._record_protective_exit_degraded(inst_key, REASON_KILL_SWITCH, now_ts,
+                self._record_protective_exit_degraded(inst_key, DEGRADED_REASON_BY_CLASS[kill_class], now_ts,
+                                                      kill_class=kill_class,
                                                       entry_block_reason=entry_block_reason or "kill_switch")
             return
+        hard_only = kill_class is not None  # operational/entry kill
         blocked = self._protective_exit_blocked_instruments(now_ts)
         await self._maybe_taker_exit_positions(
             now_ts, is_simulation=self._is_dry_run_mode(), blocked_instruments=set(blocked),
+            hard_protective_only=hard_only,
         )
-        if not blocked:
+        if not blocked and not hard_only:
             await self._maybe_maker_urgent_exit(now_ts)

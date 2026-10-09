@@ -11,6 +11,7 @@ from loguru import logger
 
 from bot.app_config import AppConfig
 from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
+from bot.journal_path import anchor_repo_path
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.enums import ActiveSide, MarketPhase
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -645,7 +646,9 @@ def initialize_strategy_settings(
     strategy._startup_rehydrated_inventory_force_sell_only = False
     strategy.inventory_last_update_ts = 0.0
     strategy.consecutive_denied_orders = 0
+    strategy.consecutive_denied_sides = set()
     strategy.maker_kill_switch = False
+    strategy.maker_kill_switch_class = None
     strategy._inventory_overage_sell_only = False
     strategy.active_maker_orders = {}
     strategy._pending_cancel_cleanup_lock = threading.Lock()
@@ -789,8 +792,10 @@ def initialize_strategy_settings(
     strategy._maker_worker_running = False
     strategy.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     strategy.trade_db_enabled = config.operations.trade_db_enabled
+    # Anchored at the repo root by the canonical resolver (same path the
+    # launcher's journal writer lock, dashboard and scripts use).
     strategy.trade_db = TradeJournalDB(
-        db_path=config.operations.trade_db_path,
+        db_path=str(anchor_repo_path(config.operations.trade_db_path)),
     ) if strategy.trade_db_enabled else None
     strategy.trade_db_health = (
         strategy.trade_db.startup_health() if strategy.trade_db is not None

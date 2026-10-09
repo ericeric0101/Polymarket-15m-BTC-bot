@@ -250,3 +250,73 @@ def test_sdk_order_normalization_preserves_share_quantities():
     for size, price in ((5.5, 0.99), (10.0, 0.70), (5.5, 0.71)):
         _side, _maker, taker = OrderBuilder.get_order_amounts(None, BUY, size, price, ROUNDING_CONFIG["0.01"])
         assert Decimal(int(taker)) / Decimal(10**6) == Decimal(str(size))
+
+
+# --- multiplier semantics are independent of DEPTH_RISK (seam audit S2) --------
+# base target -> x strategy multiplier -> min(strategy qty, caps) -> round down
+# -> skip below MIN_ENTRY_SHARES. Caps are pure caps; they never carry the
+# multiplier, and a reduced quantity is never clamped back up to 5.5.
+
+LOOSE_CAP = Decimal("1000")
+
+
+@pytest.mark.parametrize("price", ["0.50", "0.60", "0.69", "0.70", "0.75", "0.80", "0.90", "0.95"])
+def test_half_multiplier_skips_with_or_without_a_cap(price):
+    without_cap = size_entry(entry_price=price, size_multiplier=Decimal("0.5"))
+    with_cap = size_entry(entry_price=price, size_multiplier=Decimal("0.5"), cap_quantity=LOOSE_CAP)
+    assert without_cap.final_quantity == with_cap.final_quantity
+    assert with_cap.skipped and with_cap.skip_reason == SKIP_BELOW_MIN_ENTRY_SHARES
+
+
+@pytest.mark.parametrize("price,multiplier,cap,expected", [
+    ("0.50", "0.8", None, "8.00"),
+    ("0.50", "0.8", LOOSE_CAP, "8.00"),        # pre-fix: min(10, cap) = 10.00
+    ("0.50", "0.8", Decimal("6.5"), "6.50"),   # a tighter cap still binds
+    ("0.50", "0.55", LOOSE_CAP, "5.50"),
+    ("0.50", "1", Decimal("7.25"), "7.25"),
+    ("0.80", "1", LOOSE_CAP, "5.50"),
+])
+def test_multiplier_applies_before_caps_identically(price, multiplier, cap, expected):
+    decision = size_entry(entry_price=price, size_multiplier=Decimal(multiplier), cap_quantity=cap)
+    assert decision.final_quantity == Decimal(expected)
+    assert not decision.skipped
+
+
+@pytest.mark.parametrize("cap", [None, LOOSE_CAP])
+def test_reduced_quantity_below_minimum_is_skipped_never_clamped_up(cap):
+    decision = size_entry(entry_price="0.50", size_multiplier=Decimal("0.549"), cap_quantity=cap)
+    assert decision.final_quantity == Decimal("5.49")
+    assert decision.skipped
+
+
+def test_depth_risk_cap_is_built_without_the_strategy_multiplier():
+    from bot.depth_risk import cap_buy_quantity
+    from run_bot import depth_risk_cap_kwargs
+
+    kwargs = depth_risk_cap_kwargs(size_multiplier=Decimal("0.5"))
+    assert kwargs == {"size_multiplier": Decimal("1")}
+    decision = cap_buy_quantity(
+        entry_price=Decimal("0.60"), tick_size=Decimal("0.01"),
+        asks=[(Decimal("0.60"), Decimal("1000"))],
+        max_entry_notional_usdc=Decimal("10"), max_loss_usdc=Decimal("10"),
+        depth_fraction=Decimal("0.10"), boundary_ticks=1, inventory_headroom=Decimal("100"),
+        **kwargs,
+    )
+    assert decision.risk_notional_quantity == Decimal("10") / Decimal("0.60")
+
+
+def test_weak_pfair_half_size_flow_skips_with_depth_risk_on_and_off():
+    from bot.quote_service import apply_weak_pfair_size_adjustment
+
+    def flow(cap):
+        desired = {"should_quote": True, "price": Decimal("0.75"), "p_fair": Decimal("0.50"),
+                   "size_multiplier": Decimal("1")}
+        desired = apply_weak_pfair_size_adjustment(
+            desired_entry=desired, side="buy", enabled=True,
+            lower=Decimal("0.47"), upper=Decimal("0.53"), multiplier=Decimal("0.5"),
+        )
+        return apply_share_entry_sizing(desired_entry=desired, side="buy", cap_quantity=cap)
+
+    for cap in (None, Decimal("10") / Decimal("0.75")):
+        desired, decision = flow(cap)
+        assert decision.skipped and desired["should_quote"] is False
