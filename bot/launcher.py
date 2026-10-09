@@ -1190,6 +1190,44 @@ def enforce_entry_sizing_startup_policy(app_config: Any, *, live: bool) -> bool:
     return True
 
 
+def run_journal_retention_on_exit(project_root: Path, exit_reason: Optional[str], *, popen=None) -> Optional[str]:
+    """Daily journal diagnostic retention on a graceful final exit (archive -> verify -> delete).
+
+    Runs after run_integrated_bot() has returned for good, so the journal writer
+    is closed; the child still refuses if any process holds the journal open.
+    Never VACUUMs. A timeout or Ctrl+C aborts the child; its open transaction
+    rolls back and no unverified row is deleted.
+    """
+    if exit_reason not in GRACEFUL_EXIT_REASONS:
+        logger.info(f"Journal retention skipped: exit_reason={exit_reason} is not a graceful final exit")
+        return "skipped_not_graceful"
+    import subprocess
+    import sys
+    popen = popen or subprocess.Popen
+    log_path = project_root / "logs" / "journal_retention.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    timeout_sec = DEFAULT_RETENTION_EXIT_TIMEOUT_SEC
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n=== journal retention {datetime.now(timezone.utc).isoformat()} reason={exit_reason} ===\n")
+        log_file.flush()
+        process = popen(
+            [sys.executable, str(project_root / "scripts" / "journal_retention.py"), "run", "--apply"],
+            cwd=project_root, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+        try:
+            code = process.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            _stop_child(process)
+            logger.warning("Journal retention timed out and was aborted; journal rows preserved.")
+            return "timeout_aborted"
+        except KeyboardInterrupt:
+            _stop_child(process)
+            logger.warning("Journal retention aborted by operator; journal rows preserved.")
+            return "operator_aborted"
+    logger.info(f"Journal retention finished: exit_code={code} (details in {log_path})")
+    return "completed" if code == 0 else f"refused_or_failed_exit_{code}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Integrated BTC 15-Min Trading Bot")
     parser.add_argument(
@@ -1275,6 +1313,7 @@ def main():
         )
         # Final process exit only (never a rollover); the node and its writers are already disposed.
         run_exit_retention(Path(__file__).resolve().parent.parent, exit_reason)
+        run_journal_retention_on_exit(Path(__file__).resolve().parent.parent, exit_reason)
     finally:
         if live_lock is not None:
             live_lock.release()

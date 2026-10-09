@@ -87,6 +87,89 @@ effect with the commit `fix(execution): size entries by sellable shares`.
     back-to-back DRY-RUNs for ≈ 24 h without re-checking free space.
   - HEAD has not been runtime-validated since the settlement fix `bbbdc09`.
 
+## Trade-journal diagnostic retention (2026-10-09)
+
+`monitoring/journal_retention.py` (CLI `scripts/journal_retention.py`) bounds
+journal growth without losing data.
+
+**Policy.**
+- Core trading/accounting events stay in `logs/trade_journal.db` forever: orders,
+  fills, intents, taker exits, cycle PnL, settlement, session, redeem, strike,
+  shadow-sim, `ORDER_SKIP_*`, and any unknown type.
+- Diagnostic/telemetry events on an explicit allow-list stay **hot for 14 complete
+  UTC days** (`HOT_RETENTION_DAYS`). Today plus the previous 14 days are never touched.
+  - 13 `strategy_events` types: `ENTRY_DECISION_TRACE`, `QUOTE_TRANSPORT_TELEMETRY`,
+    `SIDE_DECISION_OBSERVATION`, `BUY_PATH_DIAGNOSTIC`, `SIDE_DECISION`,
+    `ENTRY_CONFIRMATION_OBSERVATION`, `SMART_MONEY_OBSERVATION`,
+    `EVENT_LOOP_CONSUMER_TIMING`, `LIVE_SIGNAL_COMPARE`,
+    `SHADOW_SIGNAL_CANDIDATE_LIVE`, `MAIN_SIGNAL_CANDIDATE_LIVE`,
+    `ENTRY_REGIME_OBSERVATION`, `ACCOUNT_SUMMARY`.
+  - 4 `order_events` types: `ENTRY_EDGE_OBSERVATION`, `DEPTH_RISK_SHADOW_MARKOUT`,
+    `DEPTH_RISK_SHADOW_CANDIDATE`, `ORDER_OBSERVE_BUY_BLOCKED`.
+- No runtime reader needs these types beyond 14 days. The strong-directional
+  calibration reads `LIVE_SIGNAL_COMPARE` over a fixed 168 h; the dashboard reads
+  only the latest row.
+- `ENTRY_DECISION_TRACE` is archived whole: no schema change, no field extraction,
+  no new research cohort boundary.
+
+**Archive → verify → delete (fail-safe).** For each closed UTC day and table:
+1. Export the rows in id order to `data/journal_archive/YYYY-MM/journal_diag_<day>_<table>.jsonl.xz`
+   (lossless JSON lines, xz). The write is fsynced, renamed atomically, and the file
+   is made read-only.
+2. Write a manifest `journal_diag_<day>.manifest.json` with: row count, id and ts
+   range, per-type counts, a content sha256 over the canonical rows, and the file
+   sha256 and size.
+3. Re-read the archive and require an identical count, ids and content hash.
+4. Delete only when all of these hold:
+   - `--apply` is set;
+   - no process holds the journal open (`lsof`; a missing or failed `lsof` counts as busy);
+   - `backups/trade_journal.db` already contains every row to be deleted;
+   - inside one `BEGIN IMMEDIATE` transaction, the live rows re-hash to the
+     manifest and the deleted count equals the archived count.
+
+Any failure deletes nothing, and the run is idempotent. The daily run happens on a
+graceful final exit (`bot.launcher.run_journal_retention_on_exit` →
+`scripts/journal_retention.py run --apply`) or manually; it never VACUUMs.
+
+**Mirror.** `JOURNAL_ARCHIVE_MIRROR_DIR` (optional, e.g. an external disk):
+copy, then sha256 verify, then atomic rename. If the disk is not mounted, the
+local archive proceeds. If a copy fails, the local archive is kept. Nothing is
+ever deleted from either side.
+
+**One-time VACUUM.** `scripts/journal_retention.py vacuum-once`. It requires all of:
+- the bot is stopped and no open handles exist;
+- a backup that passes `quick_check`;
+- every manifest verifies;
+- at least one archive+delete has completed;
+- free space ≥ 2.2× the DB size.
+
+It runs `integrity_check` afterwards and writes `data/journal_archive/VACUUM_DONE.json`,
+which refuses any second run. VACUUM is not part of the daily flow.
+
+**Re-reading archived rows.**
+- `monitoring.journal_retention.iter_archived_rows(...)`: verified rows, filterable
+  by type and day.
+- `scripts/journal_retention.py restore --out <db> [--start-day D --end-day D]`:
+  builds a new SQLite file with the same columns, which research scripts can
+  `ATTACH` or UNION with the live journal.
+- Recovery and accounting never need the archive, because core events never leave
+  the journal.
+
+**Measured (2026-10-09, first run on the real journal; the bot was stopped).**
+- Rehearsed first on an APFS clone: archive content was byte-identical, all
+  958,694 surviving rows were identical, and a re-run was a no-op.
+- Real run: cutoff 2026-09-25; 11 UTC days (2026-09-07 → 09-24) archived;
+  429,799 diagnostic rows deleted (347,281 `strategy_events` + 82,518 `order_events`).
+- Archive: 22 xz files + 11 manifests, 26.8 MB of xz (≈ 30× smaller than the rows
+  removed). A re-run deleted 0 rows.
+- One-time VACUUM: 3,205,967,872 → 2,345,553,920 bytes, `integrity_check=ok`.
+- Expected steady state at the post-budget rate (≈ 5 MiB per running hour; small
+  sample, INFERRED):
+  - the hot journal stays below about 2.3 GiB, because freed pages are reused and
+    14 days × ≈ 120 MiB ≈ 1.7 GiB;
+  - the archive grows ≈ 0.1–0.15 GiB per month at 24/7 operation;
+  - core events add ≈ 25 MiB per month.
+
 ## Protective-exit availability during pauses (2026-10-09)
 
 Commit `fix(risk): keep protective exits active during pauses`. Before it, a
