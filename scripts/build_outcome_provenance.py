@@ -99,6 +99,7 @@ def main() -> int:
     ap.add_argument("--export", default="data/research_export")
     ap.add_argument("--journal", default=os.getenv("TRADE_DB_PATH") or "logs/trade_journal.db")
     ap.add_argument("--out-dir", default="data/research_export/outcome_provenance")
+    ap.add_argument("--no-offsite", action="store_true", help="do not mirror to RESEARCH_OFFSITE_DIR (reproduction runs)")
     a = ap.parse_args()
     rows, summary = build(Path(a.official), Path(a.export), Path(a.journal))
     out_dir = Path(a.out_dir)
@@ -112,7 +113,7 @@ def main() -> int:
     summary["file"] = str(target)
     summary["file_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
     (out_dir / f"{stem}.summary.json").write_text(json.dumps(summary, indent=1, sort_keys=True))
-    offsite = os.getenv("RESEARCH_OFFSITE_DIR")
+    offsite = None if a.no_offsite else os.getenv("RESEARCH_OFFSITE_DIR")
     if offsite:
         mirror = Path(offsite).expanduser() / "outcome_provenance"
         mirror.mkdir(parents=True, exist_ok=True)
