@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 import pyarrow.parquet as pq
 import pytest
 
-from bot.research import daily_export, decision_export, partitions
+from bot.research import daily_export, decision_export, partitions, path_export
 from bot.research.store import ResearchStore
 
 DAY = date(2026, 10, 7)
@@ -103,7 +103,7 @@ def test_split_refuses_incomplete_day_and_low_disk(tmp_path):
         partitions.split_day(live, DAY, tmp_path / "parts", now=AFTER, disk_margin_bytes=1 << 62)
 
 
-def _exports(tmp_path, *, offsite=True):
+def _exports(tmp_path, *, offsite=True, with_paths=True):
     store_rows = [(f"btc-updown-15m-{int(DAY_START)}", DAY_START + 901,
                    {"event_type": "MARKET_TWAP_SUMMARY", "market_slug": f"btc-updown-15m-{int(DAY_START)}",
                     "canonical_settlement_side": "UP", "settlement_reference_is_canonical": True})]
@@ -120,6 +120,9 @@ def _exports(tmp_path, *, offsite=True):
     offsite_root = tmp_path / "icloud" if offsite else None
     daily_export.export_day(ResearchStore(path), DAY, tmp_path / "export", offsite_root=offsite_root, now=AFTER)
     decision_export.export_day(tmp_path / "j.db", DAY, tmp_path / "export", offsite_root=offsite_root, now=AFTER)
+    if with_paths:
+        path_export.export_day(ResearchStore(path), DAY, tmp_path / "export", offsite_root=offsite_root,
+                               recomputation_rows=None, now=AFTER)
 
 
 def test_eligibility_requires_partition_exports_offsite_and_unchanged_live_rows(tmp_path):
@@ -128,9 +131,13 @@ def test_eligibility_requires_partition_exports_offsite_and_unchanged_live_rows(
     nothing = partitions.deletion_eligibility(DAY, now=AFTER, **kwargs)
     assert nothing["live_rows_deletion_eligible"] is False and nothing["deletion_enabled"] is False
     partitions.split_day(live, DAY, tmp_path / "parts", now=AFTER, disk_margin_bytes=0)
-    _exports(tmp_path, offsite=False)
+    _exports(tmp_path, offsite=False, with_paths=False)
     no_offsite = partitions.deletion_eligibility(DAY, now=AFTER, **kwargs)
     assert no_offsite["checks"]["A_offsite_verified"] is False and not no_offsite["live_rows_deletion_eligible"]
+    _exports(tmp_path, offsite=True, with_paths=False)
+    no_paths = partitions.deletion_eligibility(DAY, now=AFTER + 7 * 86400, **kwargs)
+    assert no_paths["checks"]["P_verified"] is False
+    assert not no_paths["live_rows_deletion_eligible"] and not no_paths["partition_deletion_eligible"]
     _exports(tmp_path, offsite=True)
     ready = partitions.deletion_eligibility(DAY, now=AFTER, **kwargs)
     assert ready["live_rows_deletion_eligible"] is True
@@ -150,3 +157,60 @@ def test_module_contains_no_deletion_code():
     source = inspect.getsource(partitions)
     for forbidden in ("DELETE FROM", "unlink(", "os.remove", "rmtree", "VACUUM"):
         assert forbidden not in source.replace("temporary.unlink(missing_ok=True)", "")
+
+
+# --- Tier P -----------------------------------------------------------------------------------
+
+def _p_store(tmp_path):
+    slug = f"btc-updown-15m-{int(DAY_START)}"
+    def snap(t, version):
+        return (slug, DAY_START + t, {"event_type": "PREDICTION_RESEARCH_SNAPSHOT", "market_slug": slug,
+                                      "snapshot_ts": DAY_START + t, "official_twap": 100.0 + t / 100, "strike": 100.0,
+                                      "twap_fresh": True, "freshness_clock_semantics_version": version,
+                                      "required_move_z_diffusion": 0.5, "nested_ignored": {"a": 1}})
+    rows = [snap(t, 2) for t in range(10, 20)] + [snap(t, None) for t in range(30, 35)] + [snap(t, 1) for t in range(40, 42)]
+    rows += [(slug, DAY_START + 50, {"event_type": "TWAP_STRIKE_CROSS", "market_slug": slug, "direction": "UP"}),
+             (slug, DAY_START + 51, {"event_type": "SHADOW_POSITION_MARK", "market_slug": slug})]
+    path = tmp_path / "p.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE lead_lag_decisions (id INTEGER PRIMARY KEY, run_id TEXT, slug TEXT, "
+                     "market_id INTEGER, decision_epoch_ns INTEGER, payload_json TEXT)")
+        conn.executemany("INSERT INTO lead_lag_decisions (run_id, slug, decision_epoch_ns, payload_json) "
+                         "VALUES ('r', ?, ?, ?)", [(s, int(t * 1e9), json.dumps(p)) for s, t, p in rows])
+    return ResearchStore(path), slug
+
+
+def test_paths_split_native_and_historical_without_mixing(tmp_path):
+    store, slug = _p_store(tmp_path)
+    recompute = tmp_path / "recompute.csv"
+    recompute.write_text("market_slug,snapshot_ts,TWAP_classification\n" f"{slug},{DAY_START + 30},FRESH_ORIGINAL\n")
+    manifest = path_export.export_day(store, DAY, tmp_path / "out", recomputation_rows=recompute,
+                                      offsite_root=tmp_path / "icloud", now=AFTER)
+    assert manifest["verified"] is True
+    assert {k: v["rows"] for k, v in manifest["files"].items()} == {
+        "paths_native_v2": 10, "paths_historical_pre_v2": 7, "canonical_events": 1}
+    assert manifest["source_counts"]["native_v2_exclusions"] == {
+        "MISSING_FRESHNESS_CLOCK_VERSION": 5, "LEGACY_FRESHNESS_CLOCK_V1": 2}
+    folder = tmp_path / "out" / "P_paths" / str(DAY)
+    native = pq.read_table(folder / "paths_native_v2.parquet").to_pylist()
+    historical = pq.read_table(folder / "paths_historical_pre_v2.parquet").to_pylist()
+    assert {r["freshness_provenance"] for r in native} == {"NATIVE_V2"}
+    assert {r["freshness_provenance"] for r in historical} == {"HISTORICAL_PRE_V2"}
+    assert historical[0]["twap_recomputation_class"] == "FRESH_ORIGINAL" and historical[1]["twap_recomputation_class"] is None
+    assert "nested_ignored" not in native[0] and native[0]["required_move_z_diffusion"] == 0.5
+    events = pq.read_table(folder / "canonical_events.parquet").to_pylist()
+    assert [e["event_type"] for e in events] == ["TWAP_STRIKE_CROSS"]
+    assert path_export.day_is_exported(tmp_path / "out", DAY, require_offsite=True) is True
+    (folder / "paths_native_v2.parquet").write_bytes(b"tampered")
+    assert path_export.day_is_exported(tmp_path / "out", DAY) is False
+
+
+def test_paths_refuse_incomplete_day(tmp_path):
+    store, _ = _p_store(tmp_path)
+    with pytest.raises(ValueError):
+        path_export.export_day(store, DAY, tmp_path / "out", recomputation_rows=None, now=DAY_START + 3600)
+
+
+def test_canonical_event_list_matches_the_twap_model():
+    from bot.twap_forward_shadow import REQUIRED_EVENT_TYPES
+    assert set(path_export.CANONICAL_EVENTS) == set(REQUIRED_EVENT_TYPES)

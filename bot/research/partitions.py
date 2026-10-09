@@ -22,7 +22,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from bot.research import daily_export, decision_export
+from bot.research import daily_export, decision_export, path_export
 from bot.research.daily_export import SUMMARY_SLACK_SEC, _day_bounds, _sha256
 
 TABLE = "lead_lag_decisions"
@@ -175,15 +175,19 @@ def deletion_eligibility(day: date, *, live_db: Path, part_dir: Path, export_roo
         "B_verified": decision_export.day_is_exported(export_root, day),
         "A_offsite_verified": _offsite_verified(export_root, "A", day),
         "B_offsite_verified": _offsite_verified(export_root, "B", day),
+        # Narrow per-second paths are what replaces tier C long term; without a
+        # verified offsite copy the day's path evidence would be lost.
+        "P_verified": path_export.day_is_exported(export_root, day),
+        "P_offsite_verified": path_export.day_is_exported(export_root, day, require_offsite=True),
     }
     checks["live_rows_match_partition"] = bool(checks["partition_verified"]) and live_rows_still_match(
         live_db, part_dir, day)
     age_days = (now - _day_bounds(day)[1]) / 86400
     checks["older_than_retention"] = age_days >= retention_days
-    live_ok = all(checks[k] for k in ("day_complete", "partition_verified", "live_rows_match_partition",
-                                      "A_verified", "B_verified", "A_offsite_verified", "B_offsite_verified"))
-    partition_ok = all(checks[k] for k in ("partition_verified", "A_verified", "B_verified",
-                                           "A_offsite_verified", "B_offsite_verified", "older_than_retention"))
+    exports = ("A_verified", "B_verified", "P_verified", "A_offsite_verified", "B_offsite_verified",
+               "P_offsite_verified")
+    live_ok = all(checks[k] for k in ("day_complete", "partition_verified", "live_rows_match_partition", *exports))
+    partition_ok = all(checks[k] for k in ("partition_verified", "older_than_retention", *exports))
     return {"date_utc": day.isoformat(), "age_days": round(age_days, 2), "checks": checks,
             "live_rows_deletion_eligible": live_ok, "partition_deletion_eligible": partition_ok,
             "deletion_enabled": False}
