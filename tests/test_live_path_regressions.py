@@ -3842,6 +3842,10 @@ def test_no_inventory_settlement_records_outcome_for_journal_replay():
             self.recent_market_combined_pnls = []
             self.active_side = ActiveSide.UP
             self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
+            # Canonical official-TWAP tick: the settlement authority.
+            self._polymarket_chainlink_twap_price = 65100.0
+            self._polymarket_chainlink_twap_observation_ts = time.time()
+            self._polymarket_chainlink_twap_window_sec = 60
             self._cycle_total_trades = 0
             self._cycle_total_wins = 0
             self.terminal_dashboard = None
@@ -3865,6 +3869,7 @@ def test_no_inventory_settlement_records_outcome_for_journal_replay():
     settlement = next(payload for event_type, payload in host.events if event_type == "MARKET_SETTLEMENT")
     assert settlement["outcome"] == "UP"
     assert settlement["outcome_only"] is True
+    assert settlement["outcome_source"] == "canonical_twap"
     assert settlement["reference_source"] == "polymarket_chainlink_twap_60s_ws"
 
 

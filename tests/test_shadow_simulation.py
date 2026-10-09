@@ -243,7 +243,7 @@ def test_shadow_simulation_is_one_per_market_and_settles(tmp_path):
 
     host._settle_shadow_simulation(
         slug=host.current_market_slug,
-        spot=100.0,
+        outcome="UP", spot=100.0,
         strike=99.0,
     )
     settled = db.load_shadow_simulation(host.current_market_slug)
@@ -430,7 +430,7 @@ def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_p
 
     restarted_host._settle_shadow_simulation(
         slug=restarted_host.current_market_slug,
-        spot=100.0,
+        outcome="UP", spot=100.0,
         strike=99.0,
     )
     settled = db.load_shadow_simulation(restarted_host.current_market_slug)
@@ -475,7 +475,7 @@ def test_fair_edge_bucket_shadow_requires_passive_fill_and_settles(tmp_path):
 
     host._settle_shadow_simulation(
         slug=host.current_market_slug,
-        spot=100.0,
+        outcome="UP", spot=100.0,
         strike=99.0,
     )
     assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_SETTLED") == 1
@@ -503,6 +503,6 @@ def test_fair_edge_bucket_shadow_restores_after_restart(tmp_path):
     assert restored["status"] == "FILLED"
 
     restarted_host._settle_shadow_simulation(
-        slug=restarted_host.current_market_slug, spot=100.0, strike=99.0
+        slug=restarted_host.current_market_slug, outcome="UP", spot=100.0, strike=99.0
     )
     assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_SETTLED") == 1

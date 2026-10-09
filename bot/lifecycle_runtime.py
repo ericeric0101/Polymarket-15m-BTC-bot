@@ -13,13 +13,20 @@ from bot.ops import handle_waiting_phase_search
 from bot.post_trade import compute_settlement_summary
 
 
+def canonical_settlement_outcome(label: dict[str, Any]) -> str:
+    """UP/DOWN only from a canonical official-TWAP label; otherwise UNKNOWN."""
+    side = label.get("side") if label.get("canonical") else None
+    return side if side in ("UP", "DOWN") else "UNKNOWN"
+
+
 def _canonical_twap_shadow_label(
     *, twap_price: Any, source_ts: Any, window_sec: Any, strike: Any,
     settlement_ts: float, freshness_sec: float = 10.0,
 ) -> dict[str, Any]:
     """Describe whether the latest direct official-TWAP tick is a valid label.
 
-    This is research provenance only; it does not determine live settlement PnL.
+    This is the runtime settlement authority (see canonical_settlement_outcome).
+    Tie semantics: TWAP == strike settles UP (``>=``), compared as floats.
     """
     try:
         price = float(twap_price)
@@ -155,52 +162,23 @@ class StrategyLifecycleMixin:
                 )
                 self.inventory_delta_shares = Decimal(str(ledger_inv))
 
+            # Diagnostic only: the general-purpose spot cache can be stale or
+            # move after the settlement window, so it never decides the outcome.
             spot = 0.0
             if self.latest_external_spot is not None and self.latest_external_spot > 0:
                 spot = float(self.latest_external_spot)
             elif self.last_external_spot is not None and self.last_external_spot > 0:
                 spot = float(self.last_external_spot)
-            elif self._binance_ws_price is not None and self._binance_ws_price > 0:
-                ws_age = time.time() - float(self._binance_ws_price_ts or 0.0)
-                if ws_age <= 60.0:
-                    spot = float(self._binance_ws_price)
-            if spot <= 0 and self.external_spot_history:
-                _, hist_px = self.external_spot_history[-1]
-                if hist_px > 0:
-                    spot = float(hist_px)
 
             slug = self.current_market_slug or ""
             strike = 0.0
             if slug and slug in self.market_strike_cache_by_slug:
                 strike = float(self.market_strike_cache_by_slug[slug])
-            if hasattr(self, "_settle_shadow_simulation"):
-                self._settle_shadow_simulation(slug=slug, spot=spot, strike=strike)
 
-            if spot <= 0 or strike <= 0:
-                logger.warning(
-                    f"Settlement: cannot determine outcome. spot={spot} strike={strike} "
-                    f"inv={inv} slug={slug}"
-                )
-                return
-
-            if spot < 1000 and strike > 1000:
-                logger.warning(
-                    f"Settlement: invalid spot/strike scale mismatch. "
-                    f"spot={spot:.6f} strike={strike:.2f} inv={inv} slug={slug}. "
-                    "Skipping settlement PnL to avoid false outcome."
-                )
-                self._db_strategy_event("MARKET_SETTLEMENT_INVALID_DATA", {
-                    "slug": slug,
-                    "spot": spot,
-                    "strike": strike,
-                    "inventory_shares": inv,
-                    "reason": "spot_strike_scale_mismatch",
-                })
-                return
-
-            # Shadow labels must be based on the direct Chainlink-TWAP tick
-            # clock/value, not the general-purpose spot cache (which may stop
-            # refreshing when no pricing cycle runs near market close).
+            # Single runtime settlement authority: the canonical official-TWAP
+            # label. Missing/degraded TWAP -> UNKNOWN; never a spot fallback.
+            # Official Polymarket resolution is applied retrospectively only
+            # (startup Gamma reconciliation / research), never here.
             shadow_settlement_ts = time.time()
             shadow_label = _canonical_twap_shadow_label(
                 twap_price=getattr(self, "_polymarket_chainlink_twap_price", None),
@@ -210,10 +188,25 @@ class StrategyLifecycleMixin:
                 settlement_ts=shadow_settlement_ts,
                 freshness_sec=float(getattr(self, "_RAW_SPOT_FRESHNESS_SEC", 10.0)),
             )
-            shadow_settlement_side = shadow_label["side"] or ("UP" if spot >= strike else "DOWN")
+            settlement_outcome = canonical_settlement_outcome(shadow_label)
+            shadow_settlement_side = settlement_outcome
+            settlement_provenance = {
+                "outcome_source": "canonical_twap" if settlement_outcome != "UNKNOWN" else "unavailable",
+                "settlement_reference_source": shadow_label["source"],
+                "settlement_reference_is_canonical": shadow_label["canonical"],
+                "settlement_reference_age_sec": shadow_label["age_sec"],
+                "latest_spot_diagnostic": spot,
+            }
+            if settlement_outcome == "UNKNOWN":
+                logger.warning(
+                    f"Settlement outcome UNKNOWN: canonical TWAP unavailable or stale "
+                    f"(source={shadow_label['source']} age={shadow_label['age_sec']}) slug={slug} inv={inv}"
+                )
+            if hasattr(self, "_settle_shadow_simulation"):
+                self._settle_shadow_simulation(slug=slug, outcome=settlement_outcome, spot=spot, strike=strike)
 
             stop_shadow = getattr(self, "stop_forensics_shadow", None)
-            if stop_shadow is not None:
+            if stop_shadow is not None and settlement_outcome != "UNKNOWN":
                 try:
                     stop_shadow.record_settlement(
                         slug=slug,
@@ -234,7 +227,7 @@ class StrategyLifecycleMixin:
                 try:
                     trend_shadow.on_settlement(
                         slug=slug,
-                        outcome="UP" if spot >= strike else "DOWN",
+                        outcome=settlement_outcome,
                         settlement_ts=time.time(),
                     )
                 except Exception as shadow_error:
@@ -247,7 +240,7 @@ class StrategyLifecycleMixin:
                 try:
                     forward_shadow.on_settlement(
                         slug=slug,
-                        outcome=shadow_label["side"] or "UNKNOWN",
+                        outcome=settlement_outcome,
                         settlement_ts=shadow_settlement_ts,
                         settlement_source=shadow_label["source"],
                     )
@@ -283,9 +276,10 @@ class StrategyLifecycleMixin:
                         "slug": slug,
                         "spot": spot,
                         "strike": strike,
-                        "outcome": "UP" if spot >= strike else "DOWN",
+                        "outcome": settlement_outcome,
                         "outcome_only": True,
                         "reference_source": str(getattr(self, "latest_external_spot_source", "") or ""),
+                        **settlement_provenance,
                         "active_side": self.active_side.value,
                         "inventory_side": None,
                         "inventory_shares": 0.0,
@@ -326,9 +320,27 @@ class StrategyLifecycleMixin:
                 self.market_cycle_realized_net_usdc = Decimal("0")
                 return
 
+            if settlement_outcome == "UNKNOWN":
+                # Settlement PnL cannot be known without the canonical label.
+                # No MARKET_CYCLE_PNL is written, so startup reconciliation
+                # resolves this cycle from the official (Gamma) resolution.
+                self._db_strategy_event("MARKET_SETTLEMENT", {
+                    "slug": slug,
+                    "spot": spot,
+                    "strike": strike,
+                    "outcome": "UNKNOWN",
+                    "settlement_pending": True,
+                    "active_side": self.active_side.value,
+                    "inventory_side": inventory_side or self.active_side.value,
+                    "inventory_shares": inv,
+                    "settlement_pnl_usdc": None,
+                    **settlement_provenance,
+                })
+                self.market_cycle_realized_net_usdc = Decimal("0")
+                return
+
             settlement = compute_settlement_summary(
-                spot=spot,
-                strike=strike,
+                outcome=settlement_outcome,
                 inventory_shares=inv,
                 live_inventory_cost=self.live_inventory_cost,
                 market_cycle_realized_net_usdc=self.market_cycle_realized_net_usdc,
@@ -349,6 +361,7 @@ class StrategyLifecycleMixin:
                 "spot": spot,
                 "strike": strike,
                 "outcome": settlement.outcome,
+                **settlement_provenance,
                 "active_side": settlement.active_side,
                 "inventory_side": inventory_side or settlement.active_side,
                 "inventory_shares": inv,

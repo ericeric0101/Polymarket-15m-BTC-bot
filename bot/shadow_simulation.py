@@ -169,11 +169,11 @@ class ShadowSimulationMixin:
             )
 
     def _settle_fair_edge_bucket_shadow_simulations(
-        self, *, slug: str, spot: float, strike: float
+        self, *, slug: str, outcome: str, spot: float | None = None, strike: float | None = None
     ) -> None:
-        if not self._fair_edge_bucket_shadow_enabled_for_run() or spot <= 0 or strike <= 0:
-            return
-        outcome = "UP" if spot >= strike else "DOWN"
+        outcome = str(outcome or "").upper()
+        if not self._fair_edge_bucket_shadow_enabled_for_run() or outcome not in ("UP", "DOWN"):
+            return  # unknown canonical outcome: leave FILLED, never guess
         for state in list(getattr(self, "_fair_edge_bucket_shadow_by_id", {}).values()):
             if str(state.get("slug")) != str(slug) or str(state.get("status")) != "FILLED":
                 continue
@@ -543,14 +543,16 @@ class ShadowSimulationMixin:
                 },
             )
 
-    def _settle_shadow_simulation(self, *, slug: str, spot: float, strike: float) -> None:
-        self._settle_fair_edge_bucket_shadow_simulations(slug=slug, spot=spot, strike=strike)
-        if not self._shadow_simulation_enabled_for_run() or spot <= 0 or strike <= 0:
+    def _settle_shadow_simulation(self, *, slug: str, outcome: str, spot: float | None = None,
+                                  strike: float | None = None) -> None:
+        """Settle simulated fills with the canonical outcome; spot/strike are diagnostics."""
+        outcome = str(outcome or "").upper()
+        self._settle_fair_edge_bucket_shadow_simulations(slug=slug, outcome=outcome, spot=spot, strike=strike)
+        if not self._shadow_simulation_enabled_for_run() or outcome not in ("UP", "DOWN"):
             return
         state = self._load_shadow_simulation_for_slug(slug)
         if state is None or str(state.get("status") or "") != "FILLED":
             return
-        outcome = "UP" if spot >= strike else "DOWN"
         won = str(state.get("side") or "").upper() == outcome
         price = Decimal(str(state["entry_price"]))
         qty = Decimal(str(state["qty"]))

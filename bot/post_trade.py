@@ -167,15 +167,18 @@ def apply_fill_followup(
 
 
 def compute_settlement_summary(
-    spot: float,
-    strike: float,
+    *,
+    outcome: str,
     inventory_shares: float,
     live_inventory_cost: dict[str, dict[str, Any]],
     market_cycle_realized_net_usdc: Decimal,
     active_side: str = "UP",
     inventory_side: str | None = None,
 ) -> SettlementSummary:
-    outcome = "UP" if spot >= strike else "DOWN"
+    """Settlement PnL for a known canonical outcome (the caller owns the authority)."""
+    outcome = str(outcome or "").upper()
+    if outcome not in ("UP", "DOWN"):
+        raise ValueError(f"settlement outcome must be UP or DOWN, got {outcome!r}")
     side_txt = str(active_side or "UP").strip().upper()
     # Use the actual token side the inventory belongs to (if provided),
     # rather than active_side which may have flipped mid-market.
