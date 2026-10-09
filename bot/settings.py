@@ -752,6 +752,9 @@ def initialize_strategy_settings(
     strategy._polymarket_chainlink_twap_event_ts_ms = None
     strategy._polymarket_chainlink_twap_observation_ts = 0.0
     strategy._polymarket_chainlink_twap_window_sec = None
+    # Deferred near-tie settlement relabel (bot/lifecycle_runtime.py).
+    strategy._pending_settlement_relabel = None
+    strategy._recent_twap_ticks = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
     strategy._polymarket_chainlink_twap_silent_stall_count = 0

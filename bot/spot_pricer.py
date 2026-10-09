@@ -266,6 +266,9 @@ class SpotPricerMixin:
                             observation_ts = chainlink_observation_ts(tick)
                             self._polymarket_chainlink_twap_observation_ts = observation_ts
                             self._polymarket_chainlink_twap_window_sec = tick.window_seconds
+                            observe_relabel = getattr(self, "_observe_settlement_relabel_twap_tick", None)
+                            if callable(observe_relabel):
+                                observe_relabel(tick.price, observation_ts, tick.window_seconds)
                             twap_shadow = getattr(self, "twap_forward_shadow", None)
                             if twap_shadow is not None:
                                 try:

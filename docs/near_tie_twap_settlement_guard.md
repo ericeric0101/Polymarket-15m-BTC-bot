@@ -41,7 +41,7 @@ band_bps   = 0.5 × offset                           （NEAR_TIE_BPS_PER_OFFSET_
 - end 之後的 tick 也算位移（含了 window 外的價格）。
 - 超出 band 的市場行為完全不變；既有的 stale／缺 TWAP／錯 window → UNKNOWN 規則不變。
 - UNKNOWN 沿用既有路徑：寫 `MARKET_SETTLEMENT{outcome: UNKNOWN, settlement_pending: true}`，
-  不寫 `MARKET_CYCLE_PNL`、不動 session PnL／regime guard，由啟動時 Gamma reconciliation 依官方結果補齊。
+  不寫 `MARKET_CYCLE_PNL`、不動 session PnL／regime guard；之後由延遲重標（見下）或啟動時 Gamma reconciliation 依官方結果補齊。
 - 新增 provenance 欄位：`settlement_reference_margin_bps`、`settlement_reference_end_offset_sec`、
   `settlement_near_tie_band_bps`、`settlement_near_tie_unresolved`。
 - 未改任何交易門檻。
@@ -49,13 +49,49 @@ band_bps   = 0.5 × offset                           （NEAR_TIE_BPS_PER_OFFSET_
 係數 0.5 bps/s 的依據：第二個衝突需要 > 0.298 bps/s 才能攔下（0.596 bps / 2 s），
 0.5 約 1.7 倍餘裕；物理上相當於「新進樣本與被移出樣本平均相差 30 bps」才會在 1 s 內移動 0.5 bps。
 
-## 為何不做「短暫等待 end tick」
+## 延遲重標（deferred relabel）
 
-`_update_market_phase()` → `_transition_market_phase(SETTLING)` → `_record_market_settlement()`
-會在 quote 事件迴圈（`bot/quote_runtime.py:154`）上被呼叫，也會在 lifecycle timer thread 上被呼叫。
-在事件迴圈上阻塞等待數秒會凍結報價／成交處理，不安全。改為非阻塞的延遲重標（由 timer 在
-bounded 時間內重試）需處理 rollover 時 slug／inventory 重置的競態，屬後續工作。目前採「要求」版：
-近平手且 tick 不在 end → UNKNOWN。
+### 資料：RTDS 會不會發出「剛好在 end 蓋章」的 tick？
+
+會。15 分鐘邊界同時是上一個市場的 end 與下一個市場的 start，
+`canonical_events.parquet` 的 `MARKET_OPENING_TWAP_SAMPLE`（14 天、221 個市場）顯示：
+
+- 210/221 個市場有 `source_ts == market_start`（即上一個市場 end）的 TWAP tick；
+  其餘 11 個是 bot 在開盤後才開始收（首筆 rel = 1–18 s）。
+- 該 tick 收到時間 = 邊界 + 1.34 s（中位數），最大 2.52 s；所有 TWAP tick 的
+  receive − source 延遲 p99 = 2.45 s。source 時鐘全是整數秒、1 Hz（間隔 1 s 佔 98.9%）。
+- 結算在 end + ~0.14 s（中位數）執行，所以當下手上是 end−1／end−2 的 tick；
+  `MARKET_TWAP_SUMMARY` 若在 end + ≥3 s 才寫，最後 tick 都已在 end 之後（+1～+4），證實串流跨越 end 持續。
+
+### 設計（`bot/lifecycle_runtime.py`）
+
+1. `_record_market_settlement()` 照舊寫 `MARKET_SETTLEMENT{UNKNOWN, settlement_pending}`，
+   近平手且 market end 已知時另加 `settlement_relabel_pending`／`settlement_relabel_deadline_ts`
+   （= end + `SETTLEMENT_RELABEL_MAX_WAIT_SEC` = 5 s），並把 slug、strike、end、inventory、
+   inventory side、`live_inventory_cost` 深拷貝、`market_cycle_realized_net_usdc` 存成快照。
+   不等待、不做 I/O，所以在 quote 事件迴圈（`bot/quote_runtime.py:154`）上呼叫也安全。
+2. RTDS 執行緒（`bot/spot_pricer.py`）每收到 TWAP tick 呼叫 `_observe_settlement_relabel_twap_tick`：
+   O(1)，放進 16 筆的近期 tick 環形緩衝，若 tick 是 60 s window 且 |source_ts − end| < 0.5 s
+   就記在 pending 上。安排 pending 時也會掃環形緩衝（end tick 可能在結算前就到、又被下一筆覆蓋）。
+3. Lifecycle timer 執行緒每圈呼叫 `_process_pending_settlement_relabel()`；pending 期間等待上限
+   0.25 s。拿到 end tick → 以同一個 `_canonical_twap_shadow_label`（offset 0 → band 0）判定，
+   依**快照**寫 canonical `MARKET_SETTLEMENT`（`outcome_source = canonical_twap_deferred_relabel`、
+   `settlement_relabel_of_pending = true`）與 `MARKET_CYCLE_PNL`，session PnL／regime guard 來源為
+   `settlement_deferred_relabel`。無庫存市場只補 label（fill-only cycle PnL 結算時已寫）。
+4. 過了 deadline 沒有 end tick → `MARKET_SETTLEMENT_RELABEL_EXPIRED`，UNKNOWN 保留給啟動時 Gamma reconciliation。
+   下一個市場結算時若舊 pending 尚未完成：已有 end tick 就先完成，否則記為 expired（`superseded_by_next_settlement`）。
+
+### Rollover 競態
+
+Rollover 會重置 slug、inventory、`live_inventory_cost`、`market_cycle_realized_net_usdc`。
+重標只讀快照，絕不讀或改這些即時欄位，所以在 rollover 前後完成結果相同，也不會把下一個市場的
+fill PnL 算進舊市場。pending 在一把 lock 下先取出再寫入，因此 RTDS、timer、
+quote 迴圈同時觸發也只會寫一次。Gamma reconciliation 以「該 slug 已有 `MARKET_CYCLE_PNL`」為準不重複入帳；
+`audit_reconciliation` 允許 pending UNKNOWN 之後的一筆 canonical settlement，不算 `REPEATED_FINALIZATION`。
+
+測試：`tests/test_deferred_settlement_relabel.py`（含 rollover 後完成、多執行緒 tick／rollover／timer 競態 50 輪
+只寫一次、deadline 過期、非 end tick 不觸發、結算前已到的 end tick、無庫存、被下一次結算取代、
+timer 輪詢間隔、audit）。未改任何交易門檻。
 
 ## 影響量化（437 個比較市場）
 

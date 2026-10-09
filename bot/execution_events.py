@@ -117,7 +117,7 @@ def audit_reconciliation(events: Iterable[dict], *, local_inventory: dict | None
     from decimal import Decimal
     from bot.inventory import InventoryLedger
     ledger, seen, clients, finalized, identities = {}, {}, {}, set(), {}
-    finalization_events, cycle_versions = [], {}
+    finalization_events, cycle_versions, pending_settlements = [], {}, set()
     issues = []
     rank = {'CONSISTENT': 0, 'RECOVERABLE_MISMATCH': 1, 'UNRESOLVED_MISMATCH': 2, 'CRITICAL_INCONSISTENCY': 3}
     def issue(code, severity, **context):
@@ -217,9 +217,15 @@ def audit_reconciliation(events: Iterable[dict], *, local_inventory: dict | None
             if not market:
                 issue('FINALIZATION_IDENTITY_UNKNOWN', 'UNRESOLVED_MISMATCH'); continue
             key = (event_type, payload.get('tx_hash') or market) if event_type == 'REDEEM_EXECUTED' else (event_type, market)
-            if key in finalized:
+            # A pending UNKNOWN settlement is not final: its later canonical
+            # relabel (deferred or startup Gamma) supersedes it once.
+            if key in finalized and key not in pending_settlements:
                 issue('REPEATED_FINALIZATION', 'UNRESOLVED_MISMATCH', market_slug=market)
             finalized.add(key)
+            pending_settlements.discard(key)
+            if event_type == 'MARKET_SETTLEMENT' and (
+                    payload.get('settlement_pending') or str(payload.get('outcome') or '').upper() == 'UNKNOWN'):
+                pending_settlements.add(key)
     for order in open_orders:
         client = str(order.get('client_order_id') or '')
         if client not in clients:
