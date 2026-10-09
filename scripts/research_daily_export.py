@@ -22,13 +22,14 @@ from bot.research import decision_export, path_export  # noqa: E402
 from bot.research.daily_export import completed_days, day_is_exported, export_day  # noqa: E402
 from bot.research.store import ResearchStore  # noqa: E402
 from bot.runtime_env import load_runtime_env  # noqa: E402
+from bot.journal_path import resolve_trade_db_path  # noqa: E402
 
 
 def main() -> int:
     load_runtime_env()  # profile + .env (shell values win); provides RESEARCH_OFFSITE_DIR
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--db", default="data/research/twap_forward_shadow.db")
-    parser.add_argument("--journal", default=os.getenv("TRADE_DB_PATH") or "logs/trade_journal.db")
+    parser.add_argument("--journal", default=None, help="trade journal (default: canonical TRADE_DB_PATH)")
     parser.add_argument("--out", default="data/research_export")
     parser.add_argument("--offsite", default=os.getenv("RESEARCH_OFFSITE_DIR") or None)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -36,6 +37,7 @@ def main() -> int:
     group.add_argument("--pending", action="store_true")
     parser.add_argument("--allow-partial", action="store_true", help="export an incomplete day (never verified)")
     args = parser.parse_args()
+    args.journal = str(resolve_trade_db_path(args.journal))
     out_root = Path(args.out)
     offsite = Path(args.offsite).expanduser() if args.offsite else None
     store = ResearchStore(args.db)

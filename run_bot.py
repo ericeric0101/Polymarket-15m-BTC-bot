@@ -136,6 +136,7 @@ from bot.recovery import StrategyRecoveryMixin
 from bot.shadow_simulation import ShadowSimulationMixin
 from bot.depth_risk_shadow import DepthRiskShadowMixin
 from bot.depth_risk import cap_buy_quantity
+from bot.kill_switch import effective_kill_class, rollover_reset_allowed
 from bot.entry_sizing import (
     CANONICAL_ENTRY_SIZING_RULE,
     log_entry_sizing_skip_once,
@@ -271,6 +272,17 @@ class LockedSideRuntimeState:
 
 
 from bot.execution_safety import ExecutionSafetyMixin
+
+
+def depth_risk_cap_kwargs(*, size_multiplier: Decimal) -> Dict[str, Decimal]:
+    """Depth/risk/inventory caps are pure caps (share_v1 sizing).
+
+    The strategy ``size_multiplier`` is applied exactly once, to the share
+    target, by ``bot.entry_sizing.size_entry``; scaling the cap too would make
+    the multiplier's effect depend on whether DEPTH_RISK sizing is enabled.
+    """
+    del size_multiplier  # deliberately not applied to the cap
+    return {"size_multiplier": Decimal("1")}
 
 
 class IntegratedBTCStrategy(
@@ -1822,8 +1834,17 @@ class IntegratedBTCStrategy(
         self.market_cycle_realized_net_usdc = Decimal("0")
         bind_market_cycle_state(self, MarketCycleState())
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
-            self.maker_kill_switch = False
-            logger.warning("Maker kill switch auto-reset on market rollover.")
+            kill_class = effective_kill_class(self)
+            if rollover_reset_allowed(kill_class, self.active_maker_orders):
+                self.maker_kill_switch = False
+                self.maker_kill_switch_class = None
+                logger.warning(f"Maker kill switch [{kill_class}] auto-reset on market rollover.")
+            else:
+                # Execution-integrity / unresolved: reconcile first, never resume blindly.
+                logger.error(
+                    f"Maker kill switch [{kill_class}] kept across rollover: "
+                    "order reconciliation is still pending."
+                )
         self.last_quote_update_ts = 0.0
         logger.info(f"Reset maker per-market state: {prev_instrument_id} -> {new_instrument_id} (same_slug={same_slug})")
 
@@ -3555,8 +3576,9 @@ class IntegratedBTCStrategy(
                                 depth_fraction=Decimal(str(self.depth_risk_depth_fraction)),
                                 boundary_ticks=int(self.depth_risk_price_boundary_ticks),
                                 inventory_headroom=inventory_headroom,
-                                # Existing quality controls reduce the budget; they never expand it.
-                                size_multiplier=Decimal(str(desired_entry.get("size_multiplier", "1") or "1")),
+                                **depth_risk_cap_kwargs(
+                                    size_multiplier=Decimal(str(desired_entry.get("size_multiplier", "1") or "1")),
+                                ),
                             )
                             desired_entry["depth_risk_sizing"] = depth_decision.as_payload()
                             cap_quantity = depth_decision.quantity

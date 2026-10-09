@@ -290,10 +290,11 @@ def apply_share_entry_sizing(
     tick: Decimal = DEFAULT_PRICE_TICK,
     cap_quantity: Decimal | None = None,
 ) -> tuple[dict[str, Any], EntrySizingDecision | None]:
-    """Final BUY quantity = min(share target, existing L2/risk cap), skip below 5.5.
+    """Final BUY quantity = min(share target x multiplier, L2/risk cap), skip below 5.5.
 
-    ``cap_quantity`` is the existing depth/risk/inventory cap (already scaled by
-    the quality multipliers).  A Kelly ``target_qty_override`` only lowers it.
+    ``cap_quantity`` is the depth/risk/inventory cap; it does not carry the
+    strategy multiplier (``size_entry`` applies it once to the share target).
+    A Kelly ``target_qty_override`` only lowers the cap.
     On skip the entry is simply not quoted: no BUY count, cooldown or traded
     marker is touched here, because those are recorded only on a fill.
     """

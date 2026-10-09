@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -23,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bot.journal_path import MaintenanceLockError, require_bot_stopped, resolve_trade_db_path
 from monitoring.trade_journal_db import TradeJournalDB
 
 
@@ -38,7 +40,7 @@ def _current_session_key() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reset one Taipei session PnL BUY guard with an audit event.")
-    parser.add_argument("--db", default="logs/trade_journal.db", help="Trade-journal SQLite path")
+    parser.add_argument("--db", default=None, help="Trade-journal SQLite path (default: canonical TRADE_DB_PATH)")
     parser.add_argument("--date", default=_current_session_key(), help="Taipei session key (night: YYYY-MM-DD; day: YYYY-MM-DD-day)")
     parser.add_argument(
         "--reason",
@@ -48,10 +50,21 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Perform the reset; otherwise print the planned change only.")
     args = parser.parse_args()
 
-    db_path = Path(args.db)
+    db_path = resolve_trade_db_path(args.db)
     if not db_path.is_file():
         parser.error(f"journal does not exist: {db_path}")
+    # --apply writes the live journal: the bot (LIVE or DRY-RUN) must be stopped,
+    # and holding its writer lock keeps it from starting until we are done.
+    guard = require_bot_stopped(journal_path=db_path) if args.apply else nullcontext()
+    try:
+        with guard:
+            return _run(args, db_path)
+    except MaintenanceLockError as exc:
+        print(f"REFUSED: {exc}. Stop the bot first.", file=sys.stderr)
+        return 4
 
+
+def _run(args: argparse.Namespace, db_path: Path) -> int:
     db = TradeJournalDB(str(db_path), backup_interval_sec=3600)
     try:
         previous = db.load_session_pnl_state(args.date)

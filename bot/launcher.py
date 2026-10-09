@@ -43,6 +43,12 @@ from bot.market_discovery import (
     resolve_btc_15m_market_slugs,
     resolve_primary_btc_15m_instrument_ids,
 )
+from bot.journal_path import (
+    acquire_journal_writer_lock,
+    journal_writer_lock_path,
+    release_journal_writer_lock,
+    resolve_trade_db_path,
+)
 from bot.process_lock import ProcessLock
 from bot.order_runtime import classify_rollover_sell_orders
 from run_bot import (
@@ -667,7 +673,40 @@ def _strategy_rollover_source(node: Optional[TradingNode]) -> str:
     return "strategy_requested"
 
 
+EXIT_JOURNAL_WRITER_LOCK_HELD = "journal_writer_lock_held"
+
+
 def run_integrated_bot(
+    simulation: bool = True,
+    test_mode: bool = True,
+    enable_terminal_dashboard: bool = False,
+    auth: Optional[Dict[str, str]] = None,
+):
+    """Run the bot while holding the trade-journal writer lock (LIVE and DRY-RUN).
+
+    Two bot processes must never write the same journal: a DRY-RUN next to a
+    LIVE run would share session-PnL and per-market guard state. The lock is
+    released before the caller's exit-retention steps run.
+    """
+    journal_path = resolve_trade_db_path()
+    if not acquire_journal_writer_lock(journal_path):
+        logger.error(
+            f"Another bot process (LIVE or DRY-RUN) is writing {journal_path} "
+            f"(lock {journal_writer_lock_path(journal_path)}). Refusing to start."
+        )
+        return EXIT_JOURNAL_WRITER_LOCK_HELD
+    try:
+        return _run_integrated_bot_cycles(
+            simulation=simulation,
+            test_mode=test_mode,
+            enable_terminal_dashboard=enable_terminal_dashboard,
+            auth=auth,
+        )
+    finally:
+        release_journal_writer_lock(journal_path)
+
+
+def _run_integrated_bot_cycles(
     simulation: bool = True,
     test_mode: bool = True,
     enable_terminal_dashboard: bool = False,

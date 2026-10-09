@@ -29,6 +29,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bot.runtime_env import load_runtime_env  # noqa: E402
+from bot.journal_path import resolve_trade_db_path  # noqa: E402
 
 CACHE_VERSION = 1
 URL_TEMPLATE = "{base}/events/slug/{slug}"
@@ -92,10 +93,11 @@ def fetch_one(client: httpx.Client, base: str, slug: str) -> dict:
 def main() -> int:
     load_runtime_env()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--journal", default=os.getenv("TRADE_DB_PATH") or "logs/trade_journal.db")
+    ap.add_argument("--journal", default=None, help="trade journal (default: canonical TRADE_DB_PATH)")
     ap.add_argument("--export", default="data/research_export")
     ap.add_argument("--out-dir", default="data/research_export/official_resolution")
     args = ap.parse_args()
+    args.journal = str(resolve_trade_db_path(args.journal))
     base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
     slugs = sorted(referenced_slugs(Path(args.journal), Path(args.export)))
     started = datetime.now(timezone.utc)

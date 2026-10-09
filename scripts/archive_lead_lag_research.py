@@ -8,8 +8,13 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bot.journal_path import MaintenanceLockError, require_bot_stopped  # noqa: E402
 
 
 RAW_PARTITIONS = {
@@ -128,7 +133,12 @@ def main() -> None:
     print("eligible_raw_partitions=" + json.dumps(rows))
     print("trade_journal_untouched=true markouts_retained=true vacuum_run=false")
     if args.apply:
-        print("archived_and_pruned=" + json.dumps(apply_retention(str(db_path), args.archive_dir, args.raw_retention_days)))
+        try:
+            with require_bot_stopped():
+                print("archived_and_pruned=" + json.dumps(
+                    apply_retention(str(db_path), args.archive_dir, args.raw_retention_days)))
+        except MaintenanceLockError as exc:
+            raise SystemExit(f"REFUSED: {exc}. Stop the bot before --apply.")
 
 
 if __name__ == "__main__":

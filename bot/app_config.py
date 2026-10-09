@@ -12,6 +12,7 @@ from bot.entry_sizing import (
     resolve_entry_sizing_rule,
 )
 from bot.enums import ActiveSide
+from bot.journal_path import DEFAULT_TRADE_DB_PATH
 from bot.quoting import normalize_quote_mode
 from execution.rebate_model import CRYPTO_FEE_CURVE
 
@@ -1079,7 +1080,7 @@ class AppConfig:
                 sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 10.0)),
                 sell_balance_retry_pause_sec=max(1.0, _env_float("SELL_BALANCE_RETRY_PAUSE_SEC", 3.0)),
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
-                trade_db_path=_env_str("TRADE_DB_PATH", "./data/trading/trade_journal.db"),
+                trade_db_path=_env_str("TRADE_DB_PATH", DEFAULT_TRADE_DB_PATH),
                 shadow_simulation_enabled=_env_bool_inverted("SHADOW_SIMULATION_ENABLED", True),
                 fair_edge_bucket_shadow_enabled=_env_bool_inverted("FAIR_EDGE_BUCKET_SHADOW_ENABLED", True),
                 shadow_simulation_fill_timeout_sec=max(

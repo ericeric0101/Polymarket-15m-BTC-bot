@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from dashboard_state import DashboardState, TradeRecord
+from bot.journal_path import resolve_trade_db_path
 
 
 PANEL_PADDING = (0, 1)
@@ -74,12 +75,8 @@ else:
 
 
 def _resolve_db_path(explicit: Optional[str] = None) -> Path:
-    cwd = Path.cwd()
-    raw_path = explicit or os.getenv("TRADE_DB_PATH") or _ENV_VALUES.get("TRADE_DB_PATH") or "./logs/trade_journal.db"
-    path = Path(raw_path).expanduser()
-    if not path.is_absolute():
-        path = cwd / path
-    return path
+    # The bot's own resolver: explicit > shell > .env > profile > default.
+    return resolve_trade_db_path(explicit)
 
 
 def _json_loads(raw: Optional[str]) -> dict:
@@ -1233,7 +1230,7 @@ def _mock_state() -> DashboardState:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Rich dashboard for the BTC 15-minute Polymarket bot.")
-    parser.add_argument("--db", default=None, help="Path to trade_journal.db. Defaults to TRADE_DB_PATH from .env.")
+    parser.add_argument("--db", default=None, help="Path to trade_journal.db. Defaults to the canonical TRADE_DB_PATH (shell > .env > profile).")
     parser.add_argument("--mock", action="store_true", help="Use mock data instead of reading the trade DB.")
     args = parser.parse_args()
 

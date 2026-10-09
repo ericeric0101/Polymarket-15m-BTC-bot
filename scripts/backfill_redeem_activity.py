@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from bot.journal_path import MaintenanceLockError, require_bot_stopped, resolve_trade_db_path
 from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_rows
 
 
@@ -207,7 +209,7 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill actual redeem amounts from Polymarket Data API activity.")
-    parser.add_argument("--db", default=os.getenv("TRADE_DB_PATH", "./logs/trade_journal.db"))
+    parser.add_argument("--db", default=None, help="Trade-journal SQLite path (default: canonical TRADE_DB_PATH)")
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--user", default="")
     parser.add_argument("--limit", type=int, default=500)
@@ -220,13 +222,16 @@ def main() -> int:
     if not user:
         raise SystemExit("missing user address; set POLYMARKET_WALLET_ADDRESS or pass --user")
 
-    db_path = Path(args.db).expanduser()
-    if not db_path.is_absolute():
-        db_path = Path.cwd() / db_path
+    db_path = resolve_trade_db_path(args.db)
     if not db_path.exists():
         raise SystemExit(f"db not found: {db_path}")
 
-    backfill(db_path, user, limit=args.limit, dry_run=args.dry_run)
+    try:
+        # A real backfill writes the live journal: the bot must be stopped.
+        with nullcontext() if args.dry_run else require_bot_stopped(journal_path=db_path):
+            backfill(db_path, user, limit=args.limit, dry_run=args.dry_run)
+    except MaintenanceLockError as exc:
+        raise SystemExit(f"REFUSED: {exc}. Stop the bot or use --dry-run.")
     return 0
 
 

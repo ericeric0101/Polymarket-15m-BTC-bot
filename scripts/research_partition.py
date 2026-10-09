@@ -21,6 +21,9 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from contextlib import nullcontext  # noqa: E402
+
+from bot.journal_path import MaintenanceLockError, require_bot_stopped  # noqa: E402
 from bot.research.daily_export import SUMMARY_SLACK_SEC, _day_bounds  # noqa: E402
 from bot.research.partitions import deletion_eligibility, split_day  # noqa: E402
 from bot.research.retention import RetentionRefused, assert_not_in_use, delete_live_rows, trash_partition, vacuum  # noqa: E402
@@ -104,7 +107,12 @@ def main() -> int:
     if args.command == "retention":
         if not args.date:  # live rows may already be gone; partitions still need expiry
             days = sorted(set(days) | set(_days_in_partitions(part_dir)))
-        return _retention(days, live, part_dir, export_root, apply=args.apply)
+        try:
+            with require_bot_stopped() if args.apply else nullcontext():
+                return _retention(days, live, part_dir, export_root, apply=args.apply)
+        except MaintenanceLockError as exc:
+            print(f"REFUSED: {exc}. Stop the bot before retention --apply.", file=sys.stderr)
+            return 4
     for day in days:
         if args.command == "split":
             manifest = split_day(live, day, part_dir)

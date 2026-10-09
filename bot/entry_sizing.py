@@ -184,10 +184,12 @@ def size_entry(
 ) -> EntrySizingDecision:
     """The single production entry-sizing decision (LIVE and DRY-RUN).
 
-    ``cap_quantity`` is the existing L2/risk/inventory cap, which already
-    carries the quality multipliers.  Without a cap, multipliers apply to the
-    share target directly.  Either way the result can only shrink, is rounded
-    down to the venue size step, and is skipped below ``MIN_ENTRY_SHARES``.
+    base share target -> x strategy ``size_multiplier`` (never above 1) ->
+    min(strategy quantity, ``cap_quantity``) -> round down to the venue step ->
+    skip below ``MIN_ENTRY_SHARES``.  ``cap_quantity`` is a pure L2/risk/
+    inventory cap and never carries the multiplier, so the multiplier has the
+    same effect whether or not a cap exists.  A reduced quantity is never
+    clamped back up to the minimum.
     """
     price = normalize_entry_price(entry_price, tick)
     multiplier = max(Decimal("0"), _to_decimal(size_multiplier) or Decimal("0"))
@@ -195,7 +197,9 @@ def size_entry(
     if price is None:
         return EntrySizingDecision(None, Decimal("0"), cap, multiplier, Decimal("0"), SKIP_INVALID_PRICE)
     base = target_entry_shares(price, tick=tick, rule=rule)
-    raw = min(base, max(Decimal("0"), cap)) if cap is not None else base * min(Decimal("1"), multiplier)
+    raw = base * min(Decimal("1"), multiplier)
+    if cap is not None:
+        raw = min(raw, max(Decimal("0"), cap))
     final = round_down_to_venue_size(raw)
     reason = SKIP_BELOW_MIN_ENTRY_SHARES if final < MIN_ENTRY_SHARES else ""
     return EntrySizingDecision(price, base, cap, multiplier, final, reason)

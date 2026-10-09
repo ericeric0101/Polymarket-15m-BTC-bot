@@ -16,6 +16,7 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.kill_switch import HARD_PROTECTIVE_EXIT_REASONS
 from bot.order_ids import new_client_order_id
 from bot.enums import ActiveSide
 from bot.endgame_twap_exit import evaluate_endgame_twap_exit
@@ -121,6 +122,7 @@ class TakerExitMixin:
         now_ts: float,
         is_simulation: bool,
         blocked_instruments: Optional[Set[str]] = None,
+        hard_protective_only: bool = False,
     ) -> None:
         if is_simulation:
             return
@@ -128,7 +130,9 @@ class TakerExitMixin:
         # are reported as PROTECTIVE_EXIT_DEGRADED by bot.protective_exit and
         # must not be evaluated from stale data or sold twice.
         blocked = set(blocked_instruments or ())
-        stop_loss_enabled = bool(getattr(self, "stop_loss_enabled", True))
+        # An operational/entry kill switch (bot.kill_switch) applies exactly the
+        # STOP_LOSS=0 semantics: only the independent hard breakers may SELL.
+        stop_loss_enabled = bool(getattr(self, "stop_loss_enabled", True)) and not hard_protective_only
         engine_config = getattr(getattr(self, "exit_policy_engine", None), "config", None)
         hard_loss_enabled = bool(getattr(self, "absolute_max_loss_enabled",
                                         getattr(engine_config, "absolute_max_loss_enabled", False))) or bool(
@@ -615,8 +619,8 @@ class TakerExitMixin:
             # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
             # independently configured hard breaker may pass this boundary.
             if (not stop_loss_enabled or not self.taker_exit_enabled or
-                    (hold_to_redeem and not invalidation_recovery_enabled)) and exit_decision.reason not in {
-                        "absolute_max_loss_breaker", "catastrophic_stop_loss_confirming", "catastrophic_stop_loss_confirmed"}:
+                    (hold_to_redeem and not invalidation_recovery_enabled)) and (
+                        exit_decision.reason not in HARD_PROTECTIVE_EXIT_REASONS):
                 continue
             net_if_exit = exit_decision.net_if_exit
             breaker_threshold = abs(Decimal(str(getattr(self, "absolute_max_loss_usdc", "2.00"))))

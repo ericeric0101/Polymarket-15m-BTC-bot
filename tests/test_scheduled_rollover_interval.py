@@ -12,7 +12,7 @@ from bot import launcher
 def _timer_source():
     module = ast.parse(Path(launcher.__file__).read_text())
     run = next(n for n in module.body if isinstance(n, ast.FunctionDef)
-               and n.name == "run_integrated_bot")
+               and n.name == "_run_integrated_bot_cycles")
     assignments = [n for n in ast.walk(run) if isinstance(n, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "auto_rollover_sec"
                            for t in n.targets)]

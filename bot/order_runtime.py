@@ -7,6 +7,15 @@ from typing import Any, List, Optional, Protocol, Tuple
 from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
+from bot.kill_switch import (
+    KILL_REASON_CANCEL_RECONCILE_FAILED,
+    KILL_REASON_CANCEL_RECONCILE_UNKNOWN,
+    KILL_REASON_UNSPECIFIED,
+    classify_kill_reason,
+    escalate,
+    keeps_resting_sells,
+)
+
 
 _TERMINAL_ORDER_STATES = ("REJECTED", "FILLED", "CANCELED", "CANCELLED", "EXPIRED")
 
@@ -67,7 +76,7 @@ class OrderRuntimeHost(Protocol):
 
     def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
     def _get_confirmed_inventory_qty_for_instrument(self, instrument_id: Optional[Any] = None) -> Decimal: ...
-    def _activate_maker_kill_switch(self, reason: str) -> None: ...
+    def _activate_maker_kill_switch(self, reason: str, *, reason_code: str = ...) -> None: ...
     def cancel_order(self, order: Any) -> None: ...
     def _db_order_event(self, **kwargs: Any) -> None: ...
 
@@ -139,10 +148,33 @@ class OrderRuntimeMixin:
             return "unknown_instrument"
         return (getattr(self, "quote_synthesis_by_inst", None) or {}).get(str(inst))
 
-    def _activate_maker_kill_switch(self: OrderRuntimeHost, reason: str) -> None:
+    def _activate_maker_kill_switch(
+        self: OrderRuntimeHost, reason: str, *, reason_code: str = KILL_REASON_UNSPECIFIED,
+    ) -> None:
+        # Class policy lives in bot.kill_switch; an unclassified trigger is UNRESOLVED.
+        trigger_class = classify_kill_reason(
+            reason_code, denied_sides=getattr(self, "consecutive_denied_sides", None),
+        )
+        prior_class = getattr(self, "maker_kill_switch_class", None) if self.maker_kill_switch else None
+        kill_class = escalate(prior_class, trigger_class)
         self.maker_kill_switch = True
-        self._cancel_active_maker_orders()
-        logger.error(f"MAKER KILL SWITCH ACTIVATED: {reason}")
+        self.maker_kill_switch_class = kill_class
+        if keeps_resting_sells(kill_class):
+            # Operational/entry kill: stop entries, keep resting protective SELLs.
+            self._cancel_maker_order_side("buy", reason="kill_switch_entry")
+        else:
+            self._cancel_active_maker_orders()
+        logger.error(f"MAKER KILL SWITCH ACTIVATED [{kill_class}] code={reason_code}: {reason}")
+        db_event = getattr(self, "_db_strategy_event", None)
+        if callable(db_event):
+            db_event("MAKER_KILL_SWITCH_ACTIVATED", {
+                "slug": str(getattr(self, "current_market_slug", "") or ""),
+                "reason": str(reason),
+                "reason_code": str(reason_code),
+                "trigger_class": trigger_class,
+                "prior_class": prior_class,
+                "kill_class": kill_class,
+            })
 
     def _cancel_active_maker_orders(self: OrderRuntimeHost) -> None:
         for order_key in list(self.active_maker_orders.keys()):
@@ -345,7 +377,10 @@ class OrderRuntimeMixin:
                             status="KILL_SWITCH_UNKNOWN",
                             reason="max_unknown_retries",
                         )
-                        self._activate_maker_kill_switch(f"Order {coid} state unknown after {unknown_retries} retries")
+                        self._activate_maker_kill_switch(
+                            f"Order {coid} state unknown after {unknown_retries} retries",
+                            reason_code=KILL_REASON_CANCEL_RECONCILE_UNKNOWN,
+                        )
                         continue
 
                     state["last_cancel_ts"] = now_ts
@@ -403,7 +438,8 @@ class OrderRuntimeMixin:
                     reason=f"open_after_retries={retries}",
                 )
                 self._activate_maker_kill_switch(
-                    f"Cancel reconcile failed for {coid} after {retries} retries"
+                    f"Cancel reconcile failed for {coid} after {retries} retries",
+                    reason_code=KILL_REASON_CANCEL_RECONCILE_FAILED,
                 )
 
     def _is_order_still_open_in_cache(self, client_order_id: str) -> Optional[bool]:

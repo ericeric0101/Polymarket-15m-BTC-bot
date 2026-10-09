@@ -14,6 +14,7 @@ from bot.execution_events import (
     reconcile_rejected_order,
 )
 from bot.fill_ledger import interpret_fill_liquidity
+from bot.kill_switch import KILL_REASON_CONSECUTIVE_DENIED, KILL_REASON_REGION_RESTRICTED
 from bot.protocol_v2 import asset_protocol
 from bot.enums import ActiveSide
 from bot.post_trade import build_fill_order_event_payload
@@ -107,6 +108,21 @@ def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float)
         "entry_reference_source": str(getattr(strategy, "latest_external_spot_source", "") or ""),
         "entry_twap_degraded": bool(getattr(strategy, "_twap_reference_degraded", False)),
     }
+
+
+def record_denied_order_side(strategy: Any, side: Any) -> None:
+    """Count one denial and remember its side (classifies a later kill switch)."""
+    strategy.consecutive_denied_orders = int(getattr(strategy, "consecutive_denied_orders", 0) or 0) + 1
+    sides = getattr(strategy, "consecutive_denied_sides", None)
+    if not isinstance(sides, set):
+        sides = set()
+        strategy.consecutive_denied_sides = sides
+    sides.add(str(side or "").strip().lower())
+
+
+def reset_denied_order_streak(strategy: Any) -> None:
+    strategy.consecutive_denied_orders = 0
+    strategy.consecutive_denied_sides = set()
 
 
 def is_permanent_trading_restriction(reason: str) -> bool:
@@ -535,7 +551,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             },
         )
 
-    strategy.consecutive_denied_orders = 0
+    reset_denied_order_streak(strategy)
     strategy.last_quote_update_ts = 0.0
 
     strategy._record_observed_fee_rate_from_fill(
@@ -751,7 +767,7 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             now_ts=time.time(),
         )
 
-    strategy.consecutive_denied_orders += 1
+    record_denied_order_side(strategy, reject_result.rejected_side)
     reason = reject_result.reason
     if taker_exit_reason:
         strategy._db_strategy_event(
@@ -789,7 +805,10 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
         # A 403 geo/compliance rejection is not transient. Stop immediately so
         # a rapid requote loop cannot keep submitting requests that Polymarket
         # has already declared ineligible.
-        strategy._activate_maker_kill_switch("Polymarket CLOB trading restricted for this deployment region")
+        strategy._activate_maker_kill_switch(
+            "Polymarket CLOB trading restricted for this deployment region",
+            reason_code=KILL_REASON_REGION_RESTRICTED,
+        )
         logger.error(
             "Polymarket CLOB returned a permanent trading-restriction rejection. "
             "Maker quoting has been stopped; resolve the deployment's regional "
@@ -879,5 +898,6 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
     strategy.rebate_reporter.record_denied()
     if strategy.consecutive_denied_orders >= strategy.maker_max_consecutive_denied:
         strategy._activate_maker_kill_switch(
-            f"Consecutive denied orders reached {strategy.consecutive_denied_orders}"
+            f"Consecutive denied orders reached {strategy.consecutive_denied_orders}",
+            reason_code=KILL_REASON_CONSECUTIVE_DENIED,
         )
