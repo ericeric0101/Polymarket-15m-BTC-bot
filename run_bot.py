@@ -1983,6 +1983,18 @@ class IntegratedBTCStrategy(
             intended_side = str(side_value or "BUY").upper()
         except Exception:
             intended_side = "BUY"
+        policy_shadow = getattr(self, "candidate_policy_shadow", None)
+        if policy_shadow is not None:
+            try:
+                # Research only: evaluated after the production decision; cannot alter it.
+                policy_shadow.observe(
+                    slug=str(self.current_market_slug or ""), intended_side=intended_side,
+                    current_pass=bool(should_quote), current_reason=str(reason or ""),
+                    score=_as_float(self.side_decision_score), entry_price=_as_float(entry_price),
+                    time_left_sec=_as_float(time_left_sec), now_ts=float(now_ts),
+                )
+            except Exception:
+                pass
         lifecycle = getattr(self, "_live_entry_research_lifecycle", None)
         if lifecycle is None:
             lifecycle = ResearchCandidateLifecycle()

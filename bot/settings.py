@@ -827,6 +827,14 @@ def initialize_strategy_settings(
     )
     # Synchronized prediction telemetry shares the existing asynchronous TWAP
     # research writer. It has no authority over any trading decision.
+    from bot.research.candidate_policy import CandidatePolicyShadow
+    strategy.candidate_policy_shadow = CandidatePolicyShadow(db=strategy.twap_research_db, run_id=strategy.run_id)
+    from bot.research.stop_shadow import StopCandidateShadow
+    strategy.stop_candidate_shadow = StopCandidateShadow(
+        db=strategy.twap_research_db, run_id=strategy.run_id,
+        hard_loss_usdc=getattr(strategy, "absolute_max_loss_usdc", None),
+        hard_loss_min_hold_sec=getattr(strategy, "absolute_max_loss_min_hold_sec", None),
+    )
     strategy.prediction_research_snapshotter = PredictionResearchSnapshotter(
         db=strategy.twap_research_db, run_id=strategy.run_id, interval_sec=1.0,
     )
