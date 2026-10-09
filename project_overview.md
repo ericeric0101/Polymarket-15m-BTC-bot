@@ -105,6 +105,34 @@ effect with the commit `fix(execution): size entries by sellable shares`.
     back-to-back DRY-RUNs for ≈ 24 h without re-checking free space.
   - HEAD has not been runtime-validated since the settlement fix `bbbdc09`.
 
+## LIVE preflight authenticated probe (2026-10-10)
+
+Commit `fix(preflight): require authenticated read-only probe for LIVE`.
+Before it, `run_bot.py --live --preflight-only` printed `PREFLIGHT CHECK PASSED`
+as soon as `resolve_polymarket_auth` returned a credential dict; nothing proved
+the venue accepted it.
+
+- `bot/launcher.py::run_preflight_checks` (used by `--preflight-only` **and** by
+  every real `--live` start) resolves credentials exactly as before
+  (`resolve_polymarket_auth`: configured `POLYMARKET_API_KEY/SECRET/PASSPHRASE`,
+  otherwise the existing L1 → L2 `create_api_key` → `derive_api_key` path;
+  decided 2026-10-10) and then, in LIVE only, calls
+  `probe_polymarket_auth(auth)`.
+- The probe is ONE authenticated `GET /balance-allowance` (COLLATERAL) via
+  `py_clob_client_v2`. It creates/cancels no order, mints/derives no key itself,
+  and never calls `update_balance_allowance`.
+- Statuses: `AUTH_OK`, `AUTH_401`, `AUTH_403`, `NETWORK_ERROR` (httpx network /
+  timeout, or the client's `PolyApiException(status_code=None)`), `UNKNOWN`
+  (any other HTTP status, a non-JSON body, or a local error). **LIVE preflight
+  fails on anything except `AUTH_OK`.** DRY-RUN does not probe.
+- Logs carry only the status, the HTTP status code and the exception class;
+  credential values are never logged.
+- Host fact (2026-10-10): `.env` holds the PK but empty L2 key/secret/passphrase,
+  so every LIVE start derives L2 credentials. A static-credential probe with the
+  empty `.env` values returns 401; the derived credentials returned `AUTH_OK`.
+- Tests: `tests/test_live_auth_probe.py` (real client through an
+  `httpx.MockTransport`; asserts a single GET and no secret in logs).
+
 ## Prospective stop-timing telemetry (2026-10-10; research-only)
 
 Commit `research: capture prospective stop timing telemetry`. Purpose: for every
@@ -389,6 +417,7 @@ Pre-existing, unrelated failure kept as-is:
 `tests/test_live_path_regressions.py::test_app_config_reads_extended_env`
 expects `TAKER_EXIT_MAX_TIME_LEFT_SEC`, renamed to
 `RECOVERY_EXIT_MAX_TIME_LEFT_SEC` in `f493c68` (2026-08-22).
+(2026-10-10: observed passing in the full suite; 1501 passed.)
 
 ## Offline empirical probability study (2026-10-01)
 

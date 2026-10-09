@@ -148,7 +148,10 @@ def test_preflight_returns_verified_auth_for_node_build_without_redis(monkeypatc
         "private_key": "key", "api_key": "api", "api_secret": "secret",
         "passphrase": "pass", "funder": "wallet", "signature_type": "0",
     }
+    for name in ("POLYMARKET_PK", "POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_PASSPHRASE"):
+        monkeypatch.setenv(name, "configured")
     monkeypatch.setattr(launcher, "resolve_polymarket_auth", lambda: auth)
+    monkeypatch.setattr(launcher, "probe_polymarket_auth", lambda _auth: (launcher.AUTH_OK, "test"))
     monkeypatch.setattr(launcher, "resolve_btc_15m_market_slugs", lambda: ["slug"])
     monkeypatch.setattr(
         launcher, "resolve_best_btc_15m_market",

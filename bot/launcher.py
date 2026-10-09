@@ -607,13 +607,82 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         return None
 
 
+AUTH_OK = "AUTH_OK"
+AUTH_401 = "AUTH_401"
+AUTH_403 = "AUTH_403"
+AUTH_NETWORK_ERROR = "NETWORK_ERROR"
+AUTH_UNKNOWN = "UNKNOWN"
+
+
+def classify_auth_probe_error(exc: BaseException) -> str:
+    """Map a read-only probe failure to an auth status without inspecting secrets."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError,
+                        ConnectionError, TimeoutError)):
+        return AUTH_NETWORK_ERROR
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return AUTH_401
+    if status == 403:
+        return AUTH_403
+    # py_clob_client_v2 wraps httpx.RequestError as PolyApiException(status_code=None).
+    if status is None and type(exc).__name__ == "PolyApiException":
+        return AUTH_NETWORK_ERROR
+    return AUTH_UNKNOWN
+
+
+def probe_polymarket_auth(auth: Dict[str, str], *, client_factory: Any = None) -> tuple[str, str]:
+    """Prove the resolved LIVE credentials with ONE harmless authenticated read.
+
+    GET /balance-allowance (COLLATERAL) only: no order create/cancel, no API-key
+    create/derive inside the probe, no allowance or balance update. Returns ``(status, detail)``;
+    ``detail`` holds only an HTTP status / exception class, never credentials.
+    """
+    try:
+        if client_factory is None:
+            from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
+
+            signature_type = int(auth.get("signature_type") or 0)
+            kwargs: Dict[str, Any] = {
+                "key": auth["private_key"],
+                "creds": ApiCreds(api_key=auth["api_key"], api_secret=auth["api_secret"],
+                                  api_passphrase=auth["passphrase"]),
+                "signature_type": signature_type,
+            }
+            if auth.get("funder"):
+                kwargs["funder"] = auth["funder"]
+            client = ClobClient(os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com"),
+                                int(os.getenv("POLYMARKET_CHAIN_ID", "137")), **kwargs)
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=signature_type)
+        else:
+            client, params = client_factory(auth), None
+        response = client.get_balance_allowance(params)
+    except Exception as exc:
+        status = classify_auth_probe_error(exc)
+        code = getattr(exc, "status_code", None)
+        return status, f"{type(exc).__name__}(status_code={code})"
+    if isinstance(response, dict):
+        return AUTH_OK, "balance_allowance_read_ok"
+    return AUTH_UNKNOWN, f"unexpected_response_type={type(response).__name__}"
+
+
 def run_preflight_checks(simulation: bool) -> Optional[Dict[str, str]]:
     logger.info("Preflight check started.")
 
+    # Same resolution as the LIVE node: configured L2 credentials, otherwise the
+    # existing L1 -> L2 create/derive. The probe below then proves whichever
+    # credentials LIVE would actually trade with (decided 2026-10-10).
     auth = resolve_polymarket_auth()
     if not auth:
         logger.error("Polymarket auth resolution failed.")
         return None
+
+    if not simulation:
+        auth_status, auth_detail = probe_polymarket_auth(auth)
+        if auth_status != AUTH_OK:
+            logger.error(f"Polymarket auth probe: status={auth_status} detail={auth_detail} -> LIVE preflight FAILED")
+            return None
+        logger.info(f"Polymarket auth probe: status={auth_status} ({auth_detail})")
 
     slugs = resolve_btc_15m_market_slugs()
     if not slugs:
@@ -636,7 +705,10 @@ def run_preflight_checks(simulation: bool) -> Optional[Dict[str, str]]:
 
     mode_text = "SIMULATION" if simulation else "LIVE TRADING"
     logger.info(f"Preflight mode target: {mode_text}")
-    logger.info("Polymarket auth check: OK")
+    logger.info(
+        "Polymarket auth check: OK (authenticated read-only probe)" if not simulation
+        else "Polymarket auth check: credentials resolved (DRY-RUN: not probed)"
+    )
     logger.info("PREFLIGHT CHECK PASSED")
     return auth
 
