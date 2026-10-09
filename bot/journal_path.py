@@ -113,6 +113,34 @@ class BotStoppedGuard:
         self._held = []
 
 
+class JournalWriterGuard:
+    """Hold only the journal writer lock.
+
+    For a child spawned by the launcher's final-exit hook: the parent has
+    already released the writer lock but still owns the LIVE process lock, and
+    no new bot can start without the writer lock this guard holds.
+    """
+
+    def __init__(self, journal_path: str | Path) -> None:
+        self.journal_path = Path(journal_path)
+        self._lock: Optional[ProcessLock] = None
+
+    def __enter__(self) -> "JournalWriterGuard":
+        lock = ProcessLock(journal_writer_lock_path(self.journal_path))
+        if not lock.acquire():
+            raise MaintenanceLockError(
+                f"Trade-journal writer lock is held (bot running in LIVE or DRY-RUN): "
+                f"{journal_writer_lock_path(self.journal_path)}"
+            )
+        self._lock = lock
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self._lock is not None:
+            self._lock.release()
+            self._lock = None
+
+
 def require_bot_stopped(*, journal_path: Optional[str | Path] = None, repo_root: Optional[Path] = None,
                         environ: Optional[Mapping[str, str]] = None) -> BotStoppedGuard:
     """Context manager for destructive maintenance; raises MaintenanceLockError if the bot runs."""

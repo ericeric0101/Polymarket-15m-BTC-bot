@@ -1250,7 +1250,7 @@ def run_journal_retention_on_exit(project_root: Path, exit_reason: Optional[str]
         log_file.write(f"\n=== journal retention {datetime.now(timezone.utc).isoformat()} reason={exit_reason} ===\n")
         log_file.flush()
         process = popen(
-            [sys.executable, str(project_root / "scripts" / "journal_retention.py"), "run", "--apply"],
+            [sys.executable, str(project_root / "scripts" / "journal_retention.py"), "run", "--apply", "--exit-hook"],
             cwd=project_root, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         )
         try:

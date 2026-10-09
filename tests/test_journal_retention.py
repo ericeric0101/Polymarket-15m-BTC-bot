@@ -340,3 +340,104 @@ def test_current_day_rows_are_never_eligible_even_with_zero_hot_days(env):
     after = counts(env["journal"])
     assert after["ENTRY_DECISION_TRACE@2026-10-20"] == 3
     assert "2026-10-20" not in report["archived_days"]
+
+
+# --- CLI: writer lock, LIVE lock and the shared path resolver ------------------------------
+
+import subprocess as _subprocess
+import sys as _sys
+
+from bot.journal_path import journal_writer_lock_path
+from bot.process_lock import ProcessLock
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+OLD_DAYS = ("2025-01-01", "2025-01-02")  # always older than the 14-day hot window
+
+
+@pytest.fixture
+def cli_env(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "backups").mkdir()
+    journal = make_journal(tmp_path / "logs" / "trade_journal.db", days=OLD_DAYS)
+    src, dst = sqlite3.connect(journal), sqlite3.connect(tmp_path / "backups" / "trade_journal.db")
+    src.backup(dst)
+    src.close(), dst.close()
+    env = {"TRADE_DB_PATH": str(journal), "LIVE_PROCESS_LOCK_PATH": str(tmp_path / "live.lock"),
+           "JOURNAL_ARCHIVE_MIRROR_DIR": ""}
+    return {"env": env, "journal": journal, "archive": tmp_path / "archive"}
+
+
+def cli(cli_env, *args):
+    return _subprocess.run(
+        [_sys.executable, str(REPO_ROOT / "scripts" / "journal_retention.py"), *args,
+         "--archive-dir", str(cli_env["archive"])],
+        capture_output=True, text=True, timeout=120, env={**os.environ, **cli_env["env"]}, cwd=str(REPO_ROOT),
+    )
+
+
+def test_cli_apply_refuses_while_journal_writer_lock_is_held(cli_env):
+    before = cli_env["journal"].read_bytes()
+    held = ProcessLock(journal_writer_lock_path(cli_env["journal"]))
+    assert held.acquire()
+    try:
+        result = cli(cli_env, "run", "--apply")
+    finally:
+        held.release()
+    assert result.returncode == 4 and "REFUSED" in result.stderr, result.stderr
+    assert cli_env["journal"].read_bytes() == before
+    assert not cli_env["archive"].exists()
+
+
+def test_cli_vacuum_once_refuses_while_journal_writer_lock_is_held(cli_env):
+    held = ProcessLock(journal_writer_lock_path(cli_env["journal"]))
+    assert held.acquire()
+    try:
+        result = cli(cli_env, "vacuum-once")
+    finally:
+        held.release()
+    assert result.returncode == 4 and "REFUSED" in result.stderr, result.stderr
+
+
+def test_cli_manual_apply_refuses_while_live_lock_is_held_but_exit_hook_mode_proceeds(cli_env):
+    live = ProcessLock(cli_env["env"]["LIVE_PROCESS_LOCK_PATH"])
+    assert live.acquire()  # the launcher still holds its own LIVE lock during exit hooks
+    try:
+        manual = cli(cli_env, "run", "--apply")
+        hook = cli(cli_env, "run", "--apply", "--exit-hook")
+    finally:
+        live.release()
+    assert manual.returncode == 4 and "REFUSED" in manual.stderr, manual.stderr
+    assert hook.returncode == 0, hook.stderr
+    assert json.loads(hook.stdout)["deleted_rows"] == 12
+
+
+def test_cli_apply_succeeds_when_bot_is_stopped_and_dry_run_needs_no_lock(cli_env):
+    held = ProcessLock(journal_writer_lock_path(cli_env["journal"]))
+    assert held.acquire()
+    try:
+        dry = cli(cli_env, "run")  # read-only on the journal: no lock required
+    finally:
+        held.release()
+    assert dry.returncode == 0, dry.stderr and json.loads(dry.stdout)["deleted_rows"] == 0
+    applied = cli(cli_env, "run", "--apply")
+    assert applied.returncode == 0, applied.stderr
+    assert json.loads(applied.stdout)["deleted_rows"] == 12
+
+
+def test_cli_uses_the_shared_resolver_and_guard():
+    source = (REPO_ROOT / "scripts" / "journal_retention.py").read_text()
+    assert "resolve_trade_db_path" in source and "require_bot_stopped" in source
+    assert 'os.getenv("TRADE_DB_PATH"' not in source  # no private journal default
+
+
+def test_exit_hook_passes_exit_hook_mode(tmp_path):
+    from bot import launcher
+
+    spawned = []
+
+    class Child:
+        def wait(self, timeout=None):
+            return 0
+    launcher.run_journal_retention_on_exit(tmp_path, launcher.EXIT_OPERATOR_STOP,
+                                           popen=lambda cmd, **k: spawned.append(cmd) or Child())
+    assert spawned[0][-3:] == ["run", "--apply", "--exit-hook"]

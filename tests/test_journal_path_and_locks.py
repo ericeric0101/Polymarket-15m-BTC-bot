@@ -229,6 +229,7 @@ def test_compact_vacuum_refuses_while_bot_runs(tmp_path):
     "scripts/compact_research_db.py",
     "scripts/archive_lead_lag_research.py",
     "scripts/backfill_redeem_activity.py",
+    "scripts/journal_retention.py",
 ])
 def test_every_destructive_maintenance_script_takes_the_bot_stopped_guard(rel):
     assert "require_bot_stopped" in (REPO_ROOT / rel).read_text()

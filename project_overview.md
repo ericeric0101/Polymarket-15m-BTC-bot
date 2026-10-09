@@ -145,7 +145,7 @@ journal growth without losing data.
    - inside one `BEGIN IMMEDIATE` transaction, the live rows re-hash to the
      manifest and the deleted count equals the archived count.
 
-Any failure deletes nothing, and the run is idempotent. The daily run happens on a
+Any failure deletes nothing, and the run is idempotent. `scripts/journal_retention.py` resolves the journal with `bot.journal_path.resolve_trade_db_path`. `run --apply` and `vacuum-once` hold `require_bot_stopped` (the journal writer lock plus a free LIVE lock). The launcher exit hook passes `--exit-hook` and holds only the writer lock, because its parent still owns the LIVE lock. A held lock refuses with exit code 4. The daily run happens on a
 graceful final exit (`bot.launcher.run_journal_retention_on_exit` →
 `scripts/journal_retention.py run --apply`) or manually; it never VACUUMs.
 
