@@ -17,10 +17,11 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     should_requote_existing_order,
 )
+from bot.protective_exit import ProtectiveExitMixin
 from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
 
-class QuoteRuntimeMixin:
+class QuoteRuntimeMixin(ProtectiveExitMixin):
     def _inventory_overage_requires_sell_only(self) -> bool:
         """Block new BUYs on verified inventory overage without cancelling exits."""
         inventory = abs(Decimal(str(getattr(self, "inventory_delta_shares", "0"))))
@@ -145,10 +146,27 @@ class QuoteRuntimeMixin:
             return True
         return False
 
+    def _entry_authority_block_reason(self) -> str:
+        """Why NEW BUY authority is paused; protective SELL authority is separate."""
+        dashboard_state = getattr(self, "dashboard_state", None)
+        if dashboard_state is not None and bool(getattr(dashboard_state, "bot_paused", False)):
+            return "telegram_pause"
+        if time.time() < float(getattr(self, "quote_pause_until_ts", 0.0) or 0.0):
+            return "error_pause"
+        return ""
+
+    def _cancel_resting_buys_for_pause(self, reason: str) -> None:
+        for order_key, state in list(self.active_maker_orders.items()):
+            side = str(state.get("side", "") or "").lower()
+            if side == "buy" or str(order_key).lower().startswith("buy:"):
+                self._cancel_maker_order_side(order_key, reason=f"entry_paused_{reason}")
+
     async def _prepare_quote_cycle(self) -> Optional[Dict[str, Any]]:
         if self.maker_kill_switch:
-            return None
-        if time.time() < self.quote_pause_until_ts:
+            # Kill-switch semantics are unchanged (no order activity); held
+            # inventory is reported as degraded. Exit policy under kill switch
+            # is UNRESOLVED and needs an explicit operator decision.
+            await self._run_protective_exit_cycle(time.time(), entry_block_reason="kill_switch")
             return None
 
         phase = self._update_market_phase()
@@ -156,6 +174,18 @@ class QuoteRuntimeMixin:
             self._cancel_active_maker_orders()
             return None
         await self._maybe_finalize_side_decision(time.time(), phase)
+        entry_block_reason = self._entry_authority_block_reason()
+        if entry_block_reason:
+            # Pausing entries never disables protection for held inventory:
+            # cancel resting BUYs only, keep protective SELLs, evaluate exits.
+            self._cancel_resting_buys_for_pause(entry_block_reason)
+            await self._run_protective_exit_cycle(time.time(), entry_block_reason=entry_block_reason)
+            if entry_block_reason == "telegram_pause":
+                now_log_ts = time.time()
+                if now_log_ts - float(getattr(self, "_last_dashboard_pause_log_ts", 0.0)) >= 30.0:
+                    logger.info("Telegram pause active; new BUYs blocked, protective exits remain active.")
+                    self._last_dashboard_pause_log_ts = now_log_ts
+            return None
         if self.bi_side_enabled and self.active_side == ActiveSide.NONE:
             if self.inventory_delta_shares <= 0:
                 self._cancel_active_maker_orders()
@@ -245,8 +275,7 @@ class QuoteRuntimeMixin:
             or session_forced_sell_only
         )
 
-        await self._maybe_taker_exit_positions(time.time(), is_simulation=self._is_dry_run_mode())
-        await self._maybe_maker_urgent_exit(time.time())
+        await self._run_protective_exit_cycle(time.time())
 
         now_ts = time.time()
         force_quote_refresh_once = bool(getattr(self, "_force_quote_refresh_once", False))

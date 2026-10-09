@@ -3640,12 +3640,8 @@ class IntegratedBTCStrategy(
             # Sample before maker pause/kill-switch returns so locked periods
             # still contribute research observations. Persistence is queued.
             snapshotter.capture(self, now_ts=time.time(), trigger="periodic")
-        if self.dashboard_state is not None and self.dashboard_state.bot_paused:
-            now_ts = time.time()
-            if now_ts - self._last_dashboard_pause_log_ts >= 30.0:
-                logger.info("Telegram pause active; skipping maker quote cycle.")
-                self._last_dashboard_pause_log_ts = now_ts
-            return
+        # Telegram pause blocks NEW BUYs inside _prepare_quote_cycle, after the
+        # protective-exit path for held inventory has run.
         cycle = await self._prepare_quote_cycle()
         if cycle is None:
             return
@@ -4375,6 +4371,12 @@ class IntegratedBTCStrategy(
                 except Exception as cleanup_error:
                     logger.exception(f"Watchdog pending-cancel reconciliation failed: {cleanup_error}")
             self._emit_strategy_status(now_ts)
+            try:
+                # Observability only: a full quote outage must surface as
+                # PROTECTIVE_EXIT_DEGRADED, never as a silently skipped stop.
+                self._report_protective_exit_availability(now_ts)
+            except Exception as availability_error:
+                logger.exception(f"Protective-exit availability report failed: {availability_error}")
             recovery_started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0))
             pending_instruments = getattr(self, "quote_recovery_pending_instruments", set())
             if pending_instruments and recovery_started_ts > 0:

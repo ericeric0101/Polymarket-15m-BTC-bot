@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal, ROUND_FLOOR
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol, Set
 
 from loguru import logger
 from nautilus_trader.model.enums import OrderSide, TimeInForce
@@ -116,9 +116,18 @@ class TakerExitMixin:
         )
         return True
 
-    async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
+    async def _maybe_taker_exit_positions(
+        self: TakerExitHost,
+        now_ts: float,
+        is_simulation: bool,
+        blocked_instruments: Optional[Set[str]] = None,
+    ) -> None:
         if is_simulation:
             return
+        # Instruments whose inputs are stale or whose inventory is unreliable
+        # are reported as PROTECTIVE_EXIT_DEGRADED by bot.protective_exit and
+        # must not be evaluated from stale data or sold twice.
+        blocked = set(blocked_instruments or ())
         stop_loss_enabled = bool(getattr(self, "stop_loss_enabled", True))
         engine_config = getattr(getattr(self, "exit_policy_engine", None), "config", None)
         hard_loss_enabled = bool(getattr(self, "absolute_max_loss_enabled",
@@ -173,7 +182,7 @@ class TakerExitMixin:
             seen_instruments.add(inv_inst_key)
         for inst_id in target_instruments:
             inst_key = self._instrument_key(inst_id)
-            if not inst_key:
+            if not inst_key or inst_key in blocked:
                 continue
             if self.taker_exit_eval_interval_sec > 0 and not endgame_window_active:
                 last_eval_ts = float(self.taker_exit_last_eval_ts_by_inst.get(inst_key, 0.0))

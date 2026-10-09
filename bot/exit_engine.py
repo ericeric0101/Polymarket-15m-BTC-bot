@@ -351,6 +351,9 @@ class ExitPolicyEngine:
                     "signal_locked": "1" if signal.locked else "0",
                     "absolute_max_loss_usdc": str(self.config.absolute_max_loss_usdc),
                     "stop_loss_threshold": str(self.config.absolute_max_loss_usdc),
+                    # Not a guaranteed maximum loss: it needs a confirmed adverse
+                    # trend, a minimum hold and persistence (or <=120 s left).
+                    "breaker_label": "conditional_absolute_loss_breaker",
                     "adverse_trend_confirmed": "1",
                     "required_confirmations": "0",
                     "net_if_exit": str(net_if_exit),

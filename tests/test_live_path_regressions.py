@@ -209,6 +209,13 @@ def test_runtime_journal_failure_does_not_disable_normal_maker_cycle_or_protecti
             self.maker_order_ttl_sec = 30.0
             self.maker_loss_sell_reprice_min_interval_sec = 30.0
             self.instrument_id = "UP.INST"
+            # A real held position with a fresh book: the protective-exit path
+            # evaluates only held inventory whose inputs are fresh.
+            self.live_inventory_cost = {"UP.INST": {"qty": Decimal("5"), "opened_ts": 0.0}}
+            self.last_quote_update_ts_by_inst = {"UP.INST": time.time()}
+            self.latest_external_spot_source_ts = time.time()
+            self.quote_stale_sec = 30
+            self.maker_exchange_min_shares = Decimal("5")
             self.maker_vol_warmup_quotes = 0
             self.requote_bucket_last_refill = 0.0
             self.requote_bucket_tokens = 0.0

@@ -865,7 +865,13 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             return
         pause_sec = max(1, strategy.maker_error_pause_sec)
         strategy.quote_pause_until_ts = max(strategy.quote_pause_until_ts, now_ts + pause_sec)
-        strategy._cancel_active_maker_orders()
+        if reject_result.rejected_side == "buy":
+            # Error-pause class (i): a BUY collateral rejection says nothing
+            # about held inventory, so resting protective SELLs stay in place.
+            strategy._cancel_maker_order_side("buy", reason="buy_balance_reject")
+        else:
+            # Unknown rejected side: keep the existing fail-closed cancel-all.
+            strategy._cancel_active_maker_orders()
         logger.warning(
             f"Balance/allowance rejection detected; pause quoting for {pause_sec}s. "
             "Check wallet balance and token allowance."

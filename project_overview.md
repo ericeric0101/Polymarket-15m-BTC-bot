@@ -75,8 +75,9 @@ effect with the commit `fix(execution): size entries by sellable shares`.
   - Above 0.70, 151 LIVE and 773 DRY-RUN submits would have been smaller (5.5
     instead of 5.5/price shares).
 - Open items, not changed by share_v1:
-  - P1: hard-loss breakers are not evaluated during the kill switch, error pause,
-    Telegram pause, or a quote/price-feed outage.
+  - P1 (partly fixed — see Protective-exit availability during pauses):
+    Telegram pause and error pause now keep protective exits; the kill switch
+    and a stale order book remain DEGRADED, and their policy is UNRESOLVED.
   - P1: the "$2 hard" breaker needs a confirmed adverse trend. It is not a
     guaranteed $2 cap; the audit estimated up to ≈ $5 additional loss per entry.
   - Client order ids are not idempotent (an equivalent duplicate-entry guard exists).
@@ -85,6 +86,100 @@ effect with the commit `fix(execution): size entries by sellable shares`.
   - Storage is at WARNING (≈ 12.8 GiB free; critical guard 10 GiB). Avoid
     back-to-back DRY-RUNs for ≈ 24 h without re-checking free space.
   - HEAD has not been runtime-validated since the settlement fix `bbbdc09`.
+
+## Protective-exit availability during pauses (2026-10-09)
+
+Commit `fix(risk): keep protective exits active during pauses`. Before it, a
+Telegram pause or an error pause returned before the hard breakers were ever
+evaluated, and a held instrument could be stopped on a stale cached quote. Both
+were reproduced red-first.
+
+**Architecture.** Every QuoteTick drives `_quote_maker_orders` →
+`_prepare_quote_cycle` (`bot/quote_runtime.py`):
+
+1. Kill switch → `_run_protective_exit_cycle` (reports only) → return.
+2. Phase / side refresh.
+3. Entry-authority gate (`_entry_authority_block_reason`: Telegram pause,
+   error pause) → cancel resting BUYs only → `_run_protective_exit_cycle` → return.
+4. Otherwise the normal path, which reaches the same `_run_protective_exit_cycle`.
+
+`bot/protective_exit.py::ProtectiveExitMixin._run_protective_exit_cycle` is the
+one canonical entry into the unchanged exit engine
+(`TakerExitMixin._maybe_taker_exit_positions`, `_maybe_maker_urgent_exit`).
+Every real SELL still passes `ExecutionSafetyMixin.submit_order`, and DRY-RUN
+still never evaluates exits. The quote-watchdog thread calls
+`_report_protective_exit_availability` (observability only, no orders), so a
+full quote outage is visible even without QuoteTicks.
+
+| State | New BUY | Resting BUY | Protective SELL | Resting protective SELL | Breaker evaluation |
+|---|---|---|---|---|---|
+| Normal | allowed | kept | allowed | kept | yes |
+| Telegram pause (manual, or AlertWatcher after 3 consecutive losses) | blocked | **cancelled** | allowed | kept | yes |
+| Error pause, class (i) | blocked | cancelled | allowed | kept | yes |
+| Error pause, class (ii): SELL in unknown venue state on that instrument | blocked | cancelled | **not sent** | — | instrument skipped; `PROTECTIVE_EXIT_DEGRADED inventory_unreliable_sell_order_state_unknown` |
+| Kill switch | blocked | cancelled (existing: all maker orders) | **not sent (unchanged)** | cancelled (existing) | no; `PROTECTIVE_EXIT_DEGRADED kill_switch_active_exit_policy_unresolved` |
+| Polymarket order book stale (no fresh quote within `QUOTE_STALE_SEC`) | blocked by the existing watchdog/quote gates | watchdog cancels BUYs | not sent | kept | instrument skipped; `PROTECTIVE_EXIT_DEGRADED orderbook_stale` |
+| BTC / Chainlink reference stale (> 5 s) | blocked by the existing TWAP-degraded gate | per existing gates | allowed when other inputs are fresh | kept | yes. Stale TWAP votes count as unavailable (never adverse); `PROTECTIVE_EXIT_DEGRADED reference_feed_stale_partial_trend_inputs` (non-blocking) |
+
+Error-pause triggers and classes:
+
+| Trigger | Class |
+|---|---|
+| Loss pause after consecutive realized losses (`post_trade` via `fill_ledger.py`) | (i) |
+| Reference-spot fetch failures (`spot_pricer.py`) | (i); inputs gated by freshness |
+| Orderbook-missing reject (`order_events.py`; existing cancel-all kept, the book no longer exists) | (i) |
+| BUY balance/allowance reject (`order_events.py`) | (i); now cancels BUYs only, an unknown-side reject keeps cancel-all |
+| Cancel-reconcile unknown (`order_runtime.py`) | unknown BUY → (i); unknown SELL on a held instrument → (ii), fail closed |
+
+Duplicate-sell protection:
+- One in-flight protective SELL per instrument (`pending_taker_exit_by_inst`,
+  set before the chokepoint and cleared on fill, cancel or reject).
+- An 8 s minimum interval and a 20 s reject cooldown give rate-limited, never
+  storming retries, bounded to ≤ 1 per 20 s within a 15-minute market.
+- Quantity is `min(position, effective sellable)` and never exceeds verified inventory.
+- Pause → resume uses the same path, so there is no double submit.
+- A position below the 5-share venue minimum is logged once as
+  `PROTECTIVE_EXIT_UNSELLABLE`, is never retried, and is held to settlement.
+- `PROTECTIVE_EXIT_DEGRADED` is rate-limited to one line per
+  (instrument, reason) per `TAKER_EXIT_SKIP_LOG_INTERVAL_SEC`. No new Telegram
+  message type and no new config key were added.
+
+**Conditional absolute-loss breaker** (`conditional_absolute_loss_breaker`; the
+`reason` string `absolute_max_loss_breaker` is unchanged). It is **not a
+guaranteed $2 maximum loss.** It fires only when all of these hold:
+- `ABSOLUTE_MAX_LOSS_ENABLED=1`;
+- net-if-exit ≤ −$2.00 (bid minus 0.2 % slippage, minus the taker-fee estimate);
+- hold ≥ 60 s and bid below entry;
+- a confirmed adverse trend: confirmed locked-side invalidation, or a locked
+  opposite signal with |score| ≥ 0.05;
+- ≤ 120 s left, **or** 15 s persistence with ≥ 2 of ≥ 2 available thesis votes
+  (signal, fresh TWAP ≤ 5 s, fair −0.05).
+
+It bypasses the stop-loss spread guard, the hold band, the wait-for-sell-quote
+gate and the recovery-ratio gate. For 10 shares bought at 0.70, the loss before
+it fires ranges from ≈ $2.0 (trend already confirmed, liquid book) to the full
+$7.00 notional (trend never confirmed, a gap inside the 60 s / 15 s windows, an
+FOK on a thin book, or a degraded state).
+
+The catastrophic breaker (`CATASTROPHIC_STOP_LOSS_ENABLED=1`, $0.40) needs
+thesis weakening or a strong opposite signal plus 2 confirmations. It is
+evaluated after the hold-band return, is off in the last 45 s, and is subject
+to the 3 % stop-loss spread guard. With `STOP_LOSS_ENABLED=0`, the adaptive
+stop, urgent exit, endgame TWAP exit, invalidation-recovery ladder and
+force-offside exit stay off; the absolute and catastrophic breakers stay on.
+
+**UNRESOLVED (operator decision required):**
+- Exit policy under the kill switch. The existing code cancels all maker orders
+  and stops order activity; no document allows or forbids exits.
+- A stale-feed liquidation policy (for example, flatten after N seconds without
+  a fresh book). Not implemented; no threshold was invented.
+
+**Still requires tiny-LIVE validation:**
+- the real venue fill, reject and expire lifecycle of the FOK/IOC protective SELL;
+- in-flight clearing on real events;
+- the kill-switch and orphan-order paths.
+
+Deterministic harnesses: `tests/test_protective_exit_availability.py`.
 
 ## Offline empirical probability study (2026-10-01)
 
