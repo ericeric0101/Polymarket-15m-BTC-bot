@@ -1339,8 +1339,10 @@ rate-limited to five seconds while holding inventory.
 
 ### 8. Entry + stop-loss measurement status and next evidence
 
-The canonical offline reports are `scripts/research_analysis.py
-entry-stop-status` and `scripts/research_analysis.py stop-lifecycle`.  The
+The canonical research entry point is now `scripts/reproduce_research_iteration.py`
+(2026-10-09; see Entry + Stop §11). The earlier offline reports below remain
+supported tools: `scripts/research_analysis.py entry-stop-status` and
+`scripts/research_analysis.py stop-lifecycle`.  The
 first report keeps fixed price × `required_move_sigma` bins (0.55–0.90 price;
 <0.5σ, 0.5–1σ, 1–2σ, >2σ) separate from live fills and does not optimize those
 boundaries.  Its primary question is whether structural sigma adds information
@@ -2920,12 +2922,13 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
 
 ## Canonical offline prediction research and session regimes (2026-10-03)
 
-- Strategy-outcome analysis (official labels, LIVE/DRY-RUN entry, flip, stop,
-  calibration) has its own canonical offline entry point since 2026-10-09:
-  `scripts/reproduce_research_iteration.py` (see §11 of the Entry + Stop
-  authority). Folding it into `research_analysis.py` is open research debt.
-- `scripts/research_analysis.py` is the canonical offline entry point for
-  `latest`, `run`, `market`, and `compare-regimes` analysis. It consumes the
+- **Canonical offline research entry point (since 2026-10-09):**
+  `scripts/reproduce_research_iteration.py`, which covers official labels,
+  LIVE/DRY-RUN entry, flip, stop and calibration (see §11 of the Entry + Stop
+  authority). This supersedes the earlier designation of `research_analysis.py`.
+- `scripts/research_analysis.py` is retained as a supported earlier offline
+  tool, not the canonical entry point, for `latest`, `run`, `market`,
+  `compare-regimes`, `capital-efficiency` and `replay`. It consumes the
   existing TWAP research journal and trade journal only; it has no runtime,
   entry, exit, stop, sizing, order-routing, or session-policy authority.
 - Every market is classified from its **market start time in Asia/Taipei** as
@@ -2957,9 +2960,11 @@ seven boundaries. There is no new P-number or unbounded “group” backlog.
   MarketEvidence under bot/research. They open the research SQLite file
   read-only and consume persisted values; they do not calculate probabilities,
   settlement paths, freshness, or trading decisions.
-- New analysis must extend scripts/research_analysis.py before introducing a
-  general-purpose report CLI. Older focused scripts remain compatibility tools
-  until their callers have migrated.
+- New strategy-outcome analysis extends the canonical pipeline
+  `scripts/reproduce_research_iteration.py` (adding a stage script with offline
+  inputs and a content digest) rather than introducing another report CLI.
+  `scripts/research_analysis.py` and older focused scripts remain compatibility
+  tools until their callers have migrated.
 - Research data responsibilities remain split: SQLite stores lifecycle/events/
   snapshots, while Parquet stores dense BTC one-second history. Neither store
   is a live strategy authority.
