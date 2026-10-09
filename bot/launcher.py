@@ -1063,6 +1063,35 @@ def acquire_live_process_lock() -> ProcessLock | None:
     return None
 
 
+def start_research_maintenance(project_root: Path) -> Optional[int]:
+    """Run one research export/partition pass in a detached, niced subprocess.
+
+    Never blocks or fails startup: only completed UTC days are processed, verified
+    days are skipped, and nothing is deleted (retention is a manual command).
+    """
+    if os.getenv("RESEARCH_MAINTENANCE_ON_START", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    script = project_root / "scripts" / "research_maintenance.py"
+    if not script.is_file():
+        return None
+    try:
+        import subprocess
+        import sys
+        log_path = project_root / "logs" / "research_maintenance.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as log_file:
+            log_file.write(f"\n=== research maintenance start {datetime.now(timezone.utc).isoformat()} ===\n")
+            process = subprocess.Popen(
+                ["nice", "-n", "15", sys.executable, str(script)], cwd=project_root,
+                stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        logger.info(f"Research maintenance started in background: pid={process.pid} log={log_path}")
+        return process.pid
+    except Exception as exc:
+        logger.warning(f"Research maintenance could not start; trading startup continues: {exc}")
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Integrated BTC 15-Min Trading Bot")
     parser.add_argument(
@@ -1121,6 +1150,7 @@ def main():
         print("Preflight check passed. Exiting without starting bot.")
         return
 
+
     if not simulation:
         print("WARNING: LIVE TRADING MODE - REAL MONEY AT RISK!")
         confirm = input("Type 'yes' to continue: ")
@@ -1131,6 +1161,7 @@ def main():
     live_lock = acquire_live_process_lock() if not simulation else None
     if not simulation and live_lock is None:
         return
+    start_research_maintenance(Path(__file__).resolve().parent.parent)
     try:
         run_integrated_bot(
             simulation=simulation,
