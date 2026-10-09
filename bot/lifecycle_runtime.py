@@ -13,6 +13,15 @@ from bot.ops import handle_waiting_phase_search
 from bot.post_trade import compute_settlement_summary
 
 
+# Near-tie guard: a 60s TWAP tick stamped `offset` seconds away from market end
+# misses (or adds) `offset` of the 60 one-second samples the official label
+# averages, so the official value can still differ from it by roughly
+# offset/60 * (recent - dropped price spread).  Both observed official/TWAP
+# conflicts were near-ties labeled from ticks 2-4 s before end (margins 0.02
+# and 0.60 bps); see docs/near_tie_twap_settlement_guard.md.
+NEAR_TIE_BPS_PER_OFFSET_SEC = 0.5
+
+
 def canonical_settlement_outcome(label: dict[str, Any]) -> str:
     """UP/DOWN only from a canonical official-TWAP label; otherwise UNKNOWN."""
     side = label.get("side") if label.get("canonical") else None
@@ -21,12 +30,19 @@ def canonical_settlement_outcome(label: dict[str, Any]) -> str:
 
 def _canonical_twap_shadow_label(
     *, twap_price: Any, source_ts: Any, window_sec: Any, strike: Any,
-    settlement_ts: float, freshness_sec: float = 10.0,
+    settlement_ts: float, freshness_sec: float = 10.0, market_end_ts: Any = None,
+    near_tie_bps_per_offset_sec: float = NEAR_TIE_BPS_PER_OFFSET_SEC,
 ) -> dict[str, Any]:
     """Describe whether the latest direct official-TWAP tick is a valid label.
 
     This is the runtime settlement authority (see canonical_settlement_outcome).
     Tie semantics: TWAP == strike settles UP (``>=``), compared as floats.
+    Near-tie guard: when |TWAP - strike| (bps) is below
+    ``near_tie_bps_per_offset_sec * |source_ts - market_end_ts|`` the tick is
+    not the end-of-market value closely enough to decide the side, so the
+    label is not canonical (-> UNKNOWN; startup Gamma reconciliation resolves
+    it).  A tick stamped exactly at market end always decides.  Unknown
+    market end falls back to the tick age as the offset.
     """
     try:
         price = float(twap_price)
@@ -40,15 +56,32 @@ def _canonical_twap_shadow_label(
         price = observed = strike_value = 0.0
         window, age, values_valid = 0, None, False
     source = f"polymarket_chainlink_twap_{window}s_ws" if values_valid and price > 0 and window > 0 else "unavailable"
-    canonical = bool(
+    fresh = bool(
         values_valid and price > 0 and strike_value > 0 and observed > 0
         and window == 60 and age is not None and 0.0 <= age <= float(freshness_sec)
     )
+    margin_bps = end_offset = near_tie_band = None
+    near_tie_unresolved = False
+    if fresh:
+        margin_bps = (price - strike_value) / strike_value * 1e4
+        try:
+            end_offset = abs(observed - float(market_end_ts))
+        except (TypeError, ValueError, OverflowError):
+            end_offset = None
+        if end_offset is None or not math.isfinite(end_offset):
+            end_offset = age
+        near_tie_band = float(near_tie_bps_per_offset_sec) * end_offset
+        near_tie_unresolved = abs(margin_bps) < near_tie_band
+    canonical = fresh and not near_tie_unresolved
     return {
         "source": source,
         "age_sec": age,
         "canonical": canonical,
         "side": ("UP" if price >= strike_value else "DOWN") if canonical else None,
+        "margin_bps": margin_bps,
+        "end_offset_sec": end_offset,
+        "near_tie_band_bps": near_tie_band,
+        "near_tie_unresolved": near_tie_unresolved,
     }
 
 
@@ -187,6 +220,7 @@ class StrategyLifecycleMixin:
                 strike=strike,
                 settlement_ts=shadow_settlement_ts,
                 freshness_sec=float(getattr(self, "_RAW_SPOT_FRESHNESS_SEC", 10.0)),
+                market_end_ts=getattr(self, "current_market_end_timestamp", None),
             )
             settlement_outcome = canonical_settlement_outcome(shadow_label)
             shadow_settlement_side = settlement_outcome
@@ -195,12 +229,22 @@ class StrategyLifecycleMixin:
                 "settlement_reference_source": shadow_label["source"],
                 "settlement_reference_is_canonical": shadow_label["canonical"],
                 "settlement_reference_age_sec": shadow_label["age_sec"],
+                "settlement_reference_margin_bps": shadow_label["margin_bps"],
+                "settlement_reference_end_offset_sec": shadow_label["end_offset_sec"],
+                "settlement_near_tie_band_bps": shadow_label["near_tie_band_bps"],
+                "settlement_near_tie_unresolved": shadow_label["near_tie_unresolved"],
                 "latest_spot_diagnostic": spot,
             }
             if settlement_outcome == "UNKNOWN":
+                reason = (
+                    "near-tie TWAP tick not at market end"
+                    if shadow_label["near_tie_unresolved"] else "canonical TWAP unavailable or stale"
+                )
                 logger.warning(
-                    f"Settlement outcome UNKNOWN: canonical TWAP unavailable or stale "
-                    f"(source={shadow_label['source']} age={shadow_label['age_sec']}) slug={slug} inv={inv}"
+                    f"Settlement outcome UNKNOWN: {reason} "
+                    f"(source={shadow_label['source']} age={shadow_label['age_sec']} "
+                    f"margin_bps={shadow_label['margin_bps']} end_offset={shadow_label['end_offset_sec']}) "
+                    f"slug={slug} inv={inv}"
                 )
             if hasattr(self, "_settle_shadow_simulation"):
                 self._settle_shadow_simulation(slug=slug, outcome=settlement_outcome, spot=spot, strike=strike)

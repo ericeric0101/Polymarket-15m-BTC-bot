@@ -19,7 +19,8 @@ UP_INST = "up-inst"
 class Host(ShadowSimulationMixin, StrategyLifecycleMixin):
     """Real settlement + shadow-simulation code; journal/guards are recorded in memory."""
 
-    def __init__(self, *, twap, spot, twap_age=1.0, window=60, qty=Decimal("0"), entry=Decimal("0.75")):
+    def __init__(self, *, twap, spot, twap_age=1.0, window=60, qty=Decimal("0"), entry=Decimal("0.75"),
+                 tick_minus_end=0.0):
         self.current_market_slug = SLUG
         self.market_strike_cache_by_slug = {SLUG: Decimal(str(STRIKE))}
         self.latest_external_spot = Decimal(str(spot))
@@ -27,6 +28,9 @@ class Host(ShadowSimulationMixin, StrategyLifecycleMixin):
         self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
         self._polymarket_chainlink_twap_price = twap
         self._polymarket_chainlink_twap_observation_ts = None if twap is None else time.time() - twap_age
+        # By default the tick is stamped exactly at market end (the final official TWAP value).
+        tick_ts = self._polymarket_chainlink_twap_observation_ts or time.time() - twap_age
+        self.current_market_end_timestamp = tick_ts - tick_minus_end
         self._polymarket_chainlink_twap_window_sec = window
         self.inventory_delta_shares = qty
         self.live_inventory_cost = ({UP_INST: {"qty": qty, "avg_entry_price": entry}} if qty > 0 else {})
