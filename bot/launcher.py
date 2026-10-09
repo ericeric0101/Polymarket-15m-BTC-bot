@@ -1164,6 +1164,32 @@ def start_research_maintenance(project_root: Path) -> Optional[int]:
         return None
 
 
+def enforce_entry_sizing_startup_policy(app_config: Any, *, live: bool) -> bool:
+    """Log the final resolved sizing rule; refuse LIVE when it is out of bounds.
+
+    Validation runs on the fully resolved config (code default -> profile ->
+    .env -> shell), so a leftover shell export cannot silently change sizing.
+    DRY-RUN warns and runs on the canonical share_v1 rule instead.
+    """
+    from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
+
+    rule = app_config.maker.entry_sizing_rule
+    violations = list(app_config.maker.entry_sizing_violations)
+    logger.info(startup_sizing_summary(rule, violations))
+    if not violations:
+        if not is_canonical_rule(rule):
+            # In-bounds overrides can only shrink sizing; never accept them silently.
+            logger.warning(f"Entry sizing override in effect (within bounds): {rule.as_payload()}")
+        return True
+    detail = "; ".join(violations)
+    if live:
+        logger.error(f"Refusing LIVE start: entry sizing outside versioned bounds: {detail}")
+        print(f"Refusing LIVE start: entry sizing outside versioned bounds: {detail}")
+        return False
+    logger.warning(f"DRY-RUN entry sizing override ignored; canonical share_v1 rule in effect: {detail}")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Integrated BTC 15-Min Trading Bot")
     parser.add_argument(
@@ -1195,6 +1221,8 @@ def main():
     test_mode = bool(args.test_mode or not args.live)
     enable_terminal_dashboard = args.terminal_dashboard
     app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
+    if not enforce_entry_sizing_startup_policy(app_config, live=not simulation):
+        return
 
     if enable_terminal_dashboard:
         logger.remove()

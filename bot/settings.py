@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from loguru import logger
 
 from bot.app_config import AppConfig
+from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.enums import ActiveSide, MarketPhase
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -114,15 +115,23 @@ def initialize_strategy_settings(
     strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
     strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
     strategy.maker_weak_pfair_size_adjust_multiplier = config.maker.weak_pfair_size_adjust_multiplier
-    strategy.maker_high_entry_price_size_adjust_enabled = (
-        config.maker.high_entry_price_size_adjust_enabled
-    )
-    strategy.maker_high_entry_price_size_adjust_threshold = (
-        config.maker.high_entry_price_size_adjust_threshold
-    )
-    strategy.maker_high_entry_price_size_adjust_multiplier = (
-        config.maker.high_entry_price_size_adjust_multiplier
-    )
+    strategy.entry_sizing_rule = config.maker.entry_sizing_rule
+    strategy.entry_sizing_violations = tuple(config.maker.entry_sizing_violations)
+    logger.info(startup_sizing_summary(strategy.entry_sizing_rule, list(strategy.entry_sizing_violations)))
+    if not strategy.entry_sizing_violations and not is_canonical_rule(strategy.entry_sizing_rule):
+        logger.warning(f"Entry sizing override in effect (within bounds): {strategy.entry_sizing_rule.as_payload()}")
+    if strategy.entry_sizing_violations:
+        if not test_mode:
+            # Defense in depth: the launcher refuses first; a LIVE strategy must
+            # never start on an out-of-bounds sizing override.
+            raise RuntimeError(
+                "Refusing LIVE start: entry sizing override outside versioned bounds: "
+                + "; ".join(strategy.entry_sizing_violations)
+            )
+        logger.warning(
+            "DRY-RUN entry sizing override ignored (canonical share_v1 rule in effect): "
+            + "; ".join(strategy.entry_sizing_violations)
+        )
     strategy.kelly_sizing_enabled = config.maker.kelly_sizing_enabled
     strategy.kelly_sizing_fraction = config.maker.kelly_sizing_fraction
     strategy.kelly_sizing_max_collateral_fraction = (

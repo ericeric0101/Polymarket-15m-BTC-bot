@@ -4,6 +4,13 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bot.entry_sizing import (
+    HIGH_PRICE_TARGET_SHARES,
+    HIGH_PRICE_THRESHOLD,
+    LOW_PRICE_TARGET_SHARES,
+    EntrySizingRule,
+    resolve_entry_sizing_rule,
+)
 from bot.enums import ActiveSide
 from bot.quoting import normalize_quote_mode
 from execution.rebate_model import CRYPTO_FEE_CURVE
@@ -87,9 +94,8 @@ class MakerConfig:
     weak_pfair_size_adjust_lower: Decimal
     weak_pfair_size_adjust_upper: Decimal
     weak_pfair_size_adjust_multiplier: Decimal
-    high_entry_price_size_adjust_enabled: bool
-    high_entry_price_size_adjust_threshold: Decimal
-    high_entry_price_size_adjust_multiplier: Decimal
+    entry_sizing_rule: EntrySizingRule
+    entry_sizing_violations: tuple[str, ...]
     kelly_sizing_enabled: bool
     kelly_sizing_fraction: Decimal
     kelly_sizing_max_collateral_fraction: Decimal
@@ -221,10 +227,6 @@ class MakerConfig:
             raise ValueError("MAKER_QUOTE_SIZE_USDC must be > 0")
         if self.min_shares <= 0 or self.exchange_min_shares <= 0:
             raise ValueError("Maker min share settings must be > 0")
-        if self.high_entry_price_size_adjust_threshold < 0:
-            raise ValueError("HIGH_PRICE_THRESHOLD must be >= 0")
-        if self.high_entry_price_size_adjust_multiplier <= 0:
-            raise ValueError("High-price size multiplier must be > 0")
         if self.kelly_sizing_fraction < 0 or self.kelly_sizing_fraction > 1:
             raise ValueError("KELLY_SIZING_FRACTION must be in [0, 1]")
         if self.kelly_sizing_max_collateral_fraction < 0 or self.kelly_sizing_max_collateral_fraction > 1:
@@ -553,24 +555,20 @@ class AppConfig:
 
         maker_min_shares = _env_decimal("MAKER_MIN_SHARES", "5")
         maker_exchange_min_shares = _env_decimal("MAKER_EXCHANGE_MIN_SHARES", "5")
-        maker_fixed_shares = _env_decimal("MARKET_TARGET_SHARES", "0")
-        high_price_target_shares = _env_decimal(
-            "HIGH_PRICE_TARGET_SHARES", str(maker_fixed_shares)
+        # Share sizing is validated on the final resolved values (shell > .env >
+        # profile > code default). An out-of-bounds rule resolves to the
+        # canonical one so it can never enlarge sizing; LIVE startup refuses it.
+        entry_sizing_rule, entry_sizing_violations = resolve_entry_sizing_rule(
+            low_price_target_shares=_env_str("MARKET_TARGET_SHARES", str(LOW_PRICE_TARGET_SHARES)),
+            high_price_target_shares=_env_str("HIGH_PRICE_TARGET_SHARES", str(HIGH_PRICE_TARGET_SHARES)),
+            high_price_threshold=_env_str("HIGH_PRICE_THRESHOLD", str(HIGH_PRICE_THRESHOLD)),
         )
-        if maker_fixed_shares > 0 and (
-            high_price_target_shares <= 0 or high_price_target_shares > maker_fixed_shares
-        ):
-            raise ValueError("HIGH_PRICE_TARGET_SHARES must be > 0 and <= MARKET_TARGET_SHARES")
-        high_price_size_multiplier = (
-            high_price_target_shares / maker_fixed_shares
-            if maker_fixed_shares > 0
-            else Decimal("1")
-        )
+        maker_fixed_shares = entry_sizing_rule.low_price_target_shares
         external_conflict_action = _env_str("EXTERNAL_CONFLICT_ACTION", "skip").strip().lower()
         if external_conflict_action not in {"skip", "size_down"}:
             raise ValueError("EXTERNAL_CONFLICT_ACTION must be 'skip' or 'size_down'")
         entry_min_time_left_sec = max(0.0, _env_float("ENTRY_MIN_TIME_LEFT_SEC", 180.0))
-        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "25")
+        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "10.0")
         fee_rate_default_decimal = _env_decimal("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
         if fee_rate_default_decimal < 0:
             fee_rate_default_decimal = CRYPTO_FEE_CURVE.fee_rate
@@ -634,6 +632,10 @@ class AppConfig:
                 ),
                 quote_refresh_sec=_env_int("MAKER_QUOTE_REFRESH_SEC", 5),
                 half_spread=_env_decimal("MAKER_HALF_SPREAD", "0.01"),
+                # Deprecated as a sizing driver (share_v1): entry quantity comes from
+                # bot.entry_sizing. Still read only by the MakerEngine fixed-share
+                # fallback (unreachable: the share target is always >= 5.5) and the
+                # run-start journal note (bot/ops.py).
                 quote_size_usdc=_env_decimal("MAKER_QUOTE_SIZE_USDC", "1.0"),
                 min_shares=maker_min_shares,
                 exchange_min_shares=maker_exchange_min_shares,
@@ -659,14 +661,8 @@ class AppConfig:
                 weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
                 weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
                 weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
-                high_entry_price_size_adjust_enabled=(
-                    maker_fixed_shares > 0 and high_price_target_shares < maker_fixed_shares
-                ),
-                high_entry_price_size_adjust_threshold=_env_decimal(
-                    "HIGH_PRICE_THRESHOLD",
-                    "0.70",
-                ),
-                high_entry_price_size_adjust_multiplier=high_price_size_multiplier,
+                entry_sizing_rule=entry_sizing_rule,
+                entry_sizing_violations=tuple(entry_sizing_violations),
                 kelly_sizing_enabled=_env_bool("KELLY_SIZING_ENABLED", False),
                 kelly_sizing_fraction=_env_decimal("KELLY_SIZING_FRACTION", "0.25"),
                 kelly_sizing_max_collateral_fraction=_env_decimal(

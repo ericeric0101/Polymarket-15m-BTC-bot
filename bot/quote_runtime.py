@@ -210,32 +210,12 @@ class QuoteRuntimeMixin:
 
         balance_forced_sell_only = False
         regime_guard_active = False
+        # share_v1: collateral is checked per BUY at the submit boundary against
+        # the exact final quantity x tick-normalized limit price x 1.1
+        # (bot/order_submission.py). The former cycle gate used the deprecated
+        # MAKER_QUOTE_SIZE_USDC x 1.1 and could not know the real notional.
         if not self._is_dry_run_mode():
-            balance = self._refresh_balance_cache()
-            if balance is not None:
-                required = self.maker_quote_size_usdc * Decimal("1.1")
-                if balance < required:
-                    gross_sellable = self._get_total_sellable_qty(self._maker_quote_instruments())
-                    if gross_sellable > 0:
-                        balance_forced_sell_only = True
-                        if time.time() - getattr(self, "_last_balance_warn_ts", 0) >= 60:
-                            logger.warning(
-                                f"Balance pre-check: low USDC "
-                                f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
-                                f"Switching to SELL-only until balance recovers. "
-                                f"net_inventory={float(self.inventory_delta_shares):.4f} "
-                                f"gross_sellable={float(gross_sellable):.4f}"
-                            )
-                            self._last_balance_warn_ts = time.time()
-                    else:
-                        if time.time() - getattr(self, "_last_balance_warn_ts", 0) >= 60:
-                            logger.warning(
-                                f"Balance pre-check: insufficient USDC and no inventory "
-                                f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
-                                f"Skipping maker quotes."
-                            )
-                            self._last_balance_warn_ts = time.time()
-                        return None
+            self._refresh_balance_cache()
         if self.regime_guard_enabled:
             now_guard_ts = time.time()
             if self.regime_guard_conservative_until_ts > 0 and now_guard_ts >= self.regime_guard_conservative_until_ts:

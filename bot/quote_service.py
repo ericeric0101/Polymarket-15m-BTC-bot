@@ -6,6 +6,16 @@ from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable, Optional
 
 from bot.entry_quality import evaluate_entry_quality_adjustment
+from bot.entry_sizing import (
+    CANONICAL_ENTRY_SIZING_RULE,
+    DEFAULT_PRICE_TICK,
+    SIZING_RULE_VERSION,
+    EntrySizingDecision,
+    EntrySizingRule,
+    normalize_entry_price,
+    size_entry,
+    target_entry_shares,
+)
 from bot.probability_calibration import fractional_kelly_stake_fraction
 from bot.models import QuoteIntentState, QuoteMode
 
@@ -234,44 +244,91 @@ def apply_high_entry_price_size_adjustment(
     *,
     desired_entry: dict[str, Any],
     side: str,
-    enabled: bool,
-    threshold: Decimal,
-    multiplier: Decimal,
+    rule: EntrySizingRule = CANONICAL_ENTRY_SIZING_RULE,
+    tick: Decimal = DEFAULT_PRICE_TICK,
 ) -> dict[str, Any]:
-    if side != "buy" or not enabled or not desired_entry.get("should_quote", False):
-        return desired_entry
-    if threshold <= 0 or multiplier <= 0 or multiplier >= 1:
-        return desired_entry
-    price_raw = desired_entry.get("price")
-    if price_raw is None:
-        return desired_entry
-    try:
-        entry_price = Decimal(str(price_raw))
-    except Exception:
-        return desired_entry
-    if entry_price <= threshold:
-        return desired_entry
+    """Attach the canonical share target for this BUY price (``share_v1``).
 
-    prior_multiplier = Decimal(str(desired_entry.get("size_multiplier", Decimal("1")) or "1"))
-    adjusted_multiplier = max(Decimal("0"), min(prior_multiplier, multiplier))
-    desired_entry["size_multiplier"] = adjusted_multiplier
+    The target is chosen by ``bot.entry_sizing.target_entry_shares`` on the
+    tick-normalized price; this function does not change ``size_multiplier``,
+    so the 0.70 boundary exists in exactly one place.
+    """
+    if side != "buy" or not desired_entry.get("should_quote", False):
+        return desired_entry
+    entry_price = normalize_entry_price(desired_entry.get("price"), tick)
+    if entry_price is None:
+        return desired_entry
+    base_target = target_entry_shares(entry_price, tick=tick, rule=rule)
+    desired_entry["base_target_shares"] = base_target
+    desired_entry["entry_sizing_price"] = entry_price
+    if entry_price <= rule.high_price_threshold:
+        # A re-quote back below the boundary must not keep a stale marker.
+        desired_entry.pop("high_entry_price_size_adjustment", None)
+        return desired_entry
     desired_entry["high_entry_price_size_adjustment"] = {
         "entry_price": entry_price,
-        "threshold": threshold,
-        "multiplier": multiplier,
-        "prior_size_multiplier": prior_multiplier,
-        "adjusted_size_multiplier": adjusted_multiplier,
+        "threshold": rule.high_price_threshold,
+        "target_shares": base_target,
+        "sizing_version": SIZING_RULE_VERSION,
     }
     diag_reason = str(desired_entry.get("diag_reason", "") or "")
     adjustment_reason = (
-        f"high_entry_price_size_adjust entry={float(entry_price):.4f} "
-        f"> {float(threshold):.2f} "
-        f"size_cap={float(prior_multiplier):.3f}->{float(adjusted_multiplier):.3f}"
+        f"high_entry_price_share_target entry={float(entry_price):.4f} "
+        f"> {float(rule.high_price_threshold):.2f} target_shares={float(base_target):.2f}"
     )
     desired_entry["diag_reason"] = (
         f"{diag_reason}; {adjustment_reason}" if diag_reason else adjustment_reason
     )
     return desired_entry
+
+
+def apply_share_entry_sizing(
+    *,
+    desired_entry: dict[str, Any],
+    side: str,
+    rule: EntrySizingRule = CANONICAL_ENTRY_SIZING_RULE,
+    tick: Decimal = DEFAULT_PRICE_TICK,
+    cap_quantity: Decimal | None = None,
+) -> tuple[dict[str, Any], EntrySizingDecision | None]:
+    """Final BUY quantity = min(share target, existing L2/risk cap), skip below 5.5.
+
+    ``cap_quantity`` is the existing depth/risk/inventory cap (already scaled by
+    the quality multipliers).  A Kelly ``target_qty_override`` only lowers it.
+    On skip the entry is simply not quoted: no BUY count, cooldown or traded
+    marker is touched here, because those are recorded only on a fill.
+    """
+    if side != "buy" or not desired_entry.get("should_quote", False):
+        return desired_entry, None
+    multiplier = Decimal(str(desired_entry.get("size_multiplier", "1") or "1"))
+    kelly_target = desired_entry.get("target_qty_override")
+    if kelly_target is not None:
+        kelly_qty = Decimal(str(kelly_target)) * multiplier
+        cap_quantity = kelly_qty if cap_quantity is None else min(Decimal(str(cap_quantity)), kelly_qty)
+    decision = size_entry(
+        entry_price=desired_entry.get("price"),
+        tick=tick,
+        cap_quantity=cap_quantity,
+        size_multiplier=multiplier,
+        rule=rule,
+    )
+    desired_entry["entry_sizing"] = decision.as_payload()
+    desired_entry["base_target_shares"] = decision.base_target_shares
+    if decision.skipped:
+        desired_entry["should_quote"] = False
+        desired_entry["target_qty_override"] = None
+        skip_reason = (
+            f"{decision.skip_reason} price={decision.normalized_price} "
+            f"base_target={decision.base_target_shares} cap={decision.cap_quantity} "
+            f"final={decision.final_quantity}"
+        )
+        diag_reason = str(desired_entry.get("diag_reason", "") or "")
+        desired_entry["diag_reason"] = f"{diag_reason}; {skip_reason}" if diag_reason else skip_reason
+        return desired_entry, decision
+    # order_submission applies size_multiplier once; pass the pre-multiplier
+    # target so the submitted quantity is exactly the final sized quantity.
+    if multiplier > 0:
+        desired_entry["target_qty_override"] = decision.final_quantity / multiplier
+    return desired_entry, decision
 
 
 def apply_fractional_kelly_sizing(

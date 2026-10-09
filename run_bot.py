@@ -136,6 +136,11 @@ from bot.recovery import StrategyRecoveryMixin
 from bot.shadow_simulation import ShadowSimulationMixin
 from bot.depth_risk_shadow import DepthRiskShadowMixin
 from bot.depth_risk import cap_buy_quantity
+from bot.entry_sizing import (
+    CANONICAL_ENTRY_SIZING_RULE,
+    log_entry_sizing_skip_once,
+    target_entry_shares,
+)
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
     evaluate_market_phase,
@@ -176,6 +181,7 @@ from bot.quote_service import (
     apply_forced_exit_sell_pricing,
     apply_fractional_kelly_sizing,
     apply_high_entry_price_size_adjustment,
+    apply_share_entry_sizing,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
     apply_weak_pfair_size_adjustment,
@@ -3513,28 +3519,12 @@ class IntegratedBTCStrategy(
                         upper=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_upper", Decimal("0.53")))),
                         multiplier=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_multiplier", Decimal("0.5")))),
                     )
+                    entry_sizing_rule = getattr(self, "entry_sizing_rule", CANONICAL_ENTRY_SIZING_RULE)
                     desired_entry = apply_high_entry_price_size_adjustment(
                         desired_entry=desired_entry,
                         side=side,
-                        enabled=bool(getattr(self, "maker_high_entry_price_size_adjust_enabled", False)),
-                        threshold=Decimal(
-                            str(
-                                getattr(
-                                    self,
-                                    "maker_high_entry_price_size_adjust_threshold",
-                                    Decimal("0.70"),
-                                )
-                            )
-                        ),
-                        multiplier=Decimal(
-                            str(
-                                getattr(
-                                    self,
-                                    "maker_high_entry_price_size_adjust_multiplier",
-                                    Decimal("0.5"),
-                                )
-                            )
-                        ),
+                        rule=entry_sizing_rule,
+                        tick=quote_ctx.tick,
                     )
                     desired_entry = apply_fractional_kelly_sizing(
                         desired_entry=desired_entry,
@@ -3543,26 +3533,13 @@ class IntegratedBTCStrategy(
                         available_collateral_usdc=getattr(self, "_cached_usdc_balance", None),
                         fraction=Decimal(str(getattr(self, "kelly_sizing_fraction", Decimal("0.25")))),
                         max_collateral_fraction=Decimal(str(getattr(self, "kelly_sizing_max_collateral_fraction", Decimal("0.10")))),
-                        base_quantity=self._compute_maker_order_qty(
-                            Decimal(str(desired_entry.get("price", "0"))),
-                            int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
+                        base_quantity=target_entry_shares(
+                            desired_entry.get("price"), tick=quote_ctx.tick, rule=entry_sizing_rule,
                         ),
                     )
                     if side == "buy" and desired_entry.get("should_quote", False):
-                        requested_quantity = desired_entry.get("target_qty_override")
-                        if requested_quantity is None:
-                            base_quantity = self._compute_maker_order_qty(
-                                Decimal(str(desired_entry.get("price", "0") or "0")),
-                                int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
-                            )
-                            requested_quantity = (
-                                base_quantity
-                                * Decimal(str(desired_entry.get("size_multiplier", "1") or "1"))
-                            )
-                        else:
-                            requested_quantity = Decimal(str(requested_quantity)) * Decimal(
-                                str(desired_entry.get("size_multiplier", "1") or "1")
-                            )
+                        cap_quantity = None
+                        limiting_factor = ""
                         if bool(getattr(self, "depth_risk_sizing_enabled", True)):
                             inventory_headroom = max(
                                 Decimal("0"),
@@ -3582,24 +3559,30 @@ class IntegratedBTCStrategy(
                                 size_multiplier=Decimal(str(desired_entry.get("size_multiplier", "1") or "1")),
                             )
                             desired_entry["depth_risk_sizing"] = depth_decision.as_payload()
-                            requested_quantity = depth_decision.quantity
-                            multiplier = Decimal(
-                                str(desired_entry.get("size_multiplier", "1") or "1")
+                            cap_quantity = depth_decision.quantity
+                            limiting_factor = depth_decision.limiting_factor
+                        # share_v1: final = min(share target, L2/risk cap), skipped below
+                        # MIN_ENTRY_SHARES; identical for LIVE and DRY-RUN.
+                        desired_entry, entry_sizing = apply_share_entry_sizing(
+                            desired_entry=desired_entry,
+                            side=side,
+                            rule=entry_sizing_rule,
+                            tick=quote_ctx.tick,
+                            cap_quantity=cap_quantity,
+                        )
+                        requested_quantity = entry_sizing.final_quantity if entry_sizing is not None else None
+                        if entry_sizing is not None and entry_sizing.skipped:
+                            logged = getattr(self, "_entry_sizing_skip_logged", None)
+                            if not isinstance(logged, set):
+                                logged = set()
+                                self._entry_sizing_skip_logged = logged
+                            log_entry_sizing_skip_once(
+                                logged,
+                                market=str(self.current_market_slug or ""),
+                                decision=entry_sizing,
+                                limiting_factor=limiting_factor,
+                                log_fn=logger.info,
                             )
-                            # order_submission applies size_multiplier once.  Pass the
-                            # pre-multiplier target so its final submitted quantity is
-                            # exactly the L2/risk-capped quantity evaluated here.
-                            if requested_quantity > 0 and multiplier > 0:
-                                desired_entry["target_qty_override"] = (
-                                    requested_quantity / multiplier
-                                )
-                            if requested_quantity < self.maker_exchange_min_shares:
-                                desired_entry["should_quote"] = False
-                                desired_entry["diag_reason"] = (
-                                    "depth_risk_cap_below_exchange_min "
-                                    f"limit={depth_decision.limiting_factor} "
-                                    f"qty={float(requested_quantity):.6f}"
-                                )
                         desired_entry = synchronize_desired_buy_economics_to_quantity(
                             desired_entry=desired_entry,
                             requested_quantity=requested_quantity,

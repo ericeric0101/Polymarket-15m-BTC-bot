@@ -632,10 +632,10 @@ class PricingRuntimeMixin:
 
     def _compute_maker_order_qty(self, limit_price: Decimal, precision: int) -> Decimal:
         """
-        Compute order quantity for maker quote.
-        Priority:
-        1) Fixed shares (MAKER_FIXED_SHARES > 0),
-        2) USDC notional / price with min shares floor.
+        Default quantity for a maker SELL without an explicit target (it is then
+        reduced to the sellable inventory).  BUY entries never use this: they
+        are sized by ``bot.entry_sizing`` (share_v1).  The USDC-notional branch
+        is unreachable because the resolved share target is always >= 5.5.
         """
         min_lot = Decimal(str(10 ** (-precision)))
         min_qty = max(min_lot, self.maker_min_shares)

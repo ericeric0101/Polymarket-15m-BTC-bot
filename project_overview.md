@@ -12,6 +12,80 @@ this patch neither mutates nor archives it. BTC1s Parquet remains unchanged. The
 Historical entries below describe their recorded checkpoints, not current Outcome
 execution authority. Deployment and a new dry-run validation remain separate.
 
+## Entry sizing share_v1 — RESEARCH COHORT BOUNDARY (2026-10-09)
+
+`SIZING_RULE_VERSION = "share_v1_2026-10-09"` (`bot/entry_sizing.py`) is the single
+production entry-sizing authority for LIVE and DRY-RUN (no mode branch). It took
+effect with the commit `fix(execution): size entries by sellable shares`.
+
+| Tick-normalized BUY price | Base target | Final quantity |
+|---|---|---|
+| `<= 0.70` (strict boundary, as in `8de45cb`) | 10.0 shares | `min(10, existing L2/risk/inventory cap)`, rounded down to 0.01 |
+| `> 0.70` | 5.5 shares | `min(5.5, existing L2/risk/inventory cap)`, rounded down to 0.01 |
+
+- The price is normalized to the 0.01 tick before the comparison, so float noise
+  (`0.7000000000000001`, `0.6999999999999999`) lands in the `<= 0.70` bucket.
+- `MIN_ENTRY_SHARES = 5.5` is the bot's minimum requested entry, not the venue's
+  5-share SELL minimum. The 0.5-share difference absorbs the existing 0.1 % balance
+  haircut, the 0.05-share post-BUY buffer and the 2-decimal round-down. Any final
+  quantity below 5.5 is skipped (never rounded up). A skip consumes no BUY count,
+  starts no cooldown, does not mark the market as traded, and logs once per market
+  per reason.
+- Existing quality multipliers (entry quality, confirmation, weak pfair) still only
+  shrink the L2/risk budget. `apply_high_entry_price_size_adjustment` now only sets
+  the share target; the old ×0.55 high-price multiplier is retired.
+- Rationale: 5.5 shares above 0.70 keeps every full fill sellable (≥ 5 after the
+  haircut). It was documented in `df1594d` as a buffer above the 5-share exchange
+  SELL minimum.
+- Before this commit, the high bucket was NOT 5.5 shares. Since the L2 caps
+  (`b80f80d`, 2026-09-07), the depth/risk cap replaced the base quantity, giving
+  ≈ $5.50 notional (5.5/price shares, e.g. 6.875 at 0.80). Older text that says
+  "exactly 5.5 shares" describes intent, not the 2026-09-07 → 2026-10-09 runtime.
+- **Cohort boundary:** per-trade PnL, notional and size-dependent statistics from
+  before and after `share_v1` must not be pooled without adjustment. Above 0.70,
+  pre-fix entries carried ≈ $5.50 notional; post-fix entries carry 5.5 × price
+  ($3.91–$5.45). Journal rows after the change carry `sizing_version` in
+  `entry_sizing` / skip payloads.
+- Config safety: code defaults and `config/profiles/btc15_twap_v3.env` both hold
+  `MARKET_TARGET_SHARES=10.0`, `HIGH_PRICE_THRESHOLD=0.70`,
+  `HIGH_PRICE_TARGET_SHARES=5.5` and `MARKET_MAX_POSITION_SHARES=10.0` (code
+  default changed 25 → 10; the effective value was already 10 via `.env`).
+  - A missing `.env` key can no longer fall back to $10 notional / 25 shares.
+  - Validation runs on the final resolved values (code → profile → `.env` → shell).
+    Targets must lie in [5.5, 10], the high target may not exceed 5.5, and the
+    threshold must be 0.70. Otherwise LIVE refuses to start
+    (`bot.launcher.enforce_entry_sizing_startup_policy`, again in strategy settings)
+    and DRY-RUN warns and runs the canonical rule.
+  - An in-bounds, non-canonical (smaller) override is logged as a WARNING.
+  - Both modes log the effective rule and version at startup.
+- `MAKER_QUOTE_SIZE_USDC` is no longer a sizing driver. It is read only by the
+  unreachable MakerEngine fixed-share fallback and the run-start journal note.
+- Collateral check: per LIVE BUY at the submit boundary,
+  `final quantity × tick-aligned limit price × 1.1` (worst normal case
+  10 × 0.70 × 1.1 = $7.70). Insufficient or unknown balance skips the entry and
+  never shrinks it. The former cycle-level `MAKER_QUOTE_SIZE_USDC × 1.1` gate is
+  removed. SELLs and protective exits never consult the balance (regression-tested).
+- Accepted residual risk (behavior unchanged): a partial maker fill below 5 shares
+  cannot be sold by any TP, stop or hard breaker. It is held to settlement and
+  redeemed, and its loss is bounded by its own notional.
+- Historical skip impact (read-only journal reconstruction):
+  - 2 of 241 LIVE BUY submits (2026-09-22 → 09-30; 1 of 83 filled) and 4 of 982
+    DRY-RUN submits (2026-10-01 → 10-09) would now be skipped. All were below
+    5.5 because of the L2 depth cap (inferred).
+  - Above 0.70, 151 LIVE and 773 DRY-RUN submits would have been smaller (5.5
+    instead of 5.5/price shares).
+- Open items, not changed by share_v1:
+  - P1: hard-loss breakers are not evaluated during the kill switch, error pause,
+    Telegram pause, or a quote/price-feed outage.
+  - P1: the "$2 hard" breaker needs a confirmed adverse trend. It is not a
+    guaranteed $2 cap; the audit estimated up to ≈ $5 additional loss per entry.
+  - Client order ids are not idempotent (an equivalent duplicate-entry guard exists).
+  - Startup orphan-order cancellation has code but is UNVERIFIED in LIVE.
+  - DRY-RUN skips exits and breakers; it proves nothing about protective exits.
+  - Storage is at WARNING (≈ 12.8 GiB free; critical guard 10 GiB). Avoid
+    back-to-back DRY-RUNs for ≈ 24 h without re-checking free space.
+  - HEAD has not been runtime-validated since the settlement fix `bbbdc09`.
+
 ## Offline empirical probability study (2026-10-01)
 
 - `scripts/empirical_probability_research.py` is an offline-only comparison of
@@ -529,7 +603,7 @@ No commit/push or deployment was performed.
 - Operator audit command: `.venv/bin/python scripts/live_entry_quality_report.py --db data/trading/trade_journal.db --output reports/live_entry_quality`. Join rates are measured only where actual submit/fill rows and candidate evidence exist; pre-hardening historical rows without IDs remain orphaned rather than force-matched.
 - Audit finding: ordinary maker expected-net admission currently uses the maker quote economics gate; empirical markout-adjusted `robust_net` is recorded but is not a universal veto. Qualified strong-directional-regime entries compare calibrated `resolution_ev` to the configured minimum; the additional markout-adjusted robust value remains telemetry. Outcome FOK is separate and its evaluator gates on `resolution_ev - taker_fee - adverse_markout_penalty >= configured minimum`. A future policy change should be based on the new joined evidence, not inferred from these telemetry changes.
 - Authority distinction: `bot/quote_service.py::apply_shadow_entry_veto` is a pre-existing live BUY veto when its supplied shadow-side payload conflicts with intended side; its behavior is unchanged. This existing live signal veto is separate from the new research-only shadow reject/size labels, which have no order authority.
-- High-price, weak-fair, entry-quality, and depth controls were audited as implemented sizing/quote controls; no thresholds or sizing behavior changed in this evidence pass. Existing `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` and profile weak-fair adjustment remain active as configured; local `.env` also sets 10 base shares and 5.5 shares above the configured high-price threshold, subject to deployed environment overrides.
+- High-price, weak-fair, entry-quality, and depth controls were audited as implemented sizing/quote controls; no thresholds or sizing behavior changed in this evidence pass. Existing `ENTRY_QUALITY_SIZE_DOWN_ENABLED=1` and profile weak-fair adjustment remain active as configured; local `.env` also set 10 base shares and 5.5 shares above the high-price threshold; superseded by share_v1 (see Entry sizing share_v1 above).
 - Economics semantics: maker `fair` comes from the configured pricer (normally the digital model when canonical spot/strike inputs are valid) and is used for passive quote planning. The legacy trace field `calibrated_probability` copies `fair`; that name alone is not evidence of empirical calibration. Outcome FOK uses a fresh target-outcome forecast probability and executable ask-derived limit. For scale, at an assumed probability 0.78 versus an 0.82 FOK limit, resolution EV is negative before fees/penalty; at 0.72 versus 0.63 it is positive before costs but still requires subtracting taker fee and adverse markout. These are estimates, not guaranteed probabilities or fills.
 
 ## Entry + stop-loss research — authoritative status (2026-10-03)
@@ -1458,7 +1532,7 @@ same-market episodes and market-cluster bootstrap intervals. Track B compares
 Reports flag insufficient independent episode counts rather than overclaiming
 an effect. Entry output reports synchronized `p_ex - ask` only when both are
 fresh; settlement outcomes are secondary context.
-| Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing high-price/weak-signal/Kelly multipliers only reduce the risk caps. | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`; `MARKET_TARGET_SHARES` remains legacy compatibility and is no longer a scale-up authority. |
+| Size | `bot.quote_service.apply_weak_pfair_size_adjustment`, `apply_high_entry_price_size_adjustment`, `apply_fractional_kelly_sizing`, `bot.depth_risk.cap_buy_quantity`, and final `synchronize_desired_buy_economics_to_quantity`. For every new BUY with a valid L2 book, quantity is `min(risk-notional cap, full-loss cap, conservative cumulative ask-depth cap, inventory headroom)`. Missing/empty L2 fails closed; SELL sizing and exit routing are unchanged. Existing weak-signal/entry-quality/confirmation/Kelly multipliers only reduce the risk caps. Since share_v1 the final quantity is `min(share target 10 / 5.5, that cap)`, skipped below 5.5 (`bot.quote_service.apply_share_entry_sizing`). | `DEPTH_RISK_SIZING_ENABLED`, `DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC`, `DEPTH_RISK_MAX_LOSS_USDC`, `DEPTH_RISK_DEPTH_FRACTION`, `DEPTH_RISK_PRICE_BOUNDARY_TICKS`, `MARKET_MAX_POSITION_SHARES`, `MARKET_TARGET_SHARES`, `HIGH_PRICE_THRESHOLD`, `HIGH_PRICE_TARGET_SHARES` (share_v1 targets; validated bounds). |
 | Submission / repricing | `bot.quote_runtime._submit_quote_cycle` → `run_bot._submit_maker_quote` → `bot.order_submission.submit_maker_quote`. A maker entry is `LimitOrder` / **GTC**; `ORDER_POST_ONLY` requests post-only where adapter supports it. Existing entries are preserved if target version/hysteresis is unchanged; cancellation is handled by `bot.order_runtime`. The documented normal `ORDER_TTL_SEC` is no longer a TTL for unchanged BUYs. | `ORDER_POST_ONLY`, `MAKER_POST_ONLY_STRICT`, `ORDER_REQUOTE_MIN_AGE_SEC`, `ORDER_REQUOTE_HYSTERESIS_TICKS`, `MAX_REQUOTE_PER_SEC`, `MAKER_BUY_PLANNED_QUOTE_MAX_AGE_SEC`; `ORDER_TTL_SEC` applies to exit-owned orders. |
 
 ### 4. Fills, exits, settlement and cash accounting
@@ -2368,7 +2442,7 @@ shadow analysis, not as an admission gate. Every real entry-only fill still ente
 1/3/5/10/30/60-second post-fill analysis. Entry-only fills must not be relabelled
 as maker fills or silently enter the maker-only D.4 training set.
 
-Sizing is unchanged from the approved live policy: the base request is exactly
+(Historical, 2026-09-08 fast-follow record; for the current rule see Entry sizing share_v1 — maker entries between 2026-09-07 and 2026-10-09 were ≈ $5.50 notional above 0.70, not 5.5 shares.) Sizing is unchanged from the approved live policy: the base request is exactly
 **10 shares**; when the executable entry price is strictly greater than
 **0.70**, it is exactly **5.5 shares** (`10 × 0.55`). The 5.5-share floor is
 intentional because a position below the five-share exchange SELL minimum

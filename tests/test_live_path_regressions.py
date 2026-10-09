@@ -90,6 +90,7 @@ from bot.quote_service import (
     apply_entry_quality_quote_placement,
     apply_shadow_entry_veto,
     apply_high_entry_price_size_adjustment,
+    apply_share_entry_sizing,
     apply_weak_pfair_size_adjustment,
     build_desired_quote_entry,
     compute_loss_sell_policy,
@@ -1302,6 +1303,7 @@ class DummyTrendSubmitStrategy:
         self.consecutive_denied_orders = 0
         self.recovery_exit_stage_by_inst = {}
         self.tail_exit_calls = []
+        self.available_usdc = Decimal("1000")
         self._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
             allowed=True,
             reason="test_weekday_entry_session",
@@ -1326,6 +1328,9 @@ class DummyTrendSubmitStrategy:
 
     def _compute_maker_order_qty(self, _limit_price, _precision):
         return Decimal("5.4")
+
+    def _refresh_balance_cache(self):
+        return self.available_usdc
 
     def _instrument_key(self, instrument_id):
         return str(instrument_id)
@@ -4144,7 +4149,9 @@ def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
 
     assert strategy.submitted_orders, "expected submit_order to be called"
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
-    assert submitted_qty == Decimal("5.400000")
+    # share_v1: a BUY without an explicit target uses the canonical share
+    # target for the final limit price (0.64 <= 0.70 -> 10 shares).
+    assert submitted_qty == Decimal("10.000000")
     assert any(event["event_type"] == "ORDER_MAKER_INTENT" for event in strategy.order_events)
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "value"
 
@@ -4329,11 +4336,12 @@ def test_value_entry_size_multiplier_flows_into_submit_qty():
 
     assert strategy.submitted_orders, "expected submit_order to be called"
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
-    assert submitted_qty == Decimal("3.240000")
+    # 10-share target x 0.60 multiplier = 6 shares (>= MIN_ENTRY_SHARES).
+    assert submitted_qty == Decimal("6.000000")
     assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.6
 
 
-def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchange_minimum():
+def test_high_entry_price_sets_canonical_share_target_and_submits_exactly_5_5():
     desired_entry = {
         "should_quote": True,
         "price": Decimal("0.71"),
@@ -4341,13 +4349,7 @@ def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchang
         "diag_reason": "eligible",
     }
 
-    adjusted = apply_high_entry_price_size_adjustment(
-        desired_entry=desired_entry,
-        side="buy",
-        enabled=True,
-        threshold=Decimal("0.70"),
-        multiplier=Decimal("0.5"),
-    )
+    adjusted = apply_high_entry_price_size_adjustment(desired_entry=desired_entry, side="buy")
     snapshot = build_directional_snapshot(adjusted)
     strategy = DummyTrendSubmitStrategy()
 
@@ -4363,16 +4365,38 @@ def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchang
             fee_equivalent_usdc=Decimal("0"),
         ),
         directional_snapshot=snapshot,
+        target_qty_override=adjusted["base_target_shares"],
+    )
+
+    assert adjusted["base_target_shares"] == Decimal("5.5")
+    assert adjusted["size_multiplier"] == Decimal("1")
+    assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
+    assert strategy.submitted_orders[0].quantity.as_decimal() == Decimal("5.500000")
+
+
+def test_high_entry_price_quantity_above_share_target_is_skipped():
+    strategy = DummyTrendSubmitStrategy()
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.71"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+        directional_snapshot={"size_multiplier": Decimal("1")},
         target_qty_override=Decimal("6.0"),
     )
 
     assert not strategy.submitted_orders
-    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
-    assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.5
-    assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_ABOVE_SHARE_TARGET"
 
 
-def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum():
+def test_risk_size_down_below_min_entry_shares_is_skipped_not_rounded_up():
     strategy = DummyTrendSubmitStrategy()
     strategy.maker_min_shares = Decimal("5.4")
     strategy.maker_exchange_min_shares = Decimal("5.0")
@@ -4393,7 +4417,8 @@ def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum(
     )
 
     assert not strategy.submitted_orders
-    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_MIN_ENTRY_SHARES"
+    assert strategy.order_events[-1]["payload"]["final_normalized_shares"] == 3.0
 
 
 def test_buy_is_not_submitted_above_the_evaluated_economics_quantity():
@@ -4470,7 +4495,7 @@ def test_buy_is_skipped_when_remaining_market_capacity_is_below_exchange_minimum
 
     assert not strategy.submitted_orders
     assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_INVENTORY_CAP"
-    assert strategy.order_events[-1]["reason"] == "remaining_inventory_capacity_below_exchange_min"
+    assert strategy.order_events[-1]["reason"] == "remaining_inventory_capacity_below_min_entry_shares"
 
 
 def test_projected_buy_inventory_counts_pending_opposite_outcome_order():
@@ -4519,7 +4544,7 @@ def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
     assert "entry_quality_quote_placement join_bid 0.7400->0.7000" in out["diag_reason"]
 
 
-def test_weak_and_high_price_risk_caps_produce_half_size_not_quarter_size():
+def test_weak_and_high_price_risk_caps_produce_share_target_not_quarter_size():
     desired = {
         "should_quote": True,
         "p_fair": Decimal("0.50"),
@@ -4534,17 +4559,17 @@ def test_weak_and_high_price_risk_caps_produce_half_size_not_quarter_size():
         upper=Decimal("0.53"),
         multiplier=Decimal("0.5"),
     )
-    desired = apply_high_entry_price_size_adjustment(
-        desired_entry=desired,
-        side="buy",
-        enabled=True,
-        threshold=Decimal("0.70"),
-        multiplier=Decimal("0.5"),
+    desired = apply_high_entry_price_size_adjustment(desired_entry=desired, side="buy")
+    # Existing L2/risk cap at $10 x 0.5 / 0.75 = 6.67 shares; the 5.5 target binds.
+    desired, decision = apply_share_entry_sizing(
+        desired_entry=desired, side="buy", cap_quantity=Decimal("10") * Decimal("0.5") / Decimal("0.75"),
     )
 
     assert desired["size_multiplier"] == Decimal("0.5")
     assert desired["weak_pfair_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
-    assert desired["high_entry_price_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
+    assert desired["high_entry_price_size_adjustment"]["target_shares"] == Decimal("5.5")
+    assert decision.final_quantity == Decimal("5.50")
+    assert desired["target_qty_override"] * desired["size_multiplier"] == Decimal("5.50")
 
 
 def test_negative_robust_net_cannot_be_recovered_by_entry_mode():
