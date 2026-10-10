@@ -741,6 +741,78 @@ to the 3 % stop-loss spread guard. With `STOP_LOSS_ENABLED=0`, the adaptive
 stop, urgent exit, endgame TWAP exit, invalidation-recovery ladder and
 force-offside exit stay off; the absolute and catastrophic breakers stay on.
 
+**Breaker V2 canonical-TWAP authority gate** (2026-10-10; flag
+`ABSOLUTE_MAX_LOSS_TWAP_AUTHORITY_GATE_ENABLED`, **default 0**; module
+`bot/breaker_authority.py`). Motivation: across 19 reconstructable breaker
+exits the conditional absolute breaker saved +24.26 on 13 official losers but
+cost −33.81 on 6 official winners (net −9.55); the failure mode is
+classification, not latency (`reports/consolidated_breaker_value_audit/`,
+`reports/breaker_v2_shadow_replay/`). With the flag on:
+- At the FIRST time the unchanged conditional absolute breaker is eligible for a
+  position epoch (`slug|instrument|opened_ts`, same key as STOP_TIMING), the
+  canonical TWAP side state decides once:
+  - fresh TWAP ADVERSE to the held side → `ALLOW` (legacy SELL);
+  - fresh TWAP FAVORABLE → `SUPPRESS` (this breaker may not SELL);
+  - stale, future, unavailable, strike unverified, slug mismatch or unknown →
+    `FALLBACK_LEGACY`.
+- The decision is locked for the epoch; a later TWAP cross never changes it.
+  ALLOW / FALLBACK_LEGACY are byte-identical to the legacy breaker.
+- TWAP state: `bot/settlement_side.py::canonical_twap_side_state` —
+  `TwapForwardShadow.latest(slug)["official_current_twap"]`, Chainlink *source*
+  timestamp age ≤ 5 s (same bound as the breaker's TWAP vote), negative age
+  within 1 s reads 0, more negative is `FUTURE`; verified strike
+  (`_market_strike_is_entry_eligible`); tie settles UP
+  (`signed_strike_distance`, shared with STOP_TIMING). It is **not** the
+  `taker_exit` recovery-ladder `twap_confirms_adverse` (`<=`/`>=`, tie adverse
+  for both sides) and not the projected-side vote. With TTE > 60 s the 60 s TWAP
+  shares no samples with the settlement window: it is a lagged spot-vs-strike
+  read, so the gate effectively asks whether the spot cross is recent.
+- Eligibility is one shared predicate, `bot/breaker_eligibility.py`, called by
+  `ExitPolicyEngine.evaluate` and by the STOP_TIMING legacy comparator
+  (`absolute_breaker_components`).
+- Engine-level gate: `evaluate(..., suppress_conditional_absolute=True)` skips
+  only the conditional absolute branch and falls through, so the catastrophic
+  breaker ($0.40, strong opposite signal + 2 confirmations, off in the last
+  45 s, spread guard) and every other exit are still evaluated in the same
+  cycle. `taker_exit` decides on the first absolute result, then re-evaluates
+  with the same inputs. Note "catastrophic" is a *looser* loss threshold than
+  $2: under SUPPRESS it becomes the effective breaker whenever the signal turns
+  into a locked opposite.
+- Persist before act: a `BREAKER_V2_AUTHORITY_DECISION` core strategy event
+  (run, slug, instrument, epoch, opened_ts, first-eligibility and decision
+  time, decision and reason, TWAP value / source ts / age / state, strike,
+  signed distance, TTE, held-side bid/ask, qty, breaker reason and components,
+  `market_day_type`) is written synchronously; a SUPPRESS that cannot be
+  persisted degrades to FALLBACK_LEGACY.
+- Restart / rebuild: on the next first eligibility in a process, the latest
+  persisted decision for (slug, instrument) is restored
+  (`TradeJournalDB.load_breaker_v2_authority_decision`,
+  `BREAKER_V2_AUTHORITY_REHYDRATED`) unless journal SELL fills after it cover
+  its qty (that position closed). A failed lookup, an unreadable record, or a
+  legacy absolute submit without a decision restores FALLBACK_LEGACY; nothing
+  is re-decided from a newer TWAP. In-process, a decision for an earlier epoch
+  of the same instrument means the old position closed, so the new one decides
+  afresh. Paired token and next market never inherit (different key).
+- No add-on after SUPPRESS: resting BUYs on the market pair are cancelled, and
+  `ExecutionSafetyMixin.submit_order` refuses any BUY on that pair
+  (`breaker_v2_buy_block_reason`). This is defence in depth: the market BUY
+  budget is already one successful BUY per market.
+- Telemetry: STOP_TIMING `BREAKER_FIRST_ELIGIBLE` also fires on legacy
+  eligibility under SUPPRESS (`legacy_breaker_would_sell`,
+  `conditional_breaker_suppressed`, `breaker_v2_authority_decision`).
+  `POSITION_SETTLEMENT` adds those plus `legacy_exit_estimate` (bid,
+  `exit_px_effective`, net, depth VWAP at first eligibility) and
+  `market_day_type` (Taipei WEEKDAY/WEEKEND; an evaluation stratum only, never
+  a decision input).
+- Startup log prints the effective value; the run manifest `config_hash`
+  covers it (`exit` section). Rollback = set the flag to 0.
+- Stage-2 replay (`reports/breaker_v2_stage2_replay/`, untracked): the three
+  recent breaker events with eligibility telemetry give ALLOW (1791587700),
+  ALLOW (1791589500), SUPPRESS (1791623700, engine then `thesis_still_supported`,
+  catastrophic not eligible). The other 16 historical breaker exits have no
+  TWAP-at-eligibility and stay UNKNOWN.
+- Tests: `tests/test_breaker_v2_authority.py`.
+
 **Kill-switch classes** (`bot/kill_switch.py`, decided 2026-10-09). Each
 `_activate_maker_kill_switch` call site passes a trigger code; classification
 is by execution semantics, never by free text, and anything not decided is
