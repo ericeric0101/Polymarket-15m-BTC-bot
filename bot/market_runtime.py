@@ -11,6 +11,7 @@ from loguru import logger
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId
 
+from bot.instrument_slug_map import register_market_instruments
 from bot.consumer_timing import timed_call
 from bot.enums import ActiveSide
 from bot.adapter_overrides import quote_provenance_for_tick
@@ -759,6 +760,11 @@ def _find_btc_instrument_unlocked(strategy: Any) -> bool:
         if inst is not None and inst not in seen_market_insts:
             seen_market_insts.append(inst)
     strategy.current_market_instruments = seen_market_insts or [strategy._normalize_instrument_id(selection.instrument_id)]
+    # Late fills of this market's orders must stay attributed to it after the next switch.
+    register_market_instruments(
+        strategy, str(strategy.current_market_slug or ""),
+        [str(inst) for inst in strategy.current_market_instruments if inst is not None],
+    )
     strategy.instrument_id = strategy._normalize_instrument_id(selection.instrument_id)
     prewarm_instruments = next_market_pair_instruments(
         btc_instruments,

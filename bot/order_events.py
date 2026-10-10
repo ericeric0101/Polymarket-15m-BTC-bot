@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from bot.instrument_slug_map import slug_for_instrument
 from bot.execution_events import (
     is_benign_cancel_reject_reason,
     reconcile_benign_cancel_reject,
@@ -250,6 +251,20 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             strategy.inventory_delta_shares -= fill_qty_dec
     realized_net_usdc = None
     fill_lifecycle_payload = {}
+    # A resting order of the previous market can fill after a rollover; book
+    # the fill to the market that owns the instrument, not the current one.
+    current_slug_at_fill = str(getattr(strategy, "current_market_slug", "") or "")
+    mapped_fill_slug = slug_for_instrument(
+        strategy, strategy._instrument_key(filled_inst) if filled_inst is not None else None,
+    )
+    fill_market_slug = mapped_fill_slug or current_slug_at_fill
+    fill_slug_payload = {
+        "slug": fill_market_slug,
+        "market_slug": fill_market_slug,
+        "slug_attribution": "instrument_map" if mapped_fill_slug else "current_market_fallback",
+    }
+    if mapped_fill_slug and mapped_fill_slug != current_slug_at_fill:
+        fill_slug_payload["journal_current_market_slug"] = current_slug_at_fill
     if side_for_ledger:
         pre_fill_state = dict(
             getattr(strategy, "live_inventory_cost", {}).get(
@@ -267,7 +282,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         # All research metadata failures remain outside execution authority.
         try:
             inst_key_after_fill = str(strategy._instrument_key(filled_inst))
-            entry_slug = str(getattr(strategy, "current_market_slug", "") or "")
+            entry_slug = fill_market_slug
             state_after_fill = getattr(strategy, "live_inventory_cost", {}).get(inst_key_after_fill, {})
             fill_lifecycle_payload = fill_lifecycle_metadata(
                 market_slug=entry_slug, instrument_id=inst_key_after_fill, client_order_id=filled_id,
@@ -596,7 +611,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             filled_econ=filled_econ,
             filled_directional_snapshot=filled_directional_snapshot,
             realized_net_usdc=realized_net_usdc,
-        ), **fill_lifecycle_payload,
+        ), **fill_lifecycle_payload, **fill_slug_payload,
             **({"instrument_id": filled_inst_journal_key} if filled_inst_journal_key else {})},
     )
     complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)

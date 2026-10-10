@@ -367,3 +367,15 @@ def test_admission_bound_math_matches_unchanged_rollover_authority():
                  and any(isinstance(t, ast.Name) and t.id == "auto_rollover_sec" for t in n.targets)]
     assert intervals == [10800]
     assert admission.MAX_DYNAMIC_MARKETS == intervals[0] // 900 + 1 + 1
+
+
+def test_market_switch_registers_instrument_slug_for_late_fills(setup):
+    from bot.instrument_slug_map import slug_for_instrument
+
+    host = Host(Cache(pair(0)))
+    host._instrument_admission = admission.InstrumentAdmission(host, Provider([]), asyncio.new_event_loop())
+    assert host._find_btc_instrument()
+    assert host.current_market_slug == slug(0)
+    assert host.current_market_instruments
+    for inst in host.current_market_instruments:
+        assert slug_for_instrument(host, str(inst)) == slug(0)
