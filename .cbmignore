@@ -1,0 +1,80 @@
+# .cbmignore — codebase-memory-mcp indexing excludes (gitignore syntax).
+# Only shapes what the code graph sees; has no effect on git.
+# Goal: index source/tests/config/docs; skip generated, runtime and secret data.
+#
+# Note: data/, logs/, backups/, .venv/, *.db, .env are already in .gitignore
+# (which the indexer honors). They are repeated here so the graph stays clean
+# even if .gitignore changes.
+
+# --- Generated research / backtest output -----------------------------------
+# reports/ holds timestamped analysis output (CSV/JSON/TXT/SQL evidence dumps,
+# one-off evidence scripts). The source that produces it lives in scripts/,
+# monitoring/ and bot/, which stay indexed.
+/reports/
+
+# --- Runtime data, market data, journals, backups ---------------------------
+/data/
+/logs/
+/backups/
+/grafana/
+/grafana-data/
+/grafana-logs/
+/grafana-plugins/
+
+# --- Databases and snapshots -------------------------------------------------
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.parquet
+*.feather
+*.arrow
+*.pkl
+*.pickle
+
+# --- Logs, dumps, compressed data -------------------------------------------
+*.log
+*.jsonl
+*.ndjson
+*.gz
+*.zst
+paper_trades.json
+
+# --- Environments and caches -------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Build / coverage artifacts ---------------------------------------------
+build/
+dist/
+*.egg-info/
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+
+# --- Secrets (keep the committed templates) ---------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Local exports / editor noise -------------------------------------------
+repomix-output.xml
+full_diff.patch
+env_investigation.md
+.DS_Store
+.vscode/
+.idea/
