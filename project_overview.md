@@ -133,6 +133,97 @@ the venue accepted it.
 - Tests: `tests/test_live_auth_probe.py` (real client through an
   `httpx.MockTransport`; asserts a single GET and no secret in logs).
 
+## Pre-12-market engineering pass (2026-10-10)
+
+Commits `233fd3e`, `cc1cd49`, `a8ff2bc`, `d379f56`, `8b417f0` on top of `f1a134e`.
+No strategy, threshold, sizing, breaker, limit, settlement or backup change.
+Findings and evidence: `reports/pre_live_engineering_pass/` (untracked).
+
+- **Run provenance (2026-10-10 LIVE, process 54482).** The run executed
+  `f1a134e` plus an uncommitted patch (manifest `dirty_diff_hash`
+  `b8ae4cdf…`, byte-identical to `logs/run_diffs/<hash>.patch`) that removed
+  the Taipei weekend BUY block. It is reproducible from a commit only via the
+  explicit switch below.
+- **Weekend switch (`feat(config)`).** `ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS`
+  (operator `.env` surface; default false) →
+  `OperationsConfig.allow_taipei_weekend_buys` → applied once at startup by
+  `bot.entry_session_policy.configure_entry_session_policy`, logged, and
+  recorded in the run manifest (`safe_config.operations`).
+  - Default (false): new BUYs are blocked all of Saturday/Sunday Asia/Taipei
+    (Fri 16:00 → Sun 16:00 UTC), reason `taipei_weekend_observation_only`.
+  - True: weekend BUYs are allowed with reason `taipei_weekend_unlocked_by_env`.
+  - SELL/protective authority is never gated.
+  - Readers: `quote_runtime._prepare_quote_cycle`, the quote-plan guards
+    (`quoting.py`) and the submit boundary (`order_submission.py`).
+  - **To reproduce 2026-10-10 set `ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS=1`.**
+- **Protective-evaluation gap (`chore(obs)`).** Protective evaluation is
+  driven only by QuoteTick (`_quote_maker_orders` → `_prepare_quote_cycle` →
+  `_run_protective_exit_cycle`). The watchdog timer only reports.
+  - On 2026-10-10 a held position went 82.8 s unevaluated: about 27.6 s in the
+    high-cost BUY cooldown early return (INFERRED), then a 55.1 s quote-stream
+    stall (VERIFIED). No breaker could have been eligible.
+  - New: per-instrument last-evaluation time and skip reason, plus
+    `PROTECTIVE_EVAL_GAP`. That is a rate-limited (30 s) watchdog warning when
+    a held, sellable position exceeds 10 s without evaluation. It is
+    observability only.
+  - UNRESOLVED (operator decision): a timer-driven protective evaluator during
+    quote stalls; whether the high-cost cooldown may precede the hard breakers
+    (it can overlap the catastrophic breaker's adaptive 30 s floor for entries
+    with TTE ≲ 340 s).
+- **ORDER_FILLED instrument identity (`fix(ledger)`).** The fill journal
+  defaulted to the active-side instrument, so 20 historical LIVE SELL fills
+  carry the paired token's id.
+  - The in-memory ledger, pending-exit release, realized PnL and oversell
+    protection always used the filled (held) instrument (tests prove this).
+  - Startup inventory replay (`recovery._rebuild_inventory_state_from_db`)
+    selects ORDER_FILLED by instrument_id and could not see those SELLs. Its
+    qty is clamped to the on-chain balance.
+  - Fixed going forward; history is not rewritten.
+  - **Research mapping rule for rows before `cc1cd49`:** attribute a fill to a
+    position by `client_order_id` and the market condition-id prefix of the
+    BUY instrument, never by the ORDER_FILLED `instrument_id`.
+  - Fills that arrive after a market rollover still carry the next market's
+    `slug` (no instrument→slug map exists; documented, not changed).
+- **Canonical PnL rule.** Authoritative realized PnL = fills (price × qty −
+  fees) + verified settlement/redemption payout using the official outcome.
+  `MARKET_CYCLE_PNL` is correct going forward (ghost-inventory double count
+  fixed by `b0c383f`; the exact TP-exit shape is pinned by `a8ff2bc`).
+  - Pre-`b0c383f` rows are not authoritative.
+  - Guards that read `MARKET_CYCLE_PNL`: session-guard rebuild after restart,
+    regime-guard bootstrap (last 12 rows), monthly report.
+  - Read-only replay with HEAD thresholds: journal +11.87 vs fills/official
+    −30.05 across 507 LIVE markets; 2026-09-29 would have hit
+    `session_max_loss_lock`; the regime guard would have fired 3 more times.
+  - DRY-RUN `MARKET_CYCLE_PNL` rows are always 0 and do not contaminate guards.
+- **Telemetry inputs (`research:`).** These go on the existing
+  transition-only `STOP_TIMING_*` rows (about 350 B more per row):
+  - executable bid/ask at the first BUY fill (on POSITION_OPENED)
+  - held-token exit depth at the sellable qty (L2 state/age, top size, VWAP,
+    covers-qty)
+  - Binance spot and its age
+
+  `PREDICTION_RESEARCH_SNAPSHOT` (~1 s executable best bids) keeps writing
+  during pauses and degraded TWAP. It stops only when QuoteTicks stop.
+- **Node rollover (read-only note).**
+  - The scheduled rollover (every 10800 s) defers while inventory is at or
+    above the venue minimum or a protective SELL is live
+    (`launcher._strategy_rollover_exposure_reasons`).
+  - The quote-watchdog rebuild (`_request_quote_stream_node_rollover`) defers
+    only for live protective SELLs, not for inventory alone. On 2026-10-10 it
+    rebuilt for about 64 s with zero inventory.
+  - Across a rebuild, the following are in-memory and lost: in-flight markers
+    (`pending_taker_exit_by_inst`), stop-timing epochs and protective-eval
+    timestamps.
+  - Inventory is rehydrated from the on-chain balance plus ORDER_FILLED replay.
+  - There is no protective evaluation during teardown/startup.
+- **Open items (unchanged):**
+  - kill-switch semantics for open positions (UNRESOLVED)
+  - stale-feed liquidation policy (UNRESOLVED)
+  - client-order-id idempotency and startup orphan-cancel never exercised in
+    LIVE (UNVERIFIED)
+  - positions below the 5-share venue minimum cannot be sold
+  - free disk is about 12 GiB, near the 10 GiB guard
+
 ## Prospective stop-timing telemetry (2026-10-10; research-only)
 
 Commit `research: capture prospective stop timing telemetry`. Purpose: for every
