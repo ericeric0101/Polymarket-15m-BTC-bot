@@ -182,8 +182,18 @@ Findings and evidence: `reports/pre_live_engineering_pass/` (untracked).
   - **Research mapping rule for rows before `cc1cd49`:** attribute a fill to a
     position by `client_order_id` and the market condition-id prefix of the
     BUY instrument, never by the ORDER_FILLED `instrument_id`.
-  - Fills that arrive after a market rollover still carry the next market's
-    `slug` (no instrument→slug map exists; documented, not changed).
+  - Fills that arrive after a market rollover are booked to the market that
+    owns the instrument (`5b645a9`, `bot/instrument_slug_map.py`): every
+    market switch registers its outcome instruments in a bounded in-memory
+    map. ORDER_FILLED `slug`/`market_slug` and the lifecycle id use the mapped
+    slug.
+    - Rows carry `slug_attribution` (`instrument_map` |
+      `current_market_fallback`) and, when the two differ,
+      `journal_current_market_slug`.
+    - After a process restart the map is empty, so such a fill falls back to
+      the current market and is labelled `current_market_fallback`.
+    - Live buy/stop counters still use the current market (conservative).
+    - Rows before `5b645a9` may carry the next market's slug.
 - **Canonical PnL rule.** Authoritative realized PnL = fills (price × qty −
   fees) + verified settlement/redemption payout using the official outcome.
   `MARKET_CYCLE_PNL` is correct going forward (ghost-inventory double count
@@ -195,6 +205,17 @@ Findings and evidence: `reports/pre_live_engineering_pass/` (untracked).
     −30.05 across 507 LIVE markets; 2026-09-29 would have hit
     `session_max_loss_lock`; the regime guard would have fired 3 more times.
   - DRY-RUN `MARKET_CYCLE_PNL` rows are always 0 and do not contaminate guards.
+  - Divergence causes in the pre-fix journal (35 markets, journal − fills =
+    +42.13):
+
+    | Cause | Markets | journal − fills |
+    |---|---|---|
+    | zero-cost ghost inventory | 4 | +22.51 |
+    | missed settlement after a restart | 19 | +16.10 |
+    | held/sold inventory settled twice | 6 | +2.39 |
+    | fee/rounding and other | 6 | +1.13 |
+
+    All 29 markets settled after `b0c383f` match fills + official.
 - **Telemetry inputs (`research:`).** These go on the existing
   transition-only `STOP_TIMING_*` rows (about 350 B more per row):
   - executable bid/ask at the first BUY fill (on POSITION_OPENED)
