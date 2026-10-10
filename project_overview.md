@@ -225,6 +225,8 @@ Findings and evidence: `reports/pre_live_engineering_pass/` (untracked).
 
   `PREDICTION_RESEARCH_SNAPSHOT` (~1 s executable best bids) keeps writing
   during pauses and degraded TWAP. It stops only when QuoteTicks stop.
+  Extended by "Early-warning research semantics" below (Chainlink spot,
+  held-side bid state, entry baseline validity).
 - **Node rollover (read-only note).**
   - The scheduled rollover (every 10800 s) defers while inventory is at or
     above the venue minimum or a protective SELL is live
@@ -244,6 +246,139 @@ Findings and evidence: `reports/pre_live_engineering_pass/` (untracked).
     LIVE (UNVERIFIED)
   - positions below the 5-share venue minimum cannot be sold
   - free disk is about 12 GiB, near the 10 GiB guard
+
+## Early-warning research semantics (2026-10-10; research-only)
+
+Pre-LIVE telemetry/research-semantics fix. Observation only: no field below
+feeds entry, sizing, TP, breakers, stops, guards, settlement or any SELL.
+Execution outputs are identical with the telemetry absent, failing or present
+(`tests/test_stop_timing_early_warning_fields.py`). No Flip / token /
+early-warning stop exists.
+
+1. **Binance relative move** (`binance_adverse_move_bps`; offline
+   `T_BINANCE_1/2/3/5/10BPS`) is a valid fast-warning feature. It is the
+   signed Binance move from the Binance spot captured at the FIRST BUY fill
+   (`entry_binance_spot`); positive = against the held side.
+2. **Binance vs the Chainlink-derived strike is NOT canonical.** The two
+   sources differ by a basis of about 9–10 bps (2026-10-10 DRY-RUN), so a
+   Binance strike cross fires at entry for DOWN favourites. No such cross is
+   produced anywhere. The basis is derived offline from the two recorded
+   spots and reported only as `DESCRIPTIVE_ONLY_NONCANONICAL`.
+3. **Chainlink spot vs strike is the canonical spot cross**
+   (`chainlink_cross_state`; offline `T_CHAINLINK_SPOT_CROSS`). It is
+   settlement-family, not the 60 s TWAP settlement; the TWAP cross stays
+   separate.
+   - Sign: adverse for UP when spot < strike; for DOWN when spot >= strike.
+     A tie settles UP, so it is favourable for UP and adverse for DOWN.
+   - Already adverse at the first post-entry observation => `ADVERSE_AT_ENTRY`,
+     not a fresh cross. First known reading after an unobserved stretch =>
+     `ADVERSE_AT_FIRST_KNOWN_OBSERVATION` (censored).
+   - Source: the raw RTDS Chainlink stream the runtime already consumes
+     (`_polymarket_chainlink_price`). Freshness uses the existing raw-spot rule:
+     local receipt age < `_RAW_SPOT_FRESHNESS_SEC` (10 s). A stale value is
+     never fresh and never forms a cross. Resolution is limited by the
+     Chainlink update cadence; the age is always recorded.
+4. **`market_quote_fresh` is legacy market-wide freshness** (both tokens
+   fresh). It is unchanged. It turns false when the losing token's book stops
+   updating, which is why the DRY-RUN showed 10–66 s "stale" stretches near
+   expiry.
+5. **Held-side freshness is the preferred research freshness for an actual
+   position.** Fields: `held_side_bid_state` / `held_side_bid_fresh`, plus
+   per-side `up_/down_bid_state` for reference-only analysis of the analyzed
+   side. Each is computed from that token's own quote only, so an empty or
+   stale opposite book never makes the held side stale. States:
+   - `FRESH_BID`: valid executable bid.
+   - `STALE`: old data.
+   - `BOOK_EMPTY`: fresh book with no bids. The adapter publishes an empty bid
+     side as price 0.001 with size 0, so exit value is unavailable. This is
+     severe, not unknown and not zero drawdown.
+   - `UNKNOWN`: never observed.
+
+   The held side comes from the live position's instrument
+   (`live_inventory_cost`), never from prices. DRY-RUN has no live inventory,
+   so it writes `held_side = null` and no held-side claims.
+6. **TOKEN_DD = entry executable bid − current held-side executable bid**
+   (positive = deterioration). It is never a midpoint.
+   - The entry baseline is the FIRST BUY fill's book state, on the same host
+     clock (`entry_bid_at_fill`, size, synthesis, age).
+   - A book older than `QUOTE_MAX_DELIVERY_DELAY_SEC` (2 s), a repaired
+     (synthesized/crossed) book or an empty bid side gives
+     `entry_executable_bid = null` and `entry_bid_state` STALE / UNKNOWN /
+     BOOK_EMPTY.
+   - Raw entry values stay recorded for audit.
+   - `token_dd_state`: `VALUE` / `UNKNOWN` / `EXIT_UNAVAILABLE` (held
+     BOOK_EMPTY; never dropped).
+7. **Deterioration / recovery / second leg** are reconstructed offline only,
+   with no runtime event stream, by `research/early_warning_timeline.py`.
+   This is the single read-only tool; it supersedes the scratch audit
+   scripts.
+   - Arithmetic is exact Decimal; deterioration when DD >= X, for
+     X ∈ {0.05, 0.10, 0.15, 0.20}.
+   - PRIMARY: recovery when DD < X; second deterioration when DD >= X again.
+   - HYSTERESIS (pre-registered, not tuned): recovery only when
+     DD <= X − 2 ticks and that holds >= 5 s of continuous observation.
+     `flap_count` = primary episodes − hysteresis episodes.
+   - `BOOK_EMPTY` counts as a deterioration (`exit_unavailable_seen`).
+   - STALE/UNKNOWN points, and snapshot gaps > 3 s, are UNOBSERVED (censored):
+     a transition after them carries `*_lower` bounds, durations carry
+     min/max, `max_dd` may be a lower bound, and nothing is interpolated.
+   - Timeline per position: ENTRY, T_BINANCE_*, T_TOKEN_* FIRST / RECOVERY /
+     SECOND, T_CHAINLINK_SPOT_CROSS, T_TWAP_CROSS, T_MINUS2,
+     T_BREAKER_ELIGIBLE, T_EXIT_SUBMIT, T_EXIT_FILL. Each carries TTE,
+     legacy `required_move_sigma` and `required_move_z_diffusion` context.
+     `UNKNOWN` ≠ `NOT_TRIGGERED`. Legacy sigma is not a probability or a
+     z-score, and no sigma threshold exists.
+   - These events never trigger a SELL.
+8. **TWAP is a slow confirmation / settlement-state feature,** not an assumed
+   early warning. In the DRY-RUN it crossed 296 s after token DD 0.10 and
+   12.5 s after Binance 3 bps.
+9. **Schema and field dictionary.** `snapshot_schema_version`: rows without
+   it are v1; v2 adds additive nullable JSON keys only, and old rows and
+   readers work unchanged. It is also in the run manifest
+   (`schema_versions.snapshot_schema_version`).
+   - `PREDICTION_RESEARCH_SNAPSHOT` v2 (1 s; `bot/prediction_research_snapshot.py`):
+     - `btc_spot` / `btc_age_sec` / `btc_fresh`: **Binance** aggTrade only
+       (the "binance_spot" of the study; names kept for compatibility).
+     - `chainlink_spot` (null when stale), `chainlink_spot_age_sec`,
+       `chainlink_spot_fresh`, `chainlink_source_ts` (metadata).
+     - `up_/down_bid_state`, `up_/down_bid_fresh`.
+     - `held_side` (null when flat). When held: `held_qty`,
+       `held_side_bid`, `held_side_bid_state` / `_fresh`,
+       `held_side_quote_age_sec`, `held_entry_executable_bid`. The held token
+       id is the row's `up_/down_instrument_id`.
+     - A fault in the new block yields `early_warning_fields_error` and a
+       byte-identical legacy row.
+   - `STOP_TIMING_*` (LIVE, transition-only). The exit-size depth field names
+     map as follows: `best_bid` = held_side_best_bid, `exit_top_bid_size` =
+     top_bid_qty, `exit_depth_total_size` = exit_size_depth_available_qty,
+     `exit_depth_covers_qty` = exit_size_depth_sufficient,
+     `exit_vwap_for_qty` = exit_size_vwap_if_available, `exit_l2_age_sec` /
+     `exit_l2_fresh` = l2_age_sec / l2_fresh. New fields:
+     - `chainlink_spot` / `_age_sec` / `_fresh`, `chainlink_cross_state`,
+       `chainlink_signed_distance_bps`
+     - `binance_spot_fresh`, `binance_adverse_move_bps`
+     - `held_side_bid_age_sec` / `_state` / `_fresh` / `_size`,
+       `token_dd` / `token_dd_state`
+     - POSITION_OPENED: `entry_fill_price`, `entry_executable_bid` / `_ask`,
+       `entry_bid_age_sec`, `entry_bid_state`, `entry_bid_size_at_fill`,
+       `entry_quote_synthesis`, and entry Binance/Chainlink spot + age.
+   - `PROTECTIVE_EVAL_GAP` adds `gap_start_ts`, `gap_end_ts` (null while
+     open), `gap_duration_sec`, `held_position_qty`, `held_side`,
+     `last_quote_age_sec`, `last_reference_age_sec`, `skip_reason`,
+     `cooldown_active` and `cause_class`. Cause classes are
+     QUOTE_STREAM_STALL (quote silence >= 10 s, reported first) /
+     HIGH_COST_COOLDOWN / REJECT_COOLDOWN / UNKNOWN. The watchdog emits one
+     `PROTECTIVE_EVAL_GAP_END` when a reported gap ends; the exit path only
+     records the end time in memory.
+   - Cost (measured): +309 B per flat snapshot and +497 B while holding
+     (≈ +6.6 % / +10.5 % of the 4.7 KB mean row). That is ≈ +0.75–1.2 MiB/h
+     at the DRY-RUN's ~2,540 rows/h, against the 500 MB
+     `TWAP_RESEARCH_MAX_DB_MB` cap. Capture time: +4.3 / 8.9 µs p50/p99 flat,
+     +12.7 / 15.3 µs held, on a ~120 µs capture. No new I/O, locks or event
+     stream.
+   - Usage: `python -I research/early_warning_timeline.py --journal
+     logs/trade_journal.db --research-db data/research/twap_forward_shadow.db
+     --run-id <run> --out-dir reports/<dir> [--immutable] [--include-shadow]`.
 
 ## Prospective stop-timing telemetry (2026-10-10; research-only)
 
