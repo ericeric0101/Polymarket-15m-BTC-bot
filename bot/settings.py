@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from bot.entry_session_policy import configure_entry_session_policy, entry_session_policy_summary
 from bot.app_config import AppConfig
 from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
 from bot.journal_path import anchor_repo_path
@@ -812,6 +813,9 @@ def initialize_strategy_settings(
     strategy.session_max_loss_usdc = config.operations.session_max_loss_usdc
     strategy.session_pnl_guard_mode = config.operations.session_pnl_guard_mode
     strategy.monthly_net_target_usdc = config.operations.monthly_net_target_usdc
+    strategy.entry_allow_taipei_weekend_buys = bool(config.operations.allow_taipei_weekend_buys)
+    configure_entry_session_policy(allow_taipei_weekend_buys=strategy.entry_allow_taipei_weekend_buys)
+    logger.info(entry_session_policy_summary())
     # R is intentionally the existing per-trade risk authority, not a new
     # sizing input. V2 refuses startup if this value is absent/non-positive.
     strategy.session_guard_per_trade_risk_usdc = config.maker.depth_risk_max_loss_usdc

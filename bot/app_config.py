@@ -508,6 +508,8 @@ class OperationsConfig:
     session_max_loss_usdc: Decimal
     session_pnl_guard_mode: str
     monthly_net_target_usdc: Decimal | None
+    # ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS; default False keeps the weekend BUY block.
+    allow_taipei_weekend_buys: bool = False
 
     def __post_init__(self) -> None:
         supported = {"legacy", "target_scaled_v2", "shadow_target_scaled_v2"}
@@ -1107,5 +1109,6 @@ class AppConfig:
                     _env_decimal("MONTHLY_NET_TARGET_USDC", "0")
                     if os.getenv("MONTHLY_NET_TARGET_USDC") is not None else None
                 ),
+                allow_taipei_weekend_buys=_env_bool("ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS", False),
             ),
         )
