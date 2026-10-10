@@ -47,6 +47,14 @@ REASON_REFERENCE_STALE = "reference_feed_stale_partial_trend_inputs"
 # Same freshness bound the existing TWAP stop vote and endgame exit use.
 REFERENCE_FRESH_SEC = 5.0
 
+# Observability only (pre-12-market pass): a held, sellable position that goes
+# longer than this without a protective evaluation is reported from the
+# quote-independent watchdog.  Protective evaluation is driven solely by
+# QuoteTick, so a quote stall or an early-return path is otherwise silent.
+PROTECTIVE_EVAL_GAP_EVENT = "PROTECTIVE_EVAL_GAP"
+PROTECTIVE_EVAL_GAP_WARN_SEC = 10.0
+PROTECTIVE_EVAL_GAP_LOG_INTERVAL_SEC = 30.0
+
 
 class ProtectiveExitMixin:
     def _held_protective_positions(self) -> Dict[str, Dict[str, Any]]:
@@ -157,11 +165,76 @@ class ProtectiveExitMixin:
                 )
         return blocked
 
+    def _report_protective_eval_gaps(self, now_ts: float, held: Dict[str, Dict[str, Any]]) -> None:
+        """Warn when a held, sellable position has not been protectively evaluated.
+
+        Never evaluates exits, never submits or cancels orders, never raises.
+        """
+        try:
+            last_eval = getattr(self, "_protective_eval_last_ts_by_inst", None) or {}
+            skip_reason = getattr(self, "_protective_eval_skip_reason_by_inst", None) or {}
+            last_warn = getattr(self, "_protective_eval_gap_warn_ts_by_inst", None)
+            if not isinstance(last_warn, dict):
+                last_warn = {}
+                self._protective_eval_gap_warn_ts_by_inst = last_warn
+            exchange_min = Decimal(str(getattr(self, "maker_exchange_min_shares", "5")))
+            cycle_ts = getattr(self, "_protective_cycle_last_ts", None)
+            quote_ts_by_inst = getattr(self, "last_quote_update_ts_by_inst", None) or {}
+            reference_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+            high_cost_until = getattr(self, "high_cost_exit_cooldown_until_by_inst", None) or {}
+            reject_until = getattr(self, "taker_exit_reject_cooldown_until_by_inst", None) or {}
+            pending = getattr(self, "pending_taker_exit_by_inst", None) or {}
+            kill_class = effective_kill_class(self)
+            for inst_key, state in held.items():
+                qty = Decimal(str(state.get("qty", "0")))
+                if qty + Decimal("0.000001") < exchange_min:
+                    continue  # unsellable dust is never evaluated by design
+                opened_ts = float(state.get("opened_ts", 0.0) or 0.0)
+                eval_ts = last_eval.get(inst_key)
+                start_ts = float(eval_ts) if eval_ts is not None else opened_ts
+                if start_ts <= 0:
+                    continue
+                gap = float(now_ts) - start_ts
+                if gap <= PROTECTIVE_EVAL_GAP_WARN_SEC:
+                    continue
+                prior = last_warn.get(inst_key)
+                if prior is not None and float(now_ts) - float(prior) < PROTECTIVE_EVAL_GAP_LOG_INTERVAL_SEC:
+                    continue
+                last_warn[inst_key] = float(now_ts)
+                quote_ts = quote_ts_by_inst.get(inst_key)
+                hc = float(high_cost_until.get(inst_key, 0.0) or 0.0)
+                rj = float(reject_until.get(inst_key, 0.0) or 0.0)
+                payload = {
+                    "instrument_id": inst_key,
+                    "slug": str(getattr(self, "current_market_slug", "") or ""),
+                    "gap_sec": gap,
+                    "threshold_sec": PROTECTIVE_EVAL_GAP_WARN_SEC,
+                    "last_eval_ts": float(eval_ts) if eval_ts is not None else None,
+                    "opened_ts": opened_ts or None,
+                    "held_qty": float(qty),
+                    "protective_cycle_age_sec": (float(now_ts) - float(cycle_ts)) if cycle_ts else None,
+                    "quote_age_sec": (float(now_ts) - float(quote_ts)) if quote_ts is not None else None,
+                    "reference_age_sec": (float(now_ts) - reference_ts) if reference_ts > 0 else None,
+                    "last_skip_reason": skip_reason.get(inst_key),
+                    "high_cost_cooldown_remaining_sec": (hc - float(now_ts)) if hc > float(now_ts) else None,
+                    "reject_cooldown_remaining_sec": (rj - float(now_ts)) if rj > float(now_ts) else None,
+                    "pending_exit": inst_key in pending,
+                    "kill_class": kill_class,
+                    "observability_only": True,
+                }
+                logger.warning(f"{PROTECTIVE_EVAL_GAP_EVENT}: inst={inst_key} gap={gap:.1f}s details={payload}")
+                record = getattr(self, "_db_strategy_event", None)
+                if callable(record):
+                    record(PROTECTIVE_EVAL_GAP_EVENT, payload)
+        except Exception as exc:  # observability must never affect trading
+            logger.debug(f"protective eval gap report skipped: {type(exc).__name__}")
+
     def _report_protective_exit_availability(self, now_ts: float) -> None:
         """Watchdog-driven observability; never evaluates exits or submits orders."""
         held = self._held_protective_positions()
         if not held:
             return
+        self._report_protective_eval_gaps(now_ts, held)
         kill_class = effective_kill_class(self)
         if not allows_hard_protective_sell(kill_class):
             for inst_key in held:
@@ -173,6 +246,7 @@ class ProtectiveExitMixin:
     async def _run_protective_exit_cycle(self, now_ts: float | None = None, *, entry_block_reason: str = "") -> None:
         """The single protective-exit evaluation path for held inventory."""
         now_ts = time.time() if now_ts is None else float(now_ts)
+        self._protective_cycle_last_ts = now_ts  # observability: the quote-driven cycle ran
         held = self._held_protective_positions()
         if not held:
             return

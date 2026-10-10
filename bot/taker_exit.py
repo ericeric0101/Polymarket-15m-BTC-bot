@@ -117,6 +117,31 @@ class TakerExitMixin:
         )
         return True
 
+    def _note_protective_skip(self, inst_key: str, reason: str) -> None:
+        """Observability only: why a held instrument was not evaluated this cycle."""
+        try:
+            reasons = getattr(self, "_protective_eval_skip_reason_by_inst", None)
+            if not isinstance(reasons, dict):
+                reasons = {}
+                self._protective_eval_skip_reason_by_inst = reasons
+            reasons[inst_key] = reason
+        except Exception:
+            pass
+
+    def _note_protective_eval(self, inst_key: str, now_ts: float) -> None:
+        """Observability only: a protective evaluation actually ran for this instrument."""
+        try:
+            evals = getattr(self, "_protective_eval_last_ts_by_inst", None)
+            if not isinstance(evals, dict):
+                evals = {}
+                self._protective_eval_last_ts_by_inst = evals
+            evals[inst_key] = float(now_ts)
+            reasons = getattr(self, "_protective_eval_skip_reason_by_inst", None)
+            if isinstance(reasons, dict):
+                reasons.pop(inst_key, None)
+        except Exception:
+            pass
+
     async def _maybe_taker_exit_positions(
         self: TakerExitHost,
         now_ts: float,
@@ -186,7 +211,10 @@ class TakerExitMixin:
             seen_instruments.add(inv_inst_key)
         for inst_id in target_instruments:
             inst_key = self._instrument_key(inst_id)
-            if not inst_key or inst_key in blocked:
+            if not inst_key:
+                continue
+            if inst_key in blocked:
+                self._note_protective_skip(inst_key, "blocked_degraded")
                 continue
             if self.taker_exit_eval_interval_sec > 0 and not endgame_window_active:
                 last_eval_ts = float(self.taker_exit_last_eval_ts_by_inst.get(inst_key, 0.0))
@@ -195,8 +223,10 @@ class TakerExitMixin:
                 self.taker_exit_last_eval_ts_by_inst[inst_key] = now_ts
             reject_cooldown_until = float(self.taker_exit_reject_cooldown_until_by_inst.get(inst_key, 0.0))
             if now_ts < reject_cooldown_until:
+                self._note_protective_skip(inst_key, "reject_cooldown")
                 continue
             if in_reduce_only_tail and inst_key in self.taker_exit_tail_attempted_by_inst:
+                self._note_protective_skip(inst_key, "reduce_only_tail_attempted")
                 continue
             state = self.live_inventory_cost.get(inst_key)
             if not state:
@@ -205,15 +235,19 @@ class TakerExitMixin:
             if qty <= 0:
                 continue
             if inst_key in self.pending_taker_exit_by_inst:
+                self._note_protective_skip(inst_key, "pending_exit")
                 continue
             last_ts = float(self.last_taker_exit_ts_by_inst.get(inst_key, 0.0))
             if now_ts - last_ts < self.taker_exit_cooldown_sec:
+                self._note_protective_skip(inst_key, "taker_exit_cooldown")
                 continue
             quote = self._get_quote_for_instrument(inst_id)
             if quote is None:
+                self._note_protective_skip(inst_key, "no_quote")
                 continue
             best_bid, best_ask = quote
             if best_bid <= 0:
+                self._note_protective_skip(inst_key, "no_bid")
                 continue
 
             # Run the settlement-specific circuit breaker before fair pricing,
@@ -246,6 +280,7 @@ class TakerExitMixin:
                 min_distance_usd=Decimal(str(getattr(self, "endgame_twap_exit_min_distance_usd", Decimal("10")))),
             )
             if endgame_decision.eligible:
+                self._note_protective_eval(inst_key, now_ts)
                 opened_ts = float(state.get("opened_ts", 0.0) or 0.0)
                 position_epoch = (
                     f"{self.current_market_slug or ''}|{inst_key}|{opened_ts:.6f}|"
@@ -456,6 +491,7 @@ class TakerExitMixin:
                     ),
                 )
             if awaiting_recovery_sell_release:
+                self._note_protective_skip(inst_key, "awaiting_existing_sell_cancel")
                 continue
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)
@@ -479,6 +515,7 @@ class TakerExitMixin:
                     ),
                     now_ts=now_ts,
                 )
+                self._note_protective_skip(inst_key, "high_cost_cooldown")
                 continue
 
             entry_fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
@@ -616,6 +653,7 @@ class TakerExitMixin:
                 adverse_thesis_weakening_count=int(current_stop_votes.get("weakening_count", 0)),
                 adverse_thesis_available_count=int(current_stop_votes.get("available_count", 0)),
             )
+            self._note_protective_eval(inst_key, now_ts)
             # Research-only stop-timing telemetry: transition events through the
             # non-blocking journal queue; never raises and returns no decision.
             stop_timing = getattr(self, "stop_timing_telemetry", None)
