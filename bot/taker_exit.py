@@ -658,6 +658,19 @@ class TakerExitMixin:
             # non-blocking journal queue; never raises and returns no decision.
             stop_timing = getattr(self, "stop_timing_telemetry", None)
             if stop_timing is not None:
+                exit_bid_levels = None
+                l2_age_sec = None
+                try:  # cached-book read only; never awaits, never raises into the exit path
+                    l2_ts = float((getattr(self, "l2_update_ts_by_inst", None) or {}).get(inst_key, 0.0) or 0.0)
+                    l2_age_sec = (now_ts - l2_ts) if l2_ts > 0 else None
+                    cache = getattr(self, "cache", None)
+                    book_fn = getattr(cache, "order_book", None)
+                    levels_fn = getattr(self, "_levels_from_native_order_book", None)
+                    book = book_fn(inst_id) if callable(book_fn) else None
+                    if book is not None and callable(levels_fn):
+                        exit_bid_levels = levels_fn(book, "bids", int(getattr(self, "orderbook_levels_limit", 10) or 10))
+                except Exception:
+                    exit_bid_levels = None
                 stop_timing.observe_safe(
                     now_ts=now_ts, slug=slug_for_confirmation, instrument_id=inst_key,
                     held_side=held_side, state=state, qty=qty, sellable_qty=position.sellable_qty,
@@ -670,6 +683,9 @@ class TakerExitMixin:
                     adverse_persistence_sec=adverse_persistence_sec,
                     thesis_votes=current_stop_votes, hold_sec=hold_sec,
                     sizing_rule_version=state.get("sizing_version"),
+                    binance_spot=getattr(self, "_binance_ws_price", None),
+                    binance_spot_ts=getattr(self, "_binance_ws_price_ts", None),
+                    exit_bid_levels=exit_bid_levels, l2_age_sec=l2_age_sec,
                 )
             # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
             # independently configured hard breaker may pass this boundary.

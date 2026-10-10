@@ -178,6 +178,20 @@ class FillLedgerMixin:
                     features = twap.latest(str(getattr(self, "current_market_slug", "") or "")) if twap is not None else None
                     state["twap_at_entry"] = (features or {}).get("official_current_twap")
                     state["twap_minus_strike_bps_at_entry"] = (features or {}).get("twap_minus_strike_bps")
+                    # Executable (not midpoint) baseline for token-drawdown research.
+                    try:
+                        quote_fn = getattr(self, "_get_quote_for_instrument", None)
+                        quote = quote_fn(instrument_id) if callable(quote_fn) else None
+                        if quote is not None:
+                            state["entry_bid_at_fill"] = Decimal(str(quote[0]))
+                            state["entry_ask_at_fill"] = Decimal(str(quote[1]))
+                            quote_ts = (getattr(self, "last_quote_update_ts_by_inst", None) or {}).get(inst_key)
+                            state["entry_quote_age_at_fill_sec"] = (
+                                max(0.0, time.time() - float(quote_ts)) if quote_ts else None
+                            )
+                    except Exception:
+                        state.pop("entry_bid_at_fill", None)
+                        state.pop("entry_ask_at_fill", None)
                 # A new winning run starts from the fresh fill price.
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price

@@ -55,6 +55,57 @@ ABS_COMPONENTS = (
 )
 
 
+# Held-token L2 is "FRESH" only within the same bound the depth gate uses.
+L2_FRESH_MAX_AGE_SEC = 2.0
+
+
+def exit_depth_metrics(levels: Any, qty: Any, *, l2_age_sec: Optional[float]) -> dict[str, Any]:
+    """Executable exit depth for ``qty`` from held-token bid levels (price, size).
+
+    Pure and fail-safe: missing or malformed books yield UNKNOWN/None, never
+    invented values, and never raise.
+    """
+    out: dict[str, Any] = {
+        "exit_l2_state": "UNKNOWN", "exit_l2_age_sec": _num(l2_age_sec), "exit_top_bid_size": None,
+        "exit_depth_total_size": None, "exit_depth_covers_qty": None, "exit_depth_levels_used": None,
+        "exit_vwap_for_qty": None,
+    }
+    try:
+        if levels is None:
+            return out
+        parsed = []
+        for price, size in levels:
+            p, q = _dec(price), _dec(size)
+            if p is not None and q is not None and p > 0 and q > 0:
+                parsed.append((p, q))
+        if not parsed:
+            return out
+        parsed.sort(key=lambda level: level[0], reverse=True)
+        need = _dec(qty) or Decimal("0")
+        remaining, notional, used = need, Decimal("0"), 0
+        for price, size in parsed:
+            if remaining <= 0:
+                break
+            take = min(size, remaining)
+            notional += take * price
+            remaining -= take
+            used += 1
+        covers = need > 0 and remaining <= 0
+        fresh = l2_age_sec is not None and 0 <= float(l2_age_sec) <= L2_FRESH_MAX_AGE_SEC
+        out.update({
+            "exit_l2_state": "FRESH" if fresh else "STALE",
+            "exit_top_bid_size": float(parsed[0][1]),
+            "exit_depth_total_size": float(sum(q for _, q in parsed)),
+            "exit_depth_covers_qty": bool(covers),
+            "exit_depth_levels_used": used,
+            "exit_vwap_for_qty": float(notional / need) if covers else None,
+        })
+        return out
+    except Exception:
+        return {**out, "exit_l2_state": "UNKNOWN", "exit_top_bid_size": None, "exit_depth_total_size": None,
+                "exit_depth_covers_qty": None, "exit_depth_levels_used": None, "exit_vwap_for_qty": None}
+
+
 def _num(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -180,6 +231,8 @@ class StopTimingTelemetry:
         engine_config: Any, signal_decision: Any, locked_side_invalidated: bool,
         adverse_persistence_sec: float, thesis_votes: Optional[dict[str, Any]], hold_sec: float,
         sizing_rule_version: Optional[str] = None,
+        binance_spot: Any = None, binance_spot_ts: Optional[float] = None,
+        exit_bid_levels: Any = None, l2_age_sec: Optional[float] = None,
     ) -> None:
         self.counters["observations"] += 1
         mono = self._clock()
@@ -236,6 +289,14 @@ class StopTimingTelemetry:
             "thesis_weakening_count": int(votes.get("weakening_count", 0) or 0),
             "thesis_available_count": int(votes.get("available_count", 0) or 0),
             "locked_side_invalidated": bool(locked_side_invalidated),
+            # Early-warning study inputs (same host wall clock as obs_wall_ts).
+            "binance_spot": _num(binance_spot),
+            "binance_spot_age_sec": (
+                max(0.0, float(now_ts) - float(binance_spot_ts))
+                if binance_spot is not None and binance_spot_ts and float(binance_spot_ts) > 0 else None
+            ),
+            **exit_depth_metrics(exit_bid_levels, sellable_qty if sellable_qty is not None else qty,
+                                 l2_age_sec=l2_age_sec),
         }
         if epoch is None:
             if len(self._epochs) >= MAX_EPOCHS:
@@ -252,6 +313,9 @@ class StopTimingTelemetry:
                 "entry_qty": float(qty_d), "entry_cost_usdc": float(qty_d * avg_entry),
                 "entry_fee_remaining": _num(state.get("entry_fee_remaining")),
                 "fair_at_entry": _num(state.get("fair_at_entry")),
+                "entry_bid_at_fill": _num(state.get("entry_bid_at_fill")),
+                "entry_ask_at_fill": _num(state.get("entry_ask_at_fill")),
+                "entry_quote_age_at_fill_sec": _num(state.get("entry_quote_age_at_fill_sec")),
                 "tte_at_entry_sec": tte_entry, "sizing_rule_version": sizing_rule_version,
                 "first_observation_lag_sec": (float(now_ts) - opened_ts) if opened_ts > 0 else None,
             })
