@@ -49,10 +49,19 @@ rollback) is the historical path: dry-run by default; `--confirm` needs a stoppe
 (both locks), backs up first, runs in one transaction, and tags rows with a batch id.
 `scripts/backfill_redeem_activity.py` (in-place rewrite) is deprecated.
 
-**Still on raw `MARKET_CYCLE_PNL` (bot estimate), deliberately:**
-- the session PnL guard (including restart reconstruction) and the regime guard;
-- `alert_watcher` and Telegram (in-process records);
-- about 25 research scripts, so their PnL figures are bot estimates.
+**PnL consumers (audited 2026-10-10):**
+
+| Group | Scripts | Basis |
+|---|---|---|
+| Effective PnL | `dashboard.py`, `scripts/live_dashboard.py`, `scripts/pnl_attribution_report.py`, `scripts/live_entry_quality_report.py` (`settlement_pnl_usdc` is now the whole-market effective PnL; `market_pnl_basis`, `journal_settlement_pnl_usdc` kept), `scripts/forward_shadow_report.py` (`live_effective_pnl_usdc` beside the journal fields) | projection; on a minimal journal they fall back to the journal estimate and label it |
+| Guard replay | `scripts/replay_session_pnl_guard.py` | what the live guard applies: `MARKET_CYCLE_PNL` plus `SESSION_PNL_EVIDENCE_CORRECTION` |
+| Outcome labels only (unaffected) | `prediction_forensics`, `stop_timing_report`, `build_outcome_provenance`, `calibration_shadow_report`, `twap_fair_calibration_report`, `strike_flip_risk_analysis`, `replay_journal_signals`, `pure_probe_report`, `final_research_analysis`, `market_regime_report`, `invalidation_counterfactual_report` | official direction agrees with the bot label 137/137 |
+| Kept as a library | `scripts/realized_edge_report.py` (imported by `econ_gate_report`, `score_momentum_report`; per-fill edge vs. outcome label) | outcome labels; its printed settlement PnL is still the journal estimate |
+| Removed 2026-10-10 | `pnl_reconcile_report`, `hourly_attribution_report`, `recent_buy_fill_report`, `mirrored_down_report`, `shadow_veto_report`, `shadow_probe_report` (no tests or dependants, last changed in Mar–Apr; they printed the estimate). `pnl_reconcile_report` is superseded by `pnl_evidence_backfill.py report`. | — (recoverable from git history) |
+| Runtime, deliberately unchanged | session PnL guard (plus the evidence delta), regime guard, `alert_watcher` / Telegram | `alert_watcher` uses SELL-close realized PnL (not the estimate); positions held to settlement are not counted in its loss streak, which is an open risk-semantics decision |
+
+Note: `live_entry_quality_report` opens the journal with `immutable=1`, so on a journal
+that is being written it can miss rows still in the WAL.
 
 Changing the guards' basis is a separate, unapproved decision. The proposal is an
 idempotent per-market delta for open sessions only (see the report).
@@ -2356,7 +2365,7 @@ removal is:
 | Class | Scripts |
 |---|---|
 | Supported operational/manual | `inspect_env_contract.py`, `migrate_env_to_profile.py`, `check_allowance.py`, `check_positions_and_redeem.py`, `replay_journal_signals.py`, `pnl_attribution_report.py`, `execution_path_penalty_report.py`, `fast_follow_execution_report.py`, `feed_health_report.py`, `archive_lead_lag_research.py`, `invalidation_counterfactual_report.py`, `verify_exit_order_semantics.py`, `execution_penalty_report.py`, `twap_fair_calibration_report.py`, `fair_edge_bucket_shadow_report.py`, `executable_fair_edge_report.py`, `backfill_redeem_activity.py`. Evidence: README/current docs or current audit docs refer to them. |
-| Research, no CI/manual invocation | `calibration_shadow_report.py`, `pure_signal_probe.py`, `shadow_*_report.py`, `pure_probe_report.py`, `score_momentum_report.py`, `recent_buy_fill_report.py`, `realized_edge_report.py`, `pnl_reconcile_report.py`, `mirrored_down_report.py`, `hourly_attribution_report.py`, `edge_attribution_report.py`, `econ_gate_report.py`, `compare_polymarket_chainlink_vs_binance.py`, `build_smart_money_wallets.py`, `trade_db_report.py`, `live_dashboard.py`, `forward_shadow_report.py`. |
+| Research, no CI/manual invocation | `calibration_shadow_report.py`, `pure_signal_probe.py`, `shadow_*_report.py`, `pure_probe_report.py`, `score_momentum_report.py`, `realized_edge_report.py`, `edge_attribution_report.py`, `econ_gate_report.py`, `compare_polymarket_chainlink_vs_binance.py`, `build_smart_money_wallets.py`, `trade_db_report.py`, `live_dashboard.py`, `forward_shadow_report.py`. |
 | Historical / likely obsolete research | `outcome_analysis.py`, `penalty_simulation.py`. |
 
 “Research, no CI/manual invocation” is **not** proof of deletability.  These

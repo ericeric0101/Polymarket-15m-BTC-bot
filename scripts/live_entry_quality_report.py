@@ -126,6 +126,15 @@ def _shadow_reject_counterfactual(rows: list[dict[str, Any]]) -> list[dict[str, 
     return output
 
 
+def _effective_market_pnl(db_path: Path) -> dict:
+    """Shared effective-PnL projection; {} when the journal lacks the full schema."""
+    try:
+        from monitoring.pnl_attribution import load_effective_market_pnl
+        return load_effective_market_pnl(db_path)
+    except Exception:
+        return {}
+
+
 def load_candidates(db_path: Path, *, return_metrics: bool = False):
     if not db_path.exists():
         raise FileNotFoundError(f"trade journal not found: {db_path}")
@@ -300,6 +309,7 @@ def load_candidates(db_path: Path, *, return_metrics: bool = False):
     with sqlite3.connect(uri,uri=True) as conn:
         conn.row_factory=sqlite3.Row
         settlements=conn.execute("SELECT payload_json FROM strategy_events WHERE event_type='MARKET_SETTLEMENT' ORDER BY id").fetchall()
+    effective_by_slug=_effective_market_pnl(db_path)
     settlement_by_slug={}
     for row in settlements:
         p=_payload(row["payload_json"]); slug=str(p.get("slug") or "")
@@ -317,12 +327,22 @@ def load_candidates(db_path: Path, *, return_metrics: bool = False):
         item["settled"] = bool(settlement_by_slug.get(str(item.get("slug") or "")))
         settle=settlement_by_slug.get(str(item.get("slug") or ""),{})
         item["settled"]=bool(settle)
-        item["winner"]=settle.get("outcome")
-        market_pnl=_number(settle.get("settlement_pnl_usdc"))
+        effective=effective_by_slug.get(str(item.get("slug") or ""))
+        item["journal_settlement_pnl_usdc"]=_number(settle.get("settlement_pnl_usdc"))
+        if effective and effective.get("effective_pnl_usdc") is not None:
+            # Whole-market effective PnL (fills + venue cash + official outcome), see
+            # monitoring.pnl_attribution; the journal settlement value is kept for audit.
+            item["winner"]=effective.get("outcome") or settle.get("outcome")
+            market_pnl=float(effective["effective_pnl_usdc"])
+            item["market_pnl_basis"]=effective["pnl_basis"]
+        else:
+            item["winner"]=settle.get("outcome")
+            market_pnl=item["journal_settlement_pnl_usdc"]
+            item["market_pnl_basis"]="journal_settlement_estimate" if market_pnl is not None else None
         item["market_settlement_pnl_usdc"]=market_pnl
         if item.get("filled") and filled_candidate_count_by_slug.get(str(item.get("slug") or ""))==1:
             item["settlement_pnl_usdc"]=market_pnl
-            item["pnl_attribution_reason"]="single_filled_candidate_in_market; market-level settlement PnL"
+            item["pnl_attribution_reason"]="single_filled_candidate_in_market; market-level PnL ("+str(item["market_pnl_basis"])+")"
         else:
             item["settlement_pnl_usdc"]=None
             item["pnl_attribution_reason"]=("multiple_filled_candidates_in_market" if item.get("filled") else "candidate_not_filled")
