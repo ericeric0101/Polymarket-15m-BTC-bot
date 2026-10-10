@@ -278,7 +278,18 @@ def _live_join(candidates: list[dict[str, Any]], trade_db: Path | None) -> list[
                                 "live_settlement_outcome": payload.get("outcome"),
                                 "live_settlement_pnl_usdc": payload.get("settlement_pnl_usdc")})
                         else:
+                            # Journal estimate, kept for audit; compare with live_effective_pnl_usdc.
                             target["live_cycle_combined_pnl_usdc"] = payload.get("cycle_combined_pnl_usdc")
+                try:
+                    from monitoring.pnl_attribution import load_effective_market_pnl
+                    for slug, row in load_effective_market_pnl(trade_db).items():
+                        if slug in settlements or row["buy_fill_count"]:
+                            settlements.setdefault(slug, {}).update({
+                                "live_effective_pnl_usdc": row["effective_pnl_usdc"],
+                                "live_effective_pnl_basis": row["pnl_basis"],
+                            })
+                except Exception:
+                    pass  # minimal/legacy journals: effective PnL unavailable
         except sqlite3.Error:
             live = []
     result = []

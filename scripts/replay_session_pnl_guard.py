@@ -21,26 +21,32 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from bot.journal_path import resolve_trade_db_path
 from bot.session_pnl_guard import SessionPnlGuard, SessionPnlGuardConfig
+from monitoring.trade_journal_db import SESSION_CORRECTION_EVENT
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="data/trading/trade_journal.db")
+    parser.add_argument("--db", default=None, help="trade journal (default: canonical TRADE_DB_PATH)")
     parser.add_argument("--output", default="reports/stop_forensics/session_pnl_guard_replay.csv")
     args = parser.parse_args()
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    db_path = Path(args.db)
-    if not db_path.is_file() and args.db == "data/trading/trade_journal.db" and Path("logs/trade_journal.db").is_file():
-        db_path = Path("logs/trade_journal.db")
+    db_path = resolve_trade_db_path(args.db)
     if not db_path.is_file():
-        parser.error(f"journal database not found: {args.db}")
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute("SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id").fetchall()
+        parser.error(f"journal database not found: {db_path}")
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        # The live guard applies the journal estimate at settlement plus the
+        # idempotent settlement-evidence corrections; replay both, in order.
+        rows = conn.execute(
+            "SELECT ts, event_type, payload_json FROM strategy_events WHERE event_type IN ('MARKET_CYCLE_PNL', ?) ORDER BY id",
+            (SESSION_CORRECTION_EVENT,),
+        ).fetchall()
     parsed = []
-    for ts, raw in rows:
+    for ts, event_type, raw in rows:
         payload = json.loads(raw or "{}")
-        parsed.append((ts, payload, Decimal(str(payload.get("cycle_combined_pnl_usdc", 0))),
+        field = "delta_usdc" if event_type == SESSION_CORRECTION_EVENT else "cycle_combined_pnl_usdc"
+        parsed.append((ts, payload, Decimal(str(payload.get(field, 0) or 0)),
                        datetime.fromisoformat(ts).astimezone(ZoneInfo("Asia/Taipei")).date().isoformat()))
     scenarios = {
         "NO_GUARD": SessionPnlGuardConfig(enabled=False),
