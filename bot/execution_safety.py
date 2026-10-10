@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from bot.breaker_authority import breaker_v2_buy_block_reason
 from bot.kill_switch import submission_blocked_by_kill_switch
 
 
@@ -26,6 +27,12 @@ class ExecutionSafetyMixin:
         # active kill never lets a BUY through, and only an operational/entry
         # kill lets a SELL through. Only ever stricter than the mode check.
         blocked = submission_blocked_by_kill_switch(self, order)
+        if blocked:
+            logger.warning(f"Real order submission blocked: {blocked}")
+            return False
+        # Breaker V2 invariant: after a SUPPRESS decision no BUY may increase
+        # exposure on that market pair (SELLs are never affected).
+        blocked = breaker_v2_buy_block_reason(self, order)
         if blocked:
             logger.warning(f"Real order submission blocked: {blocked}")
             return False

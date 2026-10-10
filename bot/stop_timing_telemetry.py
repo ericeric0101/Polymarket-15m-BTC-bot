@@ -35,6 +35,10 @@ import time
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
+from bot.breaker_authority import market_day_type
+from bot.breaker_eligibility import adverse_trend_confirmed, conditional_absolute_components, strong_opposite_signal
+from bot.settlement_side import signed_strike_distance as _shared_signed_strike_distance
+
 SCHEMA_VERSION = "stop_timing_v1"
 EVENT_PREFIX = "STOP_TIMING_"
 PERSISTENCE_CHECKPOINTS_SEC = (5, 15, 30)
@@ -182,43 +186,35 @@ def absolute_breaker_components(
     signal_matches_position: bool, signal_side: str, signal_locked: bool, signal_score: Decimal,
     adverse_persistence_sec: float, weakening_count: int, available_count: int,
 ) -> dict[str, bool]:
-    """Pure mirror of the absolute-breaker predicate, split into components."""
-    signal_is_none = str(signal_side).upper() == "NONE"
-    strong_opposite = (
-        (not signal_matches_position) and not signal_is_none and signal_locked
-        and abs(signal_score) >= thesis_min_score_abs
+    """Legacy shadow comparator: the absolute-breaker predicate, split into components.
+
+    Not a mirror: it calls the same shared predicate as ``ExitPolicyEngine.evaluate``
+    (``bot.breaker_eligibility``).  ``taker_exit`` passes the locked invalidation as
+    both ``locked_side_invalidated`` and ``confirmed_adverse_exit_active``, so the
+    same flag feeds both here.
+    """
+    strong_opposite = strong_opposite_signal(
+        signal_matches_position=signal_matches_position, signal_side=signal_side,
+        signal_locked=signal_locked, signal_score=signal_score, thesis_min_score_abs=thesis_min_score_abs,
     )
-    comps = {
-        "abs_min_hold": hold_sec >= max(0.0, float(min_hold_sec)),
-        "abs_price_adverse": bool(avg_entry > 0 and best_bid < avg_entry and gross_if_exit < 0),
-        "abs_adverse_trend_confirmed": bool(locked_side_invalidated or strong_opposite),
-        "abs_loss_threshold": net_if_exit <= -abs(loss_usdc),
-        "abs_tte_le_120": time_left_sec is not None and time_left_sec <= 120.0,
-        "abs_persistence_ge_15s": adverse_persistence_sec >= 15.0,
-        "abs_votes_ge_2_of_2": weakening_count >= 2 and available_count >= 2,
-    }
-    comps["abs_eligible_recomputed"] = bool(
-        enabled and comps["abs_min_hold"] and comps["abs_price_adverse"]
-        and comps["abs_adverse_trend_confirmed"] and comps["abs_loss_threshold"]
-        and (comps["abs_tte_le_120"] or (comps["abs_persistence_ge_15s"] and comps["abs_votes_ge_2_of_2"]))
+    comps = conditional_absolute_components(
+        enabled=enabled, min_hold_sec=min_hold_sec, loss_usdc=loss_usdc, hold_sec=hold_sec,
+        avg_entry=avg_entry, best_bid=best_bid, gross_if_exit=gross_if_exit, net_if_exit=net_if_exit,
+        time_left_sec=time_left_sec,
+        adverse_trend_confirmed=adverse_trend_confirmed(
+            locked_side_invalidated=locked_side_invalidated,
+            confirmed_adverse_exit_active=locked_side_invalidated,
+            strong_opposite=strong_opposite,
+        ),
+        adverse_persistence_sec=adverse_persistence_sec, weakening_count=weakening_count,
+        available_count=available_count,
     )
+    comps["abs_eligible_recomputed"] = comps.pop("eligible")
     return comps
 
 
-def signed_strike_distance(held_side: str, reference: Optional[Decimal],
-                           strike: Optional[Decimal]) -> tuple[Optional[float], Optional[float], str]:
-    """Distance in the held side's favour (USD, bps) and cross state.
-
-    Settlement tie semantics: TWAP == strike settles UP, so a tie is favourable
-    for UP and adverse for DOWN.
-    """
-    side = str(held_side).upper()
-    if reference is None or strike is None or strike <= 0 or side not in {"UP", "DOWN"}:
-        return None, None, "UNKNOWN"
-    raw = reference - strike
-    distance = raw if side == "UP" else -raw
-    adverse = raw < 0 if side == "UP" else raw >= 0
-    return float(distance), float(distance / strike * Decimal("10000")), ("ADVERSE" if adverse else "FAVORABLE")
+# Canonical settlement-side helper (tie settles UP), shared with the exit path.
+signed_strike_distance = _shared_signed_strike_distance
 
 
 def _spot(value: Any, ts: Any, now_ts: float, max_age: Optional[float]) -> tuple[Optional[Decimal], Optional[float], bool]:
@@ -357,6 +353,7 @@ class StopTimingTelemetry:
         chainlink_spot: Any = None, chainlink_spot_ts: Optional[float] = None,
         held_bid_ts: Optional[float] = None, held_bid_size: Any = None,
         quote_fresh_max_age_sec: Optional[float] = None, spot_fresh_max_age_sec: Optional[float] = None,
+        breaker_v2_decision: Optional[str] = None,
     ) -> None:
         self.counters["observations"] += 1
         mono = self._clock()
@@ -429,6 +426,8 @@ class StopTimingTelemetry:
             **{k: v for k, v in early.items() if not k.startswith("_")},
         }
         snap["exit_l2_fresh"] = snap.get("exit_l2_state") == "FRESH"
+        if breaker_v2_decision is not None:
+            snap["breaker_v2_authority_decision"] = breaker_v2_decision
         if epoch is None:
             if len(self._epochs) >= MAX_EPOCHS:
                 self._epochs.pop(next(iter(self._epochs)))
@@ -456,6 +455,8 @@ class StopTimingTelemetry:
                 "first_observation_lag_sec": (float(now_ts) - opened_ts) if opened_ts > 0 else None,
             })
         epoch["max_qty"] = max(epoch["max_qty"], float(qty_d))
+        if breaker_v2_decision is not None:
+            epoch["breaker_v2_decision"] = breaker_v2_decision
 
         # Degradation (first occurrence per reason only).
         for reason, bad in (("settlement_reference_unknown", ref_state == "UNKNOWN"),
@@ -534,9 +535,23 @@ class StopTimingTelemetry:
                     self._first(epoch, name, snap_c)
         else:
             snap_c = {**snap, "abs_components": None, "abs_components_state": "UNKNOWN"}
-        if decision_reason == "absolute_max_loss_breaker":
+        # Legacy shadow comparator: the shared predicate says the legacy breaker
+        # would sell.  Under Breaker V2 SUPPRESS the engine no longer returns
+        # the breaker reason, so legacy eligibility comes from the predicate.
+        legacy_eligible = bool((snap_c.get("abs_components") or {}).get("abs_eligible_recomputed"))
+        suppressed = breaker_v2_decision == "SUPPRESS" and legacy_eligible
+        if decision_reason == "absolute_max_loss_breaker" or suppressed:
+            if "abs_breaker_eligible" not in epoch["first"]:
+                epoch["legacy_exit_estimate"] = {
+                    key: snap.get(key) for key in (
+                        "obs_wall_ts", "qty", "best_bid", "exit_px_effective", "net_if_exit",
+                        "exit_vwap_for_qty", "exit_depth_covers_qty", "exit_l2_fresh", "time_left_sec")
+                }
             self._first(epoch, "abs_breaker_eligible", snap_c, event="BREAKER_FIRST_ELIGIBLE",
-                        extra={"breaker": "conditional_absolute_loss_breaker"})
+                        extra={"breaker": "conditional_absolute_loss_breaker",
+                               "legacy_breaker_would_sell": True,
+                               "conditional_breaker_suppressed": suppressed,
+                               "breaker_v2_authority_decision": breaker_v2_decision})
         if decision_reason in {"catastrophic_stop_loss_confirming", "catastrophic_stop_loss_confirmed"}:
             self._first(epoch, "catastrophic_candidate", snap_c)
         if decision_reason == "catastrophic_stop_loss_confirmed":
@@ -616,5 +631,12 @@ class StopTimingTelemetry:
             "counterfactual_hold_gross_pnl": hold_pnl, "max_qty": epoch["max_qty"],
             "avg_entry": epoch["avg_entry"], "first_times": dict(epoch["first"]),
             "cross_count": epoch["cross_seq"], "last_observation": epoch.get("last_snap"),
+            # Breaker V2 evaluation (legacy economics vs V2 economics).
+            "legacy_breaker_would_sell": "abs_breaker_eligible" in epoch["first"],
+            "legacy_exit_estimate": epoch.get("legacy_exit_estimate"),
+            "breaker_v2_authority_decision": epoch.get("breaker_v2_decision"),
+            "conditional_breaker_suppressed": epoch.get("breaker_v2_decision") == "SUPPRESS"
+                                              and "abs_breaker_eligible" in epoch["first"],
+            "market_day_type": market_day_type(slug),
             "telemetry_counters": dict(self.counters), "telemetry_disabled": self.disabled,
         })

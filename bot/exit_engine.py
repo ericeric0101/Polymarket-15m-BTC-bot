@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bot.breaker_eligibility import (
+    adverse_trend_confirmed as _adverse_trend_confirmed,
+    conditional_absolute_components,
+    strong_opposite_signal,
+)
 from bot.models import ExitDecision, ExitDecisionType, MarketSnapshot, PositionState, SignalDecision
 from execution.rebate_model import estimate_taker_fee_usdc
 
@@ -269,6 +274,7 @@ class ExitPolicyEngine:
         adverse_persistence_sec: float = 0.0,
         adverse_thesis_weakening_count: int = 0,
         adverse_thesis_available_count: int = 0,
+        suppress_conditional_absolute: bool = False,
     ) -> ExitDecision:
         """Evaluate exit decision for a held position.
 
@@ -283,6 +289,12 @@ class ExitPolicyEngine:
             confirmations before declaring the thesis broken.
         external_offside_confirmed : bool | None
             When provided, overrides the internal offside check.
+        suppress_conditional_absolute : bool
+            Breaker V2 authority SUPPRESS for this position epoch: the
+            conditional absolute-loss breaker may not return a SELL decision.
+            Evaluation falls through unchanged, so the catastrophic breaker and
+            every other exit are still evaluated.  False (the default, and the
+            only value when the V2 flag is off) is the legacy behaviour.
         """
         exit_px_effective = snapshot.best_bid * (Decimal("1") - snapshot.slippage_buffer_pct)
         gross_if_exit = position.qty * (exit_px_effective - position.avg_entry_price)
@@ -299,43 +311,44 @@ class ExitPolicyEngine:
         )
         signal_side = str(signal.active_side).upper()
         signal_is_none = signal_side == "NONE"
-        explicit_offside = (not signal.matches_position) and not signal_is_none
-        strong_opposite = (
-            explicit_offside
-            and signal.locked
-            and abs(signal.score) >= self.config.stop_loss_thesis_min_score_abs
+        strong_opposite = strong_opposite_signal(
+            signal_matches_position=signal.matches_position,
+            signal_side=signal_side,
+            signal_locked=signal.locked,
+            signal_score=signal.score,
+            thesis_min_score_abs=self.config.stop_loss_thesis_min_score_abs,
         )
-        adverse_trend_confirmed = bool(
-            locked_side_invalidated
-            or confirmed_adverse_exit_active
-            or external_thesis_weakened is True
-            or external_offside_confirmed is True
-            or strong_opposite
+        adverse_trend_confirmed = _adverse_trend_confirmed(
+            locked_side_invalidated=locked_side_invalidated,
+            confirmed_adverse_exit_active=confirmed_adverse_exit_active,
+            external_thesis_weakened=external_thesis_weakened,
+            external_offside_confirmed=external_offside_confirmed,
+            strong_opposite=strong_opposite,
         )
         # --- Trend-confirmed absolute loss breaker ---
         # A large mark-to-market drawdown alone can be transient noise. Preserve
         # the hard-loss exit, but require an independently confirmed adverse
         # trend (locked invalidation or a locked, strong opposite-side signal).
-        _price_adverse_raw = (
-            position.avg_entry_price > 0
-            and snapshot.best_bid < position.avg_entry_price
-            and gross_if_exit < 0
+        # Eligibility is the shared predicate (bot.breaker_eligibility), also
+        # used by the STOP_TIMING legacy shadow comparator.
+        absolute_components = conditional_absolute_components(
+            enabled=self.config.absolute_max_loss_enabled,
+            min_hold_sec=self.config.absolute_max_loss_min_hold_sec,
+            loss_usdc=self.config.absolute_max_loss_usdc,
+            hold_sec=position.hold_sec,
+            avg_entry=position.avg_entry_price,
+            best_bid=snapshot.best_bid,
+            gross_if_exit=gross_if_exit,
+            net_if_exit=net_if_exit,
+            time_left_sec=snapshot.time_left_sec,
+            adverse_trend_confirmed=adverse_trend_confirmed,
+            adverse_persistence_sec=adverse_persistence_sec,
+            weakening_count=adverse_thesis_weakening_count,
+            available_count=adverse_thesis_available_count,
         )
-        if (
-            self.config.absolute_max_loss_enabled
-            and position.hold_sec >= max(0, self.config.absolute_max_loss_min_hold_sec)
-            and _price_adverse_raw
-            and adverse_trend_confirmed
-            and net_if_exit <= -abs(self.config.absolute_max_loss_usdc)
-            and (
-                (snapshot.time_left_sec is not None and snapshot.time_left_sec <= 120.0)
-                or (
-                    adverse_persistence_sec >= 15.0
-                    and adverse_thesis_weakening_count >= 2
-                    and adverse_thesis_available_count >= 2
-                )
-            )
-        ):
+        legacy_absolute_eligible = absolute_components["eligible"]
+        conditional_absolute_suppressed = bool(legacy_absolute_eligible and suppress_conditional_absolute)
+        if legacy_absolute_eligible and not conditional_absolute_suppressed:
             return ExitDecision(
                 decision_type=ExitDecisionType.TAKER_STOP_LOSS,
                 reason="absolute_max_loss_breaker",
@@ -389,6 +402,10 @@ class ExitPolicyEngine:
             "locked_side_invalidated": "1" if locked_side_invalidated else "0",
             "confirmed_adverse_exit_active": "1" if confirmed_adverse_exit_active else "0",
         }
+        if conditional_absolute_suppressed:
+            # Breaker V2 SUPPRESS: the legacy breaker would have sold here.
+            base_metadata["legacy_absolute_eligible"] = "1"
+            base_metadata["conditional_absolute_suppressed"] = "1"
         price_adverse = (
             position.avg_entry_price > 0
             and snapshot.best_bid < position.avg_entry_price

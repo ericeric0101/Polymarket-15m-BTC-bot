@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from bot.breaker_authority import breaker_v2_authority_summary
 from bot.entry_session_policy import configure_entry_session_policy, entry_session_policy_summary
 from bot.app_config import AppConfig
 from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
@@ -398,6 +399,9 @@ def initialize_strategy_settings(
     strategy.absolute_max_loss_enabled = config.exit.absolute_max_loss_enabled
     strategy.absolute_max_loss_usdc = config.exit.absolute_max_loss_usdc
     strategy.absolute_max_loss_min_hold_sec = config.exit.absolute_max_loss_min_hold_sec
+    strategy.absolute_max_loss_twap_authority_gate_enabled = bool(
+        getattr(config.exit, "absolute_max_loss_twap_authority_gate_enabled", False)
+    )
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
     strategy.exit_policy = ExitPolicy(
         ExitPolicyConfig(
@@ -821,6 +825,7 @@ def initialize_strategy_settings(
     strategy.entry_allow_taipei_weekend_buys = bool(config.operations.allow_taipei_weekend_buys)
     configure_entry_session_policy(allow_taipei_weekend_buys=strategy.entry_allow_taipei_weekend_buys)
     logger.info(entry_session_policy_summary())
+    logger.info(breaker_v2_authority_summary(strategy.absolute_max_loss_twap_authority_gate_enabled))
     # R is intentionally the existing per-trade risk authority, not a new
     # sizing input. V2 refuses startup if this value is absent/non-positive.
     strategy.session_guard_per_trade_risk_usdc = config.maker.depth_risk_max_loss_usdc

@@ -75,6 +75,8 @@ CORE_ENV_KEYS = frozenset(
         "ENDGAME_TWAP_EXIT_MAX_TIME_LEFT_SEC",
         "ENDGAME_TWAP_EXIT_MIN_DISTANCE_USD",
         "ENDGAME_TWAP_EXIT_MAX_AGE_SEC",
+        # Breaker V2 canonical-TWAP authority gate (default 0 = legacy breaker).
+        "ABSOLUTE_MAX_LOSS_TWAP_AUTHORITY_GATE_ENABLED",
         "AUTO_REDEEM_ENABLED",
         "TRADE_DB_ENABLED",
         "TRADE_DB_PATH",

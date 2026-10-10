@@ -16,7 +16,20 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.breaker_authority import (
+    DECISION_EVENT as BREAKER_V2_DECISION_EVENT,
+    FALLBACK_LEGACY as BREAKER_V2_FALLBACK_LEGACY,
+    REHYDRATED_EVENT as BREAKER_V2_REHYDRATED_EVENT,
+    SCHEMA_VERSION as BREAKER_V2_SCHEMA_VERSION,
+    SUPPRESS as BREAKER_V2_SUPPRESS,
+    BreakerV2AuthorityBook,
+    decide_authority as breaker_v2_decide_authority,
+    market_day_type as breaker_v2_market_day_type,
+    position_epoch_key as breaker_v2_position_epoch_key,
+    rehydrated_decision as breaker_v2_rehydrated_decision,
+)
 from bot.kill_switch import HARD_PROTECTIVE_EXIT_REASONS
+from bot.settlement_side import canonical_twap_side_state
 from bot.order_ids import new_client_order_id
 from bot.enums import ActiveSide
 from bot.endgame_twap_exit import evaluate_endgame_twap_exit
@@ -153,6 +166,146 @@ class TakerExitMixin:
                     open_gaps.pop(inst_key, None)
         except Exception:
             pass
+
+    def _breaker_v2_book(self) -> BreakerV2AuthorityBook:
+        book = getattr(self, "breaker_v2_authority_book", None)
+        if not isinstance(book, BreakerV2AuthorityBook):
+            book = BreakerV2AuthorityBook()
+            self.breaker_v2_authority_book = book
+        return book
+
+    def _resolve_breaker_v2_authority(
+        self, *, now_ts: float, slug: str, inst_key: str, inst_id: Any, epoch_key: str, opened_ts: float,
+        held_side: str, twap_features: Optional[dict], strike: Any, qty: Decimal, avg_entry: Decimal,
+        best_bid: Decimal, best_ask: Decimal, time_left_sec: Optional[float], exit_decision: Any,
+    ) -> str:
+        """Lock the Breaker V2 authority for one position epoch (called once).
+
+        Order: (1) a decision already persisted for this position (restart /
+        rebuild) is restored, never re-decided; (2) otherwise decide from the
+        canonical TWAP side state; (3) persist to the core journal BEFORE any
+        behaviour depends on it.  A SUPPRESS that cannot be persisted degrades
+        to FALLBACK_LEGACY.  Never raises: any fault yields FALLBACK_LEGACY.
+        """
+        book = self._breaker_v2_book()
+        try:
+            rehydrate_reason = "new_position_in_process"
+            lookup_decision = None
+            if not book.has_other_epoch(slug, inst_key, epoch_key):
+                trade_db = getattr(self, "trade_db", None)
+                loader = getattr(trade_db, "load_breaker_v2_authority_decision", None)
+                lookup = loader(slug, inst_key) if callable(loader) else None
+                lookup_decision, rehydrate_reason = breaker_v2_rehydrated_decision(lookup)
+            if lookup_decision is not None:
+                decision = book.lock(epoch_key, slug=slug, instrument_id=inst_key,
+                                     decision=lookup_decision, reason=rehydrate_reason)
+                try:
+                    self._db_strategy_event(BREAKER_V2_REHYDRATED_EVENT, {
+                        "schema": BREAKER_V2_SCHEMA_VERSION, "slug": slug, "instrument_id": inst_key,
+                        "position_epoch": epoch_key, "opened_ts": float(opened_ts or 0.0),
+                        "decision": decision, "rehydrate_reason": rehydrate_reason, "observed_ts": float(now_ts),
+                    })
+                except Exception:
+                    pass
+                self._breaker_v2_apply_side_effects(decision, inst_key)
+                logger.warning(
+                    f"Breaker V2 authority restored: {decision} ({rehydrate_reason}) slug={slug} inst={inst_key}"
+                )
+                return decision
+
+            strike_verified = False
+            verifier = getattr(self, "_market_strike_is_entry_eligible", None)
+            if callable(verifier):
+                try:
+                    strike_verified = bool(verifier(slug))
+                except Exception:
+                    strike_verified = False
+            twap = canonical_twap_side_state(
+                held_side=held_side, twap_features=twap_features, strike=strike,
+                strike_verified=strike_verified, expected_slug=slug, now_ts=now_ts,
+            )
+            decision, reason = breaker_v2_decide_authority(twap["state"])
+            meta = getattr(exit_decision, "metadata", {}) or {}
+            payload = {
+                "schema": BREAKER_V2_SCHEMA_VERSION,
+                "run_id": str(getattr(self, "run_id", "") or ""),
+                "slug": slug, "instrument_id": inst_key, "held_side": held_side,
+                "position_epoch": epoch_key, "opened_ts": float(opened_ts or 0.0),
+                "first_eligibility_ts": float(now_ts), "decision_ts": time.time(),
+                "decision": decision, "decision_reason": reason, "rehydrate_check": rehydrate_reason,
+                "legacy_breaker_would_sell": True,
+                "conditional_breaker_suppressed": decision == BREAKER_V2_SUPPRESS,
+                "twap_state": twap["state"], "twap_value": twap["twap"], "twap_source_ts": twap["source_ts"],
+                "twap_age_sec": twap["age_sec"], "twap_max_age_sec": twap["max_age_sec"],
+                "twap_features_slug": twap["features_slug"],
+                "strike": twap["strike"], "strike_verified": twap["strike_verified"],
+                "signed_distance_usd": twap["signed_distance_usd"],
+                "signed_distance_bps": twap["signed_distance_bps"],
+                "time_left_sec": time_left_sec, "qty": float(qty), "avg_entry": float(avg_entry),
+                "held_side_best_bid": float(best_bid), "held_side_best_ask": float(best_ask),
+                "breaker_reason": str(getattr(exit_decision, "reason", "") or ""),
+                "net_if_exit": float(getattr(exit_decision, "net_if_exit", 0) or 0),
+                "exit_px_effective": float(getattr(exit_decision, "exit_px_effective", 0) or 0),
+                "breaker_components": {
+                    key: meta.get(key) for key in (
+                        "near_settlement_fast_path", "adverse_persistence_sec",
+                        "adverse_thesis_weakening_count", "adverse_thesis_available_count",
+                        "adverse_trend_confirmed", "signal_score", "signal_locked",
+                        "signal_matches_position", "hold_sec", "absolute_max_loss_usdc",
+                    )
+                },
+                # Evaluation stratum only; never an input to the decision.
+                "market_day_type": breaker_v2_market_day_type(slug, now_ts),
+                "flag_enabled": True,
+            }
+            persisted = False
+            try:
+                persisted = bool(self._db_strategy_event(BREAKER_V2_DECISION_EVENT, payload))
+            except Exception:
+                persisted = False
+            if not persisted and decision == BREAKER_V2_SUPPRESS:
+                decision, reason = BREAKER_V2_FALLBACK_LEGACY, "suppress_not_persisted"
+                try:
+                    self._db_strategy_event(BREAKER_V2_DECISION_EVENT, {
+                        **payload, "decision": decision, "decision_reason": reason,
+                        "conditional_breaker_suppressed": False, "decision_ts": time.time(),
+                    })
+                except Exception:
+                    pass
+            decision = book.lock(epoch_key, slug=slug, instrument_id=inst_key, decision=decision, reason=reason)
+            self._breaker_v2_apply_side_effects(decision, inst_key)
+            logger.warning(
+                f"Breaker V2 authority: {decision} ({reason}) slug={slug} inst={inst_key} "
+                f"twap_state={twap['state']} twap={twap['twap']} strike={twap['strike']} "
+                f"age={twap['age_sec']} tte={time_left_sec}"
+            )
+            return decision
+        except Exception as exc:
+            logger.warning(f"Breaker V2 authority fault, legacy breaker kept: {exc}")
+            return book.lock(epoch_key, slug=slug, instrument_id=inst_key,
+                             decision=BREAKER_V2_FALLBACK_LEGACY, reason="authority_fault")
+
+    def _breaker_v2_apply_side_effects(self, decision: str, inst_key: str) -> None:
+        """SUPPRESS: never increase BUY exposure on this market pair."""
+        if decision != BREAKER_V2_SUPPRESS:
+            return
+        book = self._breaker_v2_book()
+        instruments = {inst_key}
+        pair = []
+        try:
+            pair = [self._instrument_key(inst) for inst in self._maker_quote_instruments()]
+        except Exception:
+            pair = []
+        if inst_key in pair:
+            instruments.update(pair)
+        book.block_buys(instruments)
+        canceller = getattr(self, "_cancel_maker_order_side", None)
+        if callable(canceller):
+            for inst in list(self._maker_quote_instruments()) if pair else []:
+                try:
+                    canceller(side="buy", instrument_id=inst, reason="breaker_v2_suppress_no_add_on")
+                except Exception:
+                    pass
 
     async def _maybe_taker_exit_positions(
         self: TakerExitHost,
@@ -654,10 +807,7 @@ class TakerExitMixin:
                 self._stop_loss_execution_priority_by_inst.get(inst_key, False)
                 or int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)) > 0
             )
-            exit_decision = self.exit_policy_engine.evaluate(
-                snapshot,
-                position,
-                signal_decision,
+            evaluate_kwargs = dict(
                 stop_loss_pending_active=stop_loss_pending_active,
                 locked_side_invalidated=confirmed_locked_side_invalidated,
                 confirmed_adverse_exit_active=confirmed_locked_side_invalidated,
@@ -665,6 +815,43 @@ class TakerExitMixin:
                 adverse_thesis_weakening_count=int(current_stop_votes.get("weakening_count", 0)),
                 adverse_thesis_available_count=int(current_stop_votes.get("available_count", 0)),
             )
+            # Breaker V2 (flag off => this block is inert and the call below is
+            # byte-identical to the legacy call).  The authority is decided
+            # once per position epoch at FIRST conditional-absolute eligibility.
+            breaker_v2_enabled = bool(getattr(self, "absolute_max_loss_twap_authority_gate_enabled", False))
+            breaker_v2_decision = None
+            breaker_v2_epoch = breaker_v2_position_epoch_key(slug_for_confirmation, inst_key, opened_ts)
+            if breaker_v2_enabled:
+                breaker_v2_decision = self._breaker_v2_book().get(breaker_v2_epoch)
+                evaluate_kwargs["suppress_conditional_absolute"] = breaker_v2_decision == BREAKER_V2_SUPPRESS
+            exit_decision = self.exit_policy_engine.evaluate(
+                snapshot,
+                position,
+                signal_decision,
+                **evaluate_kwargs,
+            )
+            if (
+                breaker_v2_enabled
+                and breaker_v2_decision is None
+                and exit_decision.reason == "absolute_max_loss_breaker"
+            ):
+                breaker_v2_decision = self._resolve_breaker_v2_authority(
+                    now_ts=now_ts, slug=slug_for_confirmation, inst_key=inst_key, inst_id=inst_id,
+                    epoch_key=breaker_v2_epoch, opened_ts=opened_ts, held_side=held_side,
+                    twap_features=stop_twap_features, strike=strike, qty=qty, avg_entry=avg_entry,
+                    best_bid=best_bid, best_ask=best_ask, time_left_sec=time_left_sec,
+                    exit_decision=exit_decision,
+                )
+                if breaker_v2_decision == BREAKER_V2_SUPPRESS:
+                    # Same cycle, same inputs: the conditional absolute branch is
+                    # skipped and catastrophic / every other exit is evaluated.
+                    evaluate_kwargs["suppress_conditional_absolute"] = True
+                    exit_decision = self.exit_policy_engine.evaluate(
+                        snapshot,
+                        position,
+                        signal_decision,
+                        **evaluate_kwargs,
+                    )
             self._note_protective_eval(inst_key, now_ts)
             # Research-only stop-timing telemetry: transition events through the
             # non-blocking journal queue; never raises and returns no decision.
@@ -710,6 +897,7 @@ class TakerExitMixin:
                     held_bid_ts=held_bid_ts, held_bid_size=held_bid_size,
                     quote_fresh_max_age_sec=getattr(self, "quote_max_delivery_delay_sec", None),
                     spot_fresh_max_age_sec=getattr(self, "_RAW_SPOT_FRESHNESS_SEC", None),
+                    **({"breaker_v2_decision": breaker_v2_decision} if breaker_v2_enabled else {}),
                 )
             # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
             # independently configured hard breaker may pass this boundary.
@@ -723,6 +911,7 @@ class TakerExitMixin:
                 confirmed_locked_side_invalidated
                 and net_if_exit <= -breaker_threshold
                 and exit_decision.reason != "absolute_max_loss_breaker"
+                and exit_decision.metadata.get("conditional_absolute_suppressed") != "1"
                 and time_left_sec is not None
                 and time_left_sec > 120.0
             ):

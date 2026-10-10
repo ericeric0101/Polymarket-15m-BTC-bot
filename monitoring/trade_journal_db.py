@@ -712,6 +712,60 @@ class TradeJournalDB:
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_stop failed: {e}")
 
+    def load_breaker_v2_authority_decision(self, slug: str, instrument_id: str) -> Optional[Dict[str, Any]]:
+        """Latest persisted Breaker V2 authority decision for (market, instrument).
+
+        Returns ``{"decision_record", "sell_qty_after_decision", "prior_absolute_submit"}``
+        or ``None`` when the lookup itself fails (the caller then fails safe to the
+        legacy breaker).  Read-only.
+        """
+        slug, instrument_id = str(slug or ""), str(instrument_id or "")
+        if not slug or not instrument_id:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT ts, payload_json FROM strategy_events
+                    WHERE event_type='BREAKER_V2_AUTHORITY_DECISION'
+                      AND json_extract(payload_json, '$.slug')=?
+                      AND json_extract(payload_json, '$.instrument_id')=?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (slug, instrument_id),
+                ).fetchone()
+                record = None
+                sell_qty_after = 0.0
+                if row is not None:
+                    record = json.loads(row[1])
+                    record["journal_ts"] = row[0]
+                    sold = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(qty), 0) FROM order_events
+                        WHERE event_type='ORDER_FILLED' AND UPPER(COALESCE(side, ''))='SELL'
+                          AND COALESCE(json_extract(payload_json, '$.instrument_id'), instrument_id)=?
+                          AND ts > ?
+                        """,
+                        (instrument_id, row[0]),
+                    ).fetchone()
+                    sell_qty_after = float(sold[0] or 0.0)
+                prior_submit = conn.execute(
+                    """
+                    SELECT 1 FROM order_events
+                    WHERE event_type='ORDER_TAKER_EXIT_SUBMIT'
+                      AND COALESCE(json_extract(payload_json, '$.instrument_id'), instrument_id)=?
+                      AND json_extract(payload_json, '$.slug')=?
+                      AND json_extract(payload_json, '$.decision_reason')='absolute_max_loss_breaker'
+                    LIMIT 1
+                    """,
+                    (instrument_id, slug),
+                ).fetchone()
+            return {"decision_record": record, "sell_qty_after_decision": sell_qty_after,
+                    "prior_absolute_submit": prior_submit is not None}
+        except Exception as e:
+            logger.warning(f"TradeJournalDB breaker V2 decision lookup failed: {e}")
+            return None
+
     def load_market_guard_counts(self, slug: str) -> Optional[Dict[str, int]]:
         """Recover per-market risk limits after a process or node restart."""
         slug = str(slug or "")
