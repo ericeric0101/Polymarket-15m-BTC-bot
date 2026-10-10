@@ -567,8 +567,14 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         fill_qty=float(event.last_qty),
         fill_price=float(event.last_px),
     )
+    # Journal the instrument that actually filled (the held token for exits).
+    # Without it _db_order_event defaults to the current active-side
+    # instrument, which flips to the paired token after an invalidation; the
+    # startup inventory replay selects ORDER_FILLED rows by instrument_id.
+    filled_inst_journal_key = str(strategy._instrument_key(filled_inst)) if filled_inst is not None else None
     strategy._db_order_event(
         event_type="ORDER_FILLED",
+        instrument_id=filled_inst_journal_key,
         client_order_id=str(getattr(event, "client_order_id", "")),
         venue_order_id=str(getattr(event, "venue_order_id", "")) if getattr(event, "venue_order_id", None) else None,
         side=(fill_side_norm.upper() if fill_side_norm else None),
@@ -590,7 +596,8 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             filled_econ=filled_econ,
             filled_directional_snapshot=filled_directional_snapshot,
             realized_net_usdc=realized_net_usdc,
-        ), **fill_lifecycle_payload},
+        ), **fill_lifecycle_payload,
+            **({"instrument_id": filled_inst_journal_key} if filled_inst_journal_key else {})},
     )
     complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
     if callable(complete_research_candidate):
