@@ -69,7 +69,7 @@
 
 ### 本次新發現
 
-1. **taker exit 的成交 token 記錯**：18 個市場的 SELL 成交記在對面的 token 上，但同一張單的 submit 列記的是買進的 token（例如 1790474400 的停損：submit token = 買入 token，原因 `stop_loss`）。投影改以 submit 為準。**執行期的成交處理也有同一個錯誤**，會讓 bot 帳上的庫存失真，這屬於交易行為修正，未在本次處理。
+1. **taker exit 的成交 token 記錯**（**更正 2026-10-10**：bot 記憶體裡的庫存帳本是正確的，錯的是 journal 的 `token_id` 欄位，以及 `cc1cd49` 之前的 payload instrument；啟動對帳會用這個欄位重播。已在 `fix/ledger-fee-token-guard` 修正，詳見 `project_overview.md`）：18 個市場的 SELL 成交記在對面的 token 上，但同一張單的 submit 列記的是買進的 token（例如 1790474400 的停損：submit token = 買入 token，原因 `stop_loss`）。投影改以 submit 為準。**執行期的成交處理也有同一個錯誤**，會讓 bot 帳上的庫存失真，這屬於交易行為修正，未在本次處理。
 2. **零價成交**：3 筆 SELL 價格為 0。其中 2 筆是同一張單真實成交的重複列；1 筆是唯一紀錄（實際成交價 0.97，見 venue）。
 3. **掛單 take-profit 成交漏記**：見 §2。
 4. **venue 手續費為 USDC**：見 §2。bot 的 taker BUY 費用模型（扣股數）與 venue 不符，影響 bot 的成本、停損與 PnL 計算；屬於交易／風控行為，未在本次修改。

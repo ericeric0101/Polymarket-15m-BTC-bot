@@ -2147,7 +2147,7 @@ def test_geoblock_rejection_stops_maker_quoting_without_retrying():
     assert strategy.order_events[-1]["event_type"] == "ORDER_REJECTED"
 
 
-def test_taker_buy_fill_updates_inventory_delta_with_net_shares():
+def test_taker_buy_fill_receives_full_shares_and_books_fee_in_usdc():
     strategy = DummyStrategyForFill()
 
     fill = SimpleNamespace(
@@ -2163,7 +2163,9 @@ def test_taker_buy_fill_updates_inventory_delta_with_net_shares():
 
     IntegratedBTCStrategy.on_order_filled(strategy, fill)
 
-    assert strategy.inventory_delta_shares == Decimal("5.10699904")
+    # The venue charges the taker BUY fee in USDC and delivers the full size
+    # (reports/pnl_reconciliation/, 42 of 42 bot taker BUYs).
+    assert strategy.inventory_delta_shares == Decimal("5.2")
 
 
 def test_urgent_exit_does_not_replace_recent_urgent_sell_too_quickly():

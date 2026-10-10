@@ -126,6 +126,20 @@ def reset_denied_order_streak(strategy: Any) -> None:
     strategy.consecutive_denied_sides = set()
 
 
+def own_order_instrument(strategy: Any, event: Any) -> Any:
+    """Instrument our order was submitted for (Nautilus cache by client order id), or None."""
+    cache = getattr(strategy, "cache", None)
+    lookup = getattr(cache, "order", None)
+    client_order_id = getattr(event, "client_order_id", None)
+    if not callable(lookup) or client_order_id is None:
+        return None
+    try:
+        order = lookup(client_order_id)
+    except Exception:
+        return None
+    return getattr(order, "instrument_id", None) if order is not None else None
+
+
 def is_permanent_trading_restriction(reason: str) -> bool:
     """Return whether the venue explicitly forbids trading from this client.
 
@@ -197,8 +211,21 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         # Persist an explicit source for all new maker fills. Historic rows
         # remain conservatively classified by client-order-id prefix.
         filled_directional_snapshot.setdefault("entry_source", "normal_maker")
+    event_inst = getattr(event, "instrument_id", None)
     if filled_inst is None:
-        filled_inst = getattr(event, "instrument_id", None) or strategy.instrument_id
+        # Our own order's instrument is the authority. A crossing taker exit can
+        # be matched against the complementary token, and the venue's fill then
+        # reports that sibling instrument; booking it there would leave the sold
+        # token in inventory and corrupt the stop's cost basis.
+        filled_inst = own_order_instrument(strategy, event) or event_inst or strategy.instrument_id
+    fill_instrument_mismatch = (
+        event_inst is not None and filled_inst is not None and str(event_inst) != str(filled_inst)
+    )
+    if fill_instrument_mismatch:
+        logger.warning(
+            f"Fill instrument differs from own order: order={filled_id} own={filled_inst} "
+            f"fill_event={event_inst}; booking against the order's own instrument"
+        )
 
     fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
     fill_qty_dec = pending_fill_qty_dec
@@ -612,7 +639,8 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             filled_directional_snapshot=filled_directional_snapshot,
             realized_net_usdc=realized_net_usdc,
         ), **fill_lifecycle_payload, **fill_slug_payload,
-            **({"instrument_id": filled_inst_journal_key} if filled_inst_journal_key else {})},
+            **({"instrument_id": filled_inst_journal_key} if filled_inst_journal_key else {}),
+            **({"fill_event_instrument_id": str(event_inst)} if fill_instrument_mismatch else {})},
     )
     complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
     if callable(complete_research_candidate):

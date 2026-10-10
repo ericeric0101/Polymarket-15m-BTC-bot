@@ -9,9 +9,11 @@ the strategy's own journal writer:
 * the venue's TRADE cash legs for those markets (missed fills, real fees);
 * REDEEM cash for those markets.
 
-It never edits or adds MARKET_CYCLE_PNL and never touches the session PnL
-guard, regime guard or any order state: effective PnL is projected from the
-evidence by ``monitoring.pnl_attribution``. Restart-safe: already journaled
+It never edits or adds MARKET_CYCLE_PNL and never touches the regime guard
+or any order state: effective PnL is projected from the evidence by
+``monitoring.pnl_attribution``. The optional ``after_cycle`` hook lets the
+strategy apply its idempotent, open-session-only guard correction
+(``StrategyDBRuntimeMixin._apply_settlement_evidence_session_corrections``). Restart-safe: already journaled
 evidence keys are re-read every cycle, so retries, duplicate API pages and
 restarts cannot write the same fact twice. Every network/journal error is
 logged and retried next cycle; nothing propagates into the caller.
@@ -70,6 +72,7 @@ class SettlementConfirmationWorker:
         lookback_sec: float = 7 * 86400.0,
         max_outcome_fetches_per_cycle: int = 20,
         now_fn: Callable[[], float] = time.time,
+        after_cycle: Optional[Callable[[], Any]] = None,
     ) -> None:
         self.journal_path = Path(journal_path)
         self.write_event = write_event
@@ -80,6 +83,7 @@ class SettlementConfirmationWorker:
         self.lookback_sec = max(MARKET_DURATION_SEC, float(lookback_sec))
         self.max_outcome_fetches = max(1, int(max_outcome_fetches_per_cycle))
         self.now_fn = now_fn
+        self.after_cycle = after_cycle
         self.last_stats: Dict[str, Any] = {}
 
     @staticmethod
@@ -207,7 +211,14 @@ class SettlementConfirmationWorker:
         while not stop_event.is_set():
             try:
                 stats = self.cycle()
-                if any(stats.get(k) for k in ("outcomes_written", "trades_written", "redeems_written")) or stats["errors"]:
+                if self.after_cycle is not None:
+                    try:
+                        stats["session_correction"] = self.after_cycle()
+                    except Exception as exc:
+                        stats["errors"].append(f"session_correction: {exc}")
+                correction = stats.get("session_correction") or {}
+                if any(stats.get(k) for k in ("outcomes_written", "trades_written", "redeems_written")) \
+                        or correction.get("applied") or stats["errors"]:
                     logger.info(f"Settlement confirmation cycle: {stats}")
             except Exception as exc:  # defensive: the worker must never die silently
                 logger.warning(f"Settlement confirmation cycle failed: {exc}")

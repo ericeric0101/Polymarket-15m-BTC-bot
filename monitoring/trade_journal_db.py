@@ -4,6 +4,7 @@ SQLite trade journal for run_bot live/simulation diagnostics and analytics.
 from __future__ import annotations
 
 import json
+import re
 import math
 import queue
 import shutil
@@ -72,6 +73,25 @@ def _summarize_adverse_markouts(
         "horizon_sec": float(horizon_sec),
         "lookback_hours": float(lookback_hours),
     }
+
+
+SESSION_CORRECTION_EVENT = "SESSION_PNL_EVIDENCE_CORRECTION"
+
+
+def session_window_local(session_date_taipei: str) -> tuple:
+    """[start, end) of a guard session in Asia/Taipei (night 19:30-07:30, '-day' 07:30-19:30)."""
+    is_day_session = str(session_date_taipei).endswith("-day")
+    raw_date = str(session_date_taipei)[:-4] if is_day_session else str(session_date_taipei)
+    session_day = calendar_date.fromisoformat(raw_date)
+    local_zone = ZoneInfo("Asia/Taipei")
+    if is_day_session:
+        return (datetime.combine(session_day, datetime_time(7, 30), tzinfo=local_zone),
+                datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone))
+    return (datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone),
+            datetime.combine(session_day + timedelta(days=1), datetime_time(7, 30), tzinfo=local_zone))
+
+
+_TOKEN_IN_INSTRUMENT = re.compile(r"-([0-9]+)\.POLYMARKET$")
 
 
 class TradeJournalDB:
@@ -1305,20 +1325,25 @@ class TradeJournalDB:
         total = Decimal("0")
         high = Decimal("0")
         try:
-            is_day_session = str(session_date_taipei).endswith("-day")
-            raw_date = str(session_date_taipei)[:-4] if is_day_session else str(session_date_taipei)
-            session_day = calendar_date.fromisoformat(raw_date)
-            local_zone = ZoneInfo("Asia/Taipei")
-            if is_day_session:
-                start_local = datetime.combine(session_day, datetime_time(7, 30), tzinfo=local_zone)
-                end_local = datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone)
-            else:
-                start_local = datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone)
-                end_local = datetime.combine(session_day + timedelta(days=1), datetime_time(7, 30), tzinfo=local_zone)
+            start_local, end_local = session_window_local(session_date_taipei)
+            local_zone = start_local.tzinfo
             with self._connect() as conn:
                 rows = conn.execute(
                     "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id"
                 ).fetchall()
+                # Evidence corrections applied to this session's live guard
+                # (bot.db_runtime) must survive a reconstruction too.
+                corrections = conn.execute(
+                    """SELECT json_extract(payload_json, '$.delta_usdc') FROM strategy_events
+                       WHERE event_type=? AND json_extract(payload_json, '$.session_date_taipei')=? ORDER BY id""",
+                    (SESSION_CORRECTION_EVENT, str(session_date_taipei)),
+                ).fetchall()
+            for (delta,) in corrections:
+                try:
+                    total += Decimal(str(delta or 0))
+                    high = max(high, total)
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
             for ts, raw in rows:
                 try:
                     event_time = datetime.fromisoformat(str(ts))
@@ -1466,13 +1491,23 @@ class TradeJournalDB:
             if existing is not None:
                 return None
             rows = conn.execute(
-                """SELECT run_id, side, price, qty, token_id, commission_usdc, payload_json
+                """SELECT run_id, side, price, qty, token_id, commission_usdc, payload_json, client_order_id
                    FROM order_events
                    WHERE event_type='ORDER_FILLED'
                      AND json_extract(payload_json, '$.slug')=?
                    ORDER BY id""",
                 (slug,),
             ).fetchall()
+            submit_tokens = {
+                str(coid): str(tok) for coid, tok in conn.execute(
+                    f"""SELECT client_order_id, token_id FROM order_events
+                        WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_TAKER_EXIT_SUBMIT', 'ORDER_MAKER_INTENT')
+                          AND client_order_id IN ({','.join('?' * len(rows))})
+                          AND token_id IS NOT NULL AND token_id <> ''
+                        ORDER BY id DESC""",
+                    [str(r[7] or "") for r in rows],
+                )
+            } if rows else {}
             if not rows:
                 return None
 
@@ -1483,13 +1518,19 @@ class TradeJournalDB:
             lots: Dict[str, Dict[str, Decimal]] = {}
             sell_realized = Decimal("0")
             run_id = str(rows[-1][0] or "startup_recovery")
-            for _run_id, raw_side, raw_price, raw_qty, raw_token, raw_commission, raw_payload in rows:
+            for _run_id, raw_side, raw_price, raw_qty, raw_token, raw_commission, raw_payload, raw_coid in rows:
                 side = str(raw_side or "").upper()
                 token_id = str(raw_token or "")
                 try:
                     price = Decimal(str(raw_price or 0))
                     qty = Decimal(str(raw_qty or 0))
                     payload = json.loads(raw_payload or "{}")
+                    # The token_id column held the current active side, not the
+                    # filled token (and before cc1cd49 so did the payload). The
+                    # order's own submit row wins, then the fill's instrument.
+                    match = _TOKEN_IN_INSTRUMENT.search(str(
+                        (payload.get("instrument_id") if isinstance(payload, dict) else "") or ""))
+                    token_id = submit_tokens.get(str(raw_coid or "")) or (match.group(1) if match else token_id)
                     fee = Decimal(str(
                         (payload.get("effective_fee_usdc") if isinstance(payload, dict) else None)
                         or raw_commission
