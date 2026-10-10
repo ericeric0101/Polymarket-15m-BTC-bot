@@ -324,8 +324,16 @@ early-warning stop exists.
      min/max, `max_dd` may be a lower bound, and nothing is interpolated.
    - Timeline per position: ENTRY, T_BINANCE_*, T_TOKEN_* FIRST / RECOVERY /
      SECOND, T_CHAINLINK_SPOT_CROSS, T_TWAP_CROSS, T_MINUS2,
-     T_BREAKER_ELIGIBLE, T_EXIT_SUBMIT, T_EXIT_FILL. Each carries TTE,
+     T_BREAKER_ELIGIBLE, T_PROTECTIVE_EXIT_SUBMIT, T_PROTECTIVE_EXIT_FILL,
+     T_TP_EXIT_FILL, T_OTHER_EXIT_FILL. Each carries TTE,
      legacy `required_move_sigma` and `required_move_z_diffusion` context.
+   - Exit events are split by exit kind, classified from the client order id:
+     `BTC-15M-TAKER-EXIT-` = protective taker exit (its submit is
+     `ORDER_TAKER_EXIT_SUBMIT`); `BTC-15M-MAKER-SELL-` = maker TP fill;
+     urgent maker, recovery-passive and unrecognised SELL fills go to
+     T_OTHER_EXIT_FILL. `exit_fill_kind` names the kind of the first SELL
+     fill. A maker TP fill is never a protective exit (the old T_EXIT_FILL
+     mixed them; before 2026-10-10 reports used T_EXIT_SUBMIT / T_EXIT_FILL).
      `UNKNOWN` ≠ `NOT_TRIGGERED`. Legacy sigma is not a probability or a
      z-score, and no sigma threshold exists.
    - These events never trigger a SELL.
@@ -354,6 +362,21 @@ early-warning stop exists.
      `exit_depth_covers_qty` = exit_size_depth_sufficient,
      `exit_vwap_for_qty` = exit_size_vwap_if_available, `exit_l2_age_sec` /
      `exit_l2_fresh` = l2_age_sec / l2_fresh. New fields:
+     - `exit_l2_age_sec` is measured against the protective cycle's `now_ts`,
+       which is read before the L2 callback may stamp the book. A negative age
+       down to −1.0 s (`L2_NEGATIVE_AGE_TOLERANCE_SEC`) is that clock-read
+       ordering artefact and is recorded as 0.0 / FRESH. Older than 2 s, or
+       more negative than −1.0 s, stays STALE. LIVE rows before 2026-10-10
+       may show −0.77..−0.88 s labelled STALE.
+     - `POSITION_SETTLEMENT` carries `settlement_relabel`. When runtime
+       settlement fires UNKNOWN and `canonical_twap_deferred_relabel` later
+       upgrades it, a second row for the same `position_epoch` follows with
+       `settlement_relabel = true`, the upgraded `settlement_outcome_runtime`,
+       the recomputed `counterfactual_hold_gross_pnl`,
+       `superseded_outcome_runtime = UNKNOWN`, `settlement_outcome_source` and
+       `settlement_relabel_ts`. Readers take the last row per epoch. The
+       relabel stays owned by `_finalize_settlement_relabel`; the row is only
+       emitted after the authoritative writes.
      - `chainlink_spot` / `_age_sec` / `_fresh`, `chainlink_cross_state`,
        `chainlink_signed_distance_bps`
      - `binance_spot_fresh`, `binance_adverse_move_bps`
