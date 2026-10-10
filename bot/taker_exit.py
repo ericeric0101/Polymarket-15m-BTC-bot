@@ -139,6 +139,18 @@ class TakerExitMixin:
             reasons = getattr(self, "_protective_eval_skip_reason_by_inst", None)
             if isinstance(reasons, dict):
                 reasons.pop(inst_key, None)
+            # A reported PROTECTIVE_EVAL_GAP ends here; memory only (the
+            # watchdog emits PROTECTIVE_EVAL_GAP_END, never this exit path).
+            open_gaps = getattr(self, "_protective_eval_gap_open_by_inst", None)
+            if isinstance(open_gaps, dict) and inst_key in open_gaps:
+                closed = getattr(self, "_protective_eval_gap_closed", None)
+                if not isinstance(closed, list):
+                    closed = []
+                    self._protective_eval_gap_closed = closed
+                if len(closed) < 64:
+                    closed.append((inst_key, open_gaps.pop(inst_key), float(now_ts)))
+                else:
+                    open_gaps.pop(inst_key, None)
         except Exception:
             pass
 

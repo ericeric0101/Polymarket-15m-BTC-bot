@@ -54,6 +54,27 @@ REFERENCE_FRESH_SEC = 5.0
 PROTECTIVE_EVAL_GAP_EVENT = "PROTECTIVE_EVAL_GAP"
 PROTECTIVE_EVAL_GAP_WARN_SEC = 10.0
 PROTECTIVE_EVAL_GAP_LOG_INTERVAL_SEC = 30.0
+# Emitted from the watchdog once a reported gap has ended (the exit path only
+# records the end time in memory; it never writes to the journal).
+PROTECTIVE_EVAL_GAP_END_EVENT = "PROTECTIVE_EVAL_GAP_END"
+MAX_CLOSED_GAPS_PENDING = 64
+GAP_CAUSE_QUOTE_STALL = "QUOTE_STREAM_STALL"
+GAP_CAUSE_HIGH_COST = "HIGH_COST_COOLDOWN"
+GAP_CAUSE_REJECT = "REJECT_COOLDOWN"
+GAP_CAUSE_UNKNOWN = "UNKNOWN"
+
+
+def protective_gap_cause(*, quote_age_sec, skip_reason, high_cost_active: bool, reject_active: bool) -> str:
+    """Observation-only cause class.  Evaluation is driven by QuoteTick, so a
+    quote silence at least as long as the warning bound is reported first; a
+    cooldown only explains a gap while quotes keep arriving."""
+    if quote_age_sec is None or float(quote_age_sec) >= PROTECTIVE_EVAL_GAP_WARN_SEC:
+        return GAP_CAUSE_QUOTE_STALL
+    if high_cost_active or skip_reason == "high_cost_cooldown":
+        return GAP_CAUSE_HIGH_COST
+    if reject_active or "reject" in str(skip_reason or ""):
+        return GAP_CAUSE_REJECT
+    return GAP_CAUSE_UNKNOWN
 
 
 class ProtectiveExitMixin:
@@ -204,6 +225,17 @@ class ProtectiveExitMixin:
                 quote_ts = quote_ts_by_inst.get(inst_key)
                 hc = float(high_cost_until.get(inst_key, 0.0) or 0.0)
                 rj = float(reject_until.get(inst_key, 0.0) or 0.0)
+                open_gaps = getattr(self, "_protective_eval_gap_open_by_inst", None)
+                if not isinstance(open_gaps, dict):
+                    open_gaps = {}
+                    self._protective_eval_gap_open_by_inst = open_gaps
+                open_gaps.setdefault(inst_key, start_ts)
+                quote_age = (float(now_ts) - float(quote_ts)) if quote_ts is not None else None
+                reference_age = (float(now_ts) - reference_ts) if reference_ts > 0 else None
+                try:
+                    held_side = str(getattr(self._side_for_instrument_id(inst_key), "value", "") or "") or None
+                except Exception:
+                    held_side = None
                 payload = {
                     "instrument_id": inst_key,
                     "slug": str(getattr(self, "current_market_slug", "") or ""),
@@ -221,6 +253,15 @@ class ProtectiveExitMixin:
                     "pending_exit": inst_key in pending,
                     "kill_class": kill_class,
                     "observability_only": True,
+                    # Pre-LIVE research names (aliases of the fields above).
+                    "gap_start_ts": start_ts, "gap_end_ts": None, "gap_open": True,
+                    "gap_duration_sec": gap, "held_position_qty": float(qty), "held_side": held_side,
+                    "last_quote_age_sec": quote_age, "last_reference_age_sec": reference_age,
+                    "skip_reason": skip_reason.get(inst_key),
+                    "cooldown_active": bool(hc > float(now_ts) or rj > float(now_ts)),
+                    "cause_class": protective_gap_cause(
+                        quote_age_sec=quote_age, skip_reason=skip_reason.get(inst_key),
+                        high_cost_active=hc > float(now_ts), reject_active=rj > float(now_ts)),
                 }
                 logger.warning(f"{PROTECTIVE_EVAL_GAP_EVENT}: inst={inst_key} gap={gap:.1f}s details={payload}")
                 record = getattr(self, "_db_strategy_event", None)
@@ -229,9 +270,35 @@ class ProtectiveExitMixin:
         except Exception as exc:  # observability must never affect trading
             logger.debug(f"protective eval gap report skipped: {type(exc).__name__}")
 
+    def _flush_protective_eval_gap_ends(self, now_ts: float, held: Dict[str, Dict[str, Any]]) -> None:
+        """Emit PROTECTIVE_EVAL_GAP_END for reported gaps that have ended.  Never raises."""
+        try:
+            record = getattr(self, "_db_strategy_event", None)
+            closed = getattr(self, "_protective_eval_gap_closed", None)
+            ended = list(closed) if isinstance(closed, list) else []
+            if isinstance(closed, list):
+                closed.clear()
+            open_gaps = getattr(self, "_protective_eval_gap_open_by_inst", None)
+            if isinstance(open_gaps, dict):
+                for inst_key in [k for k in open_gaps if k not in held]:
+                    ended.append((inst_key, open_gaps.pop(inst_key), None))
+            for inst_key, start_ts, end_ts in ended:
+                payload = {
+                    "instrument_id": inst_key, "slug": str(getattr(self, "current_market_slug", "") or ""),
+                    "gap_start_ts": start_ts, "gap_end_ts": end_ts,
+                    "gap_duration_sec": (float(end_ts) - float(start_ts)) if end_ts is not None else None,
+                    "gap_end_reason": "protective_evaluation_resumed" if end_ts is not None else "position_no_longer_held",
+                    "reported_ts": float(now_ts), "observability_only": True,
+                }
+                if callable(record):
+                    record(PROTECTIVE_EVAL_GAP_END_EVENT, payload)
+        except Exception as exc:  # observability must never affect trading
+            logger.debug(f"protective eval gap end skipped: {type(exc).__name__}")
+
     def _report_protective_exit_availability(self, now_ts: float) -> None:
         """Watchdog-driven observability; never evaluates exits or submits orders."""
         held = self._held_protective_positions()
+        self._flush_protective_eval_gap_ends(now_ts, held)
         if not held:
             return
         self._report_protective_eval_gaps(now_ts, held)

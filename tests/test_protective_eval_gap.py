@@ -111,3 +111,74 @@ def test_gap_warning_failure_never_raises():
 
     host._db_strategy_event = _broken
     host._report_protective_eval_gaps(now, host._held_protective_positions())  # must not raise
+
+
+# ---------------------------------------------- pre-LIVE telemetry semantics
+from bot.protective_exit import PROTECTIVE_EVAL_GAP_END_EVENT  # noqa: E402
+
+
+def test_gap_payload_has_research_fields_and_cause_class():
+    host = _ProtectiveHost()
+    now = time.time()
+    host._protective_eval_last_ts_by_inst = {"up": now - 40.0}
+    host.last_quote_update_ts_by_inst = {"up": now - 1.0, "down": now}
+    host._report_protective_exit_availability(now)
+    payload = _gap_events(host)[0][2]
+    assert payload["gap_start_ts"] == now - 40.0
+    assert payload["gap_end_ts"] is None and payload["gap_open"] is True
+    assert payload["gap_duration_sec"] == payload["gap_sec"]
+    assert payload["held_position_qty"] == 10.0 and payload["held_side"] == "UP"
+    assert abs(payload["last_quote_age_sec"] - 1.0) < 1e-6
+    assert "last_reference_age_sec" in payload and "skip_reason" in payload
+    assert payload["cooldown_active"] is False
+    assert payload["cause_class"] == "UNKNOWN"
+    assert host.venue_submissions == []
+
+
+def test_quote_stream_stall_cause():
+    host = _ProtectiveHost()
+    now = time.time()
+    host._protective_eval_last_ts_by_inst = {"up": now - 40.0}
+    host.last_quote_update_ts_by_inst = {"up": now - 35.0, "down": now - 35.0}
+    host._report_protective_exit_availability(now)
+    assert _gap_events(host)[0][2]["cause_class"] == "QUOTE_STREAM_STALL"
+
+
+def test_high_cost_and_reject_cooldown_causes():
+    host = _ProtectiveHost()
+    now = time.time()
+    host._protective_eval_last_ts_by_inst = {"up": now - 40.0}
+    host.high_cost_exit_cooldown_until_by_inst = {"up": now + 30.0}
+    host._report_protective_exit_availability(now)
+    payload = _gap_events(host)[0][2]
+    assert payload["cause_class"] == "HIGH_COST_COOLDOWN" and payload["cooldown_active"] is True
+    other = _ProtectiveHost()
+    other._protective_eval_last_ts_by_inst = {"up": now - 40.0}
+    other.taker_exit_reject_cooldown_until_by_inst = {"up": now + 10.0}
+    other._report_protective_exit_availability(now)
+    assert _gap_events(other)[0][2]["cause_class"] == "REJECT_COOLDOWN"
+
+
+def test_reported_gap_end_is_recorded_without_exit_path_io():
+    host = _ProtectiveHost()
+    now = time.time()
+    host._protective_eval_last_ts_by_inst = {"up": now - 40.0}
+    host._report_protective_exit_availability(now)
+    events_before = len(host.events)
+    host._note_protective_eval("up", now + 3.0)       # exit path: memory only, no journal write
+    assert len(host.events) == events_before
+    host._report_protective_exit_availability(now + 4.0)
+    (end,) = host.event_names(PROTECTIVE_EVAL_GAP_END_EVENT)
+    payload = end[2]
+    assert payload["gap_start_ts"] == now - 40.0 and payload["gap_end_ts"] == now + 3.0
+    assert abs(payload["gap_duration_sec"] - 43.0) < 1e-6
+    host._report_protective_exit_availability(now + 40.0)
+    assert len(host.event_names(PROTECTIVE_EVAL_GAP_END_EVENT)) == 1  # emitted once
+
+
+def test_unreported_short_pause_creates_no_gap_end():
+    host = _ProtectiveHost()
+    now = time.time()
+    host._note_protective_eval("up", now)
+    host._report_protective_exit_availability(now + 2.0)
+    assert host.event_names(PROTECTIVE_EVAL_GAP_END_EVENT) == []
