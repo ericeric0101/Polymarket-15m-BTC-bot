@@ -94,7 +94,8 @@ def reconstruct(conn: sqlite3.Connection, run_id: str) -> dict[str, dict[str, An
         elif kind == "POSITION_SETTLEMENT":
             pos["settlement"] = {k: payload.get(k) for k in (
                 "settlement_outcome_runtime", "counterfactual_hold_gross_pnl", "official_outcome",
-                "telemetry_counters", "telemetry_disabled", "cross_count")}
+                "telemetry_counters", "telemetry_disabled", "cross_count", "settlement_relabel",
+                "superseded_outcome_runtime", "settlement_outcome_source")}
 
     orows = conn.execute(
         f"SELECT ts, event_type, client_order_id, side, price, qty, status, reason, instrument_id, payload_json "

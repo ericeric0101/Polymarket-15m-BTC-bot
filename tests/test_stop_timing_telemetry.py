@@ -356,3 +356,62 @@ def test_report_reconstructs_orders_and_settlement_link(tmp_path):
     assert buy["kind"] == "BUY" and buy["filled_qty"] == 10.0 and buy["submit_count"] == 1
     assert sell["kind"] == "PROTECTIVE_SELL" and sell["rejected"] and sell["filled_qty"] == 0
     assert sell["events"][0]["reason"] == "absolute_max_loss_breaker"
+
+
+def test_deferred_relabel_emits_follow_up_settlement_row():
+    # LIVE run_1791621743 / btc-updown-15m-1791623700: MARKET_SETTLEMENT fired
+    # UNKNOWN, then canonical_twap_deferred_relabel DOWN one second later.
+    sink = Sink()
+    tel = StopTimingTelemetry(emit=sink, run_id="r1")
+    _obs(tel, END - 300, twap=100010.0)
+    tel.on_settlement_safe(slug=SLUG, outcome="UNKNOWN", settlement_ts=END)
+    tel.on_settlement_relabel_safe(slug=SLUG, outcome="DOWN", settlement_ts=END, relabel_ts=END + 1,
+                                   reference_source="polymarket_chainlink_twap_60s_ws",
+                                   reference_is_canonical=True,
+                                   outcome_source="canonical_twap_deferred_relabel")
+    first, follow = sink.of("STOP_TIMING_POSITION_SETTLEMENT")
+    assert first["settlement_outcome_runtime"] == "UNKNOWN" and first["counterfactual_hold_gross_pnl"] is None
+    assert first["settlement_relabel"] is False
+    assert follow["settlement_relabel"] is True
+    assert follow["position_epoch"] == first["position_epoch"]
+    assert follow["settlement_outcome_runtime"] == "DOWN"
+    assert follow["superseded_outcome_runtime"] == "UNKNOWN"
+    assert follow["settlement_outcome_source"] == "canonical_twap_deferred_relabel"
+    assert follow["settlement_relabel_ts"] == END + 1 and follow["settlement_ts"] == END
+    assert follow["counterfactual_hold_gross_pnl"] == pytest.approx(10.0 * (0.0 - 0.65))
+    assert follow["first_times"] == first["first_times"]
+    # Exactly once; unknown slugs and UNKNOWN relabels emit nothing.
+    tel.on_settlement_relabel_safe(slug=SLUG, outcome="DOWN", settlement_ts=END)
+    tel.on_settlement_relabel_safe(slug="other", outcome="UP", settlement_ts=END)
+    assert len(sink.of("STOP_TIMING_POSITION_SETTLEMENT")) == 2
+
+
+def test_known_settlement_is_not_retained_for_relabel():
+    sink = Sink()
+    tel = StopTimingTelemetry(emit=sink, run_id="r1")
+    _obs(tel, END - 300, twap=100010.0)
+    tel.on_settlement_safe(slug=SLUG, outcome="UP", settlement_ts=END)
+    tel.on_settlement_relabel_safe(slug=SLUG, outcome="DOWN", settlement_ts=END)
+    (only,) = sink.of("STOP_TIMING_POSITION_SETTLEMENT")
+    assert only["settlement_outcome_runtime"] == "UP"
+
+
+def test_report_uses_the_relabelled_settlement_row(tmp_path):
+    path = tmp_path / "journal.db"
+    db = TradeJournalDB(path, backup_interval_sec=3600)
+    try:
+        sink = Sink()
+        tel = StopTimingTelemetry(emit=sink, run_id="r1")
+        _obs(tel, END - 300, twap=100010.0)
+        tel.on_settlement_safe(slug=SLUG, outcome="UNKNOWN", settlement_ts=END)
+        tel.on_settlement_relabel_safe(slug=SLUG, outcome="DOWN", settlement_ts=END, relabel_ts=END + 1,
+                                       outcome_source="canonical_twap_deferred_relabel")
+        for event_type, payload in sink.rows:
+            db.log_strategy_event("r1", event_type, payload)
+    finally:
+        db.stop()
+    pos = next(iter(reconstruct(sqlite3.connect(path), "r1")[SLUG]["positions"].values()))
+    assert pos["settlement"]["settlement_outcome_runtime"] == "DOWN"
+    assert pos["settlement"]["settlement_relabel"] is True
+    assert pos["settlement"]["superseded_outcome_runtime"] == "UNKNOWN"
+    assert pos["settlement"]["counterfactual_hold_gross_pnl"] == pytest.approx(-6.5)

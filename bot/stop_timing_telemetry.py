@@ -288,6 +288,9 @@ class StopTimingTelemetry:
         self.run_id = str(run_id)
         self._clock = clock
         self._epochs: dict[str, dict[str, Any]] = {}
+        # Epochs settled with a runtime UNKNOWN outcome, keyed by slug, kept
+        # (bounded) only so a deferred relabel can emit a follow-up row.
+        self._awaiting_relabel: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         self.counters = {"observations": 0, "emitted": 0, "sink_rejected": 0, "capped": 0,
                          "exceptions": 0, "slow_calls": 0}
         self.disabled = False
@@ -315,6 +318,10 @@ class StopTimingTelemetry:
 
     def on_settlement_safe(self, **kwargs: Any) -> None:
         self._guarded(self._on_settlement, kwargs)
+
+    def on_settlement_relabel_safe(self, **kwargs: Any) -> None:
+        """Deferred relabel of an UNKNOWN settlement (label only; never raises)."""
+        self._guarded(self._on_settlement_relabel, kwargs)
 
     def _emit(self, epoch: Optional[dict[str, Any]], event: str, payload: dict[str, Any]) -> None:
         if self._emit_sink is None:
@@ -559,21 +566,55 @@ class StopTimingTelemetry:
         outcome_u = str(outcome or "UNKNOWN").upper()
         for key in [k for k, e in self._epochs.items() if e["slug"] == str(slug)]:
             epoch = self._epochs.pop(key)
-            held = str(epoch["held_side"]).upper()
-            hold_pnl = None
-            if outcome_u in {"UP", "DOWN"}:
-                payout = 1.0 if held == outcome_u else 0.0
-                # Counterfactual: hold the max observed quantity to settlement
-                # (entry fees excluded; realized PnL comes from journal fills).
-                hold_pnl = epoch["max_qty"] * (payout - epoch["avg_entry"])
-            self._emit(None, "POSITION_SETTLEMENT", {
-                "slug": slug, "position_epoch": key, "held_side": held,
-                "settlement_outcome_runtime": outcome_u, "settlement_ts": float(settlement_ts),
-                "settlement_reference_source": reference_source,
-                "settlement_reference_is_canonical": reference_is_canonical,
-                "official_outcome": "PENDING_OFFICIAL_RESOLUTION",
-                "counterfactual_hold_gross_pnl": hold_pnl, "max_qty": epoch["max_qty"],
-                "avg_entry": epoch["avg_entry"], "first_times": dict(epoch["first"]),
-                "cross_count": epoch["cross_seq"], "last_observation": epoch.get("last_snap"),
-                "telemetry_counters": dict(self.counters), "telemetry_disabled": self.disabled,
-            })
+            self._emit_settlement(key, epoch, slug=slug, outcome_u=outcome_u, settlement_ts=settlement_ts,
+                                  reference_source=reference_source,
+                                  reference_is_canonical=reference_is_canonical)
+            if outcome_u not in {"UP", "DOWN"}:
+                retained = self._awaiting_relabel.setdefault(str(slug), [])
+                retained.append((key, epoch))
+                while len(self._awaiting_relabel) > MAX_EPOCHS:
+                    self._awaiting_relabel.pop(next(iter(self._awaiting_relabel)))
+
+    def _on_settlement_relabel(self, *, slug: str, outcome: str, settlement_ts: float,
+                               relabel_ts: Optional[float] = None, reference_source: Optional[str] = None,
+                               reference_is_canonical: Optional[bool] = None,
+                               outcome_source: Optional[str] = None) -> None:
+        """Follow-up POSITION_SETTLEMENT row once the runtime label is upgraded.
+
+        The lifecycle runtime owns the relabel (``_finalize_settlement_relabel``);
+        this only re-emits the same epoch summary with the upgraded label.
+        Exactly once per retained epoch; an UNKNOWN relabel emits nothing.
+        """
+        outcome_u = str(outcome or "UNKNOWN").upper()
+        if outcome_u not in {"UP", "DOWN"}:
+            return
+        for key, epoch in self._awaiting_relabel.pop(str(slug), []):
+            self._emit_settlement(key, epoch, slug=slug, outcome_u=outcome_u, settlement_ts=settlement_ts,
+                                  reference_source=reference_source,
+                                  reference_is_canonical=reference_is_canonical,
+                                  relabel={"superseded_outcome_runtime": "UNKNOWN",
+                                           "settlement_outcome_source": outcome_source,
+                                           "settlement_relabel_ts": _num(relabel_ts)})
+
+    def _emit_settlement(self, key: str, epoch: dict[str, Any], *, slug: str, outcome_u: str, settlement_ts: float,
+                         reference_source: Optional[str], reference_is_canonical: Optional[bool],
+                         relabel: Optional[dict[str, Any]] = None) -> None:
+        held = str(epoch["held_side"]).upper()
+        hold_pnl = None
+        if outcome_u in {"UP", "DOWN"}:
+            payout = 1.0 if held == outcome_u else 0.0
+            # Counterfactual: hold the max observed quantity to settlement
+            # (entry fees excluded; realized PnL comes from journal fills).
+            hold_pnl = epoch["max_qty"] * (payout - epoch["avg_entry"])
+        self._emit(None, "POSITION_SETTLEMENT", {
+            "slug": slug, "position_epoch": key, "held_side": held,
+            "settlement_outcome_runtime": outcome_u, "settlement_ts": float(settlement_ts),
+            "settlement_reference_source": reference_source,
+            "settlement_reference_is_canonical": reference_is_canonical,
+            "settlement_relabel": relabel is not None, **(relabel or {}),
+            "official_outcome": "PENDING_OFFICIAL_RESOLUTION",
+            "counterfactual_hold_gross_pnl": hold_pnl, "max_qty": epoch["max_qty"],
+            "avg_entry": epoch["avg_entry"], "first_times": dict(epoch["first"]),
+            "cross_count": epoch["cross_seq"], "last_observation": epoch.get("last_snap"),
+            "telemetry_counters": dict(self.counters), "telemetry_disabled": self.disabled,
+        })

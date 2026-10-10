@@ -674,6 +674,7 @@ class StrategyLifecycleMixin:
                 "inventory_shares": 0.0, "redeem_per_share": 0.0, "redeem_value_usdc": 0.0,
                 "inventory_cost_usdc": 0.0, "settlement_pnl_usdc": 0.0,
             })
+            self._stop_timing_settlement_relabel(pending, outcome, label, now_ts)
             return
         self._write_canonical_settlement(
             slug=slug,
@@ -688,7 +689,28 @@ class StrategyLifecycleMixin:
             market_cycle_realized_net_usdc=pending["market_cycle_realized_net_usdc"],
             pnl_source="settlement_deferred_relabel",
         )
+        self._stop_timing_settlement_relabel(pending, outcome, label, now_ts)
         self._update_terminal_dashboard_snapshot()
+
+    def _stop_timing_settlement_relabel(self, pending: Dict[str, Any], outcome: str,
+                                        label: Dict[str, Any], now_ts: float) -> None:
+        """Research-only: let STOP_TIMING settlement rows carry the relabeled outcome.
+
+        Runs after the authoritative settlement rows are written; it never
+        feeds back into settlement, PnL or trading and never raises.
+        """
+        stop_timing = getattr(self, "stop_timing_telemetry", None)
+        if stop_timing is None:
+            return
+        try:
+            stop_timing.on_settlement_relabel_safe(
+                slug=pending["slug"], outcome=outcome, settlement_ts=pending["settled_ts"],
+                relabel_ts=now_ts, reference_source=label["source"],
+                reference_is_canonical=label["canonical"],
+                outcome_source="canonical_twap_deferred_relabel",
+            )
+        except Exception as exc:
+            logger.warning(f"Stop-timing settlement relabel capture failed: {type(exc).__name__}: {exc}")
 
     def _search_next_market(self) -> bool:
         try:

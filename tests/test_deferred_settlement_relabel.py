@@ -25,8 +25,11 @@ PRE_END_TWAP = 85406.90636769912
 END_TWAP_UP = STRIKE * (1 + 0.3 / 1e4)   # end-stamped tick on the official side
 
 
-def _armed_host(*, qty=Decimal("4"), cycle_realized=Decimal("0.25"), tick_minus_end=-2.0, age=2.5):
+def _armed_host(*, qty=Decimal("4"), cycle_realized=Decimal("0.25"), tick_minus_end=-2.0, age=2.5,
+                stop_timing=None):
     host = Host(twap=PRE_END_TWAP, spot=0.0, twap_age=age, qty=qty)
+    if stop_timing is not None:
+        host.stop_timing_telemetry = stop_timing
     host.current_market_slug = SLUG
     host.market_strike_cache_by_slug = {SLUG: Decimal(str(STRIKE))}
     host._shadow_state = {}
@@ -229,3 +232,53 @@ def test_audit_accepts_canonical_relabel_after_pending_unknown():
     assert "REPEATED_FINALIZATION" not in codes
     codes = [i["reason_code"] for i in audit_reconciliation([pending, final, final])["issues"]]
     assert "REPEATED_FINALIZATION" in codes
+
+
+class _StopTimingRecorder:
+    """Research-only telemetry stand-in; may be made to raise."""
+
+    def __init__(self, fail=False):
+        self.fail, self.settlements, self.relabels = fail, [], []
+
+    def on_settlement_safe(self, **kwargs):
+        self.settlements.append(kwargs)
+
+    def on_settlement_relabel_safe(self, **kwargs):
+        self.relabels.append(kwargs)
+        if self.fail:
+            raise RuntimeError("telemetry boom")
+
+
+@pytest.mark.parametrize("qty", [Decimal("4"), Decimal("0")])
+def test_relabel_forwards_upgraded_outcome_to_stop_timing_telemetry(qty):
+    rec = _StopTimingRecorder()
+    host, end = _armed_host(qty=qty, stop_timing=rec)
+    assert [s["outcome"] for s in rec.settlements] == ["UNKNOWN"]
+    host._observe_settlement_relabel_twap_tick(END_TWAP_UP, end, 60)
+    host._process_pending_settlement_relabel(now_ts=end + 1.4)
+    (relabel,) = rec.relabels
+    assert relabel["slug"] == SLUG and relabel["outcome"] == "UP"
+    assert relabel["outcome_source"] == "canonical_twap_deferred_relabel"
+    assert relabel["settlement_ts"] == rec.settlements[0]["settlement_ts"]
+    assert relabel["relabel_ts"] == pytest.approx(end + 1.4)
+    assert relabel["reference_is_canonical"] is True
+
+
+def test_expired_relabel_forwards_nothing_and_telemetry_fault_never_changes_settlement():
+    rec = _StopTimingRecorder()
+    host, end = _armed_host(stop_timing=rec)
+    host._process_pending_settlement_relabel(now_ts=end + lr.SETTLEMENT_RELABEL_MAX_WAIT_SEC)
+    assert rec.relabels == []
+
+    baseline, b_end = _armed_host()
+    faulty = _StopTimingRecorder(fail=True)
+    host, end = _armed_host(stop_timing=faulty)
+    for h, e in ((baseline, b_end), (host, end)):
+        h._observe_settlement_relabel_twap_tick(END_TWAP_UP, e, 60)
+        h._process_pending_settlement_relabel(now_ts=e + 1.4)
+    assert len(faulty.relabels) == 1
+    strip = lambda evs: [(t, {k: v for k, v in p.items() if not k.endswith("_ts") and "delay" not in k
+                               and "offset" not in k and "age" not in k and "margin" not in k})
+                         for t, p in evs]
+    assert strip(host.events) == strip(baseline.events)
+    assert host.session_pnl == baseline.session_pnl
