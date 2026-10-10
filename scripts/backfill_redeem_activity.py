@@ -208,13 +208,22 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backfill actual redeem amounts from Polymarket Data API activity.")
+    # Superseded by scripts/pnl_evidence_backfill.py (append-only evidence, all
+    # redeems incl. those outside the bot, full pagination, venue cash). This
+    # tool rewrites MARKET_SETTLEMENT / MARKET_CYCLE_PNL in place and reuses the
+    # settlement-time inventory cost, so a real run now needs --legacy-in-place.
+    parser = argparse.ArgumentParser(description="DEPRECATED: use scripts/pnl_evidence_backfill.py.")
     parser.add_argument("--db", default=None, help="Trade-journal SQLite path (default: canonical TRADE_DB_PATH)")
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--user", default="")
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--legacy-in-place", action="store_true",
+                        help="explicitly allow the deprecated in-place rewrite (not recommended)")
     args = parser.parse_args()
+    if not args.dry_run and not args.legacy_in_place:
+        raise SystemExit("DEPRECATED: in-place rewrite disabled. Use scripts/pnl_evidence_backfill.py "
+                         "(append-only), or pass --dry-run / --legacy-in-place explicitly.")
 
     load_dotenv(args.env_file, override=False)
     user = args.user or os.getenv("POLYMARKET_WALLET_ADDRESS") or os.getenv("WALLET_ADDRESS") or ""

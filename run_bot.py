@@ -137,6 +137,7 @@ from bot.shadow_simulation import ShadowSimulationMixin
 from bot.depth_risk_shadow import DepthRiskShadowMixin
 from bot.depth_risk import cap_buy_quantity
 from bot.kill_switch import effective_kill_class, rollover_reset_allowed
+from bot.settlement_confirmation import SettlementConfirmationWorker, resolve_wallet_address
 from bot.entry_sizing import (
     CANONICAL_ENTRY_SIZING_RULE,
     log_entry_sizing_skip_once,
@@ -3866,6 +3867,7 @@ class IntegratedBTCStrategy(
             self._schedule_auto_redeem(reason="startup")
         self._balance_stop_event.clear()
         self._balance_thread = start_background_thread(self._start_balance_refresh_timer, "balance-refresh")
+        self._start_settlement_confirmation()
         try:
             self._refresh_balance_cache_sync()
         except Exception as e:
@@ -4004,6 +4006,26 @@ class IntegratedBTCStrategy(
                 self._redeem_job_lock.release()
 
         threading.Thread(target=_runner, daemon=True).start()
+
+    def _start_settlement_confirmation(self) -> None:
+        """Evidence-only worker (official outcome, venue cash, redeem cash); see bot.settlement_confirmation."""
+        if not getattr(self, "settlement_confirmation_enabled", False) or getattr(self, "trade_db", None) is None:
+            return
+        try:
+            worker = SettlementConfirmationWorker(
+                journal_path=self.trade_db.db_path,
+                write_event=self._db_strategy_event,
+                user_address=resolve_wallet_address(os.environ),
+                interval_sec=float(self.settlement_confirmation_interval_sec),
+                lookback_sec=float(self.settlement_confirmation_lookback_hours) * 3600.0,
+            )
+        except Exception as e:
+            logger.warning(f"Settlement confirmation worker not started: {e}")
+            return
+        self._settlement_confirmation_stop_event.clear()
+        self._settlement_confirmation_thread = start_background_thread(
+            lambda: worker.run(self._settlement_confirmation_stop_event), "settlement-confirmation",
+        )
 
     def _start_auto_redeem_timer(self) -> None:
         """

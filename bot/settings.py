@@ -703,6 +703,11 @@ def initialize_strategy_settings(
     strategy._last_redeem_run_ts = 0.0
     strategy._balance_stop_event = threading.Event()
     strategy._balance_thread = None
+    strategy.settlement_confirmation_enabled = config.operations.settlement_confirmation_enabled
+    strategy.settlement_confirmation_interval_sec = config.operations.settlement_confirmation_interval_sec
+    strategy.settlement_confirmation_lookback_hours = config.operations.settlement_confirmation_lookback_hours
+    strategy._settlement_confirmation_stop_event = threading.Event()
+    strategy._settlement_confirmation_thread = None
     strategy._balance_refresh_lock = threading.Lock()
     strategy._balance_refresh_inflight = False
     strategy.current_market_slug = None

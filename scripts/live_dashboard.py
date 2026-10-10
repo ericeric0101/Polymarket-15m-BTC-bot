@@ -120,6 +120,35 @@ class TradingSnapshot:
     # Recent fills for history panel
     recent_fills: List[FillRecord] = field(default_factory=list)
 
+    # Effective PnL (monitoring.pnl_attribution; markets ending in the window)
+    effective_final_pnl_usdc: float = 0.0
+    effective_estimated_pnl_usdc: float = 0.0
+    effective_final_count: int = 0
+    effective_final_wins: int = 0
+    effective_unresolved_count: int = 0
+
+
+def _effective_summary(db_path: Path, since_ts: Optional[str]) -> dict:
+    """Shared effective-PnL projection for markets that ended inside the window."""
+    from monitoring.pnl_attribution import FINAL_BASES, load_effective_market_pnl
+    try:
+        rows = load_effective_market_pnl(db_path)
+    except Exception:
+        return {}
+    try:
+        since = datetime.fromisoformat(str(since_ts).replace("Z", "+00:00")).timestamp() if since_ts else None
+    except ValueError:
+        since = None
+    rows = [r for r in rows.values() if since is None or (r["market_end_ts"] or 0) >= since]
+    final = [r for r in rows if r["pnl_basis"] in FINAL_BASES]
+    return {
+        "effective_final_pnl_usdc": sum(r["effective_pnl_usdc"] for r in final),
+        "effective_estimated_pnl_usdc": sum(r["effective_pnl_usdc"] for r in rows if r["pnl_basis"] == "ESTIMATED"),
+        "effective_final_count": len(final),
+        "effective_final_wins": sum(1 for r in final if r["effective_pnl_usdc"] > 0),
+        "effective_unresolved_count": sum(1 for r in rows if r["pnl_basis"] in ("PENDING", "OPEN", "INCOMPLETE")),
+    }
+
 
 # ── DB Viewer ───────────────────────────────────────────────────────────
 
@@ -282,6 +311,7 @@ class DBViewer:
                 ts_params,
             ).fetchone()
 
+            effective = _effective_summary(self.db_path, since_ts)
             cycle_total = int(cyc_row["cycle_total"] or 0) if cyc_row else 0
             cycle_wins = int(cyc_row["cycle_wins"] or 0) if cyc_row else 0
             cycle_pnl = float(cyc_row["cycle_pnl"] or 0.0) if cyc_row else 0.0
@@ -343,6 +373,7 @@ class DBViewer:
             cycle_wins=cycle_wins,
             cycle_pnl_usdc=cycle_pnl,
             recent_fills=recent_fills or [],
+            **effective,
         )
 
 
@@ -395,14 +426,16 @@ def _build_stats_panel(s: TradingSnapshot) -> Panel:
     table.add_row("💵 買入總成本", f"{s.buy_cost_usdc:.4f} USDC")
     table.add_row("💵 賣出總收入", f"{s.sell_revenue_usdc:.4f} USDC")
     table.add_row("💸 手續費", f"{s.fees_paid_usdc:.4f} USDC")
-    table.add_row("💰 交易損益", _color_pnl(s.trade_pnl_usdc))
+    table.add_row("💱 成交現金淨流(不含贖回)", _color_pnl(s.trade_pnl_usdc))
     table.add_row("", "")
 
-    # ── Win rate ──
-    cycle_wr = (s.cycle_wins / s.cycle_total * 100.0) if s.cycle_total > 0 else 0.0
-    table.add_row("🔄 Cycle 數", f"{s.cycle_total}  (勝 {s.cycle_wins})")
-    table.add_row("🔄 Cycle 勝率", _pct_text(cycle_wr))
-    table.add_row("🔄 Cycle PnL", _color_pnl(s.cycle_pnl_usdc))
+    # ── Effective PnL (same projection as dashboard.py) ──
+    eff_wr = (s.effective_final_wins / s.effective_final_count * 100.0) if s.effective_final_count else 0.0
+    table.add_row("✅ 已確定 PnL", _color_pnl(s.effective_final_pnl_usdc))
+    table.add_row("✅ 已確定市場", f"{s.effective_final_count}  (勝 {s.effective_final_wins}, {eff_wr:.0f}%)")
+    table.add_row("〜 預估 PnL (bot TWAP)", _color_pnl(s.effective_estimated_pnl_usdc))
+    table.add_row("⏳ 待確認/進行中/資料不足", str(s.effective_unresolved_count))
+    table.add_row("📓 Journal 原始 Cycle PnL", _color_pnl(s.cycle_pnl_usdc))
 
     if s.closed_positions > 0:
         table.add_row("🏆 Position 勝率", _pct_text(s.position_win_rate))

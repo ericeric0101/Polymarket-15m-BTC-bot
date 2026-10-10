@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from monitoring.pnl_attribution import load_market_pnl_attributions
+from monitoring.pnl_attribution import load_effective_market_pnl, load_market_pnl_attributions
 
 
 def main() -> int:
@@ -50,6 +50,7 @@ def main() -> int:
         print("No settled markets found.")
         return 0
     ledger = load_market_pnl_attributions(db_path, set(slugs))
+    effective = load_effective_market_pnl(db_path, slugs=set(slugs))
     # MARKET_CYCLE_PNL is also written for idle cycles.  Keep the operational
     # report focused on markets with cash or a journaled fill; explicitly
     # requested slugs remain visible for diagnosis.
@@ -62,11 +63,14 @@ def main() -> int:
     if not slugs:
         print("No markets with journaled fills or redemption cash found.")
         return 0
-    print("slug status buy maker_sell taker_sell redeem attributable computed reported reconciliation_delta")
+    print("slug status buy maker_sell taker_sell redeem attributable computed reported reconciliation_delta "
+          "| effective_basis effective_pnl")
     attributable_total = 0.0
+    effective_final_total = 0.0
     pre_journal_count = 0
     for slug in slugs:
         item = ledger.get(slug, {})
+        eff = effective.get(slug, {})
         reported = item["reported_cycle_pnl_usdc"]
         delta = item["reconciliation_adjustment_usdc"]
         attributable = item.get("attributable_pnl_usdc")
@@ -80,9 +84,15 @@ def main() -> int:
             f"{item['redeem_value_usdc']:+.4f} "
             f"{'n/a' if attributable is None else f'{attributable:+.4f}'} {item['computed_pnl_usdc']:+.4f} "
             f"{'n/a' if reported is None else f'{reported:+.4f}'} "
-            f"{'n/a' if delta is None else f'{delta:+.4f}'}"
+            f"{'n/a' if delta is None else f'{delta:+.4f}'} "
+            f"| {eff.get('pnl_basis', 'n/a')} "
+            f"{'n/a' if eff.get('effective_pnl_usdc') is None else format(eff['effective_pnl_usdc'], '+.4f')}"
         )
+        if eff.get("is_final"):
+            effective_final_total += float(eff["effective_pnl_usdc"])
     print(f"attributable_total_usdc={attributable_total:+.4f} pre_journal_inventory_markets={pre_journal_count}")
+    # The authoritative number: same projection as the dashboards (fills + journaled evidence).
+    print(f"effective_final_total_usdc={effective_final_total:+.4f} (monitoring.pnl_attribution.load_effective_market_pnl)")
     return 0
 
 

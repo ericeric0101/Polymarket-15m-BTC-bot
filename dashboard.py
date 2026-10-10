@@ -21,6 +21,14 @@ from rich.text import Text
 
 from dashboard_state import DashboardState, TradeRecord
 from bot.journal_path import resolve_trade_db_path
+from monitoring.pnl_attribution import load_effective_market_pnl, summarize_effective_pnl
+
+RECENT_TRADE_LIMIT = 20
+EFFECTIVE_PNL_REFRESH_SEC = 10.0
+BASIS_MARK = {
+    "FILLS_FINAL": "=", "CASH_CONFIRMED": "=", "OUTCOME_CONFIRMED": "=",
+    "ESTIMATED": "~", "PENDING": "?", "OPEN": "", "INCOMPLETE": "!",
+}
 
 
 PANEL_PADDING = (0, 1)
@@ -351,11 +359,23 @@ class BTCDashboard:
         pnl_grid = Table.grid(expand=True)
         pnl_grid.add_column(ratio=1)
         pnl_grid.add_column(justify="right", ratio=1)
-        pnl_grid.add_row(Text("DB Cycle PnL", style=LABEL_STYLE), Text(_money(state.cumulative_pnl, signed=True), style=pnl_style))
-        pnl_grid.add_row(Text("Visible Trades PnL", style=LABEL_STYLE), Text(_money(state.visible_trades_pnl, signed=True), style=visible_pnl_style))
+        final = state.pnl_final_usdc if state.pnl_final_usdc is not None else state.cumulative_pnl
+        pnl_grid.add_row(Text("Final PnL (=)", style=LABEL_STYLE), Text(_money(final, signed=True), style=pnl_style))
+        if state.pnl_estimated_usdc is not None:
+            est_style = f"{_style_for_signed(state.pnl_estimated_usdc)}" if state.pnl_estimated_usdc else MUTED_STYLE
+            pnl_grid.add_row(Text("Estimated (~, bot TWAP)", style=LABEL_STYLE),
+                             Text(_money(state.pnl_estimated_usdc, signed=True), style=est_style))
+            pnl_grid.add_row(Text("Unresolved mkts (? / open / !)", style=LABEL_STYLE),
+                             Text(str(state.pnl_unresolved_count), style=WARN_STYLE if state.pnl_unresolved_count else MUTED_STYLE))
+        pnl_grid.add_row(Text("Visible final PnL", style=LABEL_STYLE), Text(_money(state.visible_trades_pnl, signed=True), style=visible_pnl_style))
+        if state.pnl_journal_raw_usdc is not None:
+            pnl_grid.add_row(Text("Journal raw cycle (legacy)", style=MUTED_STYLE),
+                             Text(_money(state.pnl_journal_raw_usdc, signed=True), style=MUTED_STYLE))
 
         pnl_box = Panel(
             pnl_grid,
+            title=Text(state.pnl_period_text or "", style=MUTED_STYLE) if state.pnl_period_text else None,
+            title_align="left",
             border_style=PANEL_STYLE,
             padding=(0, 1),
         )
@@ -403,12 +423,14 @@ class BTCDashboard:
         table.add_column("Side", justify="center", no_wrap=True)
         table.add_column("Qty", justify="right", no_wrap=True)
         table.add_column("Entry", justify="right", no_wrap=True)
-        table.add_column("Exit", justify="right", no_wrap=True)
+        table.add_column("Sold", justify="right", no_wrap=True)
+        table.add_column("Position", justify="center", no_wrap=True)
+        table.add_column("Outcome", justify="center", no_wrap=True)
         table.add_column("Redeem", justify="right", no_wrap=True)
         table.add_column("PnL", justify="right", no_wrap=True)
 
         if not state.trades:
-            table.add_row(Text("—", style=MUTED_STYLE), Text("No trades yet", style=MUTED_STYLE), "", "", "", "", "", "")
+            table.add_row(Text("—", style=MUTED_STYLE), Text("No trades yet", style=MUTED_STYLE), "", "", "", "", "", "", "", "")
         else:
             for idx, trade in enumerate(state.trades[:16], start=1):
                 table.add_row(
@@ -417,7 +439,9 @@ class BTCDashboard:
                     _side_text(trade.side),
                     Text(f"{trade.qty:.2f}", style=TEXT_STYLE),
                     Text(_price(trade.entry_price), style=TEXT_STYLE),
-                    self._exit_cell(trade),
+                    self._sold_cell(trade),
+                    self._position_cell(trade),
+                    self._outcome_cell(trade),
                     self._redeem_cell(trade),
                     self._pnl_cell(trade),
                 )
@@ -425,7 +449,7 @@ class BTCDashboard:
         return Panel(
             table,
             title=Text("RECENT TRADES", style=VALUE_STYLE),
-            subtitle=Text("last 16", style=MUTED_STYLE),
+            subtitle=Text("last 16 · PnL: = final  ~ estimated  ? pending  ! incomplete", style=MUTED_STYLE),
             subtitle_align="right",
             border_style=PANEL_STYLE,
             padding=PANEL_PADDING,
@@ -468,58 +492,63 @@ class BTCDashboard:
         )
 
     @staticmethod
-    def _exit_cell(trade: TradeRecord) -> Text:
-        if trade.exit_price is None:
-            return Text("NA", style=MUTED_STYLE)
-        return Text(f"{trade.exit_price:.2f}", style=TEXT_STYLE)
+    def _sold_cell(trade: TradeRecord) -> Text:
+        if trade.sell_qty is None:
+            return Text("—", style=MUTED_STYLE)
+        if trade.sell_qty <= 0:
+            return Text("0", style=MUTED_STYLE)
+        return Text(f"{trade.sell_qty:.2f}", style=TEXT_STYLE)
+
+    @staticmethod
+    def _position_cell(trade: TradeRecord) -> Text:
+        labels = {
+            "FULLY_SOLD": ("sold", SOLD_STYLE), "PARTIALLY_SOLD_HELD": ("part+held", WARN_STYLE),
+            "HELD": ("held", OPEN_STYLE), "NO_SHARES_HELD": ("none", MUTED_STYLE),
+            "NO_TRACKED_ENTRY": ("ext?", NEG_STYLE),
+        }
+        text, style = labels.get(trade.position_state or "", ("—", MUTED_STYLE))
+        return Text(text, style=style)
+
+    @staticmethod
+    def _outcome_cell(trade: TradeRecord) -> Text:
+        labels = {
+            "OFFICIAL": ("official", POS_STYLE), "ESTIMATED_TWAP": ("bot est", WARN_STYLE),
+            "UNKNOWN": ("pending", WARN_STYLE), "NOT_ENDED": ("live", OPEN_STYLE),
+        }
+        text, style = labels.get(trade.outcome_state or "", ("—", MUTED_STYLE))
+        return Text(text, style=style)
 
     @staticmethod
     def _redeem_cell(trade: TradeRecord) -> Text:
-        if trade.exit_price is not None and trade.redeem_amount is None:
-            return Text("NA", style=MUTED_STYLE)
-        if not trade.is_settled:
-            return Text("—", style=MUTED_STYLE)
-        if trade.redeem_amount is None:
-            if trade.expected_redeem_amount is not None:
-                if trade.expected_redeem_amount > 0:
-                    return Text(f"~{_money(trade.expected_redeem_amount)}", style=WARN_STYLE)
-                return Text(_money(0.0), style=MUTED_STYLE)
+        state = trade.redeem_state or ""
+        if state == "REDEEMED":
+            return Text(_money(trade.redeem_amount or 0.0), style=VALUE_STYLE)
+        if state == "CLAIMABLE":
+            return Text(f"claim {_money(trade.expected_redeem_amount or 0.0)}", style=WARN_STYLE)
+        if state == "NOTHING_TO_CLAIM":
+            return Text(_money(0.0), style=MUTED_STYLE)
+        if state == "AWAITING_OUTCOME":
             return Text("pending", style=WARN_STYLE)
-        return Text(_money(trade.redeem_amount), style=VALUE_STYLE)
+        return Text("—", style=MUTED_STYLE)
 
     @staticmethod
     def _pnl_cell(trade: TradeRecord) -> Text:
         pnl = BTCDashboard._trade_pnl_amount(trade)
+        mark = BASIS_MARK.get(trade.pnl_basis or "", "")
         if pnl is None:
+            if trade.pnl_basis == "INCOMPLETE":
+                return Text("! data", style=NEG_STYLE)
+            if trade.pnl_basis == "PENDING":
+                return Text("? pending", style=WARN_STYLE)
             return Text("—", style=MUTED_STYLE)
-        return Text(_money(pnl, signed=True), style=f"bold {_style_for_signed(pnl)}")
+        style = f"bold {_style_for_signed(pnl)}" if mark == "=" else _style_for_signed(pnl)
+        return Text(f"{mark}{_money(pnl, signed=True)}", style=style)
 
     @staticmethod
     def _trade_pnl_amount(trade: TradeRecord) -> Optional[float]:
-        if trade.realized_pnl is not None:
-            return trade.realized_pnl
-        entry_cost = trade.entry_price * trade.qty
-        if trade.exit_price is not None:
-            return trade.exit_price * trade.qty - entry_cost
-        if trade.redeem_amount is not None:
-            return trade.redeem_amount - entry_cost
-        if trade.expected_redeem_amount is not None:
-            return trade.expected_redeem_amount - entry_cost
-        return None
-
-    @staticmethod
-    def _status_cell(trade: TradeRecord) -> Text:
-        if trade.exit_price is not None:
-            return Text("sold", style=SOLD_STYLE)
-        if not trade.is_settled:
-            return Text("open", style=OPEN_STYLE)
-        if trade.redeem_amount is None:
-            if trade.expected_redeem_amount is not None and trade.expected_redeem_amount > 0:
-                return Text("claimable", style=WARN_STYLE)
-            return Text("pending", style=WARN_STYLE)
-        if trade.redeem_amount <= 0:
-            return Text("lost", style=NEG_STYLE)
-        return Text("redeemed", style=POS_STYLE)
+        """Effective PnL only. UNKNOWN / missing payout is never turned into a total loss,
+        and there is no exit-price x total-quantity fallback."""
+        return trade.realized_pnl
 
     @staticmethod
     def _prob_text(value: Optional[float]) -> Text:
@@ -550,6 +579,7 @@ class TradeJournalDashboardSource:
         self.db_path = db_path
         self.state = state
         self.poll_sec = max(0.5, float(poll_sec))
+        self._effective_cache: Optional[tuple[float, dict]] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -587,11 +617,12 @@ class TradeJournalDashboardSource:
     def _refresh_from_conn(self, conn: sqlite3.Connection) -> None:
         market = self._latest_market_snapshot(conn)
         decision = self._latest_decision_snapshot(conn, str(market.get("slug") or ""))
-        trades = self._recent_trades(conn)
-        cumulative_pnl = self._cumulative_pnl(conn)
+        effective = self._effective_rows()
+        summary = summarize_effective_pnl(effective)
+        trades = self._recent_trades(conn, effective)
         visible_trades_pnl = self._visible_trades_pnl(trades)
         usdc_balance, pol_balance, account_updated = self._latest_account_snapshot(conn)
-        pending_redeem_count, pending_redeem_usdc = self._pending_redeem_summary(trades)
+        pending_redeem_count, pending_redeem_usdc = self._pending_redeem_summary(effective)
         position_side, position_entry, position_qty, position_ask, current_market_price = self._current_position(
             conn,
             market_slug=str(market.get("slug") or ""),
@@ -609,8 +640,13 @@ class TradeJournalDashboardSource:
             position_ask=position_ask,
             current_market_price=current_market_price,
             trades=trades,
-            cumulative_pnl=cumulative_pnl,
+            cumulative_pnl=float(summary["final_pnl_usdc"]),
             visible_trades_pnl=visible_trades_pnl,
+            pnl_final_usdc=float(summary["final_pnl_usdc"]),
+            pnl_estimated_usdc=float(summary["estimated_pnl_usdc"]),
+            pnl_unresolved_count=int(summary["unresolved_count"]),
+            pnl_period_text=self._period_text(summary),
+            pnl_journal_raw_usdc=self._journal_raw_total(effective),
             usdc_balance=usdc_balance,
             pol_balance=pol_balance,
             account_last_updated=account_updated,
@@ -630,14 +666,32 @@ class TradeJournalDashboardSource:
             open_exposure_usdc=open_exposure_usdc,
         )
 
+    def _effective_rows(self) -> dict:
+        """Shared projection (fills + journaled evidence), refreshed at most every 10 s."""
+        now = time.time()
+        if self._effective_cache is None or now - self._effective_cache[0] >= EFFECTIVE_PNL_REFRESH_SEC:
+            self._effective_cache = (now, load_effective_market_pnl(self.db_path, as_of_ts=now))
+        return self._effective_cache[1]
+
+    @staticmethod
+    def _period_text(summary: dict) -> str:
+        first, last = summary.get("first_market_end_ts"), summary.get("last_market_end_ts")
+        if not first or not last:
+            return "no traded markets"
+        fmt = lambda ts: datetime.fromtimestamp(ts, timezone.utc).strftime("%m-%d")  # noqa: E731
+        return f"{fmt(first)}..{fmt(last)} UTC, {summary['market_count']} mkts"
+
+    @staticmethod
+    def _journal_raw_total(effective: dict) -> float:
+        return float(sum(r["journal_cycle_pnl_usdc"] or 0.0 for r in effective.values()))
+
     @staticmethod
     def _visible_trades_pnl(trades: list[TradeRecord]) -> float:
-        total = 0.0
-        for trade in trades[:16]:
-            pnl = BTCDashboard._trade_pnl_amount(trade)
-            if pnl is not None:
-                total += pnl
-        return total
+        """Sum of the displayed rows' final PnL only (estimates and pending excluded)."""
+        return float(sum(
+            trade.realized_pnl for trade in trades[:16]
+            if trade.realized_pnl is not None and BASIS_MARK.get(trade.pnl_basis or "") == "="
+        ))
 
     @staticmethod
     def _latest_market_snapshot(conn: sqlite3.Connection) -> dict:
@@ -848,17 +902,6 @@ class TradeJournalDashboardSource:
             return None
 
     @staticmethod
-    def _cumulative_pnl(conn: sqlite3.Connection) -> float:
-        row = conn.execute(
-            """
-            SELECT COALESCE(SUM(CAST(json_extract(payload_json, '$.cycle_combined_pnl_usdc') AS REAL)), 0.0) AS pnl
-            FROM strategy_events
-            WHERE event_type = 'MARKET_CYCLE_PNL'
-            """
-        ).fetchone()
-        return float(row["pnl"] or 0.0)
-
-    @staticmethod
     def _latest_account_snapshot(conn: sqlite3.Connection) -> tuple[float, float, datetime]:
         row = conn.execute(
             """
@@ -904,80 +947,35 @@ class TradeJournalDashboardSource:
                 sides[slug] = side
         return sides
 
-    def _recent_trades(self, conn: sqlite3.Connection) -> list[TradeRecord]:
+    def _recent_trades(self, conn: sqlite3.Connection, effective: dict) -> list[TradeRecord]:
+        """Most recent traded markets from the shared effective-PnL projection."""
         side_by_slug = self._side_by_slug(conn)
-        buy_rows = conn.execute(
-            """
-            SELECT
-              json_extract(payload_json, '$.slug') AS slug,
-              MAX(ts) AS last_ts,
-              SUM(qty) AS qty,
-              CASE WHEN SUM(qty) > 0 THEN SUM(price * qty) / SUM(qty) ELSE NULL END AS entry_price
-            FROM order_events
-            WHERE event_type = 'ORDER_FILLED'
-              AND status = 'FILLED'
-              AND UPPER(side) = 'BUY'
-              AND json_extract(payload_json, '$.slug') IS NOT NULL
-            GROUP BY slug
-            ORDER BY last_ts DESC
-            LIMIT 20
-            """
-        ).fetchall()
-        settlements = self._settlement_by_slug(conn)
-        redeems = self._redeem_by_slug(conn)
-        exits = self._exit_by_slug(conn)
-        cycle_pnl = self._cycle_pnl_by_slug(conn)
-
+        rows = sorted(
+            (r for r in effective.values() if r["buy_fill_count"] or r["sell_fill_count"]),
+            key=lambda r: str(r.get("last_fill_ts") or ""), reverse=True,
+        )[:RECENT_TRADE_LIMIT]
         trades: list[TradeRecord] = []
-        for idx, row in enumerate(buy_rows, start=1):
-            slug = str(row["slug"] or "")
-            if not slug:
-                continue
-            settlement = settlements.get(slug, {})
-            redeem_amount = None
-            redeem = redeems.get(slug)
-            settlement_redeem_amount = _optional_float(settlement.get("redeem_value_usdc"))
-            if redeem is not None and "redeem_cash_usdc" in redeem:
-                redeem_amount = _optional_float(redeem.get("redeem_cash_usdc"))
-            expected_redeem_amount = None
-            if slug in settlements:
-                expected_redeem_amount = float(settlement_redeem_amount or 0.0)
-            trade = TradeRecord(
+        for idx, row in enumerate(rows, start=1):
+            trades.append(TradeRecord(
                 trade_id=idx,
-                market_slug=slug,
-                side=side_by_slug.get(slug, str(settlement.get("inventory_side") or "UP")),
-                entry_price=float(row["entry_price"] or 0.0),
-                qty=float(row["qty"] or 0.0),
-                exit_price=exits.get(slug),
-                redeem_amount=redeem_amount,
-                is_settled=slug in settlements,
-                expected_redeem_amount=expected_redeem_amount,
-                realized_pnl=cycle_pnl.get(slug),
-            )
-            trades.append(trade)
+                market_slug=row["slug"],
+                side=row.get("entry_side") or side_by_slug.get(row["slug"], "—"),
+                entry_price=float(row["entry_vwap"] or 0.0),
+                qty=float(row["buy_qty"] or 0.0),
+                exit_price=None,  # superseded by sell_qty / position_state (no exit x total-qty formula)
+                redeem_amount=row["redeem_cash_usdc"],
+                is_settled=row["outcome_state"] in ("OFFICIAL", "ESTIMATED_TWAP"),
+                expected_redeem_amount=row["expected_payout_usdc"],
+                realized_pnl=row["effective_pnl_usdc"],
+                pnl_basis=row["pnl_basis"],
+                position_state=row["position_state"],
+                outcome_state=row["outcome_state"],
+                redeem_state=row["redeem_state"],
+                sell_qty=float(row["sell_qty"] or 0.0),
+                held_shares=float(row["held_shares"] or 0.0),
+                issues=tuple(row["issues"]),
+            ))
         return trades
-
-    @staticmethod
-    def _cycle_pnl_by_slug(conn: sqlite3.Connection) -> dict[str, float]:
-        rows = conn.execute(
-            """
-            SELECT payload_json
-            FROM strategy_events
-            WHERE event_type = 'MARKET_CYCLE_PNL'
-            ORDER BY id DESC
-            LIMIT 1000
-            """
-        ).fetchall()
-        out: dict[str, float] = {}
-        for row in rows:
-            payload = _json_loads(row["payload_json"])
-            slug = str(payload.get("slug") or payload.get("market_slug") or "")
-            if not slug or slug in out:
-                continue
-            pnl = _optional_float(payload.get("cycle_combined_pnl_usdc"))
-            if pnl is not None:
-                out[slug] = pnl
-        return out
 
     @staticmethod
     def _settlement_by_slug(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -999,54 +997,10 @@ class TradeJournalDashboardSource:
         return out
 
     @staticmethod
-    def _redeem_by_slug(conn: sqlite3.Connection) -> dict[str, dict]:
-        rows = conn.execute(
-            """
-            SELECT payload_json
-            FROM strategy_events
-            WHERE event_type = 'REDEEM_EXECUTED'
-            ORDER BY id DESC
-            LIMIT 1000
-            """
-        ).fetchall()
-        out: dict[str, dict] = {}
-        for row in rows:
-            payload = _json_loads(row["payload_json"])
-            slug = str(payload.get("slug") or payload.get("market_slug") or "")
-            if slug and slug not in out:
-                out[slug] = payload
-        return out
-
-    @staticmethod
-    def _exit_by_slug(conn: sqlite3.Connection) -> dict[str, float]:
-        rows = conn.execute(
-            """
-            SELECT
-              json_extract(payload_json, '$.slug') AS slug,
-              SUM(price * qty) / SUM(qty) AS exit_price
-            FROM order_events
-            WHERE event_type = 'ORDER_FILLED'
-              AND status = 'FILLED'
-              AND UPPER(side) = 'SELL'
-              AND json_extract(payload_json, '$.slug') IS NOT NULL
-            GROUP BY slug
-            """
-        ).fetchall()
-        return {str(row["slug"]): float(row["exit_price"]) for row in rows if row["slug"] is not None}
-
-    @staticmethod
-    def _pending_redeem_summary(trades: list[TradeRecord]) -> tuple[int, float]:
-        count = 0
-        total = 0.0
-        for trade in trades:
-            if not trade.is_settled or trade.exit_price is not None or trade.redeem_amount is not None:
-                continue
-            value = max(0.0, trade.expected_redeem_amount if trade.expected_redeem_amount is not None else trade.qty)
-            if value <= 0:
-                continue
-            count += 1
-            total += value
-        return count, total
+    def _pending_redeem_summary(effective: dict) -> tuple[int, float]:
+        """Claimable winning shares not yet redeemed (official or estimated outcome)."""
+        claimable = [r for r in effective.values() if r["redeem_state"] == "CLAIMABLE"]
+        return len(claimable), float(sum(r["expected_payout_usdc"] or 0.0 for r in claimable))
 
     def _current_position(
         self,
@@ -1210,18 +1164,24 @@ def _mock_state() -> DashboardState:
         position_ask=0.71,
         current_market_price=0.68,
         trades=[
-            TradeRecord(10, "btc-15m-103450-1415", "UP", 0.62, 8.5, None, None, False),
-            TradeRecord(9, "btc-15m-103200-1400", "UP", 0.58, 8.5, None, None, True),
-            TradeRecord(8, "btc-15m-103100-1345", "UP", 0.61, 8.5, None, 5.12, True),
-            TradeRecord(7, "btc-15m-103300-1330", "DOWN", 0.44, 8.5, 0.39, None, True),
-            TradeRecord(6, "btc-15m-103000-1315", "UP", 0.55, 8.5, None, 4.75, True),
-            TradeRecord(5, "btc-15m-102800-1300", "DOWN", 0.48, 8.5, None, 5.30, True),
-            TradeRecord(4, "btc-15m-103100-1245", "UP", 0.63, 5.0, None, None, True),
-            TradeRecord(3, "btc-15m-102900-1230", "UP", 0.57, 8.5, 0.61, None, True),
-            TradeRecord(2, "btc-15m-102700-1215", "DOWN", 0.51, 5.1, None, 0.0, True),
-            TradeRecord(1, "btc-15m-103050-1200", "UP", 0.59, 5.0, None, 5.0, True),
+            TradeRecord(4, "btc-updown-15m-1791625500", "UP", 0.62, 8.5, None, None, False,
+                        pnl_basis="OPEN", position_state="HELD", outcome_state="NOT_ENDED",
+                        redeem_state="NOT_ENDED", sell_qty=0.0, held_shares=8.5),
+            TradeRecord(3, "btc-updown-15m-1791624600", "DOWN", 0.71, 5.5, None, None, True, 5.5, 1.595,
+                        pnl_basis="OUTCOME_CONFIRMED", position_state="HELD", outcome_state="OFFICIAL",
+                        redeem_state="CLAIMABLE", sell_qty=0.0, held_shares=5.5),
+            TradeRecord(2, "btc-updown-15m-1791623700", "UP", 0.80, 5.5, None, None, True, 0.0, -3.15,
+                        pnl_basis="FILLS_FINAL", position_state="FULLY_SOLD", outcome_state="OFFICIAL",
+                        redeem_state="NOT_REQUIRED", sell_qty=5.5, held_shares=0.0),
+            TradeRecord(1, "btc-updown-15m-1791622800", "UP", 0.66, 10.0, None, 10.0, True, 10.0, 3.4,
+                        pnl_basis="CASH_CONFIRMED", position_state="HELD", outcome_state="OFFICIAL",
+                        redeem_state="REDEEMED", sell_qty=0.0, held_shares=10.0),
         ],
-        cumulative_pnl=18.43,
+        cumulative_pnl=0.245,
+        pnl_final_usdc=0.245,
+        pnl_estimated_usdc=0.0,
+        pnl_unresolved_count=1,
+        pnl_period_text="mock",
         usdc_balance=142.60,
         pol_balance=2.341,
         account_last_updated=datetime.now(timezone.utc),
@@ -1259,8 +1219,6 @@ if __name__ == "__main__":
                 current_market_price=market_price,
                 position_ask=round(min(0.99, market_price + 0.03), 2),
             )
-            if tick == 8:
-                state.upsert_redeem("btc-15m-103200-1400", 6.05)
     except KeyboardInterrupt:
         if source is not None:
             source.stop()
