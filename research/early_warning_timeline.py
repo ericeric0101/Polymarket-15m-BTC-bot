@@ -276,7 +276,56 @@ def binance_move_events(points: Iterable[tuple[float, Optional[Decimal]]], held_
 
 
 # ------------------------------------------------------------- timeline
-JOURNAL_EVENTS = ("T_MINUS2", "T_BREAKER_ELIGIBLE", "T_EXIT_SUBMIT", "T_EXIT_FILL")
+# Exit events are split by exit kind (from the client order id prefix minted in
+# bot/taker_exit.py and bot/order_submission.py): a maker TP SELL fill is not a
+# protective exit.  T_PROTECTIVE_EXIT_* = taker protective exit (submit is
+# ORDER_TAKER_EXIT_SUBMIT); T_TP_EXIT_FILL = maker SELL quote fill;
+# T_OTHER_EXIT_FILL = maker urgent exit, recovery-passive or unrecognised SELL.
+JOURNAL_EVENTS = ("T_MINUS2", "T_BREAKER_ELIGIBLE", "T_PROTECTIVE_EXIT_SUBMIT", "T_PROTECTIVE_EXIT_FILL",
+                  "T_TP_EXIT_FILL", "T_OTHER_EXIT_FILL")
+EXIT_EVENTS = JOURNAL_EVENTS[2:]
+EXIT_KIND_BY_COID_PREFIX = (
+    ("BTC-15M-TAKER-EXIT-", "PROTECTIVE_TAKER"),
+    ("BTC-15M-URGENT-EXIT-", "URGENT_MAKER"),
+    ("BTC-15M-RECOVERY-PASSIVE-", "RECOVERY_PASSIVE"),
+    ("BTC-15M-MAKER-SELL-", "MAKER_TP"),
+)
+FILL_EVENT_BY_EXIT_KIND = {"PROTECTIVE_TAKER": "T_PROTECTIVE_EXIT_FILL", "MAKER_TP": "T_TP_EXIT_FILL"}
+
+
+def classify_exit_order(client_order_id: Any) -> str:
+    coid = str(client_order_id or "")
+    for prefix, kind in EXIT_KIND_BY_COID_PREFIX:
+        if coid.startswith(prefix):
+            return kind
+    return "UNKNOWN"
+
+
+def exit_events_from_orders(orders: Iterable[tuple[Optional[float], str, Any, Any]], *, entry_ts: float,
+                            settled: bool) -> dict[str, Any]:
+    """First exit submit/fill per exit kind from (ts, event_type, side, client_order_id).
+
+    Pure.  Before settlement a missing event stays absent (UNKNOWN); after
+    settlement it is None (NOT_TRIGGERED).  ``first_exit_fill_kind`` names the
+    kind of the earliest SELL fill.
+    """
+    out: dict[str, Any] = {}
+    first_fill: Optional[tuple[float, str]] = None
+    for t, event_type, side, coid in orders:
+        if t is None or t < float(entry_ts or 0):
+            continue
+        if event_type == "ORDER_TAKER_EXIT_SUBMIT":
+            out.setdefault("T_PROTECTIVE_EXIT_SUBMIT", t)
+        elif event_type == "ORDER_FILLED" and str(side or "").upper() == "SELL":
+            kind = classify_exit_order(coid)
+            out.setdefault(FILL_EVENT_BY_EXIT_KIND.get(kind, "T_OTHER_EXIT_FILL"), t)
+            if first_fill is None or t < first_fill[0]:
+                first_fill = (t, kind)
+    if settled:
+        for name in EXIT_EVENTS:
+            out.setdefault(name, None)
+    out["first_exit_fill_kind"] = first_fill[1] if first_fill else None
+    return out
 
 
 def _context(obs: list[dict[str, Any]], t: float) -> dict[str, Any]:
@@ -399,19 +448,13 @@ def load_positions(journal: sqlite3.Connection, run_id: str, include_shadow: boo
         if pos["settled"] and not pos["telemetry_disabled"]:
             for name in ("T_MINUS2", "T_BREAKER_ELIGIBLE"):
                 pos["events"].setdefault(name, None)
-        orders = journal.execute("SELECT ts, event_type, side FROM order_events WHERE run_id=? AND instrument_id=? "
-                                 "ORDER BY id", (run_id, pos["instrument_id"])).fetchall()
-        for ts, event_type, side in orders:
-            t = _ts(ts)
-            if t is None or t < float(pos["entry_ts"] or 0):
-                continue
-            if event_type == "ORDER_TAKER_EXIT_SUBMIT":
-                pos["events"].setdefault("T_EXIT_SUBMIT", t)
-            elif event_type == "ORDER_FILLED" and str(side or "").upper() == "SELL":
-                pos["events"].setdefault("T_EXIT_FILL", t)
-        if pos["settled"]:
-            pos["events"].setdefault("T_EXIT_SUBMIT", None)
-            pos["events"].setdefault("T_EXIT_FILL", None)
+        orders = journal.execute("SELECT ts, event_type, side, client_order_id FROM order_events WHERE run_id=? "
+                                 "AND instrument_id=? ORDER BY id", (run_id, pos["instrument_id"])).fetchall()
+        exits = exit_events_from_orders([(_ts(ts), et, side, coid) for ts, et, side, coid in orders],
+                                        entry_ts=pos["entry_ts"], settled=pos["settled"])
+        pos["exit_fill_kind"] = exits.pop("first_exit_fill_kind")
+        for name, value in exits.items():
+            pos["events"].setdefault(name, value)
         positions.append(pos)
     if include_shadow:
         for ts, raw in journal.execute("SELECT ts, payload_json FROM order_events WHERE run_id=? AND "
@@ -459,7 +502,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                                    entry_bid=dec(pos.get("entry_bid")), entry_binance=dec(pos.get("entry_binance")),
                                    strike=dec(pos.get("strike")), events=pos["events"], end_ts=end_ts)
         results.append({"kind": pos["kind"], "slug": pos["slug"], "instrument_id": pos.get("instrument_id"),
-                        "entry_bid_state": pos.get("entry_bid_state"), **result})
+                        "entry_bid_state": pos.get("entry_bid_state"),
+                        "exit_fill_kind": pos.get("exit_fill_kind"), **result})
     with open(out_dir / "early_warning_timeline.json", "w") as fh:
         json.dump({"run_id": args.run_id, "positions": results}, fh, indent=1, default=str)
     keys = sorted({k for r in results for k in r["timeline"]})

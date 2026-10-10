@@ -13,7 +13,10 @@ from research.early_warning_timeline import (
     HYSTERESIS_TICKS,
     MAX_OBS_GAP_SEC,
     binance_move_events,
+    classify_exit_order,
     deterioration_episodes,
+    exit_events_from_orders,
+    load_positions,
     normalize_row,
     position_timeline,
     spot_cross,
@@ -196,9 +199,11 @@ def test_schema_v1_rows_still_reconstruct_with_explicit_limits():
 def test_journal_events_unknown_vs_not_triggered():
     rows = [{"snapshot_ts": 1.0, "best_bid_up": 0.7, "up_bid_state": "FRESH_BID", "snapshot_schema_version": 2}]
     result = position_timeline(rows, held_side="UP", entry_ts=1.0, entry_bid=Decimal("0.7"),
-                               events={"T_EXIT_SUBMIT": None, "T_MINUS2": 1.0})
-    assert result["timeline"]["T_EXIT_SUBMIT"]["status"] == "NOT_TRIGGERED"
-    assert result["timeline"]["T_EXIT_FILL"]["status"] == "UNKNOWN"
+                               events={"T_PROTECTIVE_EXIT_SUBMIT": None, "T_MINUS2": 1.0})
+    assert result["timeline"]["T_PROTECTIVE_EXIT_SUBMIT"]["status"] == "NOT_TRIGGERED"
+    assert result["timeline"]["T_PROTECTIVE_EXIT_FILL"]["status"] == "UNKNOWN"
+    assert result["timeline"]["T_TP_EXIT_FILL"]["status"] == "UNKNOWN"
+    assert "T_EXIT_FILL" not in result["timeline"] and "T_EXIT_SUBMIT" not in result["timeline"]
     assert result["timeline"]["T_MINUS2"]["status"] == "TRIGGERED"
     assert result["timeline"]["T_MINUS2"]["context"]["tte"] is None
 
@@ -233,3 +238,58 @@ def test_existing_reader_accepts_mixed_v1_and_v2_rows(tmp_path):
     assert [r.get("snapshot_schema_version") for r in rows] == [None, 2]
     timeline = position_timeline(rows, held_side="UP", entry_ts=100.0, entry_bid=Decimal("0.60"))
     assert timeline["schema_versions_seen"] == [1, 2] and timeline["snapshot_count"] == 2
+
+
+@pytest.mark.parametrize("coid,kind", [
+    ("BTC-15M-TAKER-EXIT-abc", "PROTECTIVE_TAKER"),
+    ("BTC-15M-URGENT-EXIT-abc", "URGENT_MAKER"),
+    ("BTC-15M-RECOVERY-PASSIVE-abc", "RECOVERY_PASSIVE"),
+    ("BTC-15M-MAKER-SELL-abc", "MAKER_TP"),
+    ("", "UNKNOWN"), (None, "UNKNOWN"), ("BTC-15M-MAKER-BUY-abc", "UNKNOWN"),
+])
+def test_exit_kind_comes_from_the_client_order_id(coid, kind):
+    assert classify_exit_order(coid) == kind
+
+
+def test_maker_tp_fill_is_not_a_protective_exit_fill():
+    # LIVE run_1791621743: a maker TP SELL fill used to be reported as T_EXIT_FILL
+    # while T_EXIT_SUBMIT only counted ORDER_TAKER_EXIT_SUBMIT.
+    orders = [(5.0, "ORDER_FILLED", "BUY", "BTC-15M-MAKER-BUY-1"),
+              (20.0, "ORDER_FILLED", "SELL", "BTC-15M-MAKER-SELL-2"),
+              (30.0, "ORDER_TAKER_EXIT_SUBMIT", "SELL", "BTC-15M-TAKER-EXIT-3"),
+              (31.0, "ORDER_FILLED", "SELL", "BTC-15M-TAKER-EXIT-3"),
+              (32.0, "ORDER_FILLED", "SELL", "BTC-15M-TAKER-EXIT-3"),
+              (40.0, "ORDER_FILLED", "SELL", "BTC-15M-URGENT-EXIT-4"),
+              (1.0, "ORDER_FILLED", "SELL", "BTC-15M-TAKER-EXIT-0")]   # before entry: ignored
+    ev = exit_events_from_orders(orders, entry_ts=5.0, settled=True)
+    assert ev["T_TP_EXIT_FILL"] == 20.0
+    assert ev["T_PROTECTIVE_EXIT_SUBMIT"] == 30.0 and ev["T_PROTECTIVE_EXIT_FILL"] == 31.0
+    assert ev["T_OTHER_EXIT_FILL"] == 40.0
+    assert ev["first_exit_fill_kind"] == "MAKER_TP"
+
+    tp_only = exit_events_from_orders(orders[:2], entry_ts=5.0, settled=True)
+    assert tp_only["T_TP_EXIT_FILL"] == 20.0
+    assert tp_only["T_PROTECTIVE_EXIT_SUBMIT"] is None and tp_only["T_PROTECTIVE_EXIT_FILL"] is None
+    unsettled = exit_events_from_orders(orders[:2], entry_ts=5.0, settled=False)
+    assert "T_PROTECTIVE_EXIT_FILL" not in unsettled          # still open: UNKNOWN, not NOT_TRIGGERED
+
+
+def test_load_positions_reads_client_order_ids_from_the_journal(tmp_path):
+    import sqlite3
+    from monitoring.trade_journal_db import TradeJournalDB
+    path = tmp_path / "journal.db"
+    db = TradeJournalDB(path, backup_interval_sec=3600)
+    try:
+        db.log_strategy_event("r1", "STOP_TIMING_POSITION_OPENED", {
+            "position_epoch": "e1", "slug": "s", "instrument_id": "up-token", "held_side": "UP",
+            "entry_fill_ts": 0.0})
+        db.log_order_event("r1", "ORDER_FILLED", client_order_id="BTC-15M-MAKER-SELL-1", side="SELL",
+                           price=0.9, qty=5, status="FILLED", instrument_id="up-token")
+        db.log_strategy_event("r1", "STOP_TIMING_POSITION_SETTLEMENT", {"position_epoch": "e1"})
+    finally:
+        db.stop()
+    (pos,) = load_positions(sqlite3.connect(path), "r1", include_shadow=False)
+    assert pos["events"]["T_TP_EXIT_FILL"] is not None
+    assert pos["events"]["T_PROTECTIVE_EXIT_FILL"] is None
+    assert pos["events"]["T_PROTECTIVE_EXIT_SUBMIT"] is None
+    assert pos["exit_fill_kind"] == "MAKER_TP"
