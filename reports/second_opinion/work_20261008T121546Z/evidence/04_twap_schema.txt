@@ -1,0 +1,40 @@
+CREATE TABLE snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    polymarket_slug TEXT NOT NULL,
+                    hyperliquid_market_id INTEGER,
+                    observed_ts_ms INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+CREATE TABLE sqlite_sequence(name,seq);
+CREATE INDEX idx_lead_lag_scope_time
+                  ON snapshots(run_id, polymarket_slug, hyperliquid_market_id, observed_ts_ms);
+CREATE TABLE reference_1s (
+                    run_id TEXT NOT NULL, slug TEXT NOT NULL, market_id INTEGER,
+                    bucket_epoch_ms INTEGER NOT NULL, source TEXT NOT NULL,
+                    price_cents INTEGER NOT NULL, received_epoch_ns INTEGER NOT NULL,
+                    PRIMARY KEY (run_id, slug, market_id, bucket_epoch_ms, source)
+                );
+CREATE TABLE lead_lag_decisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+                    slug TEXT NOT NULL, market_id INTEGER, decision_epoch_ns INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+CREATE TABLE lead_lag_markouts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+                    slug TEXT NOT NULL, market_id INTEGER, candidate_epoch_ns INTEGER NOT NULL,
+                    horizon_ms INTEGER NOT NULL, observed_epoch_ns INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    UNIQUE(run_id, slug, market_id, candidate_epoch_ns, horizon_ms)
+                );
+CREATE TABLE latency_spans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+                    client_order_id TEXT NOT NULL, name TEXT NOT NULL,
+                    started_monotonic_ns INTEGER NOT NULL, ended_monotonic_ns INTEGER NOT NULL,
+                    elapsed_ns INTEGER NOT NULL, created_epoch_ns INTEGER NOT NULL
+                );
+CREATE INDEX idx_lead_lag_latency_name ON latency_spans(name, created_epoch_ns);
+CREATE INDEX idx_lead_lag_markout_horizon_time
+                  ON lead_lag_markouts(horizon_ms, candidate_epoch_ns);
+CREATE INDEX idx_lead_lag_decision_time
+                  ON lead_lag_decisions(decision_epoch_ns);

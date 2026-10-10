@@ -1,0 +1,55 @@
+{
+ "flat": {
+  "legacy_capture_us_p50": 121.584,
+  "legacy_capture_us_p99": 141.167,
+  "v2_capture_us_p50": 125.917,
+  "v2_capture_us_p99": 150.042,
+  "added_us_p50": 4.333,
+  "added_us_p99": 8.875,
+  "bytes_added": 309,
+  "added_keys": [
+   "chainlink_source_ts",
+   "chainlink_spot",
+   "chainlink_spot_age_sec",
+   "chainlink_spot_fresh",
+   "down_bid_fresh",
+   "down_bid_state",
+   "held_side",
+   "snapshot_schema_version",
+   "up_bid_fresh",
+   "up_bid_state"
+  ]
+ },
+ "held": {
+  "legacy_capture_us_p50": 121.5,
+  "legacy_capture_us_p99": 142.75,
+  "v2_capture_us_p50": 134.208,
+  "v2_capture_us_p99": 158.041,
+  "added_us_p50": 12.708,
+  "added_us_p99": 15.291,
+  "bytes_added": 497,
+  "added_keys": [
+   "chainlink_source_ts",
+   "chainlink_spot",
+   "chainlink_spot_age_sec",
+   "chainlink_spot_fresh",
+   "down_bid_fresh",
+   "down_bid_state",
+   "held_entry_executable_bid",
+   "held_qty",
+   "held_side",
+   "held_side_bid",
+   "held_side_bid_fresh",
+   "held_side_bid_state",
+   "held_side_quote_age_sec",
+   "snapshot_schema_version",
+   "up_bid_fresh",
+   "up_bid_state"
+  ]
+ },
+ "stop_timing_observe_us_p50": 43.083,
+ "stop_timing_observe_us_p99": 54.292,
+ "dry_run_snapshot_rows": 3469,
+ "dry_run_payload_bytes_mean": 4711.906601326031,
+ "dry_run_payload_bytes_p50": 4716
+}

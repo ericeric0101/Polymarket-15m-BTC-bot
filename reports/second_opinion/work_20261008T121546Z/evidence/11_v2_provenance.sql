@@ -1,0 +1,1 @@
+SELECT COALESCE(json_extract(payload_json,'$.freshness_clock_semantics_version'),'NULL') v, COUNT(*), datetime(MIN(decision_epoch_ns)/1e9,'unixepoch'), datetime(MAX(decision_epoch_ns)/1e9,'unixepoch'), COUNT(DISTINCT slug), COUNT(DISTINCT run_id) FROM lead_lag_decisions WHERE json_extract(payload_json,'$.event_type')='PREDICTION_RESEARCH_SNAPSHOT' GROUP BY v;

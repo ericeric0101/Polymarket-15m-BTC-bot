@@ -1,0 +1,76 @@
+9352e69 2026-10-08T01:00+0800 fix(storage): bound research growth and reduce backup cadence
+33896ce 2026-10-07T22:43+0800 refactor(runtime): retire outcome hyperliquid subsystem
+e4e87ee 2026-10-07T21:19+0800 fix(adapter): initialize L2 retry state safely
+b034b4e 2026-10-07T20:38+0800 fix(storage): reduce trade journal backup write amplification
+3b50637 2026-10-07T10:02+0800 refactor: retire outcome fast-follow execution authority
+8309152 2026-10-07T07:18+0800 fix(storage): add bounded retention policy
+1fa2ba0 2026-10-07T06:46+0800 fix(storage): harden trade journal backup failures
+9f60f63 2026-10-07T00:24+0800 fix(research): correct prediction freshness clock domains
+3f90790 2026-10-07T00:10+0800 research: recompute historical freshness regime cohorts
+548ae55 2026-10-06T22:00+0800 fix(observability): persist research writer failures
+ad7cc22 2026-10-06T17:32+0800 fix(data): admit future polymarket instruments at runtime
+49aa9ca 2026-10-06T07:49+0800 fix(ops): extend scheduled rollover interval
+01c87aa 2026-10-06T01:11+0800 fix(data): coalesce redundant adapter quote generation
+bcd08cd 2026-10-06T00:21+0800 fix(observability): attribute owner-loop starvation load
+b1532c8 2026-10-05T23:37+0800 fix(observability): trace event-loop consumer stalls
+4f25d3e 2026-10-05T22:13+0800 fix(data): harden quote recovery and hot-path telemetry
+9352a6e 2026-10-05T20:44+0800 fix(observability): persist collection lifecycle attribution
+c8eeaaa 2026-10-05T00:03+0800 fix(research): finalize telemetry semantics for regime comparison
+c4aac14 2026-10-04T23:15+0800 feat(research): add sparse decision and L2 evidence
+3e595b2 2026-10-04T23:14+0800 feat(observability): unify runtime health and research quality projections
+60303d9 2026-10-04T23:13+0800 feat(research): add deterministic replay and offline integrity foundations
+0c0af23 2026-10-04T20:52+0800 fix(runtime): resolve pre-commit accounting and research blockers
+fcae261 2026-10-04T20:50+0800 fix(observability): compact DataEngine queue summaries
+a98a8f2 2026-10-03T16:49+0800 feat(research): add preliminary regime flip analysis
+cbc2631 2026-10-03T10:54+0800 feat(research): add regime-aware canonical analysis
+c3f9f70 2026-10-03T09:33+0800 feat(research): add four-market prediction forensics
+f204bd4 2026-10-03T04:48+0800 fix(network): harden Polymarket websocket recovery
+b1bd0bc 2026-10-02T23:44+0800 feat(research): add synchronized prediction snapshots
+9289455 2026-10-02T22:45+0800 feat(research): add residual repricing and entry fragility study
+9008874 2026-10-02T21:59+0800 feat(research): add BTC market prediction forensics
+f695b3f 2026-10-02T20:39+0800 fix(runtime): stop false quote watchdog rollovers
+d13985d 2026-10-02T00:31+0800 fix(market): harden quote handoff recovery
+9fbb62a 2026-10-01T21:46+0800 feat(research): add required-path probability replay
+0bcd84d 2026-10-01T21:04+0800 docs(research): add quote freshness replay reports
+aa5aa0e 2026-10-01T20:52+0800 fix(signals): reject stale market quote inputs
+616dfc7 2026-10-01T17:07+0800 feat(research): collect Binance BTC 1s Parquet history
+1afce14 2026-10-01T15:46+0800 feat(research): add empirical probability comparison
+c149976 2026-10-01T11:10+0800 fix(research): retain opening BBO across market handoff
+7a8d2af 2026-10-01T09:43+0800 fix(research): capture opening TWAP and L2 gaps
+85e4511 2026-10-01T07:29+0800 fix(recovery): harden watchdog rollover and TWAP telemetry
+944ddc7 2026-09-30T23:23+0800 fix(risk): scope session guard to Taipei overnight window
+4c3f2f2 2026-09-30T23:05+0800 fix(research): enforce settlement probability provenance
+775dbee 2026-09-30T22:46+0800 fix(research): harden settlement path provenance
+fbb26ce 2026-09-30T22:08+0800 feat(research): add settlement path probability shadow
+f4f402f 2026-09-30T21:29+0800 fix(runtime): restore quote subscriptions and prevent queue starvation
+442873b 2026-09-30T00:02+0800 fix(runtime): verify node shutdown after disposal
+622e97e 2026-09-29T22:55+0800 fix(risk): disable stop-loss exits by default
+f5a0f66 2026-09-29T21:46+0800 fix(risk): require persistent thesis confirmation for loss breaker
+a1936f5 2026-09-29T20:36+0800 fix(strategy): 改回原本設定
+c852d08 2026-09-28T21:59+0800 fix(risk): reconcile missed settlements before session guard
+d385d07 2026-09-28T21:46+0800 fix(market-data): harden watchdog rollover shutdown
+8d28201 2026-09-28T19:30+0800 fix(research): isolate TWAP telemetry storage
+966d047 2026-09-28T17:57+0800 fix(market-data): prewarm rollover quote subscriptions
+f97ceb4 2026-09-28T14:21+0800 fix(research): harden telemetry evidence semantics
+4a57f0e 2026-09-28T13:45+0800 fix(research): harden TWAP and stop forensic telemetry
+527d194 2026-09-28T13:22+0800 feat(research): add session guard and TWAP shadow telemetry
+49bc1ab 2026-09-27T22:55+0800 feat(research): validate combined exit architecture
+a5f5c28 2026-09-27T18:02+0800 fix(risk): enforce weekend buy block at submission
+b84f249 2026-09-27T14:29+0800 fix(strategy): disable weekend live entries
+79cfb67 2026-09-27T14:18+0800 feat(research): add forward shadow entry experiment
+7aed9af 2026-09-27T13:18+0800 feat(research): add early-entry profit-lock backtest
+7db5aaa 2026-09-27T12:34+0800 feat(research): add short-term take-profit backtest
+901eef2 2026-09-27T10:58+0800 fix(exit): preserve absolute breaker through recovery gate
+a8d4e93 2026-09-27T07:52+0800 fix(research): harden candidate telemetry and edge semantics
+b0c53ad 2026-09-27T01:11+0800 feat(research): add live entry economics telemetry
+c2474d3 2026-09-27T00:18+0800 feat(analytics): add strike flip risk research
+4126f5b 2026-09-26T22:49+0800 feat(research): add trend-entry shadow tracking
+42cfb2a 2026-09-26T22:18+0800 feat(entries): allow weekend trading
+d8b6e29 2026-09-26T21:20+0800 feat(analytics): add unified historical research pipeline
+6346ab6 2026-09-26T18:44+0800 feat(analytics): sample public markets for weekend study
+82f2539 2026-09-26T11:04+0800 fix(analytics): harden public history retrieval
+d7d0d56 2026-09-26T10:07+0800 feat(analytics): add weekend liquidity and execution report
+7111f56 2026-09-26T00:32+0800 fix(risk): abort fast-follow on intent persistence failure
+a2d520f 2026-09-26T00:30+0800 fix(redeem): reconcile advanced nonce without receipt
+b09b3df 2026-09-25T23:22+0800 fix(runtime): bound market queue and preserve quote recovery
+832ebbd 2026-09-25T22:08+0800 fix(trading): sync maker depth and confirm stop-loss trend

@@ -1,0 +1,1898 @@
+{
+ "page_size": 4096,
+ "page_count": 782707,
+ "freelist_pages": 0,
+ "objects": [
+  {
+   "name": "strategy_events",
+   "pg_bytes": 2046287872,
+   "unused_bytes": 359883015,
+   "payload_bytes": 1671953377
+  },
+  {
+   "name": "order_events",
+   "pg_bytes": 987435008,
+   "unused_bytes": 236839110,
+   "payload_bytes": 743713003
+  },
+  {
+   "name": "idx_strategy_events_run_ts",
+   "pg_bytes": 73478144,
+   "unused_bytes": 9194776,
+   "payload_bytes": 61109597
+  },
+  {
+   "name": "idx_strategy_events_type_id",
+   "pg_bytes": 39776256,
+   "unused_bytes": 4108275,
+   "payload_bytes": 32592946
+  },
+  {
+   "name": "idx_order_events_run_ts",
+   "pg_bytes": 29954048,
+   "unused_bytes": 3748131,
+   "payload_bytes": 24911193
+  },
+  {
+   "name": "idx_order_events_client",
+   "pg_bytes": 27951104,
+   "unused_bytes": 3747333,
+   "payload_bytes": 22818934
+  },
+  {
+   "name": "strategy_runs",
+   "pg_bytes": 1003520,
+   "unused_bytes": 100593,
+   "payload_bytes": 897503
+  },
+  {
+   "name": "idx_order_events_fill_markout_buy_ts_id",
+   "pg_bytes": 36864,
+   "unused_bytes": 8635,
+   "payload_bytes": 26250
+  },
+  {
+   "name": "sqlite_autoindex_strategy_runs_1",
+   "pg_bytes": 20480,
+   "unused_bytes": 5176,
+   "payload_bytes": 13760
+  },
+  {
+   "name": "sqlite_sequence",
+   "pg_bytes": 4096,
+   "unused_bytes": 4041,
+   "payload_bytes": 39
+  },
+  {
+   "name": "sqlite_schema",
+   "pg_bytes": 4096,
+   "unused_bytes": 1163,
+   "payload_bytes": 2767
+  },
+  {
+   "name": "sqlite_autoindex_session_pnl_state_1",
+   "pg_bytes": 4096,
+   "unused_bytes": 3734,
+   "payload_bytes": 297
+  },
+  {
+   "name": "session_pnl_state",
+   "pg_bytes": 4096,
+   "unused_bytes": 2497,
+   "payload_bytes": 1515
+  },
+  {
+   "name": "journal_schema",
+   "pg_bytes": 4096,
+   "unused_bytes": 4081,
+   "payload_bytes": 3
+  }
+ ],
+ "order_events_scale": 1.3170738958166126,
+ "order_events_by_day": [
+  {
+   "day": "2026-09-07",
+   "rows": 15085,
+   "est_disk_bytes": 41658220
+  },
+  {
+   "day": "2026-09-08",
+   "rows": 14722,
+   "est_disk_bytes": 41808433
+  },
+  {
+   "day": "2026-09-09",
+   "rows": 14781,
+   "est_disk_bytes": 39544516
+  },
+  {
+   "day": "2026-09-10",
+   "rows": 5017,
+   "est_disk_bytes": 10485774
+  },
+  {
+   "day": "2026-09-11",
+   "rows": 14751,
+   "est_disk_bytes": 37964684
+  },
+  {
+   "day": "2026-09-14",
+   "rows": 3134,
+   "est_disk_bytes": 6810037
+  },
+  {
+   "day": "2026-09-18",
+   "rows": 3952,
+   "est_disk_bytes": 7677568
+  },
+  {
+   "day": "2026-09-21",
+   "rows": 12094,
+   "est_disk_bytes": 35498377
+  },
+  {
+   "day": "2026-09-22",
+   "rows": 3710,
+   "est_disk_bytes": 9662663
+  },
+  {
+   "day": "2026-09-23",
+   "rows": 12393,
+   "est_disk_bytes": 33313826
+  },
+  {
+   "day": "2026-09-24",
+   "rows": 14767,
+   "est_disk_bytes": 39946007
+  },
+  {
+   "day": "2026-09-25",
+   "rows": 23336,
+   "est_disk_bytes": 54017033
+  },
+  {
+   "day": "2026-09-27",
+   "rows": 19730,
+   "est_disk_bytes": 42538981
+  },
+  {
+   "day": "2026-09-28",
+   "rows": 7387,
+   "est_disk_bytes": 14768101
+  },
+  {
+   "day": "2026-09-29",
+   "rows": 4225,
+   "est_disk_bytes": 8180020
+  },
+  {
+   "day": "2026-09-30",
+   "rows": 1526,
+   "est_disk_bytes": 3475538
+  },
+  {
+   "day": "2026-10-01",
+   "rows": 3323,
+   "est_disk_bytes": 8818798
+  },
+  {
+   "day": "2026-10-02",
+   "rows": 25510,
+   "est_disk_bytes": 62360957
+  },
+  {
+   "day": "2026-10-03",
+   "rows": 35388,
+   "est_disk_bytes": 90684375
+  },
+  {
+   "day": "2026-10-04",
+   "rows": 38099,
+   "est_disk_bytes": 93342853
+  },
+  {
+   "day": "2026-10-05",
+   "rows": 36899,
+   "est_disk_bytes": 88025541
+  },
+  {
+   "day": "2026-10-06",
+   "rows": 49570,
+   "est_disk_bytes": 117061232
+  },
+  {
+   "day": "2026-10-07",
+   "rows": 38551,
+   "est_disk_bytes": 91450840
+  },
+  {
+   "day": "2026-10-08",
+   "rows": 2837,
+   "est_disk_bytes": 5418522
+  },
+  {
+   "day": "2026-10-09",
+   "rows": 1537,
+   "est_disk_bytes": 2922099
+  }
+ ],
+ "order_events_by_type": [
+  {
+   "event_type": "ENTRY_EDGE_OBSERVATION",
+   "rows": 162828,
+   "est_disk_bytes": 604674997,
+   "first_ts": "2026-09-07T11:49:03.467770+00:00",
+   "last_ts": "2026-10-09T08:26:25.434648+00:00",
+   "rows_last7d": 85005,
+   "est_bytes_last7d": 315888444
+  },
+  {
+   "event_type": "DEPTH_RISK_SHADOW_MARKOUT",
+   "rows": 76316,
+   "est_disk_bytes": 134446202,
+   "first_ts": "2026-09-07T17:24:06.505551+00:00",
+   "last_ts": "2026-10-09T08:24:43.889786+00:00",
+   "rows_last7d": 54816,
+   "est_bytes_last7d": 96554587
+  },
+  {
+   "event_type": "ORDER_OBSERVE_BUY_BLOCKED",
+   "rows": 31992,
+   "est_disk_bytes": 87973077,
+   "first_ts": "2026-09-07T11:49:04.582746+00:00",
+   "last_ts": "2026-10-09T08:26:32.849855+00:00",
+   "rows_last7d": 15831,
+   "est_bytes_last7d": 43903910
+  },
+  {
+   "event_type": "DEPTH_RISK_SHADOW_CANDIDATE",
+   "rows": 19665,
+   "est_disk_bytes": 42133690,
+   "first_ts": "2026-09-07T17:24:00.899269+00:00",
+   "last_ts": "2026-10-09T08:23:43.589375+00:00",
+   "rows_last7d": 14235,
+   "est_bytes_last7d": 30523647
+  },
+  {
+   "event_type": "ORDER_SKIP_LOCKED_SIDE_INVALIDATED",
+   "rows": 23456,
+   "est_disk_bytes": 22955425,
+   "first_ts": "2026-09-07T11:49:56.964548+00:00",
+   "last_ts": "2026-10-09T08:21:12.818714+00:00",
+   "rows_last7d": 11374,
+   "est_bytes_last7d": 11132252
+  },
+  {
+   "event_type": "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE",
+   "rows": 20037,
+   "est_disk_bytes": 20384705,
+   "first_ts": "2026-09-07T11:49:03.471305+00:00",
+   "last_ts": "2026-10-09T07:54:21.501659+00:00",
+   "rows_last7d": 14213,
+   "est_bytes_last7d": 14458939
+  },
+  {
+   "event_type": "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW",
+   "rows": 18118,
+   "est_disk_bytes": 17587587,
+   "first_ts": "2026-09-07T12:32:51.369784+00:00",
+   "last_ts": "2026-10-09T08:19:58.827989+00:00",
+   "rows_last7d": 13378,
+   "est_bytes_last7d": 12986764
+  },
+  {
+   "event_type": "ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
+   "rows": 18137,
+   "est_disk_bytes": 17311149,
+   "first_ts": "2026-09-07T12:03:46.145623+00:00",
+   "last_ts": "2026-10-09T08:22:50.603050+00:00",
+   "rows_last7d": 13727,
+   "est_bytes_last7d": 13101941
+  },
+  {
+   "event_type": "ORDER_SKIP_MARKET_BUY_LIMIT",
+   "rows": 10351,
+   "est_disk_bytes": 10400122,
+   "first_ts": "2026-09-25T05:25:04.658799+00:00",
+   "last_ts": "2026-09-30T15:56:06.488308+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_SKIP_FAST_FOLLOW_OWNERSHIP",
+   "rows": 9057,
+   "est_disk_bytes": 7792583,
+   "first_ts": "2026-09-08T15:29:10.073292+00:00",
+   "last_ts": "2026-10-07T02:35:13.127451+00:00",
+   "rows_last7d": 1124,
+   "est_bytes_last7d": 967860
+  },
+  {
+   "event_type": "SHADOW_SIM_ENTRY_CANCELLED",
+   "rows": 655,
+   "est_disk_bytes": 2593206,
+   "first_ts": "2026-10-01T00:06:45.878700+00:00",
+   "last_ts": "2026-10-09T08:07:29.123031+00:00",
+   "rows_last7d": 650,
+   "est_bytes_last7d": 2573258
+  },
+  {
+   "event_type": "ORDER_SKIP_MARKET_STOP_LOSS_LIMIT",
+   "rows": 2597,
+   "est_disk_bytes": 2448656,
+   "first_ts": "2026-09-25T12:11:54.077161+00:00",
+   "last_ts": "2026-09-29T14:29:57.018855+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "FILL_MARKOUT",
+   "rows": 1016,
+   "est_disk_bytes": 2389758,
+   "first_ts": "2026-09-08T15:53:29.026374+00:00",
+   "last_ts": "2026-09-30T15:50:39.129747+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SHADOW_SIM_ENTRY_REQUOTED",
+   "rows": 592,
+   "est_disk_bytes": 2308316,
+   "first_ts": "2026-10-01T00:06:48.487405+00:00",
+   "last_ts": "2026-10-09T08:08:17.074062+00:00",
+   "rows_last7d": 588,
+   "est_bytes_last7d": 2293062
+  },
+  {
+   "event_type": "ORDER_SKIP_TWAP_REFERENCE_DEGRADED",
+   "rows": 2234,
+   "est_disk_bytes": 2015374,
+   "first_ts": "2026-09-07T12:43:19.124832+00:00",
+   "last_ts": "2026-10-07T14:16:31.937067+00:00",
+   "rows_last7d": 206,
+   "est_bytes_last7d": 185812
+  },
+  {
+   "event_type": "SHADOW_SIM_ENTRY_CANDIDATE",
+   "rows": 377,
+   "est_disk_bytes": 1420715,
+   "first_ts": "2026-10-01T00:06:44.221059+00:00",
+   "last_ts": "2026-10-09T08:20:02.084586+00:00",
+   "rows_last7d": 372,
+   "est_bytes_last7d": 1401589
+  },
+  {
+   "event_type": "ORDER_DRY_RUN_SUBMITTED",
+   "rows": 982,
+   "est_disk_bytes": 1276862,
+   "first_ts": "2026-10-01T00:06:44.222300+00:00",
+   "last_ts": "2026-10-09T08:20:02.085845+00:00",
+   "rows_last7d": 973,
+   "est_bytes_last7d": 1265850
+  },
+  {
+   "event_type": "ORDER_SUBMIT",
+   "rows": 373,
+   "est_disk_bytes": 1247452,
+   "first_ts": "2026-09-09T12:08:31.226598+00:00",
+   "last_ts": "2026-09-30T15:50:29.272292+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SHADOW_SIM_ENTRY_FILLED",
+   "rows": 305,
+   "est_disk_bytes": 1228378,
+   "first_ts": "2026-10-01T00:07:02.120077+00:00",
+   "last_ts": "2026-10-09T08:20:14.425335+00:00",
+   "rows_last7d": 301,
+   "est_bytes_last7d": 1212423
+  },
+  {
+   "event_type": "SHADOW_SIM_SETTLED",
+   "rows": 269,
+   "est_disk_bytes": 1173439,
+   "first_ts": "2026-10-01T00:15:00.184031+00:00",
+   "last_ts": "2026-10-09T08:15:00.124792+00:00",
+   "rows_last7d": 265,
+   "est_bytes_last7d": 1156103
+  },
+  {
+   "event_type": "ORDER_DRY_RUN_CANCELLED",
+   "rows": 664,
+   "est_disk_bytes": 779173,
+   "first_ts": "2026-10-01T00:06:45.961582+00:00",
+   "last_ts": "2026-10-09T08:07:29.124806+00:00",
+   "rows_last7d": 659,
+   "est_bytes_last7d": 773272
+  },
+  {
+   "event_type": "SHADOW_SIM_MARKOUT",
+   "rows": 660,
+   "est_disk_bytes": 767736,
+   "first_ts": "2026-10-01T00:07:32.291469+00:00",
+   "last_ts": "2026-10-09T08:21:14.486867+00:00",
+   "rows_last7d": 652,
+   "est_bytes_last7d": 758411
+  },
+  {
+   "event_type": "ORDER_FILLED",
+   "rows": 249,
+   "est_disk_bytes": 481319,
+   "first_ts": "2026-09-08T15:53:27.944436+00:00",
+   "last_ts": "2026-09-30T16:03:35.330878+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_SKIP_SELL_DELAY_AFTER_BUY",
+   "rows": 423,
+   "est_disk_bytes": 419829,
+   "first_ts": "2026-09-10T12:20:54.342241+00:00",
+   "last_ts": "2026-09-30T15:50:18.776230+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_MAKER_INTENT",
+   "rows": 241,
+   "est_disk_bytes": 326895,
+   "first_ts": "2026-09-22T11:51:19.145514+00:00",
+   "last_ts": "2026-09-30T15:50:02.785565+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCELED",
+   "rows": 163,
+   "est_disk_bytes": 156841,
+   "first_ts": "2026-09-09T13:06:20.744754+00:00",
+   "last_ts": "2026-09-30T12:20:16.729405+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_FAST_FOLLOW_INTENT",
+   "rows": 28,
+   "est_disk_bytes": 125137,
+   "first_ts": "2026-09-23T12:03:28.160893+00:00",
+   "last_ts": "2026-10-07T02:35:11.745605+00:00",
+   "rows_last7d": 13,
+   "est_bytes_last7d": 92229
+  },
+  {
+   "event_type": "ORDER_FAST_FOLLOW_SUBMIT",
+   "rows": 65,
+   "est_disk_bytes": 103773,
+   "first_ts": "2026-09-08T15:34:29.017150+00:00",
+   "last_ts": "2026-09-27T18:51:27.454715+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCEL_RECONCILE_UNKNOWN",
+   "rows": 100,
+   "est_disk_bytes": 92798,
+   "first_ts": "2026-09-10T12:28:48.403516+00:00",
+   "last_ts": "2026-09-30T15:50:28.207403+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_SKIP_NORMAL_MAKER_BUY_DISABLED",
+   "rows": 100,
+   "est_disk_bytes": 86268,
+   "first_ts": "2026-09-22T15:52:08.585517+00:00",
+   "last_ts": "2026-09-25T03:09:24.009620+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_REJECTED",
+   "rows": 73,
+   "est_disk_bytes": 86040,
+   "first_ts": "2026-09-08T15:34:33.345779+00:00",
+   "last_ts": "2026-09-30T12:20:29.491646+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_SKIP_PENDING_TAKER_EXIT",
+   "rows": 88,
+   "est_disk_bytes": 82654,
+   "first_ts": "2026-09-10T13:13:56.770397+00:00",
+   "last_ts": "2026-09-29T14:26:22.077564+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_TAKER_EXIT_SUBMIT",
+   "rows": 32,
+   "est_disk_bytes": 57155,
+   "first_ts": "2026-09-08T15:53:23.323601+00:00",
+   "last_ts": "2026-09-29T14:26:20.682446+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SHADOW_SIM_ENTRY_EXPIRED",
+   "rows": 9,
+   "est_disk_bytes": 36061,
+   "first_ts": "2026-10-02T18:20:25.965977+00:00",
+   "last_ts": "2026-10-07T06:36:14.952718+00:00",
+   "rows_last7d": 9,
+   "est_bytes_last7d": 36061
+  },
+  {
+   "event_type": "ORDER_CANCEL_RECONCILED",
+   "rows": 29,
+   "est_disk_bytes": 25216,
+   "first_ts": "2026-09-25T05:25:22.310856+00:00",
+   "last_ts": "2026-09-30T15:50:36.607055+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCEL_REJECTED",
+   "rows": 21,
+   "est_disk_bytes": 23582,
+   "first_ts": "2026-09-18T12:56:11.798996+00:00",
+   "last_ts": "2026-09-30T12:05:39.592054+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCEL_RECONCILE_UNKNOWN_KILL",
+   "rows": 9,
+   "est_disk_bytes": 8214,
+   "first_ts": "2026-09-10T12:29:53.558594+00:00",
+   "last_ts": "2026-09-18T18:13:26.249085+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_RECOVERY_EXIT_PASSIVE_SUBMIT",
+   "rows": 2,
+   "est_disk_bytes": 3718,
+   "first_ts": "2026-09-11T15:37:47.496352+00:00",
+   "last_ts": "2026-09-27T16:20:03.764468+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_SKIP_INVENTORY_CAP",
+   "rows": 3,
+   "est_disk_bytes": 3303,
+   "first_ts": "2026-09-27T21:04:05.796743+00:00",
+   "last_ts": "2026-09-29T17:39:49.126172+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCEL_ZERO_INVENTORY_RETIRED",
+   "rows": 3,
+   "est_disk_bytes": 2971,
+   "first_ts": "2026-09-23T12:12:36.200487+00:00",
+   "last_ts": "2026-09-24T17:43:29.534461+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCEL_RETRY",
+   "rows": 3,
+   "est_disk_bytes": 2746,
+   "first_ts": "2026-09-28T12:38:17.381351+00:00",
+   "last_ts": "2026-09-29T12:50:14.456664+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ORDER_CANCEL_PRIOR_MARKET_RETIRED",
+   "rows": 2,
+   "est_disk_bytes": 1868,
+   "first_ts": "2026-09-10T15:32:38.252664+00:00",
+   "last_ts": "2026-09-18T17:31:30.752483+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  }
+ ],
+ "strategy_events_scale": 1.221731655515838,
+ "strategy_events_by_day": [
+  {
+   "day": "2026-09-07",
+   "rows": 53156,
+   "est_disk_bytes": 76076596
+  },
+  {
+   "day": "2026-09-08",
+   "rows": 52003,
+   "est_disk_bytes": 74141731
+  },
+  {
+   "day": "2026-09-09",
+   "rows": 47154,
+   "est_disk_bytes": 65582094
+  },
+  {
+   "day": "2026-09-10",
+   "rows": 14652,
+   "est_disk_bytes": 20646189
+  },
+  {
+   "day": "2026-09-11",
+   "rows": 45537,
+   "est_disk_bytes": 64328725
+  },
+  {
+   "day": "2026-09-14",
+   "rows": 9619,
+   "est_disk_bytes": 13568600
+  },
+  {
+   "day": "2026-09-18",
+   "rows": 13353,
+   "est_disk_bytes": 18565462
+  },
+  {
+   "day": "2026-09-21",
+   "rows": 46126,
+   "est_disk_bytes": 62954578
+  },
+  {
+   "day": "2026-09-22",
+   "rows": 10474,
+   "est_disk_bytes": 14607787
+  },
+  {
+   "day": "2026-09-23",
+   "rows": 36564,
+   "est_disk_bytes": 51692572
+  },
+  {
+   "day": "2026-09-24",
+   "rows": 42166,
+   "est_disk_bytes": 56620612
+  },
+  {
+   "day": "2026-09-25",
+   "rows": 40517,
+   "est_disk_bytes": 61444889
+  },
+  {
+   "day": "2026-09-26",
+   "rows": 80,
+   "est_disk_bytes": 106940
+  },
+  {
+   "day": "2026-09-27",
+   "rows": 53432,
+   "est_disk_bytes": 108141695
+  },
+  {
+   "day": "2026-09-28",
+   "rows": 20925,
+   "est_disk_bytes": 41314643
+  },
+  {
+   "day": "2026-09-29",
+   "rows": 10025,
+   "est_disk_bytes": 20792126
+  },
+  {
+   "day": "2026-09-30",
+   "rows": 4529,
+   "est_disk_bytes": 9351415
+  },
+  {
+   "day": "2026-10-01",
+   "rows": 8313,
+   "est_disk_bytes": 17879335
+  },
+  {
+   "day": "2026-10-02",
+   "rows": 51545,
+   "est_disk_bytes": 118576580
+  },
+  {
+   "day": "2026-10-03",
+   "rows": 93966,
+   "est_disk_bytes": 218316761
+  },
+  {
+   "day": "2026-10-04",
+   "rows": 89534,
+   "est_disk_bytes": 204666632
+  },
+  {
+   "day": "2026-10-05",
+   "rows": 74126,
+   "est_disk_bytes": 193891968
+  },
+  {
+   "day": "2026-10-06",
+   "rows": 90700,
+   "est_disk_bytes": 287544601
+  },
+  {
+   "day": "2026-10-07",
+   "rows": 69542,
+   "est_disk_bytes": 221798817
+  },
+  {
+   "day": "2026-10-08",
+   "rows": 5237,
+   "est_disk_bytes": 14695009
+  },
+  {
+   "day": "2026-10-09",
+   "rows": 2894,
+   "est_disk_bytes": 8981504
+  }
+ ],
+ "strategy_events_by_type": [
+  {
+   "event_type": "ENTRY_DECISION_TRACE",
+   "rows": 134632,
+   "est_disk_bytes": 543924896,
+   "first_ts": "2026-09-07T11:49:03.470025+00:00",
+   "last_ts": "2026-10-09T08:26:32.855463+00:00",
+   "rows_last7d": 60105,
+   "est_bytes_last7d": 414375321
+  },
+  {
+   "event_type": "QUOTE_TRANSPORT_TELEMETRY",
+   "rows": 305693,
+   "est_disk_bytes": 481539486,
+   "first_ts": "2026-09-07T11:48:19.713424+00:00",
+   "last_ts": "2026-10-09T08:26:28.916475+00:00",
+   "rows_last7d": 146812,
+   "est_bytes_last7d": 298303567
+  },
+  {
+   "event_type": "SIDE_DECISION_OBSERVATION",
+   "rows": 38142,
+   "est_disk_bytes": 135753085,
+   "first_ts": "2026-09-07T12:00:13.497435+00:00",
+   "last_ts": "2026-10-09T08:15:41.460945+00:00",
+   "rows_last7d": 20941,
+   "est_bytes_last7d": 75502461
+  },
+  {
+   "event_type": "BUY_PATH_DIAGNOSTIC",
+   "rows": 113304,
+   "est_disk_bytes": 135677361,
+   "first_ts": "2026-09-07T11:49:03.471610+00:00",
+   "last_ts": "2026-10-09T08:26:21.922129+00:00",
+   "rows_last7d": 68059,
+   "est_bytes_last7d": 76211300
+  },
+  {
+   "event_type": "SIDE_DECISION",
+   "rows": 33343,
+   "est_disk_bytes": 117010953,
+   "first_ts": "2026-09-07T11:48:26.102988+00:00",
+   "last_ts": "2026-10-09T07:48:36.650037+00:00",
+   "rows_last7d": 19254,
+   "est_bytes_last7d": 68331549
+  },
+  {
+   "event_type": "ENTRY_CONFIRMATION_OBSERVATION",
+   "rows": 82695,
+   "est_disk_bytes": 112261983,
+   "first_ts": "2026-09-07T11:49:04.572529+00:00",
+   "last_ts": "2026-10-09T08:26:15.789692+00:00",
+   "rows_last7d": 33956,
+   "est_bytes_last7d": 46358715
+  },
+  {
+   "event_type": "SMART_MONEY_OBSERVATION",
+   "rows": 82714,
+   "est_disk_bytes": 107961775,
+   "first_ts": "2026-09-07T11:49:04.581339+00:00",
+   "last_ts": "2026-10-09T08:26:21.915786+00:00",
+   "rows_last7d": 33975,
+   "est_bytes_last7d": 44280822
+  },
+  {
+   "event_type": "EVENT_LOOP_CONSUMER_TIMING",
+   "rows": 2728,
+   "est_disk_bytes": 80487323,
+   "first_ts": "2026-10-05T15:42:11.243995+00:00",
+   "last_ts": "2026-10-09T08:18:17.042637+00:00",
+   "rows_last7d": 2728,
+   "est_bytes_last7d": 80487323
+  },
+  {
+   "event_type": "LIVE_SIGNAL_COMPARE",
+   "rows": 27908,
+   "est_disk_bytes": 78867374,
+   "first_ts": "2026-09-07T11:48:20.312610+00:00",
+   "last_ts": "2026-10-09T08:26:20.577639+00:00",
+   "rows_last7d": 13715,
+   "est_bytes_last7d": 38819340
+  },
+  {
+   "event_type": "SHADOW_SIGNAL_CANDIDATE_LIVE",
+   "rows": 27501,
+   "est_disk_bytes": 78133667,
+   "first_ts": "2026-09-07T11:48:20.315432+00:00",
+   "last_ts": "2026-10-09T08:26:20.713017+00:00",
+   "rows_last7d": 13526,
+   "est_bytes_last7d": 38482804
+  },
+  {
+   "event_type": "MAIN_SIGNAL_CANDIDATE_LIVE",
+   "rows": 22001,
+   "est_disk_bytes": 62514871,
+   "first_ts": "2026-09-07T11:48:20.313641+00:00",
+   "last_ts": "2026-10-09T08:26:20.669725+00:00",
+   "rows_last7d": 10857,
+   "est_bytes_last7d": 30905024
+  },
+  {
+   "event_type": "ENTRY_REGIME_OBSERVATION",
+   "rows": 7912,
+   "est_disk_bytes": 25721138,
+   "first_ts": "2026-09-07T11:54:50.507021+00:00",
+   "last_ts": "2026-10-09T08:24:50.447199+00:00",
+   "rows_last7d": 3772,
+   "est_bytes_last7d": 12261617
+  },
+  {
+   "event_type": "ACCOUNT_SUMMARY",
+   "rows": 35497,
+   "est_disk_bytes": 16655413,
+   "first_ts": "2026-09-07T11:48:12.335767+00:00",
+   "last_ts": "2026-10-09T08:26:13.451090+00:00",
+   "rows_last7d": 14756,
+   "est_bytes_last7d": 6923971
+  },
+  {
+   "event_type": "FAST_FOLLOW_ENTRY_BLOCKED",
+   "rows": 2358,
+   "est_disk_bytes": 5076706,
+   "first_ts": "2026-09-10T11:53:11.269016+00:00",
+   "last_ts": "2026-10-07T08:00:52.377207+00:00",
+   "rows_last7d": 699,
+   "est_bytes_last7d": 3352434
+  },
+  {
+   "event_type": "FAST_FOLLOW_QUOTE_HANDOFF",
+   "rows": 1065,
+   "est_disk_bytes": 4325471,
+   "first_ts": "2026-09-23T12:03:18.435909+00:00",
+   "last_ts": "2026-10-07T08:00:52.374659+00:00",
+   "rows_last7d": 592,
+   "est_bytes_last7d": 3076519
+  },
+  {
+   "event_type": "ENTRY_RESEARCH_TELEMETRY_SUMMARY",
+   "rows": 6081,
+   "est_disk_bytes": 4313096,
+   "first_ts": "2026-09-27T00:02:41.957706+00:00",
+   "last_ts": "2026-10-09T08:25:47.157022+00:00",
+   "rows_last7d": 5316,
+   "est_bytes_last7d": 3773202
+  },
+  {
+   "event_type": "FAST_FOLLOW_COUNTERFACTUAL_MARKOUT",
+   "rows": 4298,
+   "est_disk_bytes": 4236634,
+   "first_ts": "2026-09-24T12:33:12.060818+00:00",
+   "last_ts": "2026-10-07T08:01:22.552770+00:00",
+   "rows_last7d": 2689,
+   "est_bytes_last7d": 2652186
+  },
+  {
+   "event_type": "SIDE_MODE_CHANGED",
+   "rows": 1103,
+   "est_disk_bytes": 3890351,
+   "first_ts": "2026-09-07T11:49:01.433919+00:00",
+   "last_ts": "2026-10-09T08:16:30.620469+00:00",
+   "rows_last7d": 512,
+   "est_bytes_last7d": 1856865
+  },
+  {
+   "event_type": "NO_TRADE_REDUCE_ONLY",
+   "rows": 5064,
+   "est_disk_bytes": 3582323,
+   "first_ts": "2026-09-07T12:11:33.353045+00:00",
+   "last_ts": "2026-10-09T08:26:08.744452+00:00",
+   "rows_last7d": 2606,
+   "est_bytes_last7d": 1844752
+  },
+  {
+   "event_type": "ENTRY_RESEARCH_CANDIDATE_TERMINAL",
+   "rows": 3725,
+   "est_disk_bytes": 3535674,
+   "first_ts": "2026-09-27T00:02:42.968973+00:00",
+   "last_ts": "2026-10-09T08:23:59.794378+00:00",
+   "rows_last7d": 3376,
+   "est_bytes_last7d": 3205148
+  },
+  {
+   "event_type": "SIDE_DECISION_SKIPPED",
+   "rows": 2163,
+   "est_disk_bytes": 3311718,
+   "first_ts": "2026-09-07T11:48:23.679927+00:00",
+   "last_ts": "2026-10-08T16:30:48.385266+00:00",
+   "rows_last7d": 911,
+   "est_bytes_last7d": 1380703
+  },
+  {
+   "event_type": "FAST_FOLLOW_CONFIRMED",
+   "rows": 3155,
+   "est_disk_bytes": 3162903,
+   "first_ts": "2026-09-08T15:29:07.147941+00:00",
+   "last_ts": "2026-10-07T08:00:52.090415+00:00",
+   "rows_last7d": 808,
+   "est_bytes_last7d": 838182
+  },
+  {
+   "event_type": "NO_TRADE_ACTIVE_SIDE_NONE",
+   "rows": 4886,
+   "est_disk_bytes": 3131554,
+   "first_ts": "2026-09-07T11:48:20.321870+00:00",
+   "last_ts": "2026-10-09T08:16:19.789162+00:00",
+   "rows_last7d": 2570,
+   "est_bytes_last7d": 1667293
+  },
+  {
+   "event_type": "EXIT_POLICY_DECISION",
+   "rows": 2259,
+   "est_disk_bytes": 2273098,
+   "first_ts": "2026-09-08T15:48:32.996013+00:00",
+   "last_ts": "2026-09-29T14:25:50.583158+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_PHASE_CHANGE",
+   "rows": 4150,
+   "est_disk_bytes": 2108084,
+   "first_ts": "2026-09-07T11:48:10.165648+00:00",
+   "last_ts": "2026-10-09T08:15:18.339706+00:00",
+   "rows_last7d": 1901,
+   "est_bytes_last7d": 966017
+  },
+  {
+   "event_type": "NO_TRADE_ECON_GATE",
+   "rows": 2474,
+   "est_disk_bytes": 2064666,
+   "first_ts": "2026-09-07T11:54:20.825526+00:00",
+   "last_ts": "2026-10-07T15:07:38.768291+00:00",
+   "rows_last7d": 382,
+   "est_bytes_last7d": 320058
+  },
+  {
+   "event_type": "COLLECTION_LIFECYCLE",
+   "rows": 631,
+   "est_disk_bytes": 1988655,
+   "first_ts": "2026-10-05T13:00:09.470482+00:00",
+   "last_ts": "2026-10-09T08:26:54.489279+00:00",
+   "rows_last7d": 631,
+   "est_bytes_last7d": 1988655
+  },
+  {
+   "event_type": "MARKET_STRIKE_PROVENANCE",
+   "rows": 1348,
+   "est_disk_bytes": 1375276,
+   "first_ts": "2026-09-07T11:48:22.500494+00:00",
+   "last_ts": "2026-10-09T08:15:06.349060+00:00",
+   "rows_last7d": 721,
+   "est_bytes_last7d": 731002
+  },
+  {
+   "event_type": "SLOW_CONSUMER_CALLBACK",
+   "rows": 1611,
+   "est_disk_bytes": 1254144,
+   "first_ts": "2026-10-05T16:26:58.390221+00:00",
+   "last_ts": "2026-10-09T08:26:32.826620+00:00",
+   "rows_last7d": 1611,
+   "est_bytes_last7d": 1254144
+  },
+  {
+   "event_type": "EXECUTION_PENALTY_FALLBACK_APPLIED",
+   "rows": 448,
+   "est_disk_bytes": 1224537,
+   "first_ts": "2026-09-07T15:17:32.238790+00:00",
+   "last_ts": "2026-10-07T14:56:26.433422+00:00",
+   "rows_last7d": 163,
+   "est_bytes_last7d": 449668
+  },
+  {
+   "event_type": "SIDE_MODE_FLIPPED",
+   "rows": 320,
+   "est_disk_bytes": 1168758,
+   "first_ts": "2026-09-07T12:06:50.796675+00:00",
+   "last_ts": "2026-10-09T08:07:16.319467+00:00",
+   "rows_last7d": 131,
+   "est_bytes_last7d": 494851
+  },
+  {
+   "event_type": "FAST_FOLLOW_COUNTERFACTUAL_ENTRY",
+   "rows": 1127,
+   "est_disk_bytes": 932098,
+   "first_ts": "2026-09-24T12:33:10.894569+00:00",
+   "last_ts": "2026-10-07T08:00:52.371567+00:00",
+   "rows_last7d": 697,
+   "est_bytes_last7d": 576650
+  },
+  {
+   "event_type": "MARKET_STRIKE_PROVISIONAL",
+   "rows": 1681,
+   "est_disk_bytes": 922393,
+   "first_ts": "2026-09-07T11:48:23.677539+00:00",
+   "last_ts": "2026-10-09T08:15:03.072093+00:00",
+   "rows_last7d": 921,
+   "est_bytes_last7d": 504571
+  },
+  {
+   "event_type": "STRATEGY_START",
+   "rows": 496,
+   "est_disk_bytes": 914201,
+   "first_ts": "2026-09-07T11:48:10.161617+00:00",
+   "last_ts": "2026-10-09T07:28:16.455422+00:00",
+   "rows_last7d": 184,
+   "est_bytes_last7d": 365401
+  },
+  {
+   "event_type": "FAST_FOLLOW_EXPIRED",
+   "rows": 1854,
+   "est_disk_bytes": 870904,
+   "first_ts": "2026-09-08T15:29:13.340711+00:00",
+   "last_ts": "2026-10-07T08:00:58.092461+00:00",
+   "rows_last7d": 608,
+   "est_bytes_last7d": 285656
+  },
+  {
+   "event_type": "HYPERLIQUID_OUTCOME_OBSERVER_SUBSCRIBED",
+   "rows": 1392,
+   "est_disk_bytes": 818279,
+   "first_ts": "2026-09-11T13:07:09.700657+00:00",
+   "last_ts": "2026-10-07T13:26:36.095498+00:00",
+   "rows_last7d": 189,
+   "est_bytes_last7d": 111093
+  },
+  {
+   "event_type": "HYPERLIQUID_OUTCOME_OBSERVER_CONNECT_ATTEMPT",
+   "rows": 1401,
+   "est_disk_bytes": 774879,
+   "first_ts": "2026-09-11T13:07:07.812049+00:00",
+   "last_ts": "2026-10-07T13:26:34.225132+00:00",
+   "rows_last7d": 194,
+   "est_bytes_last7d": 107162
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_RESUBSCRIBED",
+   "rows": 625,
+   "est_disk_bytes": 772266,
+   "first_ts": "2026-09-09T11:49:58.445814+00:00",
+   "last_ts": "2026-10-05T13:42:40.337474+00:00",
+   "rows_last7d": 317,
+   "est_bytes_last7d": 431888
+  },
+  {
+   "event_type": "HYPERLIQUID_OUTCOME_OBSERVER_CONNECTED",
+   "rows": 1392,
+   "est_disk_bytes": 759747,
+   "first_ts": "2026-09-11T13:07:09.698338+00:00",
+   "last_ts": "2026-10-07T13:26:36.091196+00:00",
+   "rows_last7d": 189,
+   "est_bytes_last7d": 103027
+  },
+  {
+   "event_type": "MARKET_SETTLEMENT",
+   "rows": 902,
+   "est_disk_bytes": 729743,
+   "first_ts": "2026-09-07T12:00:00.058092+00:00",
+   "last_ts": "2026-10-09T08:15:00.131526+00:00",
+   "rows_last7d": 428,
+   "est_bytes_last7d": 349561
+  },
+  {
+   "event_type": "MARKET_STRIKE_LOCKED",
+   "rows": 1031,
+   "est_disk_bytes": 669083,
+   "first_ts": "2026-09-07T11:48:26.099883+00:00",
+   "last_ts": "2026-10-09T08:15:06.351228+00:00",
+   "rows_last7d": 490,
+   "est_bytes_last7d": 318219
+  },
+  {
+   "event_type": "HYPERLIQUID_OUTCOME_OBSERVER_DISCONNECTED",
+   "rows": 921,
+   "est_disk_bytes": 653852,
+   "first_ts": "2026-09-11T13:07:10.275897+00:00",
+   "last_ts": "2026-10-07T11:22:29.879359+00:00",
+   "rows_last7d": 12,
+   "est_bytes_last7d": 8681
+  },
+  {
+   "event_type": "AUTO_REDEEM_RUN",
+   "rows": 804,
+   "est_disk_bytes": 552063,
+   "first_ts": "2026-09-07T11:48:13.367925+00:00",
+   "last_ts": "2026-09-30T16:00:31.143533+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_CYCLE_PNL",
+   "rows": 902,
+   "est_disk_bytes": 537282,
+   "first_ts": "2026-09-07T12:00:00.058730+00:00",
+   "last_ts": "2026-10-09T08:15:00.135312+00:00",
+   "rows_last7d": 428,
+   "est_bytes_last7d": 253230
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_TRIGGERED",
+   "rows": 645,
+   "est_disk_bytes": 502510,
+   "first_ts": "2026-09-09T11:49:55.496906+00:00",
+   "last_ts": "2026-10-07T11:28:29.422974+00:00",
+   "rows_last7d": 334,
+   "est_bytes_last7d": 259200
+  },
+  {
+   "event_type": "POLYMARKET_TWAP_WS_RECOVERED",
+   "rows": 578,
+   "est_disk_bytes": 405303,
+   "first_ts": "2026-09-14T11:44:09.858956+00:00",
+   "last_ts": "2026-10-09T07:28:19.468734+00:00",
+   "rows_last7d": 278,
+   "est_bytes_last7d": 195400
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_NODE_ROLLOVER",
+   "rows": 314,
+   "est_disk_bytes": 398944,
+   "first_ts": "2026-09-11T14:29:19.034118+00:00",
+   "last_ts": "2026-10-05T15:58:57.691380+00:00",
+   "rows_last7d": 110,
+   "est_bytes_last7d": 228445
+  },
+  {
+   "event_type": "POLYMARKET_TWAP_WS_CONNECTED",
+   "rows": 674,
+   "est_disk_bytes": 394054,
+   "first_ts": "2026-09-08T10:39:38.365296+00:00",
+   "last_ts": "2026-10-09T07:28:17.946024+00:00",
+   "rows_last7d": 279,
+   "est_bytes_last7d": 166227
+  },
+  {
+   "event_type": "STRONG_DIRECTIONAL_REGIME_CALIBRATED",
+   "rows": 449,
+   "est_disk_bytes": 376008,
+   "first_ts": "2026-09-08T22:29:20.033688+00:00",
+   "last_ts": "2026-10-07T14:56:31.612558+00:00",
+   "rows_last7d": 181,
+   "est_bytes_last7d": 168361
+  },
+  {
+   "event_type": "QUOTE_MARKET_HANDOFF_PREWARM_READY",
+   "rows": 416,
+   "est_disk_bytes": 368688,
+   "first_ts": "2026-10-02T00:00:18.855139+00:00",
+   "last_ts": "2026-10-09T08:15:18.322723+00:00",
+   "rows_last7d": 416,
+   "est_bytes_last7d": 368688
+  },
+  {
+   "event_type": "QUOTE_MARKET_HANDOFF_READY",
+   "rows": 393,
+   "est_disk_bytes": 344434,
+   "first_ts": "2026-09-28T09:59:06.393253+00:00",
+   "last_ts": "2026-10-09T07:28:26.272754+00:00",
+   "rows_last7d": 283,
+   "est_bytes_last7d": 248048
+  },
+  {
+   "event_type": "OUTCOME_FAST_FOLLOW_EXECUTION_PENALTY_CALIBRATED",
+   "rows": 413,
+   "est_disk_bytes": 333483,
+   "first_ts": "2026-09-22T15:13:25.435125+00:00",
+   "last_ts": "2026-10-07T13:26:29.095425+00:00",
+   "rows_last7d": 180,
+   "est_bytes_last7d": 145368
+  },
+  {
+   "event_type": "SIDE_INVALIDATION_CONFIRMED",
+   "rows": 519,
+   "est_disk_bytes": 319724,
+   "first_ts": "2026-09-07T11:52:29.768663+00:00",
+   "last_ts": "2026-10-09T08:07:04.266299+00:00",
+   "rows_last7d": 232,
+   "est_bytes_last7d": 142861
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_TRANSPORT_ALIVE_DATA_STALE",
+   "rows": 176,
+   "est_disk_bytes": 319223,
+   "first_ts": "2026-10-02T16:27:51.444513+00:00",
+   "last_ts": "2026-10-05T15:58:27.177045+00:00",
+   "rows_last7d": 176,
+   "est_bytes_last7d": 319223
+  },
+  {
+   "event_type": "QUOTE_SUBSCRIPTION_RECONCILIATION",
+   "rows": 415,
+   "est_disk_bytes": 311038,
+   "first_ts": "2026-10-05T14:21:26.358638+00:00",
+   "last_ts": "2026-10-09T08:16:16.280571+00:00",
+   "rows_last7d": 415,
+   "est_bytes_last7d": 311038
+  },
+  {
+   "event_type": "HYPERLIQUID_OUTCOME_OBSERVER_STARTED",
+   "rows": 492,
+   "est_disk_bytes": 264481,
+   "first_ts": "2026-09-07T11:48:10.157490+00:00",
+   "last_ts": "2026-10-07T13:26:34.225329+00:00",
+   "rows_last7d": 180,
+   "est_bytes_last7d": 96768
+  },
+  {
+   "event_type": "HYPERLIQUID_OUTCOME_OBSERVER_STABLE",
+   "rows": 450,
+   "est_disk_bytes": 258190,
+   "first_ts": "2026-09-11T13:08:26.718984+00:00",
+   "last_ts": "2026-10-07T13:27:08.464542+00:00",
+   "rows_last7d": 181,
+   "est_bytes_last7d": 103864
+  },
+  {
+   "event_type": "SIDE_INVALIDATION_CLEARED",
+   "rows": 385,
+   "est_disk_bytes": 236160,
+   "first_ts": "2026-09-07T11:53:04.213046+00:00",
+   "last_ts": "2026-10-09T08:07:10.283855+00:00",
+   "rows_last7d": 171,
+   "est_bytes_last7d": 104885
+  },
+  {
+   "event_type": "STRATEGY_STOP",
+   "rows": 439,
+   "est_disk_bytes": 218981,
+   "first_ts": "2026-09-07T12:13:57.440614+00:00",
+   "last_ts": "2026-10-09T08:26:36.581261+00:00",
+   "rows_last7d": 181,
+   "est_bytes_last7d": 91191
+  },
+  {
+   "event_type": "ENTRY_SESSION_BUY_BLOCKED",
+   "rows": 345,
+   "est_disk_bytes": 215011,
+   "first_ts": "2026-09-27T10:07:17.980746+00:00",
+   "last_ts": "2026-09-28T15:59:58.075159+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "TWAP_REFERENCE_DEGRADED",
+   "rows": 362,
+   "est_disk_bytes": 212620,
+   "first_ts": "2026-09-07T12:43:19.119106+00:00",
+   "last_ts": "2026-10-07T14:16:30.854009+00:00",
+   "rows_last7d": 75,
+   "est_bytes_last7d": 44120
+  },
+  {
+   "event_type": "SHADOW_SIM_CYCLE_RESULT",
+   "rows": 269,
+   "est_disk_bytes": 192301,
+   "first_ts": "2026-10-01T00:15:00.193602+00:00",
+   "last_ts": "2026-10-09T08:15:00.127333+00:00",
+   "rows_last7d": 265,
+   "est_bytes_last7d": 189407
+  },
+  {
+   "event_type": "ENDGAME_TWAP_EXIT_BLOCKED",
+   "rows": 178,
+   "est_disk_bytes": 179008,
+   "first_ts": "2026-09-11T15:43:20.549226+00:00",
+   "last_ts": "2026-09-29T14:28:52.013729+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "ENDGAME_TWAP_EXIT_TRIGGERED",
+   "rows": 181,
+   "est_disk_bytes": 173473,
+   "first_ts": "2026-09-11T15:43:20.548502+00:00",
+   "last_ts": "2026-09-29T14:28:52.013281+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "FAST_FOLLOW_RISK_STATE",
+   "rows": 188,
+   "est_disk_bytes": 149752,
+   "first_ts": "2026-09-08T15:34:28.999127+00:00",
+   "last_ts": "2026-10-07T02:35:11.744798+00:00",
+   "rows_last7d": 13,
+   "est_bytes_last7d": 7897
+  },
+  {
+   "event_type": "EXIT_AUDIT",
+   "rows": 127,
+   "est_disk_bytes": 146150,
+   "first_ts": "2026-09-10T13:13:28.020680+00:00",
+   "last_ts": "2026-09-29T14:26:20.676912+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_STRIKE_RECOVERED",
+   "rows": 180,
+   "est_disk_bytes": 123041,
+   "first_ts": "2026-09-07T13:21:53.065033+00:00",
+   "last_ts": "2026-10-07T11:28:13.202151+00:00",
+   "rows_last7d": 99,
+   "est_bytes_last7d": 67723
+  },
+  {
+   "event_type": "POLYMARKET_TWAP_WS_DISCONNECTED",
+   "rows": 161,
+   "est_disk_bytes": 117534,
+   "first_ts": "2026-09-14T13:16:57.012349+00:00",
+   "last_ts": "2026-10-07T14:16:29.306005+00:00",
+   "rows_last7d": 103,
+   "est_bytes_last7d": 75110
+  },
+  {
+   "event_type": "POLYMARKET_TWAP_SILENT_STALL",
+   "rows": 177,
+   "est_disk_bytes": 109539,
+   "first_ts": "2026-09-08T15:07:31.293547+00:00",
+   "last_ts": "2026-10-07T14:16:28.925625+00:00",
+   "rows_last7d": 84,
+   "est_bytes_last7d": 51992
+  },
+  {
+   "event_type": "DYNAMIC_INSTRUMENT_ADMISSION_COMPLETED",
+   "rows": 68,
+   "est_disk_bytes": 84056,
+   "first_ts": "2026-10-06T10:30:21.575335+00:00",
+   "last_ts": "2026-10-09T08:15:21.406557+00:00",
+   "rows_last7d": 68,
+   "est_bytes_last7d": 84056
+  },
+  {
+   "event_type": "MARKET_BUY_COUNT_UPDATED",
+   "rows": 125,
+   "est_disk_bytes": 83543,
+   "first_ts": "2026-09-10T12:20:53.608575+00:00",
+   "last_ts": "2026-09-30T15:50:08.779123+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SESSION_BUY_LOCKED",
+   "rows": 113,
+   "est_disk_bytes": 79319,
+   "first_ts": "2026-09-28T04:07:35.477297+00:00",
+   "last_ts": "2026-09-29T17:45:00.903639+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "RESEARCH_WRITER_FAILURE",
+   "rows": 75,
+   "est_disk_bytes": 71962,
+   "first_ts": "2026-10-06T16:53:18.437640+00:00",
+   "last_ts": "2026-10-06T19:29:35.188181+00:00",
+   "rows_last7d": 75,
+   "est_bytes_last7d": 71962
+  },
+  {
+   "event_type": "SIDE_FORCE_UNLOCKED",
+   "rows": 116,
+   "est_disk_bytes": 67703,
+   "first_ts": "2026-09-07T11:58:31.129819+00:00",
+   "last_ts": "2026-10-08T16:43:49.328396+00:00",
+   "rows_last7d": 57,
+   "est_bytes_last7d": 33303
+  },
+  {
+   "event_type": "MARKET_BUY_ENTRY_CLOSED",
+   "rows": 125,
+   "est_disk_bytes": 67202,
+   "first_ts": "2026-09-10T12:20:53.608926+00:00",
+   "last_ts": "2026-09-30T15:50:08.780584+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "EXIT_BASELINE_METRIC",
+   "rows": 107,
+   "est_disk_bytes": 63271,
+   "first_ts": "2026-09-08T15:53:27.941722+00:00",
+   "last_ts": "2026-09-30T12:13:31.011783+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "EXECUTION_PENALTY_CALIBRATED",
+   "rows": 39,
+   "est_disk_bytes": 57657,
+   "first_ts": "2026-09-30T11:57:06.490124+00:00",
+   "last_ts": "2026-10-02T10:44:43.995909+00:00",
+   "rows_last7d": 18,
+   "est_bytes_last7d": 26612
+  },
+  {
+   "event_type": "CONSUMER_TIMING_HOOKS",
+   "rows": 34,
+   "est_disk_bytes": 53894,
+   "first_ts": "2026-10-05T15:41:10.732390+00:00",
+   "last_ts": "2026-10-09T07:26:53.877246+00:00",
+   "rows_last7d": 34,
+   "est_bytes_last7d": 53894
+  },
+  {
+   "event_type": "DYNAMIC_INSTRUMENT_ADMISSION_STARTED",
+   "rows": 68,
+   "est_disk_bytes": 52087,
+   "first_ts": "2026-10-06T10:30:18.641824+00:00",
+   "last_ts": "2026-10-09T08:15:18.339048+00:00",
+   "rows_last7d": 68,
+   "est_bytes_last7d": 52087
+  },
+  {
+   "event_type": "EXIT_AUDIT_OUTCOME",
+   "rows": 68,
+   "est_disk_bytes": 49883,
+   "first_ts": "2026-09-08T15:53:23.324375+00:00",
+   "last_ts": "2026-09-29T14:26:22.330064+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "DYNAMIC_INSTRUMENT_ADMISSION_REQUESTED",
+   "rows": 68,
+   "est_disk_bytes": 49663,
+   "first_ts": "2026-10-06T10:30:18.617048+00:00",
+   "last_ts": "2026-10-09T08:15:18.317871+00:00",
+   "rows_last7d": 68,
+   "est_bytes_last7d": 49663
+  },
+  {
+   "event_type": "FAST_FOLLOW_COUNTERFACTUAL_INCOMPLETE",
+   "rows": 86,
+   "est_disk_bytes": 45961,
+   "first_ts": "2026-09-24T14:00:22.350285+00:00",
+   "last_ts": "2026-10-07T06:45:19.372361+00:00",
+   "rows_last7d": 67,
+   "est_bytes_last7d": 36125
+  },
+  {
+   "event_type": "QUOTE_REFRESH_REQUESTED",
+   "rows": 34,
+   "est_disk_bytes": 44601,
+   "first_ts": "2026-10-05T14:54:03.324603+00:00",
+   "last_ts": "2026-10-07T11:28:29.423895+00:00",
+   "rows_last7d": 34,
+   "est_bytes_last7d": 44601
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_ROLLOVER_DEFERRED_PROTECTIVE_SELL",
+   "rows": 48,
+   "est_disk_bytes": 35854,
+   "first_ts": "2026-09-28T12:26:31.378485+00:00",
+   "last_ts": "2026-09-30T16:02:30.921684+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SESSION_PNL_UPDATE",
+   "rows": 50,
+   "est_disk_bytes": 33162,
+   "first_ts": "2026-09-28T03:22:37.521789+00:00",
+   "last_ts": "2026-09-30T16:00:00.714372+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "QUOTE_REFRESH_TASK_COMPLETED",
+   "rows": 16,
+   "est_disk_bytes": 30985,
+   "first_ts": "2026-10-05T16:45:24.089760+00:00",
+   "last_ts": "2026-10-07T11:30:17.943502+00:00",
+   "rows_last7d": 16,
+   "est_bytes_last7d": 30985
+  },
+  {
+   "event_type": "QUOTE_REFRESH_TASK_STARTED",
+   "rows": 16,
+   "est_disk_bytes": 28653,
+   "first_ts": "2026-10-05T16:45:24.089646+00:00",
+   "last_ts": "2026-10-07T11:30:17.942171+00:00",
+   "rows_last7d": 16,
+   "est_bytes_last7d": 28653
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_REFRESH_REQUESTED",
+   "rows": 17,
+   "est_disk_bytes": 23426,
+   "first_ts": "2026-10-05T14:54:03.580248+00:00",
+   "last_ts": "2026-10-07T11:28:29.447666+00:00",
+   "rows_last7d": 17,
+   "est_bytes_last7d": 23426
+  },
+  {
+   "event_type": "FAST_FOLLOW_OVERFILL_ACCEPTED",
+   "rows": 35,
+   "est_disk_bytes": 20720,
+   "first_ts": "2026-09-10T12:33:02.270866+00:00",
+   "last_ts": "2026-09-24T17:38:08.488739+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SESSION_DAY_RESET",
+   "rows": 19,
+   "est_disk_bytes": 18641,
+   "first_ts": "2026-09-28T03:12:25.666633+00:00",
+   "last_ts": "2026-10-09T07:26:53.838136+00:00",
+   "rows_last7d": 13,
+   "est_bytes_last7d": 16031
+  },
+  {
+   "event_type": "QUOTE_REFRESH_FRESH_QUOTE_CONFIRMED",
+   "rows": 12,
+   "est_disk_bytes": 16909,
+   "first_ts": "2026-10-05T15:03:40.212550+00:00",
+   "last_ts": "2026-10-07T11:28:29.972540+00:00",
+   "rows_last7d": 12,
+   "est_bytes_last7d": 16909
+  },
+  {
+   "event_type": "SIDE_STOP_LOSS_PENALIZED",
+   "rows": 24,
+   "est_disk_bytes": 14586,
+   "first_ts": "2026-09-08T15:53:27.943619+00:00",
+   "last_ts": "2026-09-29T14:26:22.331549+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_STOP_LOSS_COUNT_UPDATED",
+   "rows": 24,
+   "est_disk_bytes": 13709,
+   "first_ts": "2026-09-08T15:53:27.942877+00:00",
+   "last_ts": "2026-09-29T14:26:22.330419+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_STOP_LOSS_LIMIT_REACHED",
+   "rows": 24,
+   "est_disk_bytes": 12906,
+   "first_ts": "2026-09-08T15:53:27.943328+00:00",
+   "last_ts": "2026-09-29T14:26:22.330898+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "REDEEM_EXECUTED",
+   "rows": 24,
+   "est_disk_bytes": 11050,
+   "first_ts": "2026-09-09T13:30:54.129093+00:00",
+   "last_ts": "2026-09-30T12:40:09.392849+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "GHOST_INVENTORY_RECONCILED",
+   "rows": 13,
+   "est_disk_bytes": 8026,
+   "first_ts": "2026-09-08T15:48:32.665402+00:00",
+   "last_ts": "2026-09-28T17:02:27.317809+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_PARTIAL_MARKET_DATA",
+   "rows": 7,
+   "est_disk_bytes": 7816,
+   "first_ts": "2026-10-01T15:39:52.291421+00:00",
+   "last_ts": "2026-10-01T16:38:28.159906+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SESSION_GUARD_MANUAL_RESET",
+   "rows": 7,
+   "est_disk_bytes": 6603,
+   "first_ts": "2026-09-28T10:51:10.862310+00:00",
+   "last_ts": "2026-09-30T11:52:24.452609+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "FAST_FOLLOW_ERROR",
+   "rows": 12,
+   "est_disk_bytes": 6509,
+   "first_ts": "2026-10-06T00:25:12.321454+00:00",
+   "last_ts": "2026-10-07T01:35:24.986185+00:00",
+   "rows_last7d": 12,
+   "est_bytes_last7d": 6509
+  },
+  {
+   "event_type": "INVENTORY_OVERAGE_SELL_ONLY",
+   "rows": 6,
+   "est_disk_bytes": 3029,
+   "first_ts": "2026-09-11T13:33:08.197330+00:00",
+   "last_ts": "2026-09-28T17:02:28.109891+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_RISK_GUARDS_RECOVERED",
+   "rows": 6,
+   "est_disk_bytes": 2945,
+   "first_ts": "2026-09-24T13:12:52.925691+00:00",
+   "last_ts": "2026-09-29T12:10:57.854713+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "REGIME_GUARD_TRIGGERED",
+   "rows": 3,
+   "est_disk_bytes": 2258,
+   "first_ts": "2026-09-27T20:00:00.150671+00:00",
+   "last_ts": "2026-09-28T16:15:00.996215+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "REGIME_GUARD_BOOTSTRAP_TRIGGERED",
+   "rows": 3,
+   "est_disk_bytes": 2206,
+   "first_ts": "2026-09-27T20:02:08.943067+00:00",
+   "last_ts": "2026-09-28T16:31:51.487988+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "INVENTORY_OVERAGE_CLEARED",
+   "rows": 3,
+   "est_disk_bytes": 1512,
+   "first_ts": "2026-09-11T15:37:49.008566+00:00",
+   "last_ts": "2026-09-23T14:58:21.537062+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SESSION_PROFIT_GUARD_ARMED",
+   "rows": 2,
+   "est_disk_bytes": 1395,
+   "first_ts": "2026-09-28T13:08:33.513567+00:00",
+   "last_ts": "2026-09-29T16:56:02.491627+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "STARTUP_SETTLEMENT_RECONCILED",
+   "rows": 3,
+   "est_disk_bytes": 1128,
+   "first_ts": "2026-09-28T14:00:24.071823+00:00",
+   "last_ts": "2026-09-29T12:39:34.536323+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "FAST_FOLLOW_REVERSAL_EXIT_SUBMITTED",
+   "rows": 2,
+   "est_disk_bytes": 1092,
+   "first_ts": "2026-09-08T15:53:23.324892+00:00",
+   "last_ts": "2026-09-08T15:53:27.073525+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "QUOTE_WATCHDOG_FAILED",
+   "rows": 1,
+   "est_disk_bytes": 857,
+   "first_ts": "2026-10-01T00:32:29.136993+00:00",
+   "last_ts": "2026-10-01T00:32:29.136993+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "MARKET_SETTLEMENT_INVENTORY_RECONCILED",
+   "rows": 1,
+   "est_disk_bytes": 602,
+   "first_ts": "2026-09-28T17:15:00.229537+00:00",
+   "last_ts": "2026-09-28T17:15:00.229537+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  },
+  {
+   "event_type": "SESSION_GUARD_STATE_RECONCILED",
+   "rows": 1,
+   "est_disk_bytes": 575,
+   "first_ts": "2026-10-05T13:00:09.402689+00:00",
+   "last_ts": "2026-10-05T13:00:09.402689+00:00",
+   "rows_last7d": 1,
+   "est_bytes_last7d": 575
+  },
+  {
+   "event_type": "REGIME_GUARD_RECOVERED",
+   "rows": 1,
+   "est_disk_bytes": 448,
+   "first_ts": "2026-09-28T17:01:52.417604+00:00",
+   "last_ts": "2026-09-28T17:01:52.417604+00:00",
+   "rows_last7d": 0,
+   "est_bytes_last7d": 0
+  }
+ ],
+ "runs_by_day": [
+  {
+   "day": "2026-09-07",
+   "mode": "LIVE",
+   "runs": 15
+  },
+  {
+   "day": "2026-09-08",
+   "mode": "LIVE",
+   "runs": 13
+  },
+  {
+   "day": "2026-09-09",
+   "mode": "LIVE",
+   "runs": 11
+  },
+  {
+   "day": "2026-09-10",
+   "mode": "LIVE",
+   "runs": 4
+  },
+  {
+   "day": "2026-09-11",
+   "mode": "LIVE",
+   "runs": 13
+  },
+  {
+   "day": "2026-09-14",
+   "mode": "LIVE",
+   "runs": 3
+  },
+  {
+   "day": "2026-09-18",
+   "mode": "LIVE",
+   "runs": 6
+  },
+  {
+   "day": "2026-09-21",
+   "mode": "LIVE",
+   "runs": 11
+  },
+  {
+   "day": "2026-09-22",
+   "mode": "LIVE",
+   "runs": 4
+  },
+  {
+   "day": "2026-09-23",
+   "mode": "LIVE",
+   "runs": 11
+  },
+  {
+   "day": "2026-09-24",
+   "mode": "LIVE",
+   "runs": 46
+  },
+  {
+   "day": "2026-09-25",
+   "mode": "LIVE",
+   "runs": 51
+  },
+  {
+   "day": "2026-09-26",
+   "mode": "LIVE",
+   "runs": 1
+  },
+  {
+   "day": "2026-09-27",
+   "mode": "LIVE",
+   "runs": 73
+  },
+  {
+   "day": "2026-09-28",
+   "mode": "LIVE",
+   "runs": 21
+  },
+  {
+   "day": "2026-09-29",
+   "mode": "LIVE",
+   "runs": 8
+  },
+  {
+   "day": "2026-09-30",
+   "mode": "LIVE",
+   "runs": 4
+  },
+  {
+   "day": "2026-09-30",
+   "mode": "TEST_DRY_RUN",
+   "runs": 1
+  },
+  {
+   "day": "2026-10-01",
+   "mode": "TEST_DRY_RUN",
+   "runs": 16
+  },
+  {
+   "day": "2026-10-02",
+   "mode": "TEST_DRY_RUN",
+   "runs": 26
+  },
+  {
+   "day": "2026-10-03",
+   "mode": "TEST_DRY_RUN",
+   "runs": 35
+  },
+  {
+   "day": "2026-10-04",
+   "mode": "TEST_DRY_RUN",
+   "runs": 35
+  },
+  {
+   "day": "2026-10-05",
+   "mode": "TEST_DRY_RUN",
+   "runs": 64
+  },
+  {
+   "day": "2026-10-06",
+   "mode": "TEST_DRY_RUN",
+   "runs": 15
+  },
+  {
+   "day": "2026-10-07",
+   "mode": "TEST_DRY_RUN",
+   "runs": 6
+  },
+  {
+   "day": "2026-10-08",
+   "mode": "TEST_DRY_RUN",
+   "runs": 2
+  },
+  {
+   "day": "2026-10-09",
+   "mode": "TEST_DRY_RUN",
+   "runs": 1
+  }
+ ],
+ "active_hours_by_day": {
+  "2026-09-07": 13,
+  "2026-09-08": 14,
+  "2026-09-09": 12,
+  "2026-09-10": 6,
+  "2026-09-11": 12,
+  "2026-09-14": 5,
+  "2026-09-18": 12,
+  "2026-09-21": 12,
+  "2026-09-22": 5,
+  "2026-09-23": 12,
+  "2026-09-24": 12,
+  "2026-09-25": 13,
+  "2026-09-26": 1,
+  "2026-09-27": 20,
+  "2026-09-28": 13,
+  "2026-09-29": 7,
+  "2026-09-30": 6,
+  "2026-10-01": 6,
+  "2026-10-02": 16,
+  "2026-10-03": 24,
+  "2026-10-04": 24,
+  "2026-10-05": 24,
+  "2026-10-06": 24,
+  "2026-10-07": 16,
+  "2026-10-08": 4,
+  "2026-10-09": 2
+ }
+}

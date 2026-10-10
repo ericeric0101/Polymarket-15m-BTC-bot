@@ -1,0 +1,4 @@
+position,chainlink_adverse_ts,chainlink_adverse_status,chainlink_favorable_recross_ts,chainlink_adverse_taipei,chainlink_favorable_recross_taipei,twap_adverse_ts,twap_adverse_status,twap_favorable_recross_ts,twap_adverse_taipei,twap_favorable_recross_taipei,chainlink_to_twap_lead_sec
+16:45,,NOT_TRIGGERED,,未觸發,未觸發,,NOT_TRIGGERED,,未觸發,未觸發,
+17:15,1791624497.350322,CROSS,1791624573.571583,17:28:17.350,17:29:33.571,1791624545.253432,CROSS,1791624597.486976,17:29:05.253,17:29:57.486,47.90311002731323
+17:30,1791625044.6008918,ADVERSE_AT_ENTRY,1791625200.9751081,17:37:24.600,17:40:00.975,1791625044.6008918,ADVERSE_AT_ENTRY,1791625232.39823,17:37:24.600,17:40:32.398,

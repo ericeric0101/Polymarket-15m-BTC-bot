@@ -1,0 +1,1384 @@
+{
+ "DRY_RUN_HEAD": "e921152af5760503730387425610c5308d36217e",
+ "DRY_RUN_ID": "run_1791602735_398a83d0",
+ "mode": "TEST_DRY_RUN (no --live; ORDER_DRY_RUN_* only, no wallet orders)",
+ "config_hash": "087867b197f7126c37733ade486442aef468597810f2531ec452385cbd980a10 (pre-start == manifest)",
+ "start_utc": "2026-10-10T03:25:17Z",
+ "stop_signal_utc": "2026-10-10T04:46:00Z",
+ "process_exit_utc": "2026-10-10T04:47:14Z",
+ "total_runtime": "81m57s",
+ "RUNTIME_LIMIT_REACHED": false,
+ "startup_partial_market": "btc-updown-15m-1791602100 (excluded; 1 production-path shadow fill)",
+ "WARMUP_MARKET": "btc-updown-15m-1791603000",
+ "VALID_MEASURED_MARKETS": [
+  "btc-updown-15m-1791603900",
+  "btc-updown-15m-1791604800",
+  "btc-updown-15m-1791605700",
+  "btc-updown-15m-1791606600"
+ ],
+ "measured_status": {
+  "btc-updown-15m-1791603900": "VALID_WITH_GAPS",
+  "btc-updown-15m-1791604800": "VALID_WITH_GAPS",
+  "btc-updown-15m-1791605700": "VALID_WITH_GAPS",
+  "btc-updown-15m-1791606600": "VALID"
+ },
+ "INVALID_MARKETS": [],
+ "measured_shadow_entries": 0,
+ "track_basis": "all measured markets were no-entry; tracks are REFERENCE_ONLY (market favourite at TTE~580 s, its executable bid as baseline) - not positions; economics not evaluated",
+ "observed": {
+  "BINANCE_3": {
+   "markets_fired": 2,
+   "of": 4,
+   "slugs": [
+    "1791604800",
+    "1791606600"
+   ]
+  },
+  "BINANCE_5": {
+   "markets_fired": 0,
+   "of": 4,
+   "slugs": []
+  },
+  "TOKEN_005": {
+   "markets_fired": 2,
+   "of": 4,
+   "slugs": [
+    "1791603900",
+    "1791606600"
+   ]
+  },
+  "TOKEN_010": {
+   "markets_fired": 2,
+   "of": 4,
+   "slugs": [
+    "1791603900",
+    "1791606600"
+   ]
+  },
+  "TOKEN_015": {
+   "markets_fired": 1,
+   "of": 4,
+   "slugs": [
+    "1791606600"
+   ]
+  },
+  "TOKEN_020": {
+   "markets_fired": 1,
+   "of": 4,
+   "slugs": [
+    "1791606600"
+   ]
+  },
+  "SPOT_CROSS": {
+   "markets_fired": 2,
+   "of": 4,
+   "slugs": [
+    "1791605700",
+    "1791606600"
+   ]
+  },
+  "TWAP_CROSS": {
+   "markets_fired": 1,
+   "of": 4,
+   "slugs": [
+    "1791606600"
+   ]
+  }
+ },
+ "SIGMA_COVERAGE": {
+  "1791603900": 0.998,
+  "1791604800": 0.995,
+  "1791605700": 0.983,
+  "1791606600": 0.997
+ },
+ "DIFFUSION_Z_COVERAGE": {
+  "1791603900": 0.998,
+  "1791604800": 0.995,
+  "1791605700": 0.983,
+  "1791606600": 0.997
+ },
+ "binance_strike_cross_caveat": "Binance spot vs Chainlink-based strike carries a ~9-10 bps Binance-Chainlink basis; SPOT_CROSS as defined is basis-contaminated (DOWN favourites adverse at entry). Chainlink spot is not in the snapshot -> clean spot cross UNAVAILABLE.",
+ "token_quote_freshness_caveat": "market_quote_fresh requires BOTH tokens fresh; most >10 s stale stretches occur near expiry when one side's book empties (INFERRED), not a feed outage",
+ "telemetry": {
+  "journal_events": {
+   "POLYMARKET_TWAP_SILENT_STALL": 1,
+   "POLYMARKET_TWAP_WS_DISCONNECTED": 1,
+   "SLOW_CONSUMER_CALLBACK": 17,
+   "TWAP_REFERENCE_DEGRADED": 1
+  },
+  "stop_timing_rows": 0,
+  "protective_eval_gap_events": 0,
+  "note": "STOP_TIMING_* (incl. new E1/E3/E4 fields) and PROTECTIVE_EVAL_GAP are LIVE-only paths; not exercisable in DRY-RUN"
+ },
+ "storage": {
+  "journal_bytes_T0": 2417172480,
+  "journal_bytes_T6": 2432270336,
+  "DB_GROWTH_MIB": 14.4,
+  "MIB_PER_HOUR": 10.54,
+  "MIB_PER_COMPLETE_MARKET": 2.34,
+  "research_db_growth_mib": 23.74,
+  "research_mib_per_hour": 17.38,
+  "events": {
+   "strategy": 3581,
+   "order": 1876
+  },
+  "free_gib": {
+   "T0": 14.08,
+   "min": 13.18,
+   "T6": 17.5
+  },
+  "wal_shm": "journal -wal/-shm absent during run (NA); no VACUUM",
+  "backup": "forced_boundary backup completed at shutdown (2,432,225,280 B)",
+  "retention": "graceful-exit journal retention completed exit_code=0 (freed ~4.3 GiB)"
+ },
+ "official_outcomes": {
+  "btc-updown-15m-1791602100": "UP",
+  "btc-updown-15m-1791603000": "DOWN",
+  "btc-updown-15m-1791603900": "UP",
+  "btc-updown-15m-1791604800": "UP",
+  "btc-updown-15m-1791605700": "DOWN",
+  "btc-updown-15m-1791606600": "PENDING (not closed; prices 0.9995/0.0005)"
+ },
+ "DATA_QUALITY": "GOOD_WITH_DOCUMENTED_GAPS",
+ "TELEMETRY_VALIDATION": "PARTIAL",
+ "DB_STORAGE_VALIDATION": "PASS",
+ "HISTORICAL_AUDIT_CONSISTENCY": "INSUFFICIENT",
+ "historical_items": {
+  "binance_early_but_noisy": "MIXED (M2 false 3 bps alarm; in M4 Binance-3bps came ~284 s after token DD)",
+  "token_dd_010_015_promising": "INSUFFICIENT (M4 true warning ~296 s before TWAP cross; M1 0.10 and startup 0.15 recovered)",
+  "twap_late_confirmation_only": "SUPPORT (M4 TWAP cross 296 s after token DD, 12.5 s after Binance 3 bps)",
+  "sigma_insufficient": "INSUFFICIENT (coverage now ~98-99%, but n too small)",
+  "token_persistence_resolution": "SUPPORT for resolvability (1 s grid resolves 5/15/30/60 s persistence)"
+ },
+ "READY_FOR_12_PLUS_LIVE_SHADOW": "CONDITIONAL",
+ "BOT_STOPPED_AT_END": "YES",
+ "NO_PUSH": "YES",
+ "markets": [
+  {
+   "slug": "btc-updown-15m-1791602100",
+   "role": "STARTUP_PARTIAL",
+   "status": "INVALID",
+   "invalid_reasons": [
+    "too_few_snapshots",
+    "observation_started_late"
+   ],
+   "quality": {
+    "n_snapshots": 179,
+    "first_tte": 223.52490282058716,
+    "last_tte": 0.012563943862915039,
+    "snapshot_gaps_gt10": [],
+    "binance_stale_gt10": [],
+    "token_quote_stale_gt10": [],
+    "twap_stale_gt10": [],
+    "binance_fresh_frac": 1.0,
+    "quote_fresh_frac": 0.9664804469273743,
+    "twap_fresh_frac": 0.994413407821229,
+    "strike_available": true,
+    "sigma_coverage": 0.9217877094972067,
+    "z_coverage": 0.9217877094972067,
+    "median_gap": 1.1662157773971558
+   },
+   "shadow_fills": 1,
+   "positions": [
+    {
+     "kind": "SHADOW_SIM_POSITION (production-path DRY-RUN shadow fill)",
+     "side": "UP",
+     "entry_utc": "03:26:21",
+     "entry_tte": 219.7693009376526,
+     "entry_price": 0.68,
+     "entry_bid_baseline": 0.68,
+     "entry_score": 0.447278,
+     "entry_binance": 82589.16,
+     "entry_strike": 82510.90619752229,
+     "entry_twap_distance_bps": 0.39067604963368036,
+     "entry_binance_distance_bps": 9.484055633855915,
+     "entry_sigma": null,
+     "entry_z": null,
+     "signals": {
+      "BINANCE_3": null,
+      "BINANCE_5": null,
+      "TOKEN_005": {
+       "t": 1791602786.978654,
+       "utc": "03:26:26",
+       "tte": 213.02134609222412,
+       "tte_bin": "180-300",
+       "binance": 82589.17,
+       "binance_move_bps": -0.0012108126532297107,
+       "twap_dist_bps": 0.39587116978436937,
+       "binance_dist_bps": 9.485267594850601,
+       "bid": 0.62,
+       "dd": 0.06000000000000005,
+       "twap": 82514.17256641792,
+       "sigma": null,
+       "sigma_bucket": null,
+       "z": null,
+       "btc_age": 0.37963175773620605,
+       "twap_age": 1.0178050994873047,
+       "quote_age": 0.2719888687133789,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "NO",
+       "first_recovery_sec": 49.831571102142334,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.62,
+       "bid_15s": 0.55,
+       "bid_30s": 0.58,
+       "bid_60s": 0.65,
+       "bid_120s": 0.74
+      },
+      "TOKEN_010": {
+       "t": 1791602796.268211,
+       "utc": "03:26:36",
+       "tte": 203.73178911209106,
+       "tte_bin": "180-300",
+       "binance": 82589.17,
+       "binance_move_bps": -0.0012108126532297107,
+       "twap_dist_bps": 0.4072918470744025,
+       "binance_dist_bps": 9.485267594850601,
+       "bid": 0.55,
+       "dd": 0.13,
+       "twap": 82514.26679946118,
+       "sigma": 0.08145244600728543,
+       "sigma_bucket": "<0.5",
+       "z": 0.9672750664921702,
+       "btc_age": 0.8189289569854736,
+       "twap_age": 0.13826394081115723,
+       "quote_age": 0.25942492485046387,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "NO",
+       "persist_60s": "NO",
+       "first_recovery_sec": 24.238864183425903,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.51,
+       "bid_15s": 0.58,
+       "bid_30s": 0.63,
+       "bid_60s": 0.68,
+       "bid_120s": 0.77
+      },
+      "TOKEN_015": {
+       "t": 1791602797.323714,
+       "utc": "03:26:37",
+       "tte": 202.67628598213196,
+       "tte_bin": "180-300",
+       "binance": 82589.17,
+       "binance_move_bps": -0.0012108126532297107,
+       "twap_dist_bps": 0.4072918470744025,
+       "binance_dist_bps": 9.485267594850601,
+       "bid": 0.52,
+       "dd": 0.16000000000000003,
+       "twap": 82514.26679946118,
+       "sigma": 0.08162467569616028,
+       "sigma_bucket": "<0.5",
+       "z": 0.9891452687998474,
+       "btc_age": 0.28519296646118164,
+       "twap_age": 0.6128330230712891,
+       "quote_age": 0.2676401138305664,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "NO",
+       "persist_15s": "NO",
+       "persist_30s": "NO",
+       "persist_60s": "NO",
+       "first_recovery_sec": 4.675356864929199,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.55,
+       "bid_15s": 0.58,
+       "bid_30s": 0.63,
+       "bid_60s": 0.69,
+       "bid_120s": 0.79
+      },
+      "TOKEN_020": null,
+      "SPOT_CROSS": null,
+      "TWAP_CROSS": null
+     },
+     "sequence": [
+      "ENTRY",
+      "TOKEN_005",
+      "TOKEN_010",
+      "TOKEN_015"
+     ],
+     "pairs": {
+      "BINANCE_3_TO_TOKEN_005": null,
+      "BINANCE_3_TO_TOKEN_010": null,
+      "BINANCE_3_TO_TOKEN_015": null,
+      "BINANCE_3_TO_TOKEN_020": null,
+      "BINANCE_5_TO_TOKEN_015": null,
+      "BINANCE_3_TO_SPOT_CROSS": null,
+      "BINANCE_3_TO_TWAP_CROSS": null,
+      "SPOT_CROSS_TO_TWAP_CROSS": null,
+      "TOKEN_010_TO_TWAP_CROSS": null,
+      "TOKEN_015_TO_TWAP_CROSS": null
+     },
+     "extremes": {
+      "max_binance_adverse_bps": 0.0,
+      "max_token_dd": 0.17000000000000004,
+      "spot_strike_crosses": 0,
+      "twap_strike_crosses": 0,
+      "max_sigma": 78.2672384225019,
+      "min_tte": 0.012563943862915039,
+      "spot_adverse_at_start": false,
+      "twap_adverse_at_start": false
+     }
+    }
+   ],
+   "why_no_entry": null,
+   "runtime_outcome": "UP",
+   "official_outcome": "UP"
+  },
+  {
+   "slug": "btc-updown-15m-1791603000",
+   "role": "WARMUP",
+   "status": "VALID_WITH_GAPS",
+   "invalid_reasons": [
+    "token_quote_stale_gt10"
+   ],
+   "quality": {
+    "n_snapshots": 637,
+    "first_tte": 896.9742269515991,
+    "last_tte": 1.4405171871185303,
+    "snapshot_gaps_gt10": [],
+    "binance_stale_gt10": [],
+    "token_quote_stale_gt10": [
+     [
+      "03:44:15",
+      "03:44:33",
+      18.1
+     ]
+    ],
+    "twap_stale_gt10": [],
+    "binance_fresh_frac": 1.0,
+    "quote_fresh_frac": 0.957613814756672,
+    "twap_fresh_frac": 1.0,
+    "strike_available": true,
+    "sigma_coverage": 0.9984301412872841,
+    "z_coverage": 0.9984301412872841,
+    "median_gap": 1.2348769903182983
+   },
+   "shadow_fills": 0,
+   "positions": [
+    {
+     "kind": "REFERENCE_ONLY (no shadow entry; market favourite at TTE~580 s)",
+     "side": "DOWN",
+     "entry_utc": "03:35:20",
+     "entry_tte": 579.2682139873505,
+     "entry_price": null,
+     "entry_bid_baseline": 0.51,
+     "entry_score": null,
+     "entry_binance": 82589.17,
+     "entry_strike": 82514.79154710963,
+     "entry_twap_distance_bps": -0.02426589531877312,
+     "entry_binance_distance_bps": -9.013953922176364,
+     "entry_sigma": 0.024503519439452566,
+     "entry_z": 0.21963297172247256,
+     "signals": {
+      "BINANCE_3": null,
+      "BINANCE_5": null,
+      "TOKEN_005": null,
+      "TOKEN_010": null,
+      "TOKEN_015": null,
+      "TOKEN_020": null,
+      "SPOT_CROSS": {
+       "t": 1791603320.731786,
+       "utc": "03:35:20",
+       "tte": 579.2682139873505,
+       "tte_bin": ">300",
+       "binance": 82589.17,
+       "binance_move_bps": -0.0,
+       "twap_dist_bps": -0.02426589531877312,
+       "binance_dist_bps": -9.013953922176364,
+       "bid": 0.51,
+       "dd": 0.0,
+       "twap": 82514.99177663903,
+       "sigma": 0.024503519439452566,
+       "sigma_bucket": "<0.5",
+       "z": 0.21963297172247256,
+       "btc_age": 0.24002885818481445,
+       "twap_age": 0.5098979473114014,
+       "quote_age": 0.23990821838378906,
+       "adverse_at_entry": true,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "YES",
+       "first_recovery_sec": null,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.51,
+       "bid_15s": 0.51,
+       "bid_30s": 0.51,
+       "bid_60s": 0.76,
+       "bid_120s": 0.83
+      },
+      "TWAP_CROSS": {
+       "t": 1791603320.731786,
+       "utc": "03:35:20",
+       "tte": 579.2682139873505,
+       "tte_bin": ">300",
+       "binance": 82589.17,
+       "binance_move_bps": -0.0,
+       "twap_dist_bps": -0.02426589531877312,
+       "binance_dist_bps": -9.013953922176364,
+       "bid": 0.51,
+       "dd": 0.0,
+       "twap": 82514.99177663903,
+       "sigma": 0.024503519439452566,
+       "sigma_bucket": "<0.5",
+       "z": 0.21963297172247256,
+       "btc_age": 0.24002885818481445,
+       "twap_age": 0.5098979473114014,
+       "quote_age": 0.23990821838378906,
+       "adverse_at_entry": true,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "NO",
+       "persist_30s": "NO",
+       "persist_60s": "NO",
+       "first_recovery_sec": 7.015404939651489,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.51,
+       "bid_15s": 0.51,
+       "bid_30s": 0.51,
+       "bid_60s": 0.76,
+       "bid_120s": 0.83
+      }
+     },
+     "sequence": [
+      "ENTRY",
+      "SPOT_CROSS\u2248TWAP_CROSS"
+     ],
+     "pairs": {
+      "BINANCE_3_TO_TOKEN_005": null,
+      "BINANCE_3_TO_TOKEN_010": null,
+      "BINANCE_3_TO_TOKEN_015": null,
+      "BINANCE_3_TO_TOKEN_020": null,
+      "BINANCE_5_TO_TOKEN_015": null,
+      "BINANCE_3_TO_SPOT_CROSS": null,
+      "BINANCE_3_TO_TWAP_CROSS": null,
+      "SPOT_CROSS_TO_TWAP_CROSS": {
+       "lead_sec": 0.0,
+       "label": "SIMULTANEOUS"
+      },
+      "TOKEN_010_TO_TWAP_CROSS": null,
+      "TOKEN_015_TO_TWAP_CROSS": null
+     },
+     "extremes": {
+      "max_binance_adverse_bps": -0.0,
+      "max_token_dd": 0.0,
+      "spot_strike_crosses": 0,
+      "twap_strike_crosses": 1,
+      "max_sigma": 74.33011093458701,
+      "min_tte": 1.4405171871185303,
+      "spot_adverse_at_start": true,
+      "twap_adverse_at_start": true
+     }
+    }
+   ],
+   "why_no_entry": {
+    "top_skips": [
+     [
+      "ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
+      98
+     ],
+     [
+      "ORDER_OBSERVE_BUY_BLOCKED",
+      30
+     ]
+    ],
+    "top_trace_reasons": [
+     [
+      "directional_entry_gate",
+      61
+     ],
+     [
+      "high_entry_price_share_target entry=0.8400 > 0.70 target_shares=5.50; entry_qty_below_min_entry_shares price=0.84 base_target=5.5 cap=10.0 final=4.97",
+      11
+     ],
+     [
+      "high_entry_price_share_target entry=0.8300 > 0.70 target_shares=5.50; entry_qty_below_min_entry_shares price=0.83 base_target=5.5 cap=10.0 final=4.99",
+      4
+     ],
+     [
+      "high_entry_price_share_target entry=0.8300 > 0.70 target_shares=5.50; entry_qty_below_min_entry_shares price=0.83 base_target=5.5 cap=10.0 final=5.01",
+      4
+     ]
+    ]
+   },
+   "runtime_outcome": "DOWN",
+   "official_outcome": "DOWN"
+  },
+  {
+   "slug": "btc-updown-15m-1791603900",
+   "role": "MEASURED_1",
+   "status": "VALID_WITH_GAPS",
+   "invalid_reasons": [
+    "token_quote_stale_gt10"
+   ],
+   "quality": {
+    "n_snapshots": 649,
+    "first_tte": 897.3348100185394,
+    "last_tte": 0.727053165435791,
+    "snapshot_gaps_gt10": [],
+    "binance_stale_gt10": [],
+    "token_quote_stale_gt10": [
+     [
+      "03:59:46",
+      "03:59:59",
+      12.9
+     ]
+    ],
+    "twap_stale_gt10": [],
+    "binance_fresh_frac": 1.0,
+    "quote_fresh_frac": 0.9522342064714946,
+    "twap_fresh_frac": 1.0,
+    "strike_available": true,
+    "sigma_coverage": 0.9984591679506933,
+    "z_coverage": 0.9984591679506933,
+    "median_gap": 1.2291394472122192
+   },
+   "shadow_fills": 0,
+   "positions": [
+    {
+     "kind": "REFERENCE_ONLY (no shadow entry; market favourite at TTE~580 s)",
+     "side": "UP",
+     "entry_utc": "03:50:19",
+     "entry_tte": 580.7118971347809,
+     "entry_price": null,
+     "entry_bid_baseline": 0.75,
+     "entry_score": null,
+     "entry_binance": 82592.01,
+     "entry_strike": 82485.68915035318,
+     "entry_twap_distance_bps": 3.4785012644306685,
+     "entry_binance_distance_bps": 12.889611609234997,
+     "entry_sigma": 0.3927040700510675,
+     "entry_z": 2.6276207466296646,
+     "signals": {
+      "BINANCE_3": null,
+      "BINANCE_5": null,
+      "TOKEN_005": {
+       "t": 1791604279.8577752,
+       "utc": "03:51:19",
+       "tte": 520.1422247886658,
+       "tte_bin": ">300",
+       "binance": 82586.02,
+       "binance_move_bps": 0.7252517525594409,
+       "twap_dist_bps": 3.377096001987533,
+       "binance_dist_bps": 12.163425035334617,
+       "bid": 0.7,
+       "dd": 0.050000000000000044,
+       "twap": 82513.54535945827,
+       "sigma": 0.41807519377785973,
+       "sigma_bucket": "<0.5",
+       "z": 4.470472123770891,
+       "btc_age": 0.3911762237548828,
+       "twap_age": 0.47480320930480957,
+       "quote_age": 0.254589319229126,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "UNKNOWN",
+       "persist_60s": "UNKNOWN",
+       "first_recovery_sec": 116.75878977775574,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.7,
+       "bid_15s": 0.7,
+       "bid_30s": 0.7,
+       "bid_60s": 0.65,
+       "bid_120s": 0.72
+      },
+      "TOKEN_010": {
+       "t": 1791604313.3780549,
+       "utc": "03:51:53",
+       "tte": 486.621945142746,
+       "tte_bin": ">300",
+       "binance": 82580.01,
+       "binance_move_bps": 1.4529250468659136,
+       "twap_dist_bps": 2.974348396923083,
+       "binance_dist_bps": 11.43481379841394,
+       "bid": 0.65,
+       "dd": 0.09999999999999998,
+       "twap": 82510.22326808253,
+       "sigma": 0.32113357271161186,
+       "sigma_bucket": "<0.5",
+       "z": 2.0785965857383335,
+       "btc_age": 0.8969259262084961,
+       "twap_age": 0.4080619812011719,
+       "quote_age": 0.46598291397094727,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "NO",
+       "first_recovery_sec": 33.679625034332275,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.65,
+       "bid_15s": 0.65,
+       "bid_30s": 0.65,
+       "bid_60s": 0.66,
+       "bid_120s": 0.79
+      },
+      "TOKEN_015": null,
+      "TOKEN_020": null,
+      "SPOT_CROSS": null,
+      "TWAP_CROSS": null
+     },
+     "sequence": [
+      "ENTRY",
+      "TOKEN_005",
+      "TOKEN_010"
+     ],
+     "pairs": {
+      "BINANCE_3_TO_TOKEN_005": null,
+      "BINANCE_3_TO_TOKEN_010": null,
+      "BINANCE_3_TO_TOKEN_015": null,
+      "BINANCE_3_TO_TOKEN_020": null,
+      "BINANCE_5_TO_TOKEN_015": null,
+      "BINANCE_3_TO_SPOT_CROSS": null,
+      "BINANCE_3_TO_TWAP_CROSS": null,
+      "SPOT_CROSS_TO_TWAP_CROSS": null,
+      "TOKEN_010_TO_TWAP_CROSS": null,
+      "TOKEN_015_TO_TWAP_CROSS": null
+     },
+     "extremes": {
+      "max_binance_adverse_bps": 1.4541358177376678,
+      "max_token_dd": 0.10999999999999999,
+      "spot_strike_crosses": 0,
+      "twap_strike_crosses": 0,
+      "max_sigma": 234.86182799178687,
+      "min_tte": 0.727053165435791,
+      "spot_adverse_at_start": false,
+      "twap_adverse_at_start": false
+     }
+    }
+   ],
+   "why_no_entry": {
+    "top_skips": [
+     [
+      "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE",
+      211
+     ],
+     [
+      "ORDER_OBSERVE_BUY_BLOCKED",
+      13
+     ],
+     [
+      "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW",
+      6
+     ]
+    ],
+    "top_trace_reasons": [
+     [
+      "directional_first_entry_gate",
+      117
+     ],
+     [
+      "first_entry_too_early",
+      4
+     ],
+     [
+      "high_entry_price_share_target entry=0.8100 > 0.70 target_shares=5.50; entry_qty_below_min_entry_shares price=0.81 base_target=5.5 cap=10.0 final=5.04",
+      4
+     ],
+     [
+      "high_entry_price_share_target entry=0.8000 > 0.70 target_shares=5.50; entry_qty_below_min_entry_shares price=0.80 base_target=5.5 cap=10.0 final=5.10",
+      3
+     ]
+    ]
+   },
+   "runtime_outcome": "UP",
+   "official_outcome": "UP"
+  },
+  {
+   "slug": "btc-updown-15m-1791604800",
+   "role": "MEASURED_2",
+   "status": "VALID_WITH_GAPS",
+   "invalid_reasons": [
+    "token_quote_stale_gt10"
+   ],
+   "quality": {
+    "n_snapshots": 591,
+    "first_tte": 897.2284710407257,
+    "last_tte": 0.525946855545044,
+    "snapshot_gaps_gt10": [],
+    "binance_stale_gt10": [],
+    "token_quote_stale_gt10": [
+     [
+      "04:12:45",
+      "04:13:00",
+      14.9
+     ],
+     [
+      "04:13:06",
+      "04:14:12",
+      65.6
+     ],
+     [
+      "04:14:19",
+      "04:14:39",
+      19.9
+     ],
+     [
+      "04:14:44",
+      "04:14:59",
+      14.7
+     ]
+    ],
+    "twap_stale_gt10": [],
+    "binance_fresh_frac": 1.0,
+    "quote_fresh_frac": 0.9153976311336718,
+    "twap_fresh_frac": 1.0,
+    "strike_available": true,
+    "sigma_coverage": 0.9949238578680203,
+    "z_coverage": 0.9949238578680203,
+    "median_gap": 1.2210570573806763
+   },
+   "shadow_fills": 0,
+   "positions": [
+    {
+     "kind": "REFERENCE_ONLY (no shadow entry; market favourite at TTE~580 s)",
+     "side": "UP",
+     "entry_utc": "04:05:19",
+     "entry_tte": 580.5226519107819,
+     "entry_price": null,
+     "entry_bid_baseline": 0.89,
+     "entry_score": null,
+     "entry_binance": 82692.01,
+     "entry_strike": 82518.17283354703,
+     "entry_twap_distance_bps": 10.902811860048143,
+     "entry_binance_distance_bps": 21.066531223810323,
+     "entry_sigma": 1.3936511937411924,
+     "entry_z": 2.147126913308915,
+     "signals": {
+      "BINANCE_3": {
+       "t": 1791605463.8319628,
+       "utc": "04:11:03",
+       "tte": 236.1680371761322,
+       "tte_bin": "180-300",
+       "binance": 82666.0,
+       "binance_move_bps": 3.1454066723005965,
+       "twap_dist_bps": 10.699164697695533,
+       "binance_dist_bps": 17.91449827072237,
+       "bid": 0.92,
+       "dd": -0.030000000000000027,
+       "twap": 82606.46038571693,
+       "sigma": 1.6010017089891724,
+       "sigma_bucket": "1-<2",
+       "z": 2.739636036013287,
+       "btc_age": 0.14958786964416504,
+       "twap_age": 0.8500559329986572,
+       "quote_age": 0.25461483001708984,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "NO",
+       "persist_60s": "NO",
+       "first_recovery_sec": 26.3525972366333,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.921,
+       "bid_15s": 0.91,
+       "bid_30s": 0.956,
+       "bid_60s": 0.981,
+       "bid_120s": 0.999
+      },
+      "BINANCE_5": null,
+      "TOKEN_005": null,
+      "TOKEN_010": null,
+      "TOKEN_015": null,
+      "TOKEN_020": null,
+      "SPOT_CROSS": null,
+      "TWAP_CROSS": null
+     },
+     "sequence": [
+      "ENTRY",
+      "BINANCE_3"
+     ],
+     "pairs": {
+      "BINANCE_3_TO_TOKEN_005": null,
+      "BINANCE_3_TO_TOKEN_010": null,
+      "BINANCE_3_TO_TOKEN_015": null,
+      "BINANCE_3_TO_TOKEN_020": null,
+      "BINANCE_5_TO_TOKEN_015": null,
+      "BINANCE_3_TO_SPOT_CROSS": null,
+      "BINANCE_3_TO_TWAP_CROSS": null,
+      "SPOT_CROSS_TO_TWAP_CROSS": null,
+      "TOKEN_010_TO_TWAP_CROSS": null,
+      "TOKEN_015_TO_TWAP_CROSS": null
+     },
+     "extremes": {
+      "max_binance_adverse_bps": 3.3872680081176845,
+      "max_token_dd": 0.0,
+      "spot_strike_crosses": 0,
+      "twap_strike_crosses": 0,
+      "max_sigma": 841.6242365159253,
+      "min_tte": 0.525946855545044,
+      "spot_adverse_at_start": false,
+      "twap_adverse_at_start": false
+     }
+    }
+   ],
+   "why_no_entry": {
+    "top_skips": [
+     [
+      "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE",
+      85
+     ],
+     [
+      "ORDER_OBSERVE_BUY_BLOCKED",
+      48
+     ],
+     [
+      "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW",
+      23
+     ]
+    ],
+    "top_trace_reasons": [
+     [
+      "directional_first_entry_gate",
+      57
+     ],
+     [
+      "first_entry_too_early",
+      10
+     ],
+     [
+      "reduce_only: fair 0.9750 > max 0.9000",
+      8
+     ],
+     [
+      "reduce_only: fair 0.9990 > max 0.9000",
+      7
+     ]
+    ]
+   },
+   "runtime_outcome": "UP",
+   "official_outcome": "UP"
+  },
+  {
+   "slug": "btc-updown-15m-1791605700",
+   "role": "MEASURED_3",
+   "status": "VALID_WITH_GAPS",
+   "invalid_reasons": [
+    "token_quote_stale_gt10"
+   ],
+   "quality": {
+    "n_snapshots": 641,
+    "first_tte": 897.3650407791138,
+    "last_tte": 0.0057239532470703125,
+    "snapshot_gaps_gt10": [],
+    "binance_stale_gt10": [],
+    "token_quote_stale_gt10": [
+     [
+      "04:28:48",
+      "04:28:59",
+      10.8
+     ],
+     [
+      "04:29:11",
+      "04:29:23",
+      11.3
+     ]
+    ],
+    "twap_stale_gt10": [],
+    "binance_fresh_frac": 1.0,
+    "quote_fresh_frac": 0.9407176287051482,
+    "twap_fresh_frac": 0.9875195007800313,
+    "strike_available": true,
+    "sigma_coverage": 0.982839313572543,
+    "z_coverage": 0.982839313572543,
+    "median_gap": 1.2408430576324463
+   },
+   "shadow_fills": 0,
+   "positions": [
+    {
+     "kind": "REFERENCE_ONLY (no shadow entry; market favourite at TTE~580 s)",
+     "side": "DOWN",
+     "entry_utc": "04:20:19",
+     "entry_tte": 580.0495760440826,
+     "entry_price": null,
+     "entry_bid_baseline": 0.76,
+     "entry_score": null,
+     "entry_binance": 82685.24,
+     "entry_strike": 82634.89397865825,
+     "entry_twap_distance_bps": 2.8862385033862363,
+     "entry_binance_distance_bps": -6.0925861845674065,
+     "entry_sigma": 0.3322945593169964,
+     "entry_z": 4.838123793916513,
+     "signals": {
+      "BINANCE_3": null,
+      "BINANCE_5": null,
+      "TOKEN_005": null,
+      "TOKEN_010": null,
+      "TOKEN_015": null,
+      "TOKEN_020": null,
+      "SPOT_CROSS": {
+       "t": 1791606019.950424,
+       "utc": "04:20:19",
+       "tte": 580.0495760440826,
+       "tte_bin": ">300",
+       "binance": 82685.24,
+       "binance_move_bps": -0.0,
+       "twap_dist_bps": 2.8862385033862363,
+       "binance_dist_bps": -6.0925861845674065,
+       "bid": 0.76,
+       "dd": 0.0,
+       "twap": 82611.0435773858,
+       "sigma": 0.3322945593169964,
+       "sigma_bucket": "<0.5",
+       "z": 4.838123793916513,
+       "btc_age": 0.08738493919372559,
+       "twap_age": 0.017155885696411133,
+       "quote_age": 1.3098869323730469,
+       "adverse_at_entry": true,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "UNKNOWN",
+       "persist_30s": "UNKNOWN",
+       "persist_60s": "UNKNOWN",
+       "first_recovery_sec": null,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.76,
+       "bid_15s": 0.76,
+       "bid_30s": 0.76,
+       "bid_60s": 0.79,
+       "bid_120s": 0.83
+      },
+      "TWAP_CROSS": null
+     },
+     "sequence": [
+      "ENTRY",
+      "SPOT_CROSS"
+     ],
+     "pairs": {
+      "BINANCE_3_TO_TOKEN_005": null,
+      "BINANCE_3_TO_TOKEN_010": null,
+      "BINANCE_3_TO_TOKEN_015": null,
+      "BINANCE_3_TO_TOKEN_020": null,
+      "BINANCE_5_TO_TOKEN_015": null,
+      "BINANCE_3_TO_SPOT_CROSS": null,
+      "BINANCE_3_TO_TWAP_CROSS": null,
+      "SPOT_CROSS_TO_TWAP_CROSS": null,
+      "TOKEN_010_TO_TWAP_CROSS": null,
+      "TOKEN_015_TO_TWAP_CROSS": null
+     },
+     "extremes": {
+      "max_binance_adverse_bps": 0.0012094056925711664,
+      "max_token_dd": 0.0,
+      "spot_strike_crosses": 0,
+      "twap_strike_crosses": 0,
+      "max_sigma": 321.3500239855594,
+      "min_tte": 0.0057239532470703125,
+      "spot_adverse_at_start": true,
+      "twap_adverse_at_start": false
+     }
+    }
+   ],
+   "why_no_entry": {
+    "top_skips": [
+     [
+      "ORDER_SKIP_DIRECTIONAL_ENTRY_GATE",
+      83
+     ],
+     [
+      "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW",
+      61
+     ],
+     [
+      "ORDER_OBSERVE_BUY_BLOCKED",
+      41
+     ],
+     [
+      "ORDER_SKIP_TWAP_REFERENCE_DEGRADED",
+      3
+     ]
+    ],
+    "top_trace_reasons": [
+     [
+      "directional_entry_gate",
+      58
+     ],
+     [
+      "first_entry_too_early",
+      29
+     ],
+     [
+      "reduce_only: fair 0.9550 > max 0.9000",
+      7
+     ],
+     [
+      "reduce_only: fair 0.9950 > max 0.9000",
+      7
+     ]
+    ]
+   },
+   "runtime_outcome": "DOWN",
+   "official_outcome": "DOWN"
+  },
+  {
+   "slug": "btc-updown-15m-1791606600",
+   "role": "MEASURED_4",
+   "status": "VALID",
+   "invalid_reasons": [],
+   "quality": {
+    "n_snapshots": 695,
+    "first_tte": 897.1475188732147,
+    "last_tte": 0.9575948715209961,
+    "snapshot_gaps_gt10": [],
+    "binance_stale_gt10": [],
+    "token_quote_stale_gt10": [],
+    "twap_stale_gt10": [],
+    "binance_fresh_frac": 1.0,
+    "quote_fresh_frac": 0.9755395683453237,
+    "twap_fresh_frac": 1.0,
+    "strike_available": true,
+    "sigma_coverage": 0.9971223021582734,
+    "z_coverage": 0.9971223021582734,
+    "median_gap": 1.195038080215454
+   },
+   "shadow_fills": 0,
+   "positions": [
+    {
+     "kind": "REFERENCE_ONLY (no shadow entry; market favourite at TTE~580 s)",
+     "side": "DOWN",
+     "entry_utc": "04:35:18",
+     "entry_tte": 581.0524318218231,
+     "entry_price": null,
+     "entry_bid_baseline": 0.67,
+     "entry_score": null,
+     "entry_binance": 82650.03,
+     "entry_strike": 82592.65247335496,
+     "entry_twap_distance_bps": 2.0350942444860642,
+     "entry_binance_distance_bps": -6.947049758881369,
+     "entry_sigma": 0.23626870476452966,
+     "entry_z": 1.1934815353105834,
+     "signals": {
+      "BINANCE_3": {
+       "t": 1791607253.0322828,
+       "utc": "04:40:53",
+       "tte": 246.96771717071533,
+       "tte_bin": "180-300",
+       "binance": 82675.46,
+       "binance_move_bps": 3.076828889234229,
+       "twap_dist_bps": 0.20219448038793336,
+       "binance_dist_bps": -10.026016136454905,
+       "bid": 0.28,
+       "dd": 0.39,
+       "twap": 82590.98249550989,
+       "sigma": 0.047225256310830556,
+       "sigma_bucket": "<0.5",
+       "z": 0.07956491527127087,
+       "btc_age": 1.1194136142730713,
+       "twap_age": 0.022352933883666992,
+       "quote_age": 0.34864068031311035,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "YES",
+       "first_recovery_sec": null,
+       "recovered_to_entry_bid": false,
+       "bid_5s": 0.28,
+       "bid_15s": 0.2,
+       "bid_30s": 0.32,
+       "bid_60s": 0.26,
+       "bid_120s": 0.34
+      },
+      "BINANCE_5": null,
+      "TOKEN_005": {
+       "t": 1791606969.313817,
+       "utc": "04:36:09",
+       "tte": 530.686182975769,
+       "tte_bin": ">300",
+       "binance": 82663.92,
+       "binance_move_bps": 1.6805801522394388,
+       "twap_dist_bps": 2.0509912265296384,
+       "binance_dist_bps": -8.628797418514948,
+       "bid": 0.46,
+       "dd": 0.21000000000000002,
+       "twap": 82575.7127927951,
+       "sigma": 0.25394112841505256,
+       "sigma_bucket": "<0.5",
+       "z": 1.9628759634265966,
+       "btc_age": 0.06464409828186035,
+       "twap_age": 0.28604698181152344,
+       "quote_age": 0.3192429542541504,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "YES",
+       "first_recovery_sec": 79.7218267917633,
+       "recovered_to_entry_bid": false,
+       "bid_5s": 0.42,
+       "bid_15s": 0.41,
+       "bid_30s": 0.43,
+       "bid_60s": 0.58,
+       "bid_120s": 0.47
+      },
+      "TOKEN_010": {
+       "t": 1791606969.313817,
+       "utc": "04:36:09",
+       "tte": 530.686182975769,
+       "tte_bin": ">300",
+       "binance": 82663.92,
+       "binance_move_bps": 1.6805801522394388,
+       "twap_dist_bps": 2.0509912265296384,
+       "binance_dist_bps": -8.628797418514948,
+       "bid": 0.46,
+       "dd": 0.21000000000000002,
+       "twap": 82575.7127927951,
+       "sigma": 0.25394112841505256,
+       "sigma_bucket": "<0.5",
+       "z": 1.9628759634265966,
+       "btc_age": 0.06464409828186035,
+       "twap_age": 0.28604698181152344,
+       "quote_age": 0.3192429542541504,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "NO",
+       "first_recovery_sec": 45.11370396614075,
+       "recovered_to_entry_bid": false,
+       "bid_5s": 0.42,
+       "bid_15s": 0.41,
+       "bid_30s": 0.43,
+       "bid_60s": 0.58,
+       "bid_120s": 0.47
+      },
+      "TOKEN_015": {
+       "t": 1791606969.313817,
+       "utc": "04:36:09",
+       "tte": 530.686182975769,
+       "tte_bin": ">300",
+       "binance": 82663.92,
+       "binance_move_bps": 1.6805801522394388,
+       "twap_dist_bps": 2.0509912265296384,
+       "binance_dist_bps": -8.628797418514948,
+       "bid": 0.46,
+       "dd": 0.21000000000000002,
+       "twap": 82575.7127927951,
+       "sigma": 0.25394112841505256,
+       "sigma_bucket": "<0.5",
+       "z": 1.9628759634265966,
+       "btc_age": 0.06464409828186035,
+       "twap_age": 0.28604698181152344,
+       "quote_age": 0.3192429542541504,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "NO",
+       "first_recovery_sec": 43.849196910858154,
+       "recovered_to_entry_bid": false,
+       "bid_5s": 0.42,
+       "bid_15s": 0.41,
+       "bid_30s": 0.43,
+       "bid_60s": 0.58,
+       "bid_120s": 0.47
+      },
+      "TOKEN_020": {
+       "t": 1791606969.313817,
+       "utc": "04:36:09",
+       "tte": 530.686182975769,
+       "tte_bin": ">300",
+       "binance": 82663.92,
+       "binance_move_bps": 1.6805801522394388,
+       "twap_dist_bps": 2.0509912265296384,
+       "binance_dist_bps": -8.628797418514948,
+       "bid": 0.46,
+       "dd": 0.21000000000000002,
+       "twap": 82575.7127927951,
+       "sigma": 0.25394112841505256,
+       "sigma_bucket": "<0.5",
+       "z": 1.9628759634265966,
+       "btc_age": 0.06464409828186035,
+       "twap_age": 0.28604698181152344,
+       "quote_age": 0.3192429542541504,
+       "adverse_at_entry": null,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "NO",
+       "first_recovery_sec": 43.849196910858154,
+       "recovered_to_entry_bid": false,
+       "bid_5s": 0.42,
+       "bid_15s": 0.41,
+       "bid_30s": 0.43,
+       "bid_60s": 0.58,
+       "bid_120s": 0.47
+      },
+      "SPOT_CROSS": {
+       "t": 1791606918.9475682,
+       "utc": "04:35:18",
+       "tte": 581.0524318218231,
+       "tte_bin": ">300",
+       "binance": 82650.03,
+       "binance_move_bps": -0.0,
+       "twap_dist_bps": 2.0350942444860642,
+       "binance_dist_bps": -6.947049758881369,
+       "bid": 0.67,
+       "dd": 0.0,
+       "twap": 82575.84409018642,
+       "sigma": 0.23626870476452966,
+       "sigma_bucket": "<0.5",
+       "z": 1.1934815353105834,
+       "btc_age": 0.8545241355895996,
+       "twap_age": 1.061877965927124,
+       "quote_age": 0.48390722274780273,
+       "adverse_at_entry": true,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "YES",
+       "first_recovery_sec": null,
+       "recovered_to_entry_bid": true,
+       "bid_5s": 0.68,
+       "bid_15s": 0.67,
+       "bid_30s": 0.67,
+       "bid_60s": 0.42,
+       "bid_120s": 0.55
+      },
+      "TWAP_CROSS": {
+       "t": 1791607265.569609,
+       "utc": "04:41:05",
+       "tte": 234.43039107322693,
+       "tte_bin": "180-300",
+       "binance": 82678.65,
+       "binance_move_bps": 3.462793661417346,
+       "twap_dist_bps": -0.011434364764467282,
+       "binance_dist_bps": -10.412249040285774,
+       "bid": 0.18,
+       "dd": 0.49000000000000005,
+       "twap": 82592.74691280648,
+       "sigma": 0.2702026606643024,
+       "sigma_bucket": "<0.5",
+       "z": 0.4458928330899013,
+       "btc_age": 0.26879382133483887,
+       "twap_age": 0.19687700271606445,
+       "quote_age": 0.32169079780578613,
+       "adverse_at_entry": false,
+       "timing_quality": "APPROX_SAME_SECOND (1 s snapshot grid, local receipt clock)",
+       "persist_5s": "YES",
+       "persist_15s": "YES",
+       "persist_30s": "YES",
+       "persist_60s": "YES",
+       "first_recovery_sec": null,
+       "recovered_to_entry_bid": false,
+       "bid_5s": 0.2,
+       "bid_15s": 0.24,
+       "bid_30s": 0.29,
+       "bid_60s": 0.26,
+       "bid_120s": 0.31
+      }
+     },
+     "sequence": [
+      "ENTRY",
+      "SPOT_CROSS",
+      "TOKEN_005\u2248TOKEN_010\u2248TOKEN_015\u2248TOKEN_020",
+      "BINANCE_3",
+      "TWAP_CROSS"
+     ],
+     "pairs": {
+      "BINANCE_3_TO_TOKEN_005": {
+       "lead_sec": -283.7,
+       "label": "B_FIRST"
+      },
+      "BINANCE_3_TO_TOKEN_010": {
+       "lead_sec": -283.7,
+       "label": "B_FIRST"
+      },
+      "BINANCE_3_TO_TOKEN_015": {
+       "lead_sec": -283.7,
+       "label": "B_FIRST"
+      },
+      "BINANCE_3_TO_TOKEN_020": {
+       "lead_sec": -283.7,
+       "label": "B_FIRST"
+      },
+      "BINANCE_5_TO_TOKEN_015": null,
+      "BINANCE_3_TO_SPOT_CROSS": {
+       "lead_sec": -334.1,
+       "label": "B_FIRST"
+      },
+      "BINANCE_3_TO_TWAP_CROSS": {
+       "lead_sec": 12.5,
+       "label": "A_FIRST"
+      },
+      "SPOT_CROSS_TO_TWAP_CROSS": {
+       "lead_sec": 346.6,
+       "label": "A_FIRST"
+      },
+      "TOKEN_010_TO_TWAP_CROSS": {
+       "lead_sec": 296.3,
+       "label": "A_FIRST"
+      },
+      "TOKEN_015_TO_TWAP_CROSS": {
+       "lead_sec": 296.3,
+       "label": "A_FIRST"
+      }
+     },
+     "extremes": {
+      "max_binance_adverse_bps": 3.462793661417346,
+      "max_token_dd": 0.67,
+      "spot_strike_crosses": 0,
+      "twap_strike_crosses": 1,
+      "max_sigma": 39.1535254947853,
+      "min_tte": 0.9575948715209961,
+      "spot_adverse_at_start": true,
+      "twap_adverse_at_start": false
+     }
+    }
+   ],
+   "why_no_entry": {
+    "top_skips": [
+     [
+      "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE",
+      103
+     ],
+     [
+      "ORDER_SKIP_LOCKED_SIDE_INVALIDATED",
+      88
+     ],
+     [
+      "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW",
+      3
+     ]
+    ],
+    "top_trace_reasons": [
+     [
+      "directional_first_entry_gate",
+      61
+     ],
+     [
+      "locked_side_signal_invalidated",
+      34
+     ],
+     [
+      "locked_side_invalidation_confirmed",
+      27
+     ],
+     [
+      "first_entry_too_early",
+      2
+     ]
+    ]
+   },
+   "runtime_outcome": "UP",
+   "official_outcome": "PENDING (not closed; prices 0.9995/0.0005)"
+  }
+ ]
+}

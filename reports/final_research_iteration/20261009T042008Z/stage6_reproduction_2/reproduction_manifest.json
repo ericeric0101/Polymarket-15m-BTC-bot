@@ -1,0 +1,119 @@
+{
+ "generated_at_utc": "2026-10-09T04:42:25.285762+00:00",
+ "git_head": "b9a1e984af8bcc6e52bbc39e767af89f9d9f64f6",
+ "code_dirty": true,
+ "network_used": false,
+ "bootstrap_seed": 11,
+ "scripts": {
+  "build_outcome_provenance.py": "125de11183d0a4ef260855755addc62da24642990462257b17787ba846c29d57",
+  "final_research_analysis.py": "c05541d477556f987f74fc881adeec17154579ce0ab4ce2e9675d39edd3f50f3",
+  "research_entry_analysis.py": "60581606ba57c2c9d12a1e3bd7a69c8496d09fcd2978282c9472779acb1682da",
+  "research_flip_analysis.py": "06e6d11ab703cc80b4d29039f7fdcf40fe4350dd4e281025fbbed2a8e8f85d82",
+  "research_stop_analysis.py": "684c2cb8773160df180f849a1193097840988c933d1f0b75a19fc54ade69590a",
+  "reproduce_research_iteration.py": "8bde5361226386f52a6d527bb21cd632d635d68e78dd03ab324428b93db1b8a5"
+ },
+ "inputs": {
+  "official_cache": {
+   "path": "data/research_export/official_resolution/official_resolutions_20261009T041657Z.json",
+   "file_sha256": "7795b2c91dbedd68e8650fc1f66352b8afe83c4742602c22a0215b68f412851c",
+   "content_sha256": "5356cf95f81ee074cbde43427e3dbbbba254fd454a24283d2fd88a1e7ee20120"
+  },
+  "outcome_provenance_csv": {
+   "path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/reports/final_research_iteration/20261009T042008Z/stage6_reproduction_2/outcome_provenance/market_outcomes_5356cf95f81e.csv",
+   "sha256": "ea7440039a50a1262c38520ebbfc1eda692901d7a3cc89928d35c9f23c375107"
+  },
+  "journal": {
+   "path": "logs/trade_journal.db",
+   "size_bytes": 3193483264,
+   "mtime_utc": "2026-10-08T17:28:29.660991+00:00",
+   "order_events_rows": 400787,
+   "order_events_max_rowid": 400787
+  },
+  "export_files": {
+   "A_market_summary/2026-09-25.csv": "ac82485a9035f1113fbf7f47e670bbb0e762a47b374afd4281d67780319a09bc",
+   "A_market_summary/2026-09-26.csv": "1dc7d1f2721844813bc169dfce1ac12dc052ce1010dd7c011cebbae98180c71c",
+   "A_market_summary/2026-09-27.csv": "4d8b6c07995f79828d43d94719ac62f50e28dbdad7c093c32ed3d0989bd54805",
+   "A_market_summary/2026-09-28.csv": "6bd5ca61b8afb4aeeac8594ead2fe31cfb911bfa146dce17a92a1812d15fa0d6",
+   "A_market_summary/2026-09-29.csv": "bd95ea5dcb43720918f69563fb3d43df6416925217abe233dddb547f1538cfa9",
+   "A_market_summary/2026-09-30.csv": "54d867451f304ee23fdaaf0574281882fce500652f53a779249d880a94f12836",
+   "A_market_summary/2026-10-01.csv": "490e5190f77214f2ecadf4964551f0eace7139fc4a6840474e80aca03f2cce79",
+   "A_market_summary/2026-10-02.csv": "5ef40d4e69e056ae45297f204d21bcca374b721426f7fb800e9383f79e78f99b",
+   "A_market_summary/2026-10-03.csv": "76b2baa9c3d532b1ea3b65386ec4a56b370f4a6542d509fcfe75cb1e804bee1e",
+   "A_market_summary/2026-10-04.csv": "75ba3b64a4a943b40541d75c9ef982b0bc15bd8d3015f300244d125c43e078dd",
+   "A_market_summary/2026-10-05.csv": "1ec37413ae24f4aef8e88a086f19acd5fc17d909fae5161e391eece5d9953be4",
+   "A_market_summary/2026-10-06.csv": "f9b42987de66a9829c46769a4323262c483eb1cc748014d7af6299d9feba9e37",
+   "A_market_summary/2026-10-07.csv": "07bde53991002d6970dc92be1767116d79d15f38020df5ee0d7555364a2f5694",
+   "A_market_summary/2026-10-08.csv": "7cccbb54b78789e5a31d8653678597c7afdcc2b05d9f2810e65650141ac90937",
+   "P_paths/2026-09-25/canonical_events.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-25/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-25/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-26/canonical_events.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-26/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-26/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-27/canonical_events.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-27/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-27/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-28/canonical_events.parquet": "72ddf6139ec33dbd9ac1b0370fafd2aa9e599b92d3f64730509bd358599c5fb0",
+   "P_paths/2026-09-28/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-28/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-29/canonical_events.parquet": "3c5b0137f0a229165599de107d19390274e779895c837187279b161ed0f0eb96",
+   "P_paths/2026-09-29/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-29/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-30/canonical_events.parquet": "2c4409cb8dbad1bfdfe55ff250e351a4574bf7a9604969b930da4712e30be412",
+   "P_paths/2026-09-30/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-09-30/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-01/canonical_events.parquet": "e5ddb489145c00ff73a8c982c089435e24b81343393dfe34f912693379c98cae",
+   "P_paths/2026-10-01/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-01/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-02/canonical_events.parquet": "6d522ed84fe257cf0af3372991987f4319680c083e271fb659ea054868c99f23",
+   "P_paths/2026-10-02/paths_historical_pre_v2.parquet": "2e0c325900aed67f8d9cd5c3d3ef019ce3ad141ab376eec8677a6c01fc85db99",
+   "P_paths/2026-10-02/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-03/canonical_events.parquet": "0039b6597f5113d703a9fa469fb186efd1498372e1b780733d5d2210fe8c5181",
+   "P_paths/2026-10-03/paths_historical_pre_v2.parquet": "78b624e80368ffc08652372f3b389458580745a48d2071d78a08b8d9c17043dc",
+   "P_paths/2026-10-03/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-04/canonical_events.parquet": "efcda62d970bdcb97d50453154095a0dd0bdae858a802fef6cac57f2f77bb3a5",
+   "P_paths/2026-10-04/paths_historical_pre_v2.parquet": "b1860b71a97b36cb0d763b38f94fb661b8dcff8b7ab638aa949f682be299e6a8",
+   "P_paths/2026-10-04/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-05/canonical_events.parquet": "08531dd075ee9d02fd948cfc403a12d6d1250eeceb3bf64f1ad756340954d957",
+   "P_paths/2026-10-05/paths_historical_pre_v2.parquet": "c6c87727a32bbff985cf59daa9657dd19907b867c645d799407189ad84f38365",
+   "P_paths/2026-10-05/paths_native_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-06/canonical_events.parquet": "acbe07eb2fd1324b4c3f82980f6e122e5e6a7d90505af32cf4a7c36be4297eaa",
+   "P_paths/2026-10-06/paths_historical_pre_v2.parquet": "c5908149d3efa39fddd56b8cec05d4f41674d13541d3c3248418db9778581004",
+   "P_paths/2026-10-06/paths_native_v2.parquet": "1285bbea4eb8f14543dacf9ba4960e1110192469e116ea92bf9e98850bb11acc",
+   "P_paths/2026-10-07/canonical_events.parquet": "766459f11d1cf09bde2748a3a6fd28a4b3f9d4a0f4c869bdfbdc232e229f8099",
+   "P_paths/2026-10-07/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-07/paths_native_v2.parquet": "89564d2b049337016caeba8d20bca7b57a8b8787c49b551e241f23fbfebe1a90",
+   "P_paths/2026-10-08/canonical_events.parquet": "3838d047771c5891971dd1c1643f08dae91555fbd45fb6abde156a7673a45b70",
+   "P_paths/2026-10-08/paths_historical_pre_v2.parquet": "b42b5ba57dfd222d08cc3c8ca19fc562b45cad7824eb7aecf4026206c7659932",
+   "P_paths/2026-10-08/paths_native_v2.parquet": "cca107aecbd89d2272762104614bcf46a53a6895fa4440fb56d80e4380990386"
+  }
+ },
+ "date_ranges": {
+  "entry_LIVE": {
+   "first_day": "2026-09-10",
+   "last_day": "2026-09-30",
+   "n_days": 11,
+   "n_markets": 125
+  },
+  "entry_DRY_RUN": {
+   "first_day": "2026-10-01",
+   "last_day": "2026-10-08",
+   "n_days": 8,
+   "n_markets": 266
+  }
+ },
+ "result_digests": {
+  "stage2_official": "621d27245436ad2a53c665afdcc1bdf42d55d3b41e95f745a9f93989ac15d7a9",
+  "stage2_journal": "78a7f20066fb02caf21a982e4113bd46b2405e40142a6de6b776ec7d0e1fc84b",
+  "stage3": "72701cc8759aa666672814c2c9598143b195ebe59fa27a0e530158a7ac86b119",
+  "stage4": "057234d12bec3b0697def8d19ec043d36da6e3bcd5de2aecb4fcf239db5dc830",
+  "stage5": "52663e6fff430bf12a0b0d6350a3b1cacf4dbab79a74c6e3f360b30ff9df8b1b"
+ },
+ "compare": {
+  "stage2_official": true,
+  "stage2_journal": true,
+  "stage3": true,
+  "stage4": true,
+  "stage5": true
+ }
+}

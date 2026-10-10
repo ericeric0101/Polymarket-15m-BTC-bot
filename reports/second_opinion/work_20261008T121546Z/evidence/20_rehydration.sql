@@ -1,0 +1,1 @@
+SELECT e.ts, r.mode, substr(e.payload_json,1,300) FROM strategy_events e JOIN strategy_runs r ON r.run_id=e.run_id WHERE e.event_type IN ('STARTUP_INVENTORY_REHYDRATED','MARKET_RISK_GUARDS_RECOVERED') ORDER BY e.id DESC LIMIT 8;

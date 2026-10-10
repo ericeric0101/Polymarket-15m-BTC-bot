@@ -1,0 +1,63 @@
+=== PREFIX 9f60f63 tests/test_prediction_research_snapshot.py tests/test_twap_forward_shadow.py
+FAILED tests/test_twap_forward_shadow.py::test_stale_raw_sigma_fails_closed_even_with_fresh_binance_path_spot
+FAILED tests/test_twap_forward_shadow.py::test_research_probability_freshness_uses_receipt_and_same_chainlink_clock[0.5]
+FAILED tests/test_twap_forward_shadow.py::test_research_probability_freshness_uses_receipt_and_same_chainlink_clock[-0.5]
+FAILED tests/test_twap_forward_shadow.py::test_research_sigma_still_rejects_old_value_and_missing_local_receipt
+FAILED tests/test_twap_forward_shadow.py::test_research_sigma_negative_same_domain_order_is_invalid_not_clamped
+22 failed, 39 passed in 2.30s
+--- HEAD
+no tests ran in 0.01s
+=== PREFIX b034b4e tests/test_trade_journal_backup.py
+FAILED tests/test_trade_journal_backup.py::test_default_periodic_rpo_is_fifteen_minutes
+FAILED tests/test_trade_journal_backup.py::test_periodic_interval_unchanged_suppression_and_committed_updates
+FAILED tests/test_trade_journal_backup.py::test_force_boundary_bypasses_interval_even_without_new_rows
+FAILED tests/test_trade_journal_backup.py::test_unchanged_skip_logging_is_interval_bounded
+FAILED tests/test_trade_journal_backup.py::test_run_metadata_changes_mark_source_dirty
+5 failed, 9 passed in 0.18s
+--- HEAD
+no tests ran in 0.01s
+=== PREFIX 1fa2ba0 tests/test_trade_journal_backup.py
+FAILED tests/test_trade_journal_backup.py::test_sqlite_backup_failure_keeps_primary_durable_and_closes_connections[unable to open database file]
+FAILED tests/test_trade_journal_backup.py::test_destination_open_failure_is_reported_separately_and_recovers
+FAILED tests/test_trade_journal_backup.py::test_failed_worker_flush_is_cooled_down_despite_repeated_write_wakeups
+FAILED tests/test_trade_journal_backup.py::test_shutdown_force_keeps_existing_final_backup_contract
+FAILED tests/test_trade_journal_backup.py::test_backup_retention_is_one_published_image_and_source_is_read_only
+8 failed, 1 passed in 0.14s
+--- HEAD
+no tests ran in 0.02s
+=== PREFIX 49aa9ca tests/test_scheduled_rollover_interval.py
+tests/test_scheduled_rollover_interval.py:42: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_scheduled_rollover_interval.py::test_single_interval_authority_ignores_retired_environment_override
+FAILED tests/test_scheduled_rollover_interval.py::test_scheduled_timer_and_existing_exposure_defer[False]
+FAILED tests/test_scheduled_rollover_interval.py::test_scheduled_timer_and_existing_exposure_defer[True]
+3 failed, 1 passed in 2.01s
+--- HEAD
+no tests ran in 0.01s
+=== PREFIX 3b50637 tests/test_fast_follow_retirement.py
+    from bot.outcome_lead_lag_exit_handoff import OutcomeFastFollowLive, FastFollowLiveConfig, observational_outcome_mode
+E   ImportError: cannot import name 'observational_outcome_mode' from 'bot.outcome_lead_lag_exit_handoff' (/private/tmp/audit_prefix_3b50637/bot/outcome_lead_lag_exit_handoff.py)
+=========================== short test summary info ============================
+ERROR tests/test_fast_follow_retirement.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.66s
+--- HEAD
+no tests ran in 0.01s
+=== PREFIX 9352e69 tests/test_twap_forward_shadow.py tests/test_trade_journal_backup.py tests/test_forward_shadow.py
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: module 'bot.twap_forward_shadow' has no attribute 'REQUIRED_EVENT_TYPES'
+=========================== short test summary info ============================
+ERROR tests/test_twap_forward_shadow.py - AttributeError: module 'bot.twap_fo...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.38s
+--- HEAD
+no tests ran in 0.01s
+=== PREFIX 33896ce tests/test_outcome_decommission.py
+FAILED tests/test_outcome_decommission.py::test_runtime_store_cannot_point_to_historical_database[True]
+FAILED tests/test_outcome_decommission.py::test_legacy_db_requires_explicit_path
+FAILED tests/test_outcome_decommission.py::test_no_runtime_outcome_import_network_or_execution_hooks
+FAILED tests/test_outcome_decommission.py::test_missing_historical_report_db_is_not_created
+FAILED tests/test_outcome_decommission.py::test_runtime_store_rejects_hardlink_to_old_database
+7 failed in 2.81s
+--- HEAD
+no tests ran in 0.01s

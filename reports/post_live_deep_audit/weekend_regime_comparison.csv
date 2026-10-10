@@ -1,0 +1,108 @@
+level,id,utc_weekday,taipei_weekday,source,group,usable,coverage,sd_1m_bps,median_abs_1m_bps,max_abs_1m_bps,hi_lo_range_bps,n_gt5bps,n_gt10bps,n_gt20bps,lag1_autocorr,twap_cross_count,twap_range_bps,fav_T580,fav_px_T580,fav_adverse_cross,fav_tte_first_adverse,fav_final_lost_proxy,fav_bid_drop40c_while_twap_favourable,median_spread,note
+DAY_WINDOW_22:40-00:16UTC,2026-07-27,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,6.9709,4.1986,32.1525,160.9842,39,10,1,-0.0143,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-07-28,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.2163,2.8098,14.8324,99.8614,17,4,0,-0.0385,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-07-29,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.8851,2.4898,12.7611,34.1017,16,3,0,-0.1551,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-07-30,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.1063,1.8504,21.4233,53.381,15,2,1,-0.0007,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-07-31,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,1.9203,0.9177,5.9899,24.2865,4,0,0,0.0705,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-01,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,1.7925,0.4569,7.2143,33.4173,5,0,0,0.034,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-02,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,3.7731,1.8857,15.7477,39.7426,15,3,0,0.026,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-03,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.2526,1.5753,12.8027,32.0923,12,1,0,0.0574,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-04,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.4169,1.774,21.7438,82.8043,18,2,1,-0.0249,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-05,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.6079,1.3402,9.1554,26.4115,7,0,0,-0.0158,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-06,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.2376,0.8394,7.1576,32.6262,5,0,0,0.1556,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-07,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,1.3534,0.0015,7.9875,16.6482,2,0,0,-0.0212,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-08,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,0.7442,0.0015,2.9865,7.3095,0,0,0,0.221,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-09,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,4.5287,2.2634,24.6337,73.8445,17,3,1,0.0737,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-10,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,1.8265,0.6859,5.7608,19.4424,1,0,0,-0.0708,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-11,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,1.8943,1.0631,4.7876,23.972,0,0,0,0.0565,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-12,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.5994,1.1167,10.0897,38.5478,8,1,0,-0.0974,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-13,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,1.8952,0.8152,6.7448,27.0596,2,0,0,0.0885,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-14,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,1.9181,0.7581,6.5733,31.9826,3,0,0,0.1432,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-15,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,0.7152,0.0016,3.1204,17.026,0,0,0,0.1922,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-16,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,2.7889,1.4787,10.9372,44.2901,8,1,0,-0.0595,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-17,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.5425,0.8294,8.5364,45.0513,7,0,0,0.068,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-18,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,1.9056,0.4773,5.8777,35.8924,4,0,0,0.0494,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-19,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,6.9934,5.3409,18.1842,80.6196,53,14,0,-0.0586,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-20,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,7.4246,3.6309,23.6557,114.8434,39,12,3,-0.2121,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-21,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,8.4225,4.609,33.7823,125.0845,43,16,3,0.111,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-22,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,3.2099,1.8937,8.9542,32.2089,12,0,0,-0.1615,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-23,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,5.4262,3.7128,16.1491,69.4741,28,9,0,0.0944,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-24,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.2986,2.1503,13.1754,58.5245,22,3,0,-0.1448,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-25,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,5.8645,3.1681,19.66,84.7132,27,7,0,-0.1406,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-26,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.8227,2.7599,14.7705,78.8749,19,4,0,-0.0975,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-27,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.4563,1.7622,13.0387,32.3594,14,1,0,-0.1295,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-28,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,2.9482,1.2745,9.0992,32.8311,10,0,0,-0.2041,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-29,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,1.7605,0.8475,5.9074,17.4652,2,0,0,-0.0676,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-30,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,9.1897,5.0383,41.9769,196.1384,48,23,3,0.2163,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-08-31,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.8282,1.4774,11.5628,49.756,7,1,0,0.068,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-01,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.8603,2.1139,12.3833,71.3664,14,3,0,-0.1167,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-02,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.2688,1.572,9.8546,50.111,15,0,0,0.0728,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-03,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.5893,2.3893,15.9091,33.7319,26,4,0,-0.0279,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-04,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,1.8366,0.8136,8.535,19.7117,1,0,0,0.2788,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-05,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,2.0463,0.7633,7.485,26.2003,5,0,0,0.0818,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-06,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,5.5816,3.4839,23.219,78.54,30,7,1,-0.1286,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-07,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.3829,1.9976,10.5677,54.3904,14,1,0,-0.1644,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-08,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.4226,1.2721,7.9099,41.2139,7,0,0,0.0127,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-09,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,2.7115,1.8349,7.0962,59.491,9,0,0,0.1066,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-10,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,5.4528,2.7537,20.1245,65.9361,26,8,1,-0.1706,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-11,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,2.6892,1.243,10.6144,40.6577,5,2,0,-0.1297,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-12,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,0.897,0.0013,3.7294,13.8503,0,0,0,0.0549,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-13,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,3.8495,2.1267,12.2645,59.9393,14,3,0,-0.0445,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-14,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.2246,1.8878,9.5738,70.8575,13,0,0,-0.0116,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-15,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.0903,2.4958,11.0764,50.2837,18,2,0,0.0824,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-16,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,4.5063,2.6276,13.1896,107.1031,25,3,0,-0.0491,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-17,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,True,1.0,3.0255,1.5689,9.9958,24.4172,11,0,0,-0.027,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-18,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,1.0,3.3688,1.7304,9.1429,43.7839,14,0,0,-0.1451,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-19,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,True,1.0,1.8898,0.7703,8.5741,20.8429,2,0,0,0.2288,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-20,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,False,0.8333,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-21,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-22,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-23,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-24,Thu,Fri,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-25,Fri,Sat,binance_1m_json,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-26,Sat,Sun,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-27,Sun,Mon,binance_1m_json,PRIOR_UTC_WEEKEND_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-28,Mon,Tue,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-29,Tue,Wed,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-09-30,Wed,Thu,binance_1m_json,PRIOR_WEEKDAY_NIGHT,False,0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-01,Thu,Fri,binance_1s_agg_1m,PRIOR_WEEKDAY_NIGHT,False,0.3958,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-02,Fri,Sat,binance_1s_agg_1m,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),False,0.1354,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-03,Sat,Sun,binance_1s_agg_1m,PRIOR_UTC_WEEKEND_NIGHT,True,0.9688,1.4896,0.1947,6.6537,15.5498,2,0,0,0.1524,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-04,Sun,Mon,binance_1s_agg_1m,PRIOR_UTC_WEEKEND_NIGHT,False,0.8646,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-05,Mon,Tue,binance_1s_agg_1m,PRIOR_WEEKDAY_NIGHT,True,0.9896,2.6492,1.4001,10.1666,38.8796,5,1,0,0.1725,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-06,Tue,Wed,binance_1s_agg_1m,PRIOR_WEEKDAY_NIGHT,False,0.4167,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-07,Wed,Thu,binance_1s_agg_1m,PRIOR_WEEKDAY_NIGHT,False,0.0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-08,Thu,Fri,binance_1s_agg_1m,PRIOR_WEEKDAY_NIGHT,False,0.0,,,,,,,,,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+DAY_WINDOW_22:40-00:16UTC,2026-10-09,Fri,Sat,binance_1s_agg_1m,TODAY,True,1.0,1.5777,0.2868,6.6503,14.0681,2,0,0,0.0281,,,,,,,,,,"Binance BTCUSDT proxy, NOT settlement Chainlink"
+GROUP_MEDIAN,PRIOR_WEEKDAY_NIGHT,,,binance,PRIOR_WEEKDAY_NIGHT,True,n_days=33,3.3829,1.8349,11.5628,50.111,14,1,0,-0.0249,,,,,,,,,,independent day count = n_days
+GROUP_MEDIAN,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),,,binance,PRIOR_SAME_TAIPEI_SAT_MORNING(UTC_FRI),True,n_days=8,2.3047,1.0803,8.8171,32.4069,4.5,0.0,0.0,0.0247,,,,,,,,,,independent day count = n_days
+GROUP_MEDIAN,PRIOR_UTC_WEEKEND_NIGHT,,,binance,PRIOR_UTC_WEEKEND_NIGHT,True,n_days=16,2.4176,1.1631,8.7641,32.8131,6.5,0.0,0.0,0.0643,,,,,,,,,,independent day count = n_days
+GROUP_MEDIAN,TODAY,,,binance,TODAY,True,n_days=1,1.5777,0.2868,6.6503,14.0681,2,0,0,0.0281,,,,,,,,,,independent day count = n_days
+MARKET_SLOT_TWAP,btc-updown-15m-1790985600,Sat,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9978,,,,8.9128,,,,,2,8.9128,DOWN,,True,95.6899,False,null,0.015,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791067500,Sat,Sun,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9978,,,,2.8159,,,,,1,2.8159,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791068400,Sat,Sun,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9975,,,,2.7578,,,,,2,2.7578,DOWN,0.515,True,580.678,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791069300,Sat,Sun,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9978,,,,8.2464,,,,,2,8.2464,DOWN,0.505,True,580.6037,False,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791070200,Sat,Sun,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9892,,,,5.9201,,,,,1,5.9201,,,,,,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791071100,Sat,Sun,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.998,,,,7.1597,,,,,2,7.1597,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791072000,Sun,Sun,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9767,,,,9.7322,,,,,1,9.7322,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791153900,Sun,Mon,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.992,,,,10.097,,,,,1,10.097,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791154800,Sun,Mon,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.997,,,,16.406,,,,,0,16.406,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791155700,Sun,Mon,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9827,,,,22.305,,,,,1,22.305,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791156600,Sun,Mon,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9958,,,,29.5643,,,,,0,29.5643,DOWN,,False,,False,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791157500,Sun,Mon,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9961,,,,6.6651,,,,,3,6.6651,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791158400,Mon,Mon,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9908,,,,15.6762,,,,,0,15.6762,DOWN,,False,,False,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791240300,Mon,Tue,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9986,,,,10.2381,,,,,1,10.2381,DOWN,,False,,False,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791241200,Mon,Tue,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9986,,,,21.9443,,,,,2,21.9443,,,,,,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791242100,Mon,Tue,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9984,,,,13.2542,,,,,1,13.2542,UP,0.675,False,,False,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791243000,Mon,Tue,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9985,,,,11.0757,,,,,1,11.0757,DOWN,0.685,False,,False,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791243900,Mon,Tue,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9987,,,,11.8929,,,,,2,11.8929,DOWN,,True,249.8903,False,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791244800,Tue,Tue,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9986,,,,12.4134,,,,,3,12.4134,UP,0.535,True,496.7126,False,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791329400,Tue,Wed,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,False,0.9947,,,,16.0676,,,,,1,16.0676,,,,,,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791330300,Tue,Wed,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9914,,,,6.8661,,,,,1,6.8661,UP,0.685,True,26.4216,True,"{""tte"": 68.94304513931274, ""twap_favourable"": true}",0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791331200,Wed,Wed,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),PRIOR,True,0.9958,,,,13.6963,,,,,1,13.6963,DOWN,0.735,True,239.1096,True,"{""tte"": 303.9063091278076, ""twap_favourable"": true}",0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791585900,Fri,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),TODAY,True,0.9986,,,,1.9968,,,,,8,1.9968,DOWN,0.505,True,580.4244,True,"{""tte"": 65.80963516235352, ""twap_favourable"": true}",0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791586800,Fri,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),TODAY,True,0.9971,,,,2.3766,,,,,2,2.3766,DOWN,0.695,True,70.6736,False,null,0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791587700,Fri,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),TODAY,False,0.9908,,,,8.4591,,,,,3,8.4591,UP,0.795,True,148.9115,True,"{""tte"": 203.82153391838074, ""twap_favourable"": true}",0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791588600,Fri,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),TODAY,False,0.9951,,,,6.0657,,,,,2,6.0657,UP,0.525,True,491.9043,False,null,0.01,coverage_gate
+MARKET_SLOT_TWAP,btc-updown-15m-1791589500,Fri,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),TODAY,True,0.9985,,,,7.6373,,,,,1,7.6373,UP,0.745,True,133.9671,True,"{""tte"": 184.5994827747345, ""twap_favourable"": true}",0.01,
+MARKET_SLOT_TWAP,btc-updown-15m-1791590400,Sat,Sat,canonical PREDICTION_RESEARCH_SNAPSHOT (official 60s Chainlink TWAP),TODAY,True,0.9986,,,,8.1567,,,,,4,8.1567,DOWN,0.695,True,70.4594,False,"{""tte"": 322.9893729686737, ""twap_favourable"": true}",0.01,

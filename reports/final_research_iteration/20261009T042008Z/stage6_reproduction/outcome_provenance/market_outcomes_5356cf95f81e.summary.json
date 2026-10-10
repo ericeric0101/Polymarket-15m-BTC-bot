@@ -1,0 +1,26 @@
+{
+ "confidence": {
+  "HIGH": 952,
+  "HIGH_OFFICIAL_TWAP_CONFLICT": 2
+ },
+ "file": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/reports/final_research_iteration/20261009T042008Z/stage6_reproduction/outcome_provenance/market_outcomes_5356cf95f81e.csv",
+ "file_sha256": "ea7440039a50a1262c38520ebbfc1eda692901d7a3cc89928d35c9f23c375107",
+ "journal_conflicting_markets": 0,
+ "journal_vs_used": {
+  "compared": 895,
+  "mismatch": 68,
+  "rate": 0.076
+ },
+ "markets": 954,
+ "official_cache": "data/research_export/official_resolution/official_resolutions_20261009T041657Z.json",
+ "official_cache_content_sha256": "5356cf95f81ee074cbde43427e3dbbbba254fd454a24283d2fd88a1e7ee20120",
+ "official_fetched_at_utc": "2026-10-09T04:16:57.813141+00:00",
+ "outcome_source_used": {
+  "POLYMARKET_OFFICIAL": 954
+ },
+ "twap_vs_official": {
+  "compared": 437,
+  "mismatch": 2,
+  "rate": 0.0046
+ }
+}

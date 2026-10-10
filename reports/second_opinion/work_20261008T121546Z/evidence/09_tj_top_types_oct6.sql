@@ -1,0 +1,1 @@
+SELECT 'S',event_type, COUNT(*), SUM(length(payload_json)) b FROM strategy_events WHERE ts>='2026-10-06' AND ts<'2026-10-07' GROUP BY 2 UNION ALL SELECT 'O',event_type, COUNT(*), SUM(length(payload_json)) b FROM order_events WHERE ts>='2026-10-06' AND ts<'2026-10-07' GROUP BY 2 ORDER BY b DESC LIMIT 25;

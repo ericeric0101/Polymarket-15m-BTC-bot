@@ -1,0 +1,14 @@
+{
+  "recorded_net_rows": 22,
+  "max_absolute_reproduction_error_usdc": 8.881784197001252e-16,
+  "actual_live_positions": 3,
+  "actual_fill_rows": 7,
+  "best_available_timeline_rows": 855,
+  "official_outcomes_verified": true,
+  "production_diff_empty": true,
+  "bot_process_check": "no bot/run_bot process; separate existing research-only Python process is not a trading runtime",
+  "no_commit_or_push": true,
+  "sqlite_mode": "ro",
+  "unknowns_not_imputed": true,
+  "scratch_only": true
+}

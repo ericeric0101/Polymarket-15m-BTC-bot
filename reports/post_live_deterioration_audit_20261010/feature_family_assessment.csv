@@ -1,0 +1,12 @@
+family,rating,earliness,loser_coverage,winner_false_positives,executability,recovery_discrimination,data_quality,prospective_support
+First token deterioration,PROMISING,早於 breaker；0.15 不早於 −2,本次無官方輸家,17:15、17:30 都會誤報,部分可驗證,單一 first 無法辨認恢復,v2 bid 良好；深度稀疏,MIXED
+Recovery time,PROMISING,必須等待恢复；非領先訊號,無法估 coverage,17:15 也有極快淺恢复,不授予 SELL,恢復幅度比速度更有描述价值,gaps 刪截；確認時間另列,MIXED
+Second-leg deterioration,INSUFFICIENT,0.10 second 早於 breaker,無官方輸家,17:30 primary/hysteresis 都有 second,多數深度 UNKNOWN,17:15 first0.15無 second；單獨 second 不足,n=3 一天,MIXED
+Hysteresis episode filtering,PROMISING,first 時刻不變；recovery 確認延後,無官方輸家,17:30 0.15仍3段,非出場規則,確實減少分段；不等於減少 false positions,2 ticks、5s 固定；gaps reset hold,SUPPORT_FRAGMENTATION_ONLY
+Binance adverse path,PROMISING,1bps 早0.05約1.21s，同格；3bps比0.15晚1.05s，同格,無官方輸家,17:30 <1bps；17:15 4.18bps 仍官方贏,context 不單獨授權,連續方向/幅度能區分壓力程度，未證明最終命運,約1s；entry baseline 固定,MIXED
+Chainlink spot cross,WEAK,17:15 比TWAP早47.90s,無官方輸家,17:30 ADVERSE_AT_ENTRY；17:15 recross,cross 後持倉已重虧,可逆；不能用cross宣布不可恢復,native v2 fresh spot；官方驗證,SUPPORT_EARLIER_NOT_ACTIONABLE
+TWAP cross,WEAK,17:15 在breaker成交後24.24s才cross,無官方輸家,17:30 adverse entry仍TP,不提供早停依據,後續仍recross,60s 平滑；最終窗口模式另列,SUPPORT_CONFIRMATION_ONLY
+TTE,WEAK,時間背景而非方向訊號,無官方輸家,贏家也進入短TTE,不是成交證據,17:15較晚進場；無獨立效果證據,host time，可重建,INSUFFICIENT
+sigma / diffusion-z,INSUFFICIENT,可描述reference衰弱,無官方輸家,17:15/17:30都低值,不是深度,未證明增量判別力,legacy非z；diffusion模型；<60s模式切換,INSUFFICIENT
+fixed PnL thresholds,WEAK,−1到−2.5跳空同列；較DD0.10晚31.21s,無官方輸家,17:15 −2仍官方贏,bid同源；非獨立證據,−2不能宣布經濟不可逆,snapshot公式重建+engine轉換；依qty,MIXED
+existing breaker,WEAK,−2後24.78s eligible,本次唯一breaker官方贏,分類錯誤1/1案例，非比率估计,實際2.77s submit→fill成功,將可恢復collapse鎖成損失,components確定；n=1,CONTRADICT_CORRECT_LOSER_CLASSIFICATION

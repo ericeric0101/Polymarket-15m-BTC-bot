@@ -1,0 +1,2 @@
+group,n_markets,n_days,win_rate,win_wilson95,avg_price,edge_win_minus_price,pnl_total,pnl_per_market
+all,266,8,0.7857,"[0.7325, 0.8308]",0.7687,0.017,17.272,0.0649

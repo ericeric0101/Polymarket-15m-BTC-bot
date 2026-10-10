@@ -1,0 +1,1 @@
+SELECT date(decision_epoch_ns/1000000000,'unixepoch') d, COALESCE(json_extract(payload_json,'$.event_type'),'?') et, COUNT(*) n, SUM(length(payload_json)) bytes FROM lead_lag_decisions GROUP BY d, et ORDER BY d, bytes DESC;

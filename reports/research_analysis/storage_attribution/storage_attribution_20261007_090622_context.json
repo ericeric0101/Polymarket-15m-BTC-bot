@@ -1,0 +1,171 @@
+{
+  "offline_databases": [
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/backups/trade_journal.db",
+      "bytes": 2875211776,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 701956,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 7
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/20261006_064237_+0800/twap_forward_shadow_snapshot.db",
+      "bytes": 728670208,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 177898,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 6
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/20261006_064237_+0800/trade_journal_snapshot.db",
+      "bytes": 2402308096,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 586501,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 7
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/20261005_185454_+0800/twap_forward_shadow_snapshot.db",
+      "bytes": 611336192,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 149252,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 6
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/20261005_185454_+0800/trade_journal_snapshot.db",
+      "bytes": 2225152000,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 543250,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 7
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/freshness_audit_20261006_231849_+0800/twap_forward_shadow_snapshot.db",
+      "bytes": 962129920,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 234895,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 6
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/freshness_audit_20261006_231849_+0800/trade_journal_snapshot.db",
+      "bytes": 2753429504,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 672224,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 7
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/20261005_065718_+0800/twap_forward_shadow_snapshot.db",
+      "bytes": 559370240,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 136565,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 6
+    },
+    {
+      "source_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/data/analysis_snapshots/20261005_065718_+0800/trade_journal_snapshot.db",
+      "bytes": 2125357056,
+      "pragmas": {
+        "page_size": 4096,
+        "page_count": 518886,
+        "freelist_count": 0,
+        "journal_mode": "delete"
+      },
+      "tables": 6,
+      "indexes": 7
+    }
+  ],
+  "apfs_snapshots": [
+    "com.apple.TimeMachine.2026-10-07-080057.local",
+    "com.apple.TimeMachine.2026-10-07-090057.local"
+  ],
+  "bot_deleted_large_handles_found": false,
+  "compression_samples": {
+    "logs/trade_journal.db": {
+      "bytes": 1048576,
+      "gzip_reduction_pct": 87.68434524536133,
+      "sampling": "64 equally spaced 16KiB page blocks from main file; illustrative only, not an archive"
+    },
+    "data/research/twap_forward_shadow.db": {
+      "bytes": 1048576,
+      "gzip_reduction_pct": 87.94898986816406,
+      "sampling": "64 equally spaced 16KiB page blocks from main file; illustrative only, not an archive"
+    },
+    "data/research/hyperliquid_lead_lag.db": {
+      "bytes": 1048576,
+      "gzip_reduction_pct": 84.23099517822266,
+      "sampling": "64 equally spaced 16KiB page blocks from main file; illustrative only, not an archive"
+    },
+    "logs/hyperliquid_lead_lag.db": {
+      "bytes": 1048576,
+      "gzip_reduction_pct": 80.12533187866211,
+      "sampling": "64 equally spaced 16KiB page blocks from main file; illustrative only, not an archive"
+    }
+  },
+  "parquet_daily": {
+    "2026-10-05": {
+      "files": 2501,
+      "bytes": 11816044
+    },
+    "2026-10-06": {
+      "files": 1627,
+      "bytes": 7712246
+    },
+    "2026-10-03": {
+      "files": 2768,
+      "bytes": 12466533
+    },
+    "2026-10-02": {
+      "files": 1499,
+      "bytes": 7191037
+    },
+    "2026-10-04": {
+      "files": 2737,
+      "bytes": 12613186
+    },
+    "2026-10-07": {
+      "files": 141,
+      "bytes": 648241
+    },
+    "2026-10-01": {
+      "files": 236,
+      "bytes": 1110945
+    }
+  },
+  "disk_now_bytes": 15600984064,
+  "recorded_epoch": 1791335531.414625
+}

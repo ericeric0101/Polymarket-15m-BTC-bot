@@ -1,0 +1,5 @@
+=========================== short test summary info ============================
+FAILED tests/test_outcome_decommission.py::test_normal_dry_run_initialization_has_one_writer_and_no_outcome_runtime
+1 failed, 139 passed in 4.79s
+.......                                                                  [100%]
+7 passed in 3.12s

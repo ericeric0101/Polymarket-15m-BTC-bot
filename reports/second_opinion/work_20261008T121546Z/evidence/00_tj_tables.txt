@@ -1,0 +1,2 @@
+journal_schema     session_pnl_state  strategy_runs    
+order_events       strategy_events  

@@ -1,0 +1,119 @@
+{
+"fetched_via": "scripts/fetch_official_resolutions.fetch_one (read-only GET)",
+"markets": [
+{
+"slug": "btc-updown-15m-1791602100",
+"source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1791602100",
+"http_status": 200,
+"event_slug": "btc-updown-15m-1791602100",
+"condition_id": "0xa2c879d2f94047613e59c15835db3aa45ba668167655cf5445d7f101b841964d",
+"closed": true,
+"uma_resolution_status": "resolved",
+"end_date": "2026-10-10T03:30:00Z",
+"outcomes": [
+"Up",
+"Down"
+],
+"outcome_prices": [
+"1",
+"0"
+],
+"official_outcome": "UP"
+},
+{
+"slug": "btc-updown-15m-1791603000",
+"source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1791603000",
+"http_status": 200,
+"event_slug": "btc-updown-15m-1791603000",
+"condition_id": "0x9c6baefa4b285f6aaeb2c1333c3e39434919e1ce794bfd49d262971ef4b061e5",
+"closed": true,
+"uma_resolution_status": "resolved",
+"end_date": "2026-10-10T03:45:00Z",
+"outcomes": [
+"Up",
+"Down"
+],
+"outcome_prices": [
+"0",
+"1"
+],
+"official_outcome": "DOWN"
+},
+{
+"slug": "btc-updown-15m-1791603900",
+"source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1791603900",
+"http_status": 200,
+"event_slug": "btc-updown-15m-1791603900",
+"condition_id": "0x06efe6b886667a42437f502a46fa9a9b2277641615b4daa76da671cc5d601a5f",
+"closed": true,
+"uma_resolution_status": "resolved",
+"end_date": "2026-10-10T04:00:00Z",
+"outcomes": [
+"Up",
+"Down"
+],
+"outcome_prices": [
+"1",
+"0"
+],
+"official_outcome": "UP"
+},
+{
+"slug": "btc-updown-15m-1791604800",
+"source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1791604800",
+"http_status": 200,
+"event_slug": "btc-updown-15m-1791604800",
+"condition_id": "0xa0b825817963c9d200187c79ca0869083d5aca0408fdd212c71571f66bd6ad83",
+"closed": true,
+"uma_resolution_status": "resolved",
+"end_date": "2026-10-10T04:15:00Z",
+"outcomes": [
+"Up",
+"Down"
+],
+"outcome_prices": [
+"1",
+"0"
+],
+"official_outcome": "UP"
+},
+{
+"slug": "btc-updown-15m-1791605700",
+"source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1791605700",
+"http_status": 200,
+"event_slug": "btc-updown-15m-1791605700",
+"condition_id": "0xab0fef9f4f5a2dc29b5e38de4e5166de85dd8c051f38f58d4d75cc07331027fd",
+"closed": true,
+"uma_resolution_status": "resolved",
+"end_date": "2026-10-10T04:30:00Z",
+"outcomes": [
+"Up",
+"Down"
+],
+"outcome_prices": [
+"0",
+"1"
+],
+"official_outcome": "DOWN"
+},
+{
+"slug": "btc-updown-15m-1791606600",
+"source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1791606600",
+"http_status": 200,
+"event_slug": "btc-updown-15m-1791606600",
+"condition_id": "0x3213f57534c1bc2d88de2e0e12d886de4c3e4eadfb30a05c2e167fd93ecdff58",
+"closed": false,
+"uma_resolution_status": null,
+"end_date": "2026-10-10T04:45:00Z",
+"outcomes": [
+"Up",
+"Down"
+],
+"outcome_prices": [
+"0.9995",
+"0.0005"
+],
+"official_outcome": "UP"
+}
+]
+}

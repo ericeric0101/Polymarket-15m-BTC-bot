@@ -1,0 +1,3 @@
+group,total_eligible,usable_N,wins,losses,win_rate,gross_pnl,avg_pnl,median_pnl,avg_winner,avg_loser,profit_factor,capital_minutes,pnl_per_dollar_minute
+ALL_LOSERS,10,10,0,10,0.0,-56.186645468998414,-5.618664546899841,-5.5,,-5.618664546899841,0.0,474.5272556575076,-0.1184055179109699
+WORST_25_PERCENT_LOSSES,3,3,0,3,0.0,-17.900000000000002,-5.966666666666667,-6.0,,-5.966666666666667,0.0,175.196589170297,-0.10217093885658127

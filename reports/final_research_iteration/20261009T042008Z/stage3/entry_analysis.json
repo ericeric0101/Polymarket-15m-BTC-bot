@@ -1,0 +1,2538 @@
+{
+ "frozen": {
+  "score_min": 0.3,
+  "price_min": 0.75,
+  "tte_max": 480.0
+ },
+ "generated_at_utc": "2026-10-09T04:26:49.750817+00:00",
+ "coverage": {
+  "LIVE": {
+   "n": 125,
+   "days": [
+    "2026-09-10",
+    "2026-09-11",
+    "2026-09-14",
+    "2026-09-18",
+    "2026-09-23",
+    "2026-09-24",
+    "2026-09-25",
+    "2026-09-27",
+    "2026-09-28",
+    "2026-09-29",
+    "2026-09-30"
+   ],
+   "missing_score": 0,
+   "missing_tte": 0,
+   "missing_sigma": 125
+  },
+  "DRY_RUN": {
+   "n": 266,
+   "days": [
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04",
+    "2026-10-05",
+    "2026-10-06",
+    "2026-10-07",
+    "2026-10-08"
+   ],
+   "missing_score": 0,
+   "missing_tte": 0,
+   "missing_sigma": 40
+  }
+ },
+ "correlation": {
+  "LIVE": {
+   "n": 125,
+   "fields": [
+    "price",
+    "score",
+    "tte",
+    "distance"
+   ],
+   "matrix": [
+    [
+     1.0,
+     0.683,
+     -0.242,
+     0.546
+    ],
+    [
+     0.683,
+     1.0,
+     -0.311,
+     0.399
+    ],
+    [
+     -0.242,
+     -0.311,
+     1.0,
+     0.125
+    ],
+    [
+     0.546,
+     0.399,
+     0.125,
+     1.0
+    ]
+   ]
+  },
+  "DRY_RUN": {
+   "n": 226,
+   "fields": [
+    "price",
+    "score",
+    "tte",
+    "sigma"
+   ],
+   "matrix": [
+    [
+     1.0,
+     0.531,
+     -0.059,
+     0.683
+    ],
+    [
+     0.531,
+     1.0,
+     0.012,
+     0.341
+    ],
+    [
+     -0.059,
+     0.012,
+     1.0,
+     0.136
+    ],
+    [
+     0.683,
+     0.341,
+     0.136,
+     1.0
+    ]
+   ]
+  }
+ },
+ "SCORE_030": {
+  "LIVE": {
+   "pass": {
+    "n_markets": 93,
+    "n_days": 11,
+    "mean_pnl": 0.1402,
+    "median_pnl": 0.7967,
+    "total_pnl": 13.038,
+    "win_rate": 0.8065,
+    "edge_win_minus_price": 0.0245,
+    "max_drawdown": 17.657
+   },
+   "fail": {
+    "n_markets": 32,
+    "n_days": 5,
+    "mean_pnl": -0.6973,
+    "median_pnl": 1.2532,
+    "total_pnl": -22.315,
+    "win_rate": 0.5625,
+    "edge_win_minus_price": -0.1138,
+    "max_drawdown": 25.737
+   },
+   "raw_mean_pnl_diff": 0.8375,
+   "day_boot95_diff": [
+    -0.2464,
+    2.1847
+   ],
+   "per_day": {
+    "2026-09-10": {
+     "pass": {
+      "n_markets": 9,
+      "n_days": 1,
+      "mean_pnl": 0.5215,
+      "median_pnl": 1.0045,
+      "total_pnl": 4.693,
+      "win_rate": 0.8889,
+      "edge_win_minus_price": 0.0856,
+      "max_drawdown": 4.73
+     },
+     "fail": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 2.1323,
+      "median_pnl": 2.1323,
+      "total_pnl": 2.132,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.35,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-11": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": -3.2189,
+      "median_pnl": -3.3808,
+      "total_pnl": -12.876,
+      "win_rate": 0.25,
+      "edge_win_minus_price": -0.4475,
+      "max_drawdown": 12.876
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -0.3,
+      "median_pnl": -0.3,
+      "total_pnl": -0.6,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.055,
+      "max_drawdown": 6.1
+     },
+     "direction": -1
+    },
+    "2026-09-14": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": -1.1952,
+      "median_pnl": -1.068,
+      "total_pnl": -4.781,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.26,
+      "max_drawdown": 6.379
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-09-18": {
+     "pass": {
+      "n_markets": 11,
+      "n_days": 1,
+      "mean_pnl": 0.9585,
+      "median_pnl": 1.0045,
+      "total_pnl": 10.543,
+      "win_rate": 0.9091,
+      "edge_win_minus_price": 0.1409,
+      "max_drawdown": 4.35
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-09-23": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": -0.2037,
+      "median_pnl": 0.7304,
+      "total_pnl": -0.815,
+      "win_rate": 0.75,
+      "edge_win_minus_price": -0.02,
+      "max_drawdown": 3.65
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-09-24": {
+     "pass": {
+      "n_markets": 7,
+      "n_days": 1,
+      "mean_pnl": 0.9049,
+      "median_pnl": 0.7397,
+      "total_pnl": 6.334,
+      "win_rate": 0.8571,
+      "edge_win_minus_price": 0.0357,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-09-25": {
+     "pass": {
+      "n_markets": 14,
+      "n_days": 1,
+      "mean_pnl": 0.7004,
+      "median_pnl": 0.5289,
+      "total_pnl": 9.806,
+      "win_rate": 0.9286,
+      "edge_win_minus_price": 0.0857,
+      "max_drawdown": 2.836
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-09-27": {
+     "pass": {
+      "n_markets": 19,
+      "n_days": 1,
+      "mean_pnl": 0.2316,
+      "median_pnl": 0.7767,
+      "total_pnl": 4.401,
+      "win_rate": 0.8947,
+      "edge_win_minus_price": 0.0784,
+      "max_drawdown": 11.048
+     },
+     "fail": {
+      "n_markets": 18,
+      "n_days": 1,
+      "mean_pnl": -0.1812,
+      "median_pnl": 1.3971,
+      "total_pnl": -3.262,
+      "win_rate": 0.7222,
+      "edge_win_minus_price": 0.0222,
+      "max_drawdown": 12.091
+     },
+     "direction": 1
+    },
+    "2026-09-28": {
+     "pass": {
+      "n_markets": 11,
+      "n_days": 1,
+      "mean_pnl": 0.1903,
+      "median_pnl": 2.0,
+      "total_pnl": 2.093,
+      "win_rate": 0.7273,
+      "edge_win_minus_price": 0.0273,
+      "max_drawdown": 6.6
+     },
+     "fail": {
+      "n_markets": 7,
+      "n_days": 1,
+      "mean_pnl": -2.2399,
+      "median_pnl": -2.9842,
+      "total_pnl": -15.68,
+      "win_rate": 0.2857,
+      "edge_win_minus_price": -0.4071,
+      "max_drawdown": 16.096
+     },
+     "direction": 1
+    },
+    "2026-09-29": {
+     "pass": {
+      "n_markets": 7,
+      "n_days": 1,
+      "mean_pnl": -0.5537,
+      "median_pnl": 1.0866,
+      "total_pnl": -3.876,
+      "win_rate": 0.7143,
+      "edge_win_minus_price": -0.0114,
+      "max_drawdown": 9.591
+     },
+     "fail": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": -1.2263,
+      "median_pnl": -1.2027,
+      "total_pnl": -4.905,
+      "win_rate": 0.25,
+      "edge_win_minus_price": -0.3575,
+      "max_drawdown": 6.3
+     },
+     "direction": 1
+    },
+    "2026-09-30": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": -0.8288,
+      "median_pnl": 1.2073,
+      "total_pnl": -2.486,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0967,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    }
+   },
+   "days_compared": 5,
+   "days_positive": 3,
+   "days_negative": 2
+  },
+  "DRY_RUN": {
+   "pass": {
+    "n_markets": 148,
+    "n_days": 8,
+    "mean_pnl": 0.1459,
+    "median_pnl": 1.0476,
+    "total_pnl": 21.592,
+    "win_rate": 0.8243,
+    "edge_win_minus_price": 0.0207,
+    "max_drawdown": 30.984
+   },
+   "fail": {
+    "n_markets": 118,
+    "n_days": 5,
+    "mean_pnl": -0.2643,
+    "median_pnl": 1.2901,
+    "total_pnl": -31.188,
+    "win_rate": 0.7034,
+    "edge_win_minus_price": -0.0214,
+    "max_drawdown": 40.051
+   },
+   "raw_mean_pnl_diff": 0.4102,
+   "day_boot95_diff": [
+    -0.1204,
+    0.9199
+   ],
+   "per_day": {
+    "2026-10-01": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": 1.3177,
+      "median_pnl": 1.2508,
+      "total_pnl": 5.271,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.1925,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-10-02": {
+     "pass": {
+      "n_markets": 19,
+      "n_days": 1,
+      "mean_pnl": 0.5888,
+      "median_pnl": 1.462,
+      "total_pnl": 11.188,
+      "win_rate": 0.8421,
+      "edge_win_minus_price": 0.0605,
+      "max_drawdown": 11.0
+     },
+     "fail": {
+      "n_markets": 13,
+      "n_days": 1,
+      "mean_pnl": 0.1731,
+      "median_pnl": 1.375,
+      "total_pnl": 2.251,
+      "win_rate": 0.7692,
+      "edge_win_minus_price": 0.0338,
+      "max_drawdown": 14.679
+     },
+     "direction": 1
+    },
+    "2026-10-03": {
+     "pass": {
+      "n_markets": 23,
+      "n_days": 1,
+      "mean_pnl": 0.2243,
+      "median_pnl": 0.9706,
+      "total_pnl": 5.159,
+      "win_rate": 0.8696,
+      "edge_win_minus_price": 0.0326,
+      "max_drawdown": 10.32
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-10-04": {
+     "pass": {
+      "n_markets": 21,
+      "n_days": 1,
+      "mean_pnl": 0.5893,
+      "median_pnl": 1.1265,
+      "total_pnl": 12.376,
+      "win_rate": 0.9048,
+      "edge_win_minus_price": 0.0905,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 12,
+      "n_days": 1,
+      "mean_pnl": 0.0413,
+      "median_pnl": 3.25,
+      "total_pnl": 0.495,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0258,
+      "max_drawdown": 17.8
+     },
+     "direction": 1
+    },
+    "2026-10-05": {
+     "pass": {
+      "n_markets": 26,
+      "n_days": 1,
+      "mean_pnl": -0.3998,
+      "median_pnl": 0.9715,
+      "total_pnl": -10.394,
+      "win_rate": 0.7692,
+      "edge_win_minus_price": -0.0531,
+      "max_drawdown": 20.919
+     },
+     "fail": {
+      "n_markets": 26,
+      "n_days": 1,
+      "mean_pnl": -0.6609,
+      "median_pnl": 1.2073,
+      "total_pnl": -17.184,
+      "win_rate": 0.6538,
+      "edge_win_minus_price": -0.0585,
+      "max_drawdown": 30.223
+     },
+     "direction": 1
+    },
+    "2026-10-06": {
+     "pass": {
+      "n_markets": 22,
+      "n_days": 1,
+      "mean_pnl": 0.5028,
+      "median_pnl": 1.2901,
+      "total_pnl": 11.061,
+      "win_rate": 0.8636,
+      "edge_win_minus_price": 0.0777,
+      "max_drawdown": 9.713
+     },
+     "fail": {
+      "n_markets": 45,
+      "n_days": 1,
+      "mean_pnl": -0.378,
+      "median_pnl": 1.0476,
+      "total_pnl": -17.009,
+      "win_rate": 0.6889,
+      "edge_win_minus_price": -0.0396,
+      "max_drawdown": 25.089
+     },
+     "direction": 1
+    },
+    "2026-10-07": {
+     "pass": {
+      "n_markets": 28,
+      "n_days": 1,
+      "mean_pnl": -0.8299,
+      "median_pnl": 0.75,
+      "total_pnl": -23.237,
+      "win_rate": 0.6786,
+      "edge_win_minus_price": -0.1079,
+      "max_drawdown": 26.987
+     },
+     "fail": {
+      "n_markets": 22,
+      "n_days": 1,
+      "mean_pnl": 0.0118,
+      "median_pnl": 1.3326,
+      "total_pnl": 0.259,
+      "win_rate": 0.7727,
+      "edge_win_minus_price": 0.0291,
+      "max_drawdown": 13.449
+     },
+     "direction": -1
+    },
+    "2026-10-08": {
+     "pass": {
+      "n_markets": 5,
+      "n_days": 1,
+      "mean_pnl": 2.0337,
+      "median_pnl": 1.8333,
+      "total_pnl": 10.168,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.236,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    }
+   },
+   "days_compared": 5,
+   "days_positive": 4,
+   "days_negative": 1
+  },
+  "status": "WEAK_CANDIDATE"
+ },
+ "ENTRY_PRICE_075": {
+  "LIVE": {
+   "pass": {
+    "n_markets": 65,
+    "n_days": 11,
+    "mean_pnl": 0.5426,
+    "median_pnl": 0.7767,
+    "total_pnl": 35.272,
+    "win_rate": 0.9231,
+    "edge_win_minus_price": 0.0906,
+    "max_drawdown": 5.5
+   },
+   "fail": {
+    "n_markets": 60,
+    "n_days": 11,
+    "mean_pnl": -0.7425,
+    "median_pnl": 1.4362,
+    "total_pnl": -44.548,
+    "win_rate": 0.55,
+    "edge_win_minus_price": -0.1208,
+    "max_drawdown": 51.35
+   },
+   "raw_mean_pnl_diff": 1.2851,
+   "day_boot95_diff": [
+    0.2196,
+    2.1433
+   ],
+   "per_day": {
+    "2026-09-10": {
+     "pass": {
+      "n_markets": 7,
+      "n_days": 1,
+      "mean_pnl": 0.0909,
+      "median_pnl": 0.9369,
+      "total_pnl": 0.636,
+      "win_rate": 0.8571,
+      "edge_win_minus_price": 0.03,
+      "max_drawdown": 4.73
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 2.0632,
+      "median_pnl": 2.1323,
+      "total_pnl": 6.19,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.3033,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-11": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 0.3861,
+      "median_pnl": 0.3861,
+      "total_pnl": 0.386,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.1,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 5,
+      "n_days": 1,
+      "mean_pnl": -2.7723,
+      "median_pnl": -4.11,
+      "total_pnl": -13.862,
+      "win_rate": 0.2,
+      "edge_win_minus_price": -0.4,
+      "max_drawdown": 13.862
+     },
+     "direction": 1
+    },
+    "2026-09-14": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 0.7988,
+      "median_pnl": 0.7988,
+      "total_pnl": 1.598,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.17,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -3.1893,
+      "median_pnl": -3.1893,
+      "total_pnl": -6.379,
+      "win_rate": 0.0,
+      "edge_win_minus_price": -0.69,
+      "max_drawdown": 6.379
+     },
+     "direction": 1
+    },
+    "2026-09-18": {
+     "pass": {
+      "n_markets": 8,
+      "n_days": 1,
+      "mean_pnl": 0.2928,
+      "median_pnl": 0.9502,
+      "total_pnl": 2.343,
+      "win_rate": 0.875,
+      "edge_win_minus_price": 0.0725,
+      "max_drawdown": 4.35
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 2.7336,
+      "median_pnl": 3.1394,
+      "total_pnl": 8.201,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.3233,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-23": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 0.7304,
+      "median_pnl": 0.7304,
+      "total_pnl": 1.461,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.165,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -1.1378,
+      "median_pnl": -1.1378,
+      "total_pnl": -2.276,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.205,
+      "max_drawdown": 3.65
+     },
+     "direction": 1
+    },
+    "2026-09-24": {
+     "pass": {
+      "n_markets": 6,
+      "n_days": 1,
+      "mean_pnl": 0.8061,
+      "median_pnl": 0.7258,
+      "total_pnl": 4.836,
+      "win_rate": 0.8333,
+      "edge_win_minus_price": -0.0033,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 1.4979,
+      "median_pnl": 1.4979,
+      "total_pnl": 1.498,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.27,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-25": {
+     "pass": {
+      "n_markets": 12,
+      "n_days": 1,
+      "mean_pnl": 0.3797,
+      "median_pnl": 0.495,
+      "total_pnl": 4.556,
+      "win_rate": 0.9167,
+      "edge_win_minus_price": 0.0442,
+      "max_drawdown": 2.836
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 2.625,
+      "median_pnl": 2.625,
+      "total_pnl": 5.25,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.335,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-27": {
+     "pass": {
+      "n_markets": 20,
+      "n_days": 1,
+      "mean_pnl": 0.5957,
+      "median_pnl": 0.7867,
+      "total_pnl": 11.915,
+      "win_rate": 0.95,
+      "edge_win_minus_price": 0.122,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 17,
+      "n_days": 1,
+      "mean_pnl": -0.6339,
+      "median_pnl": 1.5408,
+      "total_pnl": -10.776,
+      "win_rate": 0.6471,
+      "edge_win_minus_price": -0.0324,
+      "max_drawdown": 20.534
+     },
+     "direction": 1
+    },
+    "2026-09-28": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 0.6636,
+      "median_pnl": 0.9501,
+      "total_pnl": 1.991,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.1767,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 15,
+      "n_days": 1,
+      "mean_pnl": -1.0385,
+      "median_pnl": 1.5542,
+      "total_pnl": -15.577,
+      "win_rate": 0.4667,
+      "edge_win_minus_price": -0.2053,
+      "max_drawdown": 15.577
+     },
+     "direction": 1
+    },
+    "2026-09-29": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.4477,
+      "median_pnl": 1.6137,
+      "total_pnl": 4.343,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2233,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 8,
+      "n_days": 1,
+      "mean_pnl": -1.6405,
+      "median_pnl": -1.8169,
+      "total_pnl": -13.124,
+      "win_rate": 0.375,
+      "edge_win_minus_price": -0.2725,
+      "max_drawdown": 17.43
+     },
+     "direction": 1
+    },
+    "2026-09-30": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 1.2073,
+      "median_pnl": 1.2073,
+      "total_pnl": 1.207,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.18,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -1.8469,
+      "median_pnl": -1.8469,
+      "total_pnl": -3.694,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.235,
+      "max_drawdown": 5.5
+     },
+     "direction": 1
+    }
+   },
+   "days_compared": 11,
+   "days_positive": 7,
+   "days_negative": 4,
+   "adjusted": {
+    "n": 125,
+    "n_days": 11,
+    "controls": [
+     "score",
+     "tte",
+     "distance"
+    ],
+    "coef": 1.4389,
+    "day_boot95": [
+     0.2323,
+     3.4947
+    ]
+   },
+   "control_verdict": "SURVIVES",
+   "stratified": {
+    "score>=0.30": {
+     "pass": {
+      "n_markets": 59,
+      "n_days": 11,
+      "mean_pnl": 0.5882,
+      "median_pnl": 0.7507,
+      "total_pnl": 34.701,
+      "win_rate": 0.9322,
+      "edge_win_minus_price": 0.0953,
+      "max_drawdown": 4.73
+     },
+     "fail": {
+      "n_markets": 34,
+      "n_days": 11,
+      "mean_pnl": -0.6372,
+      "median_pnl": 1.3249,
+      "total_pnl": -21.664,
+      "win_rate": 0.5882,
+      "edge_win_minus_price": -0.0982,
+      "max_drawdown": 25.721
+     },
+     "raw_mean_pnl_diff": 1.2253
+    },
+    "score<0.30": {
+     "pass": {
+      "n_markets": 6,
+      "n_days": 2,
+      "mean_pnl": 0.095,
+      "median_pnl": 1.1265,
+      "total_pnl": 0.57,
+      "win_rate": 0.8333,
+      "edge_win_minus_price": 0.045,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 26,
+      "n_days": 5,
+      "mean_pnl": -0.8802,
+      "median_pnl": 1.5475,
+      "total_pnl": -22.885,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.1504,
+      "max_drawdown": 29.072
+     },
+     "raw_mean_pnl_diff": 0.9752
+    },
+    "tte<=480": {
+     "pass": {
+      "n_markets": 17,
+      "n_days": 6,
+      "mean_pnl": -0.1631,
+      "median_pnl": 0.5124,
+      "total_pnl": -2.773,
+      "win_rate": 0.7647,
+      "edge_win_minus_price": -0.0941,
+      "max_drawdown": 7.473
+     },
+     "fail": {
+      "n_markets": 13,
+      "n_days": 8,
+      "mean_pnl": 0.0759,
+      "median_pnl": 1.4979,
+      "total_pnl": 0.986,
+      "win_rate": 0.6923,
+      "edge_win_minus_price": 0.0115,
+      "max_drawdown": 12.9
+     },
+     "raw_mean_pnl_diff": -0.239
+    },
+    "tte>480": {
+     "pass": {
+      "n_markets": 48,
+      "n_days": 11,
+      "mean_pnl": 0.7926,
+      "median_pnl": 0.9432,
+      "total_pnl": 38.044,
+      "win_rate": 0.9792,
+      "edge_win_minus_price": 0.156,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 47,
+      "n_days": 10,
+      "mean_pnl": -0.9688,
+      "median_pnl": 1.2755,
+      "total_pnl": -45.534,
+      "win_rate": 0.5106,
+      "edge_win_minus_price": -0.1574,
+      "max_drawdown": 55.854
+     },
+     "raw_mean_pnl_diff": 1.7614
+    }
+   }
+  },
+  "DRY_RUN": {
+   "pass": {
+    "n_markets": 166,
+    "n_days": 8,
+    "mean_pnl": 0.1529,
+    "median_pnl": 1.0476,
+    "total_pnl": 25.379,
+    "win_rate": 0.8494,
+    "edge_win_minus_price": 0.0239,
+    "max_drawdown": 17.895
+   },
+   "fail": {
+    "n_markets": 100,
+    "n_days": 6,
+    "mean_pnl": -0.3497,
+    "median_pnl": 2.1389,
+    "total_pnl": -34.975,
+    "win_rate": 0.64,
+    "edge_win_minus_price": -0.0343,
+    "max_drawdown": 54.087
+   },
+   "raw_mean_pnl_diff": 0.5026,
+   "day_boot95_diff": [
+    -0.1251,
+    0.9631
+   ],
+   "per_day": {
+    "2026-10-01": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": 1.3177,
+      "median_pnl": 1.2508,
+      "total_pnl": 5.271,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.1925,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-10-02": {
+     "pass": {
+      "n_markets": 18,
+      "n_days": 1,
+      "mean_pnl": 0.4196,
+      "median_pnl": 0.9706,
+      "total_pnl": 7.554,
+      "win_rate": 0.8889,
+      "edge_win_minus_price": 0.06,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 14,
+      "n_days": 1,
+      "mean_pnl": 0.4204,
+      "median_pnl": 2.1848,
+      "total_pnl": 5.885,
+      "win_rate": 0.7143,
+      "edge_win_minus_price": 0.0364,
+      "max_drawdown": 14.251
+     },
+     "direction": -1
+    },
+    "2026-10-03": {
+     "pass": {
+      "n_markets": 23,
+      "n_days": 1,
+      "mean_pnl": 0.2243,
+      "median_pnl": 0.9706,
+      "total_pnl": 5.159,
+      "win_rate": 0.8696,
+      "edge_win_minus_price": 0.0326,
+      "max_drawdown": 10.32
+     },
+     "fail": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "direction": null
+    },
+    "2026-10-04": {
+     "pass": {
+      "n_markets": 22,
+      "n_days": 1,
+      "mean_pnl": 0.2884,
+      "median_pnl": 1.0871,
+      "total_pnl": 6.344,
+      "win_rate": 0.8636,
+      "edge_win_minus_price": 0.0441,
+      "max_drawdown": 6.574
+     },
+     "fail": {
+      "n_markets": 11,
+      "n_days": 1,
+      "mean_pnl": 0.5934,
+      "median_pnl": 3.4,
+      "total_pnl": 6.527,
+      "win_rate": 0.7273,
+      "edge_win_minus_price": 0.0564,
+      "max_drawdown": 12.3
+     },
+     "direction": -1
+    },
+    "2026-10-05": {
+     "pass": {
+      "n_markets": 33,
+      "n_days": 1,
+      "mean_pnl": -0.0304,
+      "median_pnl": 1.0476,
+      "total_pnl": -1.003,
+      "win_rate": 0.8182,
+      "edge_win_minus_price": -0.0085,
+      "max_drawdown": 13.423
+     },
+     "fail": {
+      "n_markets": 19,
+      "n_days": 1,
+      "mean_pnl": -1.3987,
+      "median_pnl": 2.1389,
+      "total_pnl": -26.576,
+      "win_rate": 0.5263,
+      "edge_win_minus_price": -0.1379,
+      "max_drawdown": 37.476
+     },
+     "direction": 1
+    },
+    "2026-10-06": {
+     "pass": {
+      "n_markets": 34,
+      "n_days": 1,
+      "mean_pnl": 0.2024,
+      "median_pnl": 1.0476,
+      "total_pnl": 6.882,
+      "win_rate": 0.8529,
+      "edge_win_minus_price": 0.0332,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 33,
+      "n_days": 1,
+      "mean_pnl": -0.3888,
+      "median_pnl": 2.0342,
+      "total_pnl": -12.83,
+      "win_rate": 0.6364,
+      "edge_win_minus_price": -0.0364,
+      "max_drawdown": 26.227
+     },
+     "direction": 1
+    },
+    "2026-10-07": {
+     "pass": {
+      "n_markets": 29,
+      "n_days": 1,
+      "mean_pnl": -0.2861,
+      "median_pnl": 0.8218,
+      "total_pnl": -8.297,
+      "win_rate": 0.7931,
+      "edge_win_minus_price": -0.0334,
+      "max_drawdown": 9.472
+     },
+     "fail": {
+      "n_markets": 21,
+      "n_days": 1,
+      "mean_pnl": -0.6991,
+      "median_pnl": 2.0342,
+      "total_pnl": -14.681,
+      "win_rate": 0.619,
+      "edge_win_minus_price": -0.0671,
+      "max_drawdown": 26.58
+     },
+     "direction": 1
+    },
+    "2026-10-08": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.1561,
+      "median_pnl": 0.8851,
+      "total_pnl": 3.468,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.17,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 3.35,
+      "median_pnl": 3.35,
+      "total_pnl": 6.7,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.335,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    }
+   },
+   "days_compared": 6,
+   "days_positive": 3,
+   "days_negative": 3,
+   "adjusted": {
+    "n": 226,
+    "n_days": 7,
+    "controls": [
+     "score",
+     "tte",
+     "sigma"
+    ],
+    "coef": 0.0467,
+    "day_boot95": [
+     -0.7855,
+     1.2015
+    ]
+   },
+   "control_verdict": "PROXY",
+   "stratified": {
+    "score>=0.30": {
+     "pass": {
+      "n_markets": 121,
+      "n_days": 8,
+      "mean_pnl": 0.102,
+      "median_pnl": 0.9706,
+      "total_pnl": 12.338,
+      "win_rate": 0.843,
+      "edge_win_minus_price": 0.0152,
+      "max_drawdown": 22.822
+     },
+     "fail": {
+      "n_markets": 27,
+      "n_days": 6,
+      "mean_pnl": 0.3427,
+      "median_pnl": 2.1389,
+      "total_pnl": 9.254,
+      "win_rate": 0.7407,
+      "edge_win_minus_price": 0.0452,
+      "max_drawdown": 16.55
+     },
+     "raw_mean_pnl_diff": -0.2408
+    },
+    "score<0.30": {
+     "pass": {
+      "n_markets": 45,
+      "n_days": 5,
+      "mean_pnl": 0.2898,
+      "median_pnl": 1.0476,
+      "total_pnl": 13.041,
+      "win_rate": 0.8667,
+      "edge_win_minus_price": 0.0471,
+      "max_drawdown": 11.663
+     },
+     "fail": {
+      "n_markets": 73,
+      "n_days": 5,
+      "mean_pnl": -0.6059,
+      "median_pnl": 2.1389,
+      "total_pnl": -44.229,
+      "win_rate": 0.6027,
+      "edge_win_minus_price": -0.0637,
+      "max_drawdown": 46.749
+     },
+     "raw_mean_pnl_diff": 0.8957
+    },
+    "tte<=480": {
+     "pass": {
+      "n_markets": 52,
+      "n_days": 7,
+      "mean_pnl": 0.3754,
+      "median_pnl": 1.0476,
+      "total_pnl": 19.523,
+      "win_rate": 0.8846,
+      "edge_win_minus_price": 0.0583,
+      "max_drawdown": 9.888
+     },
+     "fail": {
+      "n_markets": 25,
+      "n_days": 5,
+      "mean_pnl": 1.466,
+      "median_pnl": 3.0,
+      "total_pnl": 36.651,
+      "win_rate": 0.84,
+      "edge_win_minus_price": 0.1688,
+      "max_drawdown": 17.054
+     },
+     "raw_mean_pnl_diff": -1.0906
+    },
+    "tte>480": {
+     "pass": {
+      "n_markets": 114,
+      "n_days": 8,
+      "mean_pnl": 0.0514,
+      "median_pnl": 0.9706,
+      "total_pnl": 5.856,
+      "win_rate": 0.8333,
+      "edge_win_minus_price": 0.0082,
+      "max_drawdown": 21.216
+     },
+     "fail": {
+      "n_markets": 75,
+      "n_days": 6,
+      "mean_pnl": -0.955,
+      "median_pnl": 2.0342,
+      "total_pnl": -71.626,
+      "win_rate": 0.5733,
+      "edge_win_minus_price": -0.102,
+      "max_drawdown": 86.711
+     },
+     "raw_mean_pnl_diff": 1.0064
+    }
+   }
+  },
+  "status": "UNRESOLVED"
+ },
+ "TTE_480": {
+  "LIVE": {
+   "pass": {
+    "n_markets": 30,
+    "n_days": 10,
+    "mean_pnl": -0.0596,
+    "median_pnl": 0.6908,
+    "total_pnl": -1.787,
+    "win_rate": 0.7333,
+    "edge_win_minus_price": -0.0483,
+    "max_drawdown": 12.9
+   },
+   "fail": {
+    "n_markets": 95,
+    "n_days": 11,
+    "mean_pnl": -0.0788,
+    "median_pnl": 0.9641,
+    "total_pnl": -7.49,
+    "win_rate": 0.7474,
+    "edge_win_minus_price": 0.0009,
+    "max_drawdown": 43.296
+   },
+   "raw_mean_pnl_diff": 0.0193,
+   "day_boot95_diff": [
+    -1.98,
+    1.4374
+   ],
+   "per_day": {
+    "2026-09-10": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": -0.337,
+      "median_pnl": 0.9369,
+      "total_pnl": -1.011,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.13,
+      "max_drawdown": 4.73
+     },
+     "fail": {
+      "n_markets": 7,
+      "n_days": 1,
+      "mean_pnl": 1.1195,
+      "median_pnl": 1.1275,
+      "total_pnl": 7.837,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2157,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-11": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": -4.11,
+      "median_pnl": -4.11,
+      "total_pnl": -4.11,
+      "win_rate": 0.0,
+      "edge_win_minus_price": -0.66,
+      "max_drawdown": 4.11
+     },
+     "fail": {
+      "n_markets": 5,
+      "n_days": 1,
+      "mean_pnl": -1.8731,
+      "median_pnl": -2.6517,
+      "total_pnl": -9.366,
+      "win_rate": 0.4,
+      "edge_win_minus_price": -0.248,
+      "max_drawdown": 12.6
+     },
+     "direction": -1
+    },
+    "2026-09-14": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": -2.8868,
+      "median_pnl": -2.8868,
+      "total_pnl": -2.887,
+      "win_rate": 0.0,
+      "edge_win_minus_price": -0.7,
+      "max_drawdown": 2.887
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": -0.6314,
+      "median_pnl": 0.7507,
+      "total_pnl": -1.894,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.1133,
+      "max_drawdown": 3.492
+     },
+     "direction": -1
+    },
+    "2026-09-18": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -1.8402,
+      "median_pnl": -1.8402,
+      "total_pnl": -3.68,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.35,
+      "max_drawdown": 4.35
+     },
+     "fail": {
+      "n_markets": 9,
+      "n_days": 1,
+      "mean_pnl": 1.5804,
+      "median_pnl": 1.0938,
+      "total_pnl": 14.224,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.25,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-23": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 1.3744,
+      "median_pnl": 1.3744,
+      "total_pnl": 1.374,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.27,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": -0.7297,
+      "median_pnl": 0.4563,
+      "total_pnl": -2.189,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.1167,
+      "max_drawdown": 3.65
+     },
+     "direction": 1
+    },
+    "2026-09-24": {
+     "pass": {
+      "n_markets": 5,
+      "n_days": 1,
+      "mean_pnl": 0.9263,
+      "median_pnl": 0.7397,
+      "total_pnl": 4.632,
+      "win_rate": 0.8,
+      "edge_win_minus_price": -0.02,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 0.8514,
+      "median_pnl": 0.8514,
+      "total_pnl": 1.703,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.175,
+      "max_drawdown": 0.0
+     },
+     "direction": 1
+    },
+    "2026-09-25": {
+     "pass": {
+      "n_markets": 6,
+      "n_days": 1,
+      "mean_pnl": -0.0177,
+      "median_pnl": 0.4949,
+      "total_pnl": -0.106,
+      "win_rate": 0.8333,
+      "edge_win_minus_price": -0.055,
+      "max_drawdown": 2.836
+     },
+     "fail": {
+      "n_markets": 8,
+      "n_days": 1,
+      "mean_pnl": 1.2391,
+      "median_pnl": 0.885,
+      "total_pnl": 9.912,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.1913,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-27": {
+     "pass": {
+      "n_markets": 6,
+      "n_days": 1,
+      "mean_pnl": 1.9371,
+      "median_pnl": 1.3927,
+      "total_pnl": 11.623,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.275,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 31,
+      "n_days": 1,
+      "mean_pnl": -0.3382,
+      "median_pnl": 0.7767,
+      "total_pnl": -10.484,
+      "win_rate": 0.7742,
+      "edge_win_minus_price": 0.0077,
+      "max_drawdown": 17.921
+     },
+     "direction": 1
+    },
+    "2026-09-28": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.7597,
+      "median_pnl": 2.2446,
+      "total_pnl": 5.279,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2667,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 15,
+      "n_days": 1,
+      "mean_pnl": -1.2577,
+      "median_pnl": 0.9501,
+      "total_pnl": -18.866,
+      "win_rate": 0.4667,
+      "edge_win_minus_price": -0.2233,
+      "max_drawdown": 18.866
+     },
+     "direction": 1
+    },
+    "2026-09-29": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -6.45,
+      "median_pnl": -6.45,
+      "total_pnl": -12.9,
+      "win_rate": 0.0,
+      "edge_win_minus_price": -0.645,
+      "max_drawdown": 12.9
+     },
+     "fail": {
+      "n_markets": 9,
+      "n_days": 1,
+      "mean_pnl": 0.4577,
+      "median_pnl": 1.6137,
+      "total_pnl": 4.119,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0244,
+      "max_drawdown": 10.83
+     },
+     "direction": -1
+    },
+    "2026-09-30": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": -0.8288,
+      "median_pnl": 1.2073,
+      "total_pnl": -2.486,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0967,
+      "max_drawdown": 5.5
+     },
+     "direction": null
+    }
+   },
+   "days_compared": 10,
+   "days_positive": 4,
+   "days_negative": 6,
+   "adjusted": {
+    "n": 125,
+    "n_days": 11,
+    "controls": [
+     "score",
+     "price",
+     "distance"
+    ],
+    "coef": -0.3272,
+    "day_boot95": [
+     -2.2061,
+     1.1506
+    ]
+   },
+   "control_verdict": "PROXY",
+   "stratified": {
+    "score>=0.30": {
+     "pass": {
+      "n_markets": 26,
+      "n_days": 10,
+      "mean_pnl": -0.1625,
+      "median_pnl": 0.651,
+      "total_pnl": -4.226,
+      "win_rate": 0.7308,
+      "edge_win_minus_price": -0.0727,
+      "max_drawdown": 11.688
+     },
+     "fail": {
+      "n_markets": 67,
+      "n_days": 11,
+      "mean_pnl": 0.2577,
+      "median_pnl": 0.9363,
+      "total_pnl": 17.263,
+      "win_rate": 0.8358,
+      "edge_win_minus_price": 0.0622,
+      "max_drawdown": 14.756
+     },
+     "raw_mean_pnl_diff": -0.4202
+    },
+    "score<0.30": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 2,
+      "mean_pnl": 0.6098,
+      "median_pnl": 2.5694,
+      "total_pnl": 2.439,
+      "win_rate": 0.75,
+      "edge_win_minus_price": 0.11,
+      "max_drawdown": 6.3
+     },
+     "fail": {
+      "n_markets": 28,
+      "n_days": 5,
+      "mean_pnl": -0.8841,
+      "median_pnl": 1.1265,
+      "total_pnl": -24.754,
+      "win_rate": 0.5357,
+      "edge_win_minus_price": -0.1457,
+      "max_drawdown": 34.477
+     },
+     "raw_mean_pnl_diff": 1.4938
+    },
+    "price>=0.75": {
+     "pass": {
+      "n_markets": 17,
+      "n_days": 6,
+      "mean_pnl": -0.1631,
+      "median_pnl": 0.5124,
+      "total_pnl": -2.773,
+      "win_rate": 0.7647,
+      "edge_win_minus_price": -0.0941,
+      "max_drawdown": 7.473
+     },
+     "fail": {
+      "n_markets": 48,
+      "n_days": 11,
+      "mean_pnl": 0.7926,
+      "median_pnl": 0.9432,
+      "total_pnl": 38.044,
+      "win_rate": 0.9792,
+      "edge_win_minus_price": 0.156,
+      "max_drawdown": 5.5
+     },
+     "raw_mean_pnl_diff": -0.9557
+    },
+    "price<0.75": {
+     "pass": {
+      "n_markets": 13,
+      "n_days": 8,
+      "mean_pnl": 0.0759,
+      "median_pnl": 1.4979,
+      "total_pnl": 0.986,
+      "win_rate": 0.6923,
+      "edge_win_minus_price": 0.0115,
+      "max_drawdown": 12.9
+     },
+     "fail": {
+      "n_markets": 47,
+      "n_days": 10,
+      "mean_pnl": -0.9688,
+      "median_pnl": 1.2755,
+      "total_pnl": -45.534,
+      "win_rate": 0.5106,
+      "edge_win_minus_price": -0.1574,
+      "max_drawdown": 55.854
+     },
+     "raw_mean_pnl_diff": 1.0447
+    }
+   }
+  },
+  "DRY_RUN": {
+   "pass": {
+    "n_markets": 77,
+    "n_days": 7,
+    "mean_pnl": 0.7295,
+    "median_pnl": 1.1265,
+    "total_pnl": 56.174,
+    "win_rate": 0.8701,
+    "edge_win_minus_price": 0.0942,
+    "max_drawdown": 17.12
+   },
+   "fail": {
+    "n_markets": 189,
+    "n_days": 8,
+    "mean_pnl": -0.348,
+    "median_pnl": 1.0476,
+    "total_pnl": -65.77,
+    "win_rate": 0.7302,
+    "edge_win_minus_price": -0.0356,
+    "max_drawdown": 95.947
+   },
+   "raw_mean_pnl_diff": 1.0775,
+   "day_boot95_diff": [
+    -0.0922,
+    2.1568
+   ],
+   "per_day": {
+    "2026-10-01": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.2093,
+      "median_pnl": 1.1265,
+      "total_pnl": 3.628,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.18,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 1.6429,
+      "median_pnl": 1.6429,
+      "total_pnl": 1.643,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.23,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-10-02": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.9346,
+      "median_pnl": 1.8333,
+      "total_pnl": 5.804,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2333,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 29,
+      "n_days": 1,
+      "mean_pnl": 0.2633,
+      "median_pnl": 1.375,
+      "total_pnl": 7.635,
+      "win_rate": 0.7931,
+      "edge_win_minus_price": 0.0307,
+      "max_drawdown": 11.0
+     },
+     "direction": 1
+    },
+    "2026-10-03": {
+     "pass": {
+      "n_markets": 13,
+      "n_days": 1,
+      "mean_pnl": 0.0772,
+      "median_pnl": 0.9706,
+      "total_pnl": 1.004,
+      "win_rate": 0.8462,
+      "edge_win_minus_price": 0.0131,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 10,
+      "n_days": 1,
+      "mean_pnl": 0.4155,
+      "median_pnl": 1.0091,
+      "total_pnl": 4.155,
+      "win_rate": 0.9,
+      "edge_win_minus_price": 0.058,
+      "max_drawdown": 5.5
+     },
+     "direction": -1
+    },
+    "2026-10-04": {
+     "pass": {
+      "n_markets": 19,
+      "n_days": 1,
+      "mean_pnl": 0.9772,
+      "median_pnl": 1.1265,
+      "total_pnl": 18.567,
+      "win_rate": 0.8947,
+      "edge_win_minus_price": 0.1137,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 14,
+      "n_days": 1,
+      "mean_pnl": -0.4068,
+      "median_pnl": 1.1669,
+      "total_pnl": -5.695,
+      "win_rate": 0.7143,
+      "edge_win_minus_price": -0.0407,
+      "max_drawdown": 20.478
+     },
+     "direction": 1
+    },
+    "2026-10-05": {
+     "pass": {
+      "n_markets": 15,
+      "n_days": 1,
+      "mean_pnl": -0.9647,
+      "median_pnl": 0.75,
+      "total_pnl": -14.47,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0827,
+      "max_drawdown": 17.12
+     },
+     "fail": {
+      "n_markets": 37,
+      "n_days": 1,
+      "mean_pnl": -0.3543,
+      "median_pnl": 1.1265,
+      "total_pnl": -13.108,
+      "win_rate": 0.7297,
+      "edge_win_minus_price": -0.0449,
+      "max_drawdown": 26.244
+     },
+     "direction": -1
+    },
+    "2026-10-06": {
+     "pass": {
+      "n_markets": 12,
+      "n_days": 1,
+      "mean_pnl": 1.5985,
+      "median_pnl": 2.0483,
+      "total_pnl": 19.182,
+      "win_rate": 0.9167,
+      "edge_win_minus_price": 0.1867,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 55,
+      "n_days": 1,
+      "mean_pnl": -0.4569,
+      "median_pnl": 1.0476,
+      "total_pnl": -25.13,
+      "win_rate": 0.7091,
+      "edge_win_minus_price": -0.042,
+      "max_drawdown": 30.852
+     },
+     "direction": 1
+    },
+    "2026-10-07": {
+     "pass": {
+      "n_markets": 12,
+      "n_days": 1,
+      "mean_pnl": 1.8716,
+      "median_pnl": 1.4207,
+      "total_pnl": 22.459,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2233,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 38,
+      "n_days": 1,
+      "mean_pnl": -1.1957,
+      "median_pnl": 0.7859,
+      "total_pnl": -45.437,
+      "win_rate": 0.6316,
+      "edge_win_minus_price": -0.1332,
+      "max_drawdown": 45.437
+     },
+     "direction": 1
+    },
+    "2026-10-08": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 5,
+      "n_days": 1,
+      "mean_pnl": 2.0337,
+      "median_pnl": 1.8333,
+      "total_pnl": 10.168,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.236,
+      "max_drawdown": 0.0
+     },
+     "direction": null
+    }
+   },
+   "days_compared": 7,
+   "days_positive": 4,
+   "days_negative": 3,
+   "adjusted": {
+    "n": 226,
+    "n_days": 7,
+    "controls": [
+     "score",
+     "price",
+     "sigma"
+    ],
+    "coef": 1.4045,
+    "day_boot95": [
+     0.3448,
+     2.2805
+    ]
+   },
+   "control_verdict": "SURVIVES",
+   "stratified": {
+    "score>=0.30": {
+     "pass": {
+      "n_markets": 46,
+      "n_days": 7,
+      "mean_pnl": 0.7199,
+      "median_pnl": 1.0871,
+      "total_pnl": 33.113,
+      "win_rate": 0.913,
+      "edge_win_minus_price": 0.1002,
+      "max_drawdown": 9.888
+     },
+     "fail": {
+      "n_markets": 102,
+      "n_days": 8,
+      "mean_pnl": -0.113,
+      "median_pnl": 1.0091,
+      "total_pnl": -11.522,
+      "win_rate": 0.7843,
+      "edge_win_minus_price": -0.0152,
+      "max_drawdown": 45.447
+     },
+     "raw_mean_pnl_diff": 0.8328
+    },
+    "score<0.30": {
+     "pass": {
+      "n_markets": 31,
+      "n_days": 5,
+      "mean_pnl": 0.7439,
+      "median_pnl": 1.6429,
+      "total_pnl": 23.06,
+      "win_rate": 0.8065,
+      "edge_win_minus_price": 0.0852,
+      "max_drawdown": 18.953
+     },
+     "fail": {
+      "n_markets": 87,
+      "n_days": 5,
+      "mean_pnl": -0.6235,
+      "median_pnl": 1.1265,
+      "total_pnl": -54.248,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0594,
+      "max_drawdown": 55.528
+     },
+     "raw_mean_pnl_diff": 1.3674
+    },
+    "price>=0.75": {
+     "pass": {
+      "n_markets": 52,
+      "n_days": 7,
+      "mean_pnl": 0.3754,
+      "median_pnl": 1.0476,
+      "total_pnl": 19.523,
+      "win_rate": 0.8846,
+      "edge_win_minus_price": 0.0583,
+      "max_drawdown": 9.888
+     },
+     "fail": {
+      "n_markets": 114,
+      "n_days": 8,
+      "mean_pnl": 0.0514,
+      "median_pnl": 0.9706,
+      "total_pnl": 5.856,
+      "win_rate": 0.8333,
+      "edge_win_minus_price": 0.0082,
+      "max_drawdown": 21.216
+     },
+     "raw_mean_pnl_diff": 0.3241
+    },
+    "price<0.75": {
+     "pass": {
+      "n_markets": 25,
+      "n_days": 5,
+      "mean_pnl": 1.466,
+      "median_pnl": 3.0,
+      "total_pnl": 36.651,
+      "win_rate": 0.84,
+      "edge_win_minus_price": 0.1688,
+      "max_drawdown": 17.054
+     },
+     "fail": {
+      "n_markets": 75,
+      "n_days": 6,
+      "mean_pnl": -0.955,
+      "median_pnl": 2.0342,
+      "total_pnl": -71.626,
+      "win_rate": 0.5733,
+      "edge_win_minus_price": -0.102,
+      "max_drawdown": 86.711
+     },
+     "raw_mean_pnl_diff": 2.421
+    }
+   }
+  },
+  "status": "PROXY_FOR_OTHER_FEATURES"
+ },
+ "COMBINED_IN_SAMPLE_ONLY": {
+  "LIVE": {
+   "pass": {
+    "n_markets": 17,
+    "n_days": 6,
+    "mean_pnl": -0.1631,
+    "median_pnl": 0.5124,
+    "total_pnl": -2.773,
+    "win_rate": 0.7647,
+    "edge_win_minus_price": -0.0941,
+    "max_drawdown": 7.473
+   },
+   "fail": {
+    "n_markets": 108,
+    "n_days": 11,
+    "mean_pnl": -0.0602,
+    "median_pnl": 1.0023,
+    "total_pnl": -6.504,
+    "win_rate": 0.7407,
+    "edge_win_minus_price": 0.0022,
+    "max_drawdown": 37.912
+   },
+   "raw_mean_pnl_diff": -0.1029,
+   "day_boot95_diff": [
+    -1.4609,
+    1.026
+   ],
+   "per_day": {
+    "2026-09-10": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -1.8964,
+      "median_pnl": -1.8964,
+      "total_pnl": -3.793,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.345,
+      "max_drawdown": 4.73
+     },
+     "fail": {
+      "n_markets": 8,
+      "n_days": 1,
+      "mean_pnl": 1.3273,
+      "median_pnl": 1.2015,
+      "total_pnl": 10.619,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2262,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-11": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 6,
+      "n_days": 1,
+      "mean_pnl": -2.2459,
+      "median_pnl": -3.3808,
+      "total_pnl": -13.476,
+      "win_rate": 0.3333,
+      "edge_win_minus_price": -0.3167,
+      "max_drawdown": 13.476
+     },
+     "direction": null
+    },
+    "2026-09-14": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": -1.1952,
+      "median_pnl": -1.068,
+      "total_pnl": -4.781,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.26,
+      "max_drawdown": 6.379
+     },
+     "direction": null
+    },
+    "2026-09-18": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": -1.8402,
+      "median_pnl": -1.8402,
+      "total_pnl": -3.68,
+      "win_rate": 0.5,
+      "edge_win_minus_price": -0.35,
+      "max_drawdown": 4.35
+     },
+     "fail": {
+      "n_markets": 9,
+      "n_days": 1,
+      "mean_pnl": 1.5804,
+      "median_pnl": 1.0938,
+      "total_pnl": 14.224,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.25,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-23": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": -0.2037,
+      "median_pnl": 0.7304,
+      "total_pnl": -0.815,
+      "win_rate": 0.75,
+      "edge_win_minus_price": -0.02,
+      "max_drawdown": 3.65
+     },
+     "direction": null
+    },
+    "2026-09-24": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": 0.7834,
+      "median_pnl": 0.7258,
+      "total_pnl": 3.134,
+      "win_rate": 0.75,
+      "edge_win_minus_price": -0.0925,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.0669,
+      "median_pnl": 1.3167,
+      "total_pnl": 3.201,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.2067,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-25": {
+     "pass": {
+      "n_markets": 6,
+      "n_days": 1,
+      "mean_pnl": -0.0177,
+      "median_pnl": 0.4949,
+      "total_pnl": -0.106,
+      "win_rate": 0.8333,
+      "edge_win_minus_price": -0.055,
+      "max_drawdown": 2.836
+     },
+     "fail": {
+      "n_markets": 8,
+      "n_days": 1,
+      "mean_pnl": 1.2391,
+      "median_pnl": 0.885,
+      "total_pnl": 9.912,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.1913,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-09-27": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 0.8195,
+      "median_pnl": 0.8195,
+      "total_pnl": 1.639,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.155,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 35,
+      "n_days": 1,
+      "mean_pnl": -0.0143,
+      "median_pnl": 0.9171,
+      "total_pnl": -0.5,
+      "win_rate": 0.8,
+      "edge_win_minus_price": 0.0451,
+      "max_drawdown": 17.667
+     },
+     "direction": 1
+    },
+    "2026-09-28": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 0.0342,
+      "median_pnl": 0.0342,
+      "total_pnl": 0.034,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.18,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 17,
+      "n_days": 1,
+      "mean_pnl": -0.8012,
+      "median_pnl": 1.0065,
+      "total_pnl": -13.621,
+      "win_rate": 0.5294,
+      "edge_win_minus_price": -0.1606,
+      "max_drawdown": 13.621
+     },
+     "direction": 1
+    },
+    "2026-09-29": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 11,
+      "n_days": 1,
+      "mean_pnl": -0.7983,
+      "median_pnl": 1.0866,
+      "total_pnl": -8.781,
+      "win_rate": 0.5455,
+      "edge_win_minus_price": -0.1373,
+      "max_drawdown": 15.787
+     },
+     "direction": null
+    },
+    "2026-09-30": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": -0.8288,
+      "median_pnl": 1.2073,
+      "total_pnl": -2.486,
+      "win_rate": 0.6667,
+      "edge_win_minus_price": -0.0967,
+      "max_drawdown": 5.5
+     },
+     "direction": null
+    }
+   },
+   "days_compared": 6,
+   "days_positive": 2,
+   "days_negative": 4,
+   "drop_one_filter": {
+    "drop_score": {
+     "n_markets": 17,
+     "n_days": 6,
+     "mean_pnl": -0.1631,
+     "median_pnl": 0.5124,
+     "total_pnl": -2.773,
+     "win_rate": 0.7647,
+     "edge_win_minus_price": -0.0941,
+     "max_drawdown": 7.473
+    },
+    "drop_price": {
+     "n_markets": 26,
+     "n_days": 10,
+     "mean_pnl": -0.1625,
+     "median_pnl": 0.651,
+     "total_pnl": -4.226,
+     "win_rate": 0.7308,
+     "edge_win_minus_price": -0.0727,
+     "max_drawdown": 11.688
+    },
+    "drop_tte": {
+     "n_markets": 59,
+     "n_days": 11,
+     "mean_pnl": 0.5882,
+     "median_pnl": 0.7507,
+     "total_pnl": 34.701,
+     "win_rate": 0.9322,
+     "edge_win_minus_price": 0.0953,
+     "max_drawdown": 4.73
+    }
+   },
+   "all_trades": {
+    "n_markets": 125,
+    "n_days": 11,
+    "mean_pnl": -0.0742,
+    "median_pnl": 0.9171,
+    "total_pnl": -9.277,
+    "win_rate": 0.744,
+    "edge_win_minus_price": -0.0109,
+    "max_drawdown": 37.878
+   }
+  },
+  "DRY_RUN": {
+   "pass": {
+    "n_markets": 40,
+    "n_days": 7,
+    "mean_pnl": 0.4622,
+    "median_pnl": 1.0476,
+    "total_pnl": 18.49,
+    "win_rate": 0.9,
+    "edge_win_minus_price": 0.0697,
+    "max_drawdown": 9.888
+   },
+   "fail": {
+    "n_markets": 226,
+    "n_days": 8,
+    "mean_pnl": -0.1243,
+    "median_pnl": 1.1596,
+    "total_pnl": -28.086,
+    "win_rate": 0.7478,
+    "edge_win_minus_price": -0.01,
+    "max_drawdown": 66.185
+   },
+   "raw_mean_pnl_diff": 0.5865,
+   "day_boot95_diff": [
+    -0.1028,
+    1.3762
+   ],
+   "per_day": {
+    "2026-10-01": {
+     "pass": {
+      "n_markets": 3,
+      "n_days": 1,
+      "mean_pnl": 1.2093,
+      "median_pnl": 1.1265,
+      "total_pnl": 3.628,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.18,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 1.6429,
+      "median_pnl": 1.6429,
+      "total_pnl": 1.643,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.23,
+      "max_drawdown": 0.0
+     },
+     "direction": -1
+    },
+    "2026-10-02": {
+     "pass": {
+      "n_markets": 1,
+      "n_days": 1,
+      "mean_pnl": 1.8333,
+      "median_pnl": 1.8333,
+      "total_pnl": 1.833,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.25,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 31,
+      "n_days": 1,
+      "mean_pnl": 0.3744,
+      "median_pnl": 1.375,
+      "total_pnl": 11.605,
+      "win_rate": 0.8065,
+      "edge_win_minus_price": 0.0432,
+      "max_drawdown": 11.0
+     },
+     "direction": 1
+    },
+    "2026-10-03": {
+     "pass": {
+      "n_markets": 13,
+      "n_days": 1,
+      "mean_pnl": 0.0772,
+      "median_pnl": 0.9706,
+      "total_pnl": 1.004,
+      "win_rate": 0.8462,
+      "edge_win_minus_price": 0.0131,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 10,
+      "n_days": 1,
+      "mean_pnl": 0.4155,
+      "median_pnl": 1.0091,
+      "total_pnl": 4.155,
+      "win_rate": 0.9,
+      "edge_win_minus_price": 0.058,
+      "max_drawdown": 5.5
+     },
+     "direction": -1
+    },
+    "2026-10-04": {
+     "pass": {
+      "n_markets": 13,
+      "n_days": 1,
+      "mean_pnl": 0.1803,
+      "median_pnl": 1.0476,
+      "total_pnl": 2.344,
+      "win_rate": 0.8462,
+      "edge_win_minus_price": 0.0277,
+      "max_drawdown": 5.5
+     },
+     "fail": {
+      "n_markets": 20,
+      "n_days": 1,
+      "mean_pnl": 0.5263,
+      "median_pnl": 1.401,
+      "total_pnl": 10.527,
+      "win_rate": 0.8,
+      "edge_win_minus_price": 0.0615,
+      "max_drawdown": 17.8
+     },
+     "direction": -1
+    },
+    "2026-10-05": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": 1.1208,
+      "median_pnl": 0.9849,
+      "total_pnl": 4.483,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.165,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 48,
+      "n_days": 1,
+      "mean_pnl": -0.668,
+      "median_pnl": 1.0871,
+      "total_pnl": -32.062,
+      "win_rate": 0.6875,
+      "edge_win_minus_price": -0.0742,
+      "max_drawdown": 40.481
+     },
+     "direction": 1
+    },
+    "2026-10-06": {
+     "pass": {
+      "n_markets": 2,
+      "n_days": 1,
+      "mean_pnl": 1.0201,
+      "median_pnl": 1.0201,
+      "total_pnl": 2.04,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.155,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 65,
+      "n_days": 1,
+      "mean_pnl": -0.1229,
+      "median_pnl": 1.2901,
+      "total_pnl": -7.988,
+      "win_rate": 0.7385,
+      "edge_win_minus_price": -0.0058,
+      "max_drawdown": 24.277
+     },
+     "direction": 1
+    },
+    "2026-10-07": {
+     "pass": {
+      "n_markets": 4,
+      "n_days": 1,
+      "mean_pnl": 0.7893,
+      "median_pnl": 0.7149,
+      "total_pnl": 3.157,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.125,
+      "max_drawdown": 0.0
+     },
+     "fail": {
+      "n_markets": 46,
+      "n_days": 1,
+      "mean_pnl": -0.5682,
+      "median_pnl": 1.0109,
+      "total_pnl": -26.135,
+      "win_rate": 0.6957,
+      "edge_win_minus_price": -0.0626,
+      "max_drawdown": 31.91
+     },
+     "direction": 1
+    },
+    "2026-10-08": {
+     "pass": {
+      "n_markets": 0,
+      "n_days": 0
+     },
+     "fail": {
+      "n_markets": 5,
+      "n_days": 1,
+      "mean_pnl": 2.0337,
+      "median_pnl": 1.8333,
+      "total_pnl": 10.168,
+      "win_rate": 1.0,
+      "edge_win_minus_price": 0.236,
+      "max_drawdown": 0.0
+     },
+     "direction": null
+    }
+   },
+   "days_compared": 7,
+   "days_positive": 4,
+   "days_negative": 3,
+   "drop_one_filter": {
+    "drop_score": {
+     "n_markets": 52,
+     "n_days": 7,
+     "mean_pnl": 0.3754,
+     "median_pnl": 1.0476,
+     "total_pnl": 19.523,
+     "win_rate": 0.8846,
+     "edge_win_minus_price": 0.0583,
+     "max_drawdown": 9.888
+    },
+    "drop_price": {
+     "n_markets": 46,
+     "n_days": 7,
+     "mean_pnl": 0.7199,
+     "median_pnl": 1.0871,
+     "total_pnl": 33.113,
+     "win_rate": 0.913,
+     "edge_win_minus_price": 0.1002,
+     "max_drawdown": 9.888
+    },
+    "drop_tte": {
+     "n_markets": 121,
+     "n_days": 8,
+     "mean_pnl": 0.102,
+     "median_pnl": 0.9706,
+     "total_pnl": 12.338,
+     "win_rate": 0.843,
+     "edge_win_minus_price": 0.0152,
+     "max_drawdown": 22.822
+    }
+   },
+   "all_trades": {
+    "n_markets": 266,
+    "n_days": 8,
+    "mean_pnl": -0.0361,
+    "median_pnl": 1.1265,
+    "total_pnl": -9.596,
+    "win_rate": 0.7707,
+    "edge_win_minus_price": 0.002,
+    "max_drawdown": 56.505
+   }
+  }
+ }
+}

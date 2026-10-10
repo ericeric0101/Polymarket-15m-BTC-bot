@@ -1,0 +1,19 @@
+{
+ "ts": 1791530787.326167,
+ "strategy_events_max_id": 983275,
+ "order_events_max_id": 400787,
+ "research_max_id": 0,
+ "research_seq": 313939,
+ "sizes": {
+  "logs/trade_journal.db": 3193483264,
+  "logs/trade_journal.db-wal": 0,
+  "backups/trade_journal.db": 3193434112,
+  "data/research/twap_forward_shadow.db": 319488,
+  "data/research/twap_forward_shadow.db-wal": 0
+ },
+ "free_bytes": 14766354432,
+ "free_gib": 13.752239227294922,
+ "command": ".venv/bin/python -u run_bot.py",
+ "git_head": "95f0860f6053e264638c92874a01665dc52b9bb5",
+ "start_ts": 1791530793.829178
+}

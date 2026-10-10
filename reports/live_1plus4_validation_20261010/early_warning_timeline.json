@@ -1,0 +1,2973 @@
+{
+ "run_id": "run_1791621743_36d99e96",
+ "positions": [
+  {
+   "kind": "LIVE",
+   "slug": "btc-updown-15m-1791621900",
+   "instrument_id": "0x6da5dd3f831517920f79a79d86507c1d4b54780a8060d940934c5ef6ec50b8eb-80973435333466914698905368401451504871678480272314164951361280815107544835383.POLYMARKET",
+   "entry_bid_state": "FRESH_BID",
+   "held_side": "UP",
+   "entry_ts": 1791622287.231762,
+   "entry_bid": 0.67,
+   "entry_binance": 82824.73,
+   "strike": 82725.8573166071,
+   "timeline": {
+    "ENTRY": {
+     "status": "TRIGGERED",
+     "ts": 1791622287.231762,
+     "context": {
+      "tte": null,
+      "required_move_sigma": null,
+      "required_move_z_diffusion": null
+     }
+    },
+    "T_BINANCE_1BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_2BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_3BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_5BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_10BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_TOKEN_005_FIRST": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false
+    },
+    "T_TOKEN_005_RECOVERY": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_005_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_010_FIRST": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false
+    },
+    "T_TOKEN_010_RECOVERY": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_010_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_015_FIRST": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false
+    },
+    "T_TOKEN_015_RECOVERY": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_015_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_020_FIRST": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false
+    },
+    "T_TOKEN_020_RECOVERY": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_020_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_CHAINLINK_SPOT_CROSS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "adverse_cross_count": 0
+    },
+    "T_TWAP_CROSS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "adverse_cross_count": 0
+    },
+    "T_MINUS2": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_BREAKER_ELIGIBLE": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_EXIT_SUBMIT": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_EXIT_FILL": {
+     "status": "TRIGGERED",
+     "ts": 1791622589.91793,
+     "context": {
+      "tte": 211.25635194778442,
+      "required_move_sigma": 0.9467019115410136,
+      "required_move_z_diffusion": 4.1062112569087805
+     }
+    }
+   },
+   "token": {
+    "0.05": {
+     "primary": {
+      "threshold": "0.05",
+      "variant": "PRIMARY",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.05",
+      "variant": "HYSTERESIS",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    },
+    "0.10": {
+     "primary": {
+      "threshold": "0.10",
+      "variant": "PRIMARY",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.10",
+      "variant": "HYSTERESIS",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    },
+    "0.15": {
+     "primary": {
+      "threshold": "0.15",
+      "variant": "PRIMARY",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.15",
+      "variant": "HYSTERESIS",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    },
+    "0.20": {
+     "primary": {
+      "threshold": "0.20",
+      "variant": "PRIMARY",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.20",
+      "variant": "HYSTERESIS",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 326,
+       "total_points": 330,
+       "observed_fraction": 0.9878787878787879,
+       "gaps": [
+        {
+         "from_ts": 1791622309.7824278,
+         "to_ts": 1791622313.6028328,
+         "duration_sec": 3.8204050064086914
+        },
+        {
+         "from_ts": 1791622498.0152981,
+         "to_ts": 1791622501.105053,
+         "duration_sec": 3.089754819869995
+        },
+        {
+         "from_ts": 1791622526.550477,
+         "to_ts": 1791622529.879833,
+         "duration_sec": 3.3293559551239014
+        },
+        {
+         "from_ts": 1791622535.10865,
+         "to_ts": 1791622538.125112,
+         "duration_sec": 3.0164620876312256
+        },
+        {
+         "from_ts": 1791622567.204662,
+         "to_ts": 1791622571.020837,
+         "duration_sec": 3.8161749839782715
+        },
+        {
+         "from_ts": 1791622631.504289,
+         "to_ts": 1791622635.473792,
+         "duration_sec": 3.969503164291382
+        },
+        {
+         "from_ts": 1791622702.892781,
+         "to_ts": 1791622707.746366,
+         "duration_sec": 4.8535850048065186
+        },
+        {
+         "from_ts": 1791622729.571645,
+         "to_ts": 1791622735.458828,
+         "duration_sec": 5.887182950973511
+        },
+        {
+         "from_ts": 1791622735.458828,
+         "to_ts": 1791622741.392983,
+         "duration_sec": 5.934154987335205
+        },
+        {
+         "from_ts": 1791622741.392983,
+         "to_ts": 1791622746.613121,
+         "duration_sec": 5.220138072967529
+        },
+        {
+         "from_ts": 1791622747.7263381,
+         "to_ts": 1791622753.2011268,
+         "duration_sec": 5.474788665771484
+        },
+        {
+         "from_ts": 1791622753.2011268,
+         "to_ts": 1791622758.9013078,
+         "duration_sec": 5.700181007385254
+        },
+        {
+         "from_ts": 1791622758.9013078,
+         "to_ts": 1791622764.01422,
+         "duration_sec": 5.112912178039551
+        },
+        {
+         "from_ts": 1791622764.01422,
+         "to_ts": 1791622767.9725509,
+         "duration_sec": 3.9583308696746826
+        },
+        {
+         "from_ts": 1791622767.9725509,
+         "to_ts": 1791622773.109421,
+         "duration_sec": 5.1368701457977295
+        },
+        {
+         "from_ts": 1791622773.109421,
+         "to_ts": 1791622778.599416,
+         "duration_sec": 5.489995002746582
+        },
+        {
+         "from_ts": 1791622778.599416,
+         "to_ts": 1791622784.545856,
+         "duration_sec": 5.946439981460571
+        },
+        {
+         "from_ts": 1791622784.545856,
+         "to_ts": 1791622789.6214159,
+         "duration_sec": 5.075559854507446
+        },
+        {
+         "from_ts": 1791622789.6214159,
+         "to_ts": 1791622792.680663,
+         "duration_sec": 3.0592472553253174
+        },
+        {
+         "from_ts": 1791622792.680663,
+         "to_ts": 1791622798.064491,
+         "duration_sec": 5.3838279247283936
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    }
+   },
+   "basis": {
+    "binance_minus_chainlink_bps_median": 9.931617668785838,
+    "samples": 329,
+    "label": "DESCRIPTIVE_ONLY_NONCANONICAL"
+   },
+   "schema_versions_seen": [
+    2
+   ],
+   "book_empty_detectable": true,
+   "snapshot_count": 330
+  },
+  {
+   "kind": "LIVE",
+   "slug": "btc-updown-15m-1791623700",
+   "instrument_id": "0xea3cca8b8c803b873736b340751fdea54ed67358790c7dce572c18c0e3b0d9b4-98718709113305138653715058348713020377322434585724238524455627897768442303955.POLYMARKET",
+   "entry_bid_state": "FRESH_BID",
+   "held_side": "DOWN",
+   "entry_ts": 1791624357.8661098,
+   "entry_bid": 0.8,
+   "entry_binance": 82895.33,
+   "strike": 82837.20514112496,
+   "timeline": {
+    "ENTRY": {
+     "status": "TRIGGERED",
+     "ts": 1791624357.8661098,
+     "context": {
+      "tte": null,
+      "required_move_sigma": null,
+      "required_move_z_diffusion": null
+     }
+    },
+    "T_BINANCE_1BPS": {
+     "status": "TRIGGERED",
+     "ts": 1791624458.971993,
+     "censored": false,
+     "move_bps": 1.7709079630903213,
+     "context": {
+      "tte": 141.02800703048706,
+      "required_move_sigma": 1.0365219984254224,
+      "required_move_z_diffusion": 5.36073188462566
+     }
+    },
+    "T_BINANCE_2BPS": {
+     "status": "TRIGGERED",
+     "ts": 1791624494.651507,
+     "censored": false,
+     "move_bps": 4.182382771140425,
+     "context": {
+      "tte": 105.34849309921265,
+      "required_move_sigma": 0.5018421752256821,
+      "required_move_z_diffusion": 1.0315923862483705
+     }
+    },
+    "T_BINANCE_3BPS": {
+     "status": "TRIGGERED",
+     "ts": 1791624494.651507,
+     "censored": false,
+     "move_bps": 4.182382771140425,
+     "context": {
+      "tte": 105.34849309921265,
+      "required_move_sigma": 0.5018421752256821,
+      "required_move_z_diffusion": 1.0315923862483705
+     }
+    },
+    "T_BINANCE_5BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_10BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_TOKEN_005_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791624460.179564,
+     "censored": false,
+     "context": {
+      "tte": 139.82043600082397,
+      "required_move_sigma": 1.0250241024844795,
+      "required_move_z_diffusion": 5.311897755859203
+     }
+    },
+    "T_TOKEN_005_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791624471.2250628,
+     "context": {
+      "tte": 128.77493715286255,
+      "required_move_sigma": 0.47879547874378586,
+      "required_move_z_diffusion": 0.9369595890753775
+     }
+    },
+    "T_TOKEN_005_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791624477.042927,
+     "context": {
+      "tte": 122.95707297325134,
+      "required_move_sigma": 0.46551527290537975,
+      "required_move_z_diffusion": 0.9157058612487956
+     }
+    },
+    "T_TOKEN_010_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791624462.122478,
+     "censored": false,
+     "context": {
+      "tte": 137.87752199172974,
+      "required_move_sigma": 0.5006929593622316,
+      "required_move_z_diffusion": 0.9749363231237881
+     }
+    },
+    "T_TOKEN_010_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791624463.348314,
+     "context": {
+      "tte": 136.65168595314026,
+      "required_move_sigma": 0.5095015516836625,
+      "required_move_z_diffusion": 0.9930372948136498
+     }
+    },
+    "T_TOKEN_010_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791624464.6960142,
+     "context": {
+      "tte": 135.3039858341217,
+      "required_move_sigma": 0.47360465269493845,
+      "required_move_z_diffusion": 0.9194145481855801
+     }
+    },
+    "T_TOKEN_015_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791624493.596978,
+     "censored": false,
+     "context": {
+      "tte": 106.40302205085754,
+      "required_move_sigma": 0.5247805116114254,
+      "required_move_z_diffusion": 1.0761026745952207
+     }
+    },
+    "T_TOKEN_015_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791624572.378517,
+     "context": {
+      "tte": 27.621483087539673,
+      "required_move_sigma": 0.49855746166451564,
+      "required_move_z_diffusion": 1.120005633099242
+     }
+    },
+    "T_TOKEN_015_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791624586.0810602,
+     "context": {
+      "tte": 13.91893982887268,
+      "required_move_sigma": 0.6670441493963408,
+      "required_move_z_diffusion": 1.7627897462571362
+     }
+    },
+    "T_TOKEN_020_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791624493.596978,
+     "censored": false,
+     "context": {
+      "tte": 106.40302205085754,
+      "required_move_sigma": 0.5247805116114254,
+      "required_move_z_diffusion": 1.0761026745952207
+     }
+    },
+    "T_TOKEN_020_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791624572.378517,
+     "context": {
+      "tte": 27.621483087539673,
+      "required_move_sigma": 0.49855746166451564,
+      "required_move_z_diffusion": 1.120005633099242
+     }
+    },
+    "T_TOKEN_020_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791624586.0810602,
+     "context": {
+      "tte": 13.91893982887268,
+      "required_move_sigma": 0.6670441493963408,
+      "required_move_z_diffusion": 1.7627897462571362
+     }
+    },
+    "T_CHAINLINK_SPOT_CROSS": {
+     "status": "CROSS",
+     "ts": 1791624497.350322,
+     "censored": false,
+     "adverse_cross_count": 1,
+     "context": {
+      "tte": 102.64967799186707,
+      "required_move_sigma": 0.08724745466622656,
+      "required_move_z_diffusion": 0.14151042596565228
+     }
+    },
+    "T_TWAP_CROSS": {
+     "status": "CROSS",
+     "ts": 1791624545.253432,
+     "censored": false,
+     "adverse_cross_count": 1,
+     "context": {
+      "tte": 54.74656796455383,
+      "required_move_sigma": 0.2421228164625509,
+      "required_move_z_diffusion": 0.5436520273069675
+     }
+    },
+    "T_MINUS2": {
+     "status": "TRIGGERED",
+     "ts": 1791624493.327542,
+     "context": {
+      "tte": 107.41201090812683,
+      "required_move_sigma": 0.5029218473930368,
+      "required_move_z_diffusion": 1.0247660689226212
+     }
+    },
+    "T_BREAKER_ELIGIBLE": {
+     "status": "TRIGGERED",
+     "ts": 1791624518.105302,
+     "context": {
+      "tte": 82.72697186470032,
+      "required_move_sigma": 0.10641829571903734,
+      "required_move_z_diffusion": 0.18670173677090884
+     }
+    },
+    "T_EXIT_SUBMIT": {
+     "status": "TRIGGERED",
+     "ts": 1791624518.235854,
+     "context": {
+      "tte": 82.72697186470032,
+      "required_move_sigma": 0.10641829571903734,
+      "required_move_z_diffusion": 0.18670173677090884
+     }
+    },
+    "T_EXIT_FILL": {
+     "status": "TRIGGERED",
+     "ts": 1791624521.009035,
+     "context": {
+      "tte": 79.20986199378967,
+      "required_move_sigma": 0.10765330515725323,
+      "required_move_z_diffusion": 0.19296045363617598
+     }
+    }
+   },
+   "token": {
+    "0.05": {
+     "primary": {
+      "threshold": "0.05",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 3,
+      "episodes": [
+       {
+        "start_ts": 1791624460.179564,
+        "start_ts_lower": 1791624460.179564,
+        "start_censored": false,
+        "max_dd": "0.13",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624471.2250628,
+        "end_ts_lower": 1791624471.2250628,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 11.045498847961426,
+        "duration_min_sec": 11.045498847961426,
+        "duration_max_sec": 11.045498847961426,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624477.042927,
+        "start_ts_lower": 1791624477.042927,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 95.33558988571167,
+        "duration_min_sec": 95.33558988571167,
+        "duration_max_sec": 95.33558988571167,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624589.019798,
+        "end_ts_lower": 1791624589.019798,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 2.9387378692626953,
+        "duration_min_sec": 2.9387378692626953,
+        "duration_max_sec": 2.9387378692626953,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791624460.179564,
+      "first_recovery_ts": 1791624471.2250628,
+      "first_episode_duration_sec": 11.045498847961426,
+      "first_episode_duration_bounds": [
+       11.045498847961426,
+       11.045498847961426
+      ],
+      "second_trigger_ts": 1791624477.042927,
+      "time_recovery_to_second_trigger_sec": 5.817864179611206,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.05",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 2,
+      "episodes": [
+       {
+        "start_ts": 1791624460.179564,
+        "start_ts_lower": 1791624460.179564,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791624577.819319,
+        "duration_sec": 112.1989529132843,
+        "duration_min_sec": 112.1989529132843,
+        "duration_max_sec": 112.1989529132843,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": null,
+        "end_ts_lower": null,
+        "end_censored": true,
+        "censored_at_end": true,
+        "recovery_confirmed_ts": null,
+        "duration_sec": null,
+        "duration_min_sec": 13.261977672576904,
+        "duration_max_sec": null,
+        "max_dd_is_lower_bound": true
+       }
+      ],
+      "first_trigger_ts": 1791624460.179564,
+      "first_recovery_ts": 1791624572.378517,
+      "first_episode_duration_sec": 112.1989529132843,
+      "first_episode_duration_bounds": [
+       112.1989529132843,
+       112.1989529132843
+      ],
+      "second_trigger_ts": 1791624586.0810602,
+      "time_recovery_to_second_trigger_sec": 13.702543258666992,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "flap_count": 1
+    },
+    "0.10": {
+     "primary": {
+      "threshold": "0.10",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 4,
+      "episodes": [
+       {
+        "start_ts": 1791624462.122478,
+        "start_ts_lower": 1791624462.122478,
+        "start_censored": false,
+        "max_dd": "0.12",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624463.348314,
+        "end_ts_lower": 1791624463.348314,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 1.2258360385894775,
+        "duration_min_sec": 1.2258360385894775,
+        "duration_max_sec": 1.2258360385894775,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624464.6960142,
+        "start_ts_lower": 1791624464.6960142,
+        "start_censored": false,
+        "max_dd": "0.13",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624469.085889,
+        "end_ts_lower": 1791624469.085889,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 4.3898749351501465,
+        "duration_min_sec": 4.3898749351501465,
+        "duration_max_sec": 4.3898749351501465,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624493.596978,
+        "start_ts_lower": 1791624493.596978,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 78.78153896331787,
+        "duration_min_sec": 78.78153896331787,
+        "duration_max_sec": 78.78153896331787,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624589.019798,
+        "end_ts_lower": 1791624589.019798,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 2.9387378692626953,
+        "duration_min_sec": 2.9387378692626953,
+        "duration_max_sec": 2.9387378692626953,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791624462.122478,
+      "first_recovery_ts": 1791624463.348314,
+      "first_episode_duration_sec": 1.2258360385894775,
+      "first_episode_duration_bounds": [
+       1.2258360385894775,
+       1.2258360385894775
+      ],
+      "second_trigger_ts": 1791624464.6960142,
+      "time_recovery_to_second_trigger_sec": 1.3477001190185547,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.10",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 3,
+      "episodes": [
+       {
+        "start_ts": 1791624462.122478,
+        "start_ts_lower": 1791624462.122478,
+        "start_censored": false,
+        "max_dd": "0.13",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624469.085889,
+        "end_ts_lower": 1791624469.085889,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791624474.732838,
+        "duration_sec": 6.963411092758179,
+        "duration_min_sec": 6.963411092758179,
+        "duration_max_sec": 6.963411092758179,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624493.596978,
+        "start_ts_lower": 1791624493.596978,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791624577.819319,
+        "duration_sec": 78.78153896331787,
+        "duration_min_sec": 78.78153896331787,
+        "duration_max_sec": 78.78153896331787,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": null,
+        "end_ts_lower": null,
+        "end_censored": true,
+        "censored_at_end": true,
+        "recovery_confirmed_ts": null,
+        "duration_sec": null,
+        "duration_min_sec": 13.261977672576904,
+        "duration_max_sec": null,
+        "max_dd_is_lower_bound": true
+       }
+      ],
+      "first_trigger_ts": 1791624462.122478,
+      "first_recovery_ts": 1791624469.085889,
+      "first_episode_duration_sec": 6.963411092758179,
+      "first_episode_duration_bounds": [
+       6.963411092758179,
+       6.963411092758179
+      ],
+      "second_trigger_ts": 1791624493.596978,
+      "time_recovery_to_second_trigger_sec": 24.511088848114014,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "flap_count": 1
+    },
+    "0.15": {
+     "primary": {
+      "threshold": "0.15",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 2,
+      "episodes": [
+       {
+        "start_ts": 1791624493.596978,
+        "start_ts_lower": 1791624493.596978,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 78.78153896331787,
+        "duration_min_sec": 78.78153896331787,
+        "duration_max_sec": 78.78153896331787,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624589.019798,
+        "end_ts_lower": 1791624589.019798,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 2.9387378692626953,
+        "duration_min_sec": 2.9387378692626953,
+        "duration_max_sec": 2.9387378692626953,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791624493.596978,
+      "first_recovery_ts": 1791624572.378517,
+      "first_episode_duration_sec": 78.78153896331787,
+      "first_episode_duration_bounds": [
+       78.78153896331787,
+       78.78153896331787
+      ],
+      "second_trigger_ts": 1791624586.0810602,
+      "time_recovery_to_second_trigger_sec": 13.702543258666992,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.15",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 2,
+      "episodes": [
+       {
+        "start_ts": 1791624493.596978,
+        "start_ts_lower": 1791624493.596978,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791624577.819319,
+        "duration_sec": 78.78153896331787,
+        "duration_min_sec": 78.78153896331787,
+        "duration_max_sec": 78.78153896331787,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": null,
+        "end_ts_lower": null,
+        "end_censored": true,
+        "censored_at_end": true,
+        "recovery_confirmed_ts": null,
+        "duration_sec": null,
+        "duration_min_sec": 13.261977672576904,
+        "duration_max_sec": null,
+        "max_dd_is_lower_bound": true
+       }
+      ],
+      "first_trigger_ts": 1791624493.596978,
+      "first_recovery_ts": 1791624572.378517,
+      "first_episode_duration_sec": 78.78153896331787,
+      "first_episode_duration_bounds": [
+       78.78153896331787,
+       78.78153896331787
+      ],
+      "second_trigger_ts": 1791624586.0810602,
+      "time_recovery_to_second_trigger_sec": 13.702543258666992,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    },
+    "0.20": {
+     "primary": {
+      "threshold": "0.20",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 2,
+      "episodes": [
+       {
+        "start_ts": 1791624493.596978,
+        "start_ts_lower": 1791624493.596978,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 78.78153896331787,
+        "duration_min_sec": 78.78153896331787,
+        "duration_max_sec": 78.78153896331787,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624589.019798,
+        "end_ts_lower": 1791624589.019798,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 2.9387378692626953,
+        "duration_min_sec": 2.9387378692626953,
+        "duration_max_sec": 2.9387378692626953,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791624493.596978,
+      "first_recovery_ts": 1791624572.378517,
+      "first_episode_duration_sec": 78.78153896331787,
+      "first_episode_duration_bounds": [
+       78.78153896331787,
+       78.78153896331787
+      ],
+      "second_trigger_ts": 1791624586.0810602,
+      "time_recovery_to_second_trigger_sec": 13.702543258666992,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.20",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 2,
+      "episodes": [
+       {
+        "start_ts": 1791624493.596978,
+        "start_ts_lower": 1791624493.596978,
+        "start_censored": false,
+        "max_dd": "0.76",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791624572.378517,
+        "end_ts_lower": 1791624572.378517,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791624577.819319,
+        "duration_sec": 78.78153896331787,
+        "duration_min_sec": 78.78153896331787,
+        "duration_max_sec": 78.78153896331787,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791624586.0810602,
+        "start_ts_lower": 1791624586.0810602,
+        "start_censored": false,
+        "max_dd": "0.44",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": null,
+        "end_ts_lower": null,
+        "end_censored": true,
+        "censored_at_end": true,
+        "recovery_confirmed_ts": null,
+        "duration_sec": null,
+        "duration_min_sec": 13.261977672576904,
+        "duration_max_sec": null,
+        "max_dd_is_lower_bound": true
+       }
+      ],
+      "first_trigger_ts": 1791624493.596978,
+      "first_recovery_ts": 1791624572.378517,
+      "first_episode_duration_sec": 78.78153896331787,
+      "first_episode_duration_bounds": [
+       78.78153896331787,
+       78.78153896331787
+      ],
+      "second_trigger_ts": 1791624586.0810602,
+      "time_recovery_to_second_trigger_sec": 13.702543258666992,
+      "coverage": {
+       "observed_points": 196,
+       "total_points": 196,
+       "observed_fraction": 1.0,
+       "gaps": [
+        {
+         "from_ts": 1791624390.353181,
+         "to_ts": 1791624393.727548,
+         "duration_sec": 3.3743669986724854
+        },
+        {
+         "from_ts": 1791624591.375495,
+         "to_ts": 1791624594.615038,
+         "duration_sec": 3.2395429611206055
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    }
+   },
+   "basis": {
+    "binance_minus_chainlink_bps_median": 10.358933766486176,
+    "samples": 196,
+    "label": "DESCRIPTIVE_ONLY_NONCANONICAL"
+   },
+   "schema_versions_seen": [
+    2
+   ],
+   "book_empty_detectable": true,
+   "snapshot_count": 196
+  },
+  {
+   "kind": "LIVE",
+   "slug": "btc-updown-15m-1791624600",
+   "instrument_id": "0x0519a4cc6e5e2920f2495a09634c105c1027f9753911c4f3450798bfc4bdc7c1-39590183912367521399090991710945095090755215622032866539900652537470932517696.POLYMARKET",
+   "entry_bid_state": "FRESH_BID",
+   "held_side": "DOWN",
+   "entry_ts": 1791625043.557332,
+   "entry_bid": 0.7,
+   "entry_binance": 82922.0,
+   "strike": 82836.33390600658,
+   "timeline": {
+    "ENTRY": {
+     "status": "TRIGGERED",
+     "ts": 1791625043.557332,
+     "context": {
+      "tte": null,
+      "required_move_sigma": null,
+      "required_move_z_diffusion": null
+     }
+    },
+    "T_BINANCE_1BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_2BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_3BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_5BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_10BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_TOKEN_005_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791625045.818775,
+     "censored": false,
+     "context": {
+      "tte": 454.1812250614166,
+      "required_move_sigma": 0.06073167762704832,
+      "required_move_z_diffusion": 0.1485103160851981
+     }
+    },
+    "T_TOKEN_005_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791625053.3971782,
+     "context": {
+      "tte": 446.6028218269348,
+      "required_move_sigma": 0.07306522828091627,
+      "required_move_z_diffusion": 0.17889371451463068
+     }
+    },
+    "T_TOKEN_005_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791625068.8111491,
+     "context": {
+      "tte": 431.1888508796692,
+      "required_move_sigma": 0.05912394235365311,
+      "required_move_z_diffusion": 0.1550774305597736
+     }
+    },
+    "T_TOKEN_010_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791625121.334346,
+     "censored": false,
+     "context": {
+      "tte": 378.6656539440155,
+      "required_move_sigma": 0.06713798064157828,
+      "required_move_z_diffusion": 0.19383227649729903
+     }
+    },
+    "T_TOKEN_010_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791625198.816352,
+     "context": {
+      "tte": 301.18364810943604,
+      "required_move_sigma": 0.12556737476578603,
+      "required_move_z_diffusion": 1.1639715499593135
+     }
+    },
+    "T_TOKEN_010_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791625205.5989928,
+     "context": {
+      "tte": 294.40100717544556,
+      "required_move_sigma": 0.1738047390332423,
+      "required_move_z_diffusion": 0.3960895049926086
+     }
+    },
+    "T_TOKEN_015_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791625144.697411,
+     "censored": false,
+     "context": {
+      "tte": 355.30258893966675,
+      "required_move_sigma": 0.06317360876337305,
+      "required_move_z_diffusion": 0.23016587048069728
+     }
+    },
+    "T_TOKEN_015_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791625150.153774,
+     "context": {
+      "tte": 349.84622597694397,
+      "required_move_sigma": 0.13250920446185963,
+      "required_move_z_diffusion": 0.466928241389995
+     }
+    },
+    "T_TOKEN_015_SECOND": {
+     "status": "TRIGGERED",
+     "ts": 1791625178.037106,
+     "context": {
+      "tte": 321.9628939628601,
+      "required_move_sigma": 0.13275826334346058,
+      "required_move_z_diffusion": 1.2515929057792892
+     }
+    },
+    "T_TOKEN_020_FIRST": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false
+    },
+    "T_TOKEN_020_RECOVERY": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_020_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_CHAINLINK_SPOT_CROSS": {
+     "status": "ADVERSE_AT_ENTRY",
+     "ts": 1791625044.6008918,
+     "censored": false,
+     "adverse_cross_count": 1,
+     "context": {
+      "tte": 455.399108171463,
+      "required_move_sigma": 0.061662391652106796,
+      "required_move_z_diffusion": 0.14959551653569803
+     }
+    },
+    "T_TWAP_CROSS": {
+     "status": "ADVERSE_AT_ENTRY",
+     "ts": 1791625044.6008918,
+     "censored": false,
+     "adverse_cross_count": 1,
+     "context": {
+      "tte": 455.399108171463,
+      "required_move_sigma": 0.061662391652106796,
+      "required_move_z_diffusion": 0.14959551653569803
+     }
+    },
+    "T_MINUS2": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_BREAKER_ELIGIBLE": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_EXIT_SUBMIT": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_EXIT_FILL": {
+     "status": "TRIGGERED",
+     "ts": 1791625426.857567,
+     "context": {
+      "tte": 74.13147401809692,
+      "required_move_sigma": 0.8280992574907345,
+      "required_move_z_diffusion": 5.066815649880927
+     }
+    }
+   },
+   "token": {
+    "0.05": {
+     "primary": {
+      "threshold": "0.05",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 7,
+      "episodes": [
+       {
+        "start_ts": 1791625045.818775,
+        "start_ts_lower": 1791625045.818775,
+        "start_censored": false,
+        "max_dd": "0.05",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625053.3971782,
+        "end_ts_lower": 1791625053.3971782,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 7.5784032344818115,
+        "duration_min_sec": 7.5784032344818115,
+        "duration_max_sec": 7.5784032344818115,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625068.8111491,
+        "start_ts_lower": 1791625068.8111491,
+        "start_censored": false,
+        "max_dd": "0.05",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625075.1982012,
+        "end_ts_lower": 1791625075.1982012,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 6.387052059173584,
+        "duration_min_sec": 6.387052059173584,
+        "duration_max_sec": 6.387052059173584,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625101.799829,
+        "start_ts_lower": 1791625101.799829,
+        "start_censored": false,
+        "max_dd": "0.16",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": 1791625200.9751081,
+        "end_ts_lower": 1791625200.9751081,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 99.17527914047241,
+        "duration_min_sec": 99.17527914047241,
+        "duration_max_sec": 99.17527914047241,
+        "max_dd_is_lower_bound": true
+       },
+       {
+        "start_ts": 1791625205.5989928,
+        "start_ts_lower": 1791625205.5989928,
+        "start_censored": false,
+        "max_dd": "0.12",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625241.520383,
+        "end_ts_lower": 1791625241.520383,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 35.92139005661011,
+        "duration_min_sec": 35.92139005661011,
+        "duration_max_sec": 35.92139005661011,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625250.439596,
+        "start_ts_lower": 1791625250.439596,
+        "start_censored": false,
+        "max_dd": "0.05",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625255.147019,
+        "end_ts_lower": 1791625255.147019,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 4.707422971725464,
+        "duration_min_sec": 4.707422971725464,
+        "duration_max_sec": 4.707422971725464,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625257.500454,
+        "start_ts_lower": 1791625257.500454,
+        "start_censored": false,
+        "max_dd": "0.05",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625258.592428,
+        "end_ts_lower": 1791625258.592428,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 1.0919740200042725,
+        "duration_min_sec": 1.0919740200042725,
+        "duration_max_sec": 1.0919740200042725,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625260.9461079,
+        "start_ts_lower": 1791625260.9461079,
+        "start_censored": false,
+        "max_dd": "0.19",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625305.42336,
+        "end_ts_lower": 1791625305.42336,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 44.47725224494934,
+        "duration_min_sec": 44.47725224494934,
+        "duration_max_sec": 44.47725224494934,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791625045.818775,
+      "first_recovery_ts": 1791625053.3971782,
+      "first_episode_duration_sec": 7.5784032344818115,
+      "first_episode_duration_bounds": [
+       7.5784032344818115,
+       7.5784032344818115
+      ],
+      "second_trigger_ts": 1791625068.8111491,
+      "time_recovery_to_second_trigger_sec": 15.413970947265625,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.05",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791625045.818775,
+        "start_ts_lower": 1791625045.818775,
+        "start_censored": false,
+        "max_dd": "0.19",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": 1791625305.42336,
+        "end_ts_lower": 1791625305.42336,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625311.224282,
+        "duration_sec": 259.60458517074585,
+        "duration_min_sec": 259.60458517074585,
+        "duration_max_sec": 259.60458517074585,
+        "max_dd_is_lower_bound": true
+       }
+      ],
+      "first_trigger_ts": 1791625045.818775,
+      "first_recovery_ts": 1791625305.42336,
+      "first_episode_duration_sec": 259.60458517074585,
+      "first_episode_duration_bounds": [
+       259.60458517074585,
+       259.60458517074585
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "flap_count": 6
+    },
+    "0.10": {
+     "primary": {
+      "threshold": "0.10",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 3,
+      "episodes": [
+       {
+        "start_ts": 1791625121.334346,
+        "start_ts_lower": 1791625121.334346,
+        "start_censored": false,
+        "max_dd": "0.16",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": 1791625198.816352,
+        "end_ts_lower": 1791625198.816352,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 77.48200583457947,
+        "duration_min_sec": 77.48200583457947,
+        "duration_max_sec": 77.48200583457947,
+        "max_dd_is_lower_bound": true
+       },
+       {
+        "start_ts": 1791625205.5989928,
+        "start_ts_lower": 1791625205.5989928,
+        "start_censored": false,
+        "max_dd": "0.12",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625215.030496,
+        "end_ts_lower": 1791625215.030496,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 9.431503057479858,
+        "duration_min_sec": 9.431503057479858,
+        "duration_max_sec": 9.431503057479858,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625287.81152,
+        "start_ts_lower": 1791625287.81152,
+        "start_censored": false,
+        "max_dd": "0.19",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625305.42336,
+        "end_ts_lower": 1791625305.42336,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 17.61184000968933,
+        "duration_min_sec": 17.61184000968933,
+        "duration_max_sec": 17.61184000968933,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791625121.334346,
+      "first_recovery_ts": 1791625198.816352,
+      "first_episode_duration_sec": 77.48200583457947,
+      "first_episode_duration_bounds": [
+       77.48200583457947,
+       77.48200583457947
+      ],
+      "second_trigger_ts": 1791625205.5989928,
+      "time_recovery_to_second_trigger_sec": 6.7826409339904785,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.10",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 3,
+      "episodes": [
+       {
+        "start_ts": 1791625121.334346,
+        "start_ts_lower": 1791625121.334346,
+        "start_censored": false,
+        "max_dd": "0.16",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": 1791625198.816352,
+        "end_ts_lower": 1791625198.816352,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625204.469555,
+        "duration_sec": 77.48200583457947,
+        "duration_min_sec": 77.48200583457947,
+        "duration_max_sec": 77.48200583457947,
+        "max_dd_is_lower_bound": true
+       },
+       {
+        "start_ts": 1791625205.5989928,
+        "start_ts_lower": 1791625205.5989928,
+        "start_censored": false,
+        "max_dd": "0.12",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625216.190778,
+        "end_ts_lower": 1791625216.190778,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625221.4572952,
+        "duration_sec": 10.591785192489624,
+        "duration_min_sec": 10.591785192489624,
+        "duration_max_sec": 10.591785192489624,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625287.81152,
+        "start_ts_lower": 1791625287.81152,
+        "start_censored": false,
+        "max_dd": "0.19",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625305.42336,
+        "end_ts_lower": 1791625305.42336,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625311.224282,
+        "duration_sec": 17.61184000968933,
+        "duration_min_sec": 17.61184000968933,
+        "duration_max_sec": 17.61184000968933,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791625121.334346,
+      "first_recovery_ts": 1791625198.816352,
+      "first_episode_duration_sec": 77.48200583457947,
+      "first_episode_duration_bounds": [
+       77.48200583457947,
+       77.48200583457947
+      ],
+      "second_trigger_ts": 1791625205.5989928,
+      "time_recovery_to_second_trigger_sec": 6.7826409339904785,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    },
+    "0.15": {
+     "primary": {
+      "threshold": "0.15",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 5,
+      "episodes": [
+       {
+        "start_ts": 1791625144.697411,
+        "start_ts_lower": 1791625144.697411,
+        "start_censored": false,
+        "max_dd": "0.16",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625150.153774,
+        "end_ts_lower": 1791625150.153774,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 5.456362962722778,
+        "duration_min_sec": 5.456362962722778,
+        "duration_max_sec": 5.456362962722778,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625178.037106,
+        "start_ts_lower": 1791625178.037106,
+        "start_censored": false,
+        "max_dd": "0.16",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": 1791625198.816352,
+        "end_ts_lower": 1791625198.816352,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 20.779245853424072,
+        "duration_min_sec": 20.779245853424072,
+        "duration_max_sec": 20.779245853424072,
+        "max_dd_is_lower_bound": true
+       },
+       {
+        "start_ts": 1791625288.936048,
+        "start_ts_lower": 1791625288.936048,
+        "start_censored": false,
+        "max_dd": "0.19",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625292.610732,
+        "end_ts_lower": 1791625292.610732,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 3.6746840476989746,
+        "duration_min_sec": 3.6746840476989746,
+        "duration_max_sec": 3.6746840476989746,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625293.828712,
+        "start_ts_lower": 1791625293.828712,
+        "start_censored": false,
+        "max_dd": "0.15",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625296.042872,
+        "end_ts_lower": 1791625296.042872,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 2.2141599655151367,
+        "duration_min_sec": 2.2141599655151367,
+        "duration_max_sec": 2.2141599655151367,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625303.076431,
+        "start_ts_lower": 1791625303.076431,
+        "start_censored": false,
+        "max_dd": "0.15",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625305.42336,
+        "end_ts_lower": 1791625305.42336,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 2.3469290733337402,
+        "duration_min_sec": 2.3469290733337402,
+        "duration_max_sec": 2.3469290733337402,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791625144.697411,
+      "first_recovery_ts": 1791625150.153774,
+      "first_episode_duration_sec": 5.456362962722778,
+      "first_episode_duration_bounds": [
+       5.456362962722778,
+       5.456362962722778
+      ],
+      "second_trigger_ts": 1791625178.037106,
+      "time_recovery_to_second_trigger_sec": 27.883332014083862,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.15",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 3,
+      "episodes": [
+       {
+        "start_ts": 1791625144.697411,
+        "start_ts_lower": 1791625144.697411,
+        "start_censored": false,
+        "max_dd": "0.16",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": true,
+        "end_ts": 1791625198.816352,
+        "end_ts_lower": 1791625198.816352,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625204.469555,
+        "duration_sec": 54.11894083023071,
+        "duration_min_sec": 54.11894083023071,
+        "duration_max_sec": 54.11894083023071,
+        "max_dd_is_lower_bound": true
+       },
+       {
+        "start_ts": 1791625288.936048,
+        "start_ts_lower": 1791625288.936048,
+        "start_censored": false,
+        "max_dd": "0.19",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625296.042872,
+        "end_ts_lower": 1791625296.042872,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625301.9598432,
+        "duration_sec": 7.106823921203613,
+        "duration_min_sec": 7.106823921203613,
+        "duration_max_sec": 7.106823921203613,
+        "max_dd_is_lower_bound": false
+       },
+       {
+        "start_ts": 1791625303.076431,
+        "start_ts_lower": 1791625303.076431,
+        "start_censored": false,
+        "max_dd": "0.15",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791625305.42336,
+        "end_ts_lower": 1791625305.42336,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791625311.224282,
+        "duration_sec": 2.3469290733337402,
+        "duration_min_sec": 2.3469290733337402,
+        "duration_max_sec": 2.3469290733337402,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791625144.697411,
+      "first_recovery_ts": 1791625198.816352,
+      "first_episode_duration_sec": 54.11894083023071,
+      "first_episode_duration_bounds": [
+       54.11894083023071,
+       54.11894083023071
+      ],
+      "second_trigger_ts": 1791625288.936048,
+      "time_recovery_to_second_trigger_sec": 90.1196961402893,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "flap_count": 2
+    },
+    "0.20": {
+     "primary": {
+      "threshold": "0.20",
+      "variant": "PRIMARY",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.20",
+      "variant": "HYSTERESIS",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 325,
+       "total_points": 329,
+       "observed_fraction": 0.9878419452887538,
+       "gaps": [
+        {
+         "from_ts": 1791625061.6098208,
+         "to_ts": 1791625065.487894,
+         "duration_sec": 3.878073215484619
+        },
+        {
+         "from_ts": 1791625153.975181,
+         "to_ts": 1791625158.373695,
+         "duration_sec": 4.3985137939453125
+        },
+        {
+         "from_ts": 1791625180.319965,
+         "to_ts": 1791625183.375185,
+         "duration_sec": 3.055220127105713
+        },
+        {
+         "from_ts": 1791625471.826838,
+         "to_ts": 1791625475.207546,
+         "duration_sec": 3.3807079792022705
+        },
+        {
+         "from_ts": 1791625492.773375,
+         "to_ts": 1791625498.483959,
+         "duration_sec": 5.710583925247192
+        }
+       ]
+      }
+     },
+     "flap_count": 0
+    }
+   },
+   "basis": {
+    "binance_minus_chainlink_bps_median": 9.800852473733121,
+    "samples": 328,
+    "label": "DESCRIPTIVE_ONLY_NONCANONICAL"
+   },
+   "schema_versions_seen": [
+    2
+   ],
+   "book_empty_detectable": true,
+   "snapshot_count": 329
+  }
+ ]
+}

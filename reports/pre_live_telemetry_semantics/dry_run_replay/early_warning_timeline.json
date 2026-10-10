@@ -1,0 +1,469 @@
+{
+ "run_id": "run_1791602735_398a83d0",
+ "positions": [
+  {
+   "kind": "SHADOW",
+   "slug": "btc-updown-15m-1791602100",
+   "instrument_id": "0xa2c879d2f94047613e59c15835db3aa45ba668167655cf5445d7f101b841964d-100171960541320735688135788028021392679681608775733530961743260878422466456574.POLYMARKET",
+   "entry_bid_state": "SHADOW_QUOTE",
+   "held_side": "UP",
+   "entry_ts": 1791602781.714521,
+   "entry_bid": 0.68,
+   "entry_binance": 82589.16,
+   "strike": 82510.90619752229,
+   "timeline": {
+    "ENTRY": {
+     "status": "TRIGGERED",
+     "ts": 1791602781.714521,
+     "context": {
+      "tte": null,
+      "required_move_sigma": null,
+      "required_move_z_diffusion": null
+     }
+    },
+    "T_BINANCE_1BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_2BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_3BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_5BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_BINANCE_10BPS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "move_bps": null
+    },
+    "T_TOKEN_005_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791602786.978654,
+     "censored": false,
+     "context": {
+      "tte": 213.02134609222412,
+      "required_move_sigma": null,
+      "required_move_z_diffusion": null
+     }
+    },
+    "T_TOKEN_005_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791602836.810225,
+     "context": {
+      "tte": 163.1897749900818,
+      "required_move_sigma": 0.13551467481236507,
+      "required_move_z_diffusion": 2.204770372343714
+     }
+    },
+    "T_TOKEN_005_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_010_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791602796.268211,
+     "censored": false,
+     "context": {
+      "tte": 203.73178911209106,
+      "required_move_sigma": 0.08145244600728543,
+      "required_move_z_diffusion": 0.9672750664921702
+     }
+    },
+    "T_TOKEN_010_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791602820.507075,
+     "context": {
+      "tte": 179.49292492866516,
+      "required_move_sigma": 0.1198387641371529,
+      "required_move_z_diffusion": 1.69868668253423
+     }
+    },
+    "T_TOKEN_010_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_015_FIRST": {
+     "status": "TRIGGERED",
+     "ts": 1791602797.323714,
+     "censored": false,
+     "context": {
+      "tte": 202.67628598213196,
+      "required_move_sigma": 0.08162467569616028,
+      "required_move_z_diffusion": 0.9891452687998474
+     }
+    },
+    "T_TOKEN_015_RECOVERY": {
+     "status": "TRIGGERED",
+     "ts": 1791602801.999071,
+     "context": {
+      "tte": 198.00092911720276,
+      "required_move_sigma": 0.0914077262084436,
+      "required_move_z_diffusion": 1.1738157376339469
+     }
+    },
+    "T_TOKEN_015_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_020_FIRST": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false
+    },
+    "T_TOKEN_020_RECOVERY": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_TOKEN_020_SECOND": {
+     "status": "NOT_TRIGGERED",
+     "ts": null
+    },
+    "T_CHAINLINK_SPOT_CROSS": {
+     "status": "UNKNOWN",
+     "ts": null,
+     "censored": false,
+     "adverse_cross_count": 0
+    },
+    "T_TWAP_CROSS": {
+     "status": "NOT_TRIGGERED",
+     "ts": null,
+     "censored": false,
+     "adverse_cross_count": 0
+    },
+    "T_MINUS2": {
+     "status": "UNKNOWN",
+     "ts": null
+    },
+    "T_BREAKER_ELIGIBLE": {
+     "status": "UNKNOWN",
+     "ts": null
+    },
+    "T_EXIT_SUBMIT": {
+     "status": "UNKNOWN",
+     "ts": null
+    },
+    "T_EXIT_FILL": {
+     "status": "UNKNOWN",
+     "ts": null
+    }
+   },
+   "token": {
+    "0.05": {
+     "primary": {
+      "threshold": "0.05",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791602786.978654,
+        "start_ts_lower": 1791602786.978654,
+        "start_censored": false,
+        "max_dd": "0.17",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791602836.810225,
+        "end_ts_lower": 1791602836.810225,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 49.831571102142334,
+        "duration_min_sec": 49.831571102142334,
+        "duration_max_sec": 49.831571102142334,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791602786.978654,
+      "first_recovery_ts": 1791602836.810225,
+      "first_episode_duration_sec": 49.831571102142334,
+      "first_episode_duration_bounds": [
+       49.831571102142334,
+       49.831571102142334
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.05",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791602786.978654,
+        "start_ts_lower": 1791602786.978654,
+        "start_censored": false,
+        "max_dd": "0.17",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791602836.810225,
+        "end_ts_lower": 1791602836.810225,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791602844.1363719,
+        "duration_sec": 49.831571102142334,
+        "duration_min_sec": 49.831571102142334,
+        "duration_max_sec": 49.831571102142334,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791602786.978654,
+      "first_recovery_ts": 1791602836.810225,
+      "first_episode_duration_sec": 49.831571102142334,
+      "first_episode_duration_bounds": [
+       49.831571102142334,
+       49.831571102142334
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "flap_count": 0
+    },
+    "0.10": {
+     "primary": {
+      "threshold": "0.10",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791602796.268211,
+        "start_ts_lower": 1791602796.268211,
+        "start_censored": false,
+        "max_dd": "0.17",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791602820.507075,
+        "end_ts_lower": 1791602820.507075,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 24.238864183425903,
+        "duration_min_sec": 24.238864183425903,
+        "duration_max_sec": 24.238864183425903,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791602796.268211,
+      "first_recovery_ts": 1791602820.507075,
+      "first_episode_duration_sec": 24.238864183425903,
+      "first_episode_duration_bounds": [
+       24.238864183425903,
+       24.238864183425903
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.10",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791602796.268211,
+        "start_ts_lower": 1791602796.268211,
+        "start_censored": false,
+        "max_dd": "0.17",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791602820.507075,
+        "end_ts_lower": 1791602820.507075,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791602826.203625,
+        "duration_sec": 24.238864183425903,
+        "duration_min_sec": 24.238864183425903,
+        "duration_max_sec": 24.238864183425903,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791602796.268211,
+      "first_recovery_ts": 1791602820.507075,
+      "first_episode_duration_sec": 24.238864183425903,
+      "first_episode_duration_bounds": [
+       24.238864183425903,
+       24.238864183425903
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "flap_count": 0
+    },
+    "0.15": {
+     "primary": {
+      "threshold": "0.15",
+      "variant": "PRIMARY",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791602797.323714,
+        "start_ts_lower": 1791602797.323714,
+        "start_censored": false,
+        "max_dd": "0.17",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791602801.999071,
+        "end_ts_lower": 1791602801.999071,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": null,
+        "duration_sec": 4.675356864929199,
+        "duration_min_sec": 4.675356864929199,
+        "duration_max_sec": 4.675356864929199,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791602797.323714,
+      "first_recovery_ts": 1791602801.999071,
+      "first_episode_duration_sec": 4.675356864929199,
+      "first_episode_duration_bounds": [
+       4.675356864929199,
+       4.675356864929199
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.15",
+      "variant": "HYSTERESIS",
+      "status": "TRIGGERED",
+      "episode_count": 1,
+      "episodes": [
+       {
+        "start_ts": 1791602797.323714,
+        "start_ts_lower": 1791602797.323714,
+        "start_censored": false,
+        "max_dd": "0.17",
+        "exit_unavailable_seen": false,
+        "spans_unobserved": false,
+        "end_ts": 1791602801.999071,
+        "end_ts_lower": 1791602801.999071,
+        "end_censored": false,
+        "censored_at_end": false,
+        "recovery_confirmed_ts": 1791602807.690191,
+        "duration_sec": 4.675356864929199,
+        "duration_min_sec": 4.675356864929199,
+        "duration_max_sec": 4.675356864929199,
+        "max_dd_is_lower_bound": false
+       }
+      ],
+      "first_trigger_ts": 1791602797.323714,
+      "first_recovery_ts": 1791602801.999071,
+      "first_episode_duration_sec": 4.675356864929199,
+      "first_episode_duration_bounds": [
+       4.675356864929199,
+       4.675356864929199
+      ],
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "flap_count": 0
+    },
+    "0.20": {
+     "primary": {
+      "threshold": "0.20",
+      "variant": "PRIMARY",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "hysteresis": {
+      "threshold": "0.20",
+      "variant": "HYSTERESIS",
+      "status": "NOT_TRIGGERED",
+      "episode_count": 0,
+      "episodes": [],
+      "first_trigger_ts": null,
+      "first_recovery_ts": null,
+      "first_episode_duration_sec": null,
+      "first_episode_duration_bounds": null,
+      "second_trigger_ts": null,
+      "time_recovery_to_second_trigger_sec": null,
+      "coverage": {
+       "observed_points": 180,
+       "total_points": 181,
+       "observed_fraction": 0.994475138121547,
+       "gaps": []
+      }
+     },
+     "flap_count": 0
+    }
+   },
+   "basis": {
+    "binance_minus_chainlink_bps_median": null,
+    "samples": 0,
+    "label": "DESCRIPTIVE_ONLY_NONCANONICAL"
+   },
+   "schema_versions_seen": [
+    1
+   ],
+   "book_empty_detectable": false,
+   "snapshot_count": 181
+  }
+ ]
+}

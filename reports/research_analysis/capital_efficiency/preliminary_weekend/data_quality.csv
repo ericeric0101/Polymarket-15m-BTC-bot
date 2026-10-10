@@ -1,0 +1,8 @@
+metric,usable_N,missing_N,excluded_N,detail
+completed_research_markets,47,0,0,ResearchStore canonical TEST_DRY_RUN summaries
+completed_markets_with_settled_shadow_trade,10,0,0,Completed markets represented in trade capital cohort
+shadow_entry_records,10,0,0,SHADOW_SIM_ENTRY_FILLED; may be unresolved
+live_recorded_entries,0,0,0,ORDER_FILLED; not pooled with simulated entries
+settled_shadow_entries,10,0,0,Deduped SHADOW_SIM_SETTLED
+capital_efficiency_usable,10,0,0,positive fill notional and positive holding time required
+stopped_trade_reconstruction,0,0,0,No durable joined stop-to-finalized-shadow lifecycle
