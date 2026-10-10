@@ -106,6 +106,46 @@ def exit_depth_metrics(levels: Any, qty: Any, *, l2_age_sec: Optional[float]) ->
                 "exit_depth_covers_qty": None, "exit_depth_levels_used": None, "exit_vwap_for_qty": None}
 
 
+BID_FRESH, BID_STALE, BID_BOOK_EMPTY, BID_UNKNOWN = "FRESH_BID", "STALE", "BOOK_EMPTY", "UNKNOWN"
+
+
+def entry_bid_baseline(state: Any, max_age_sec: Optional[float]) -> dict[str, Any]:
+    """Executable entry baseline captured once at the FIRST BUY fill.
+
+    The bid/ask come from the book state read at fill time (same host clock).
+    A stale, repaired (synthesized/crossed) or empty-bid book is not an
+    executable baseline: ``entry_executable_bid`` is then None and the state
+    says why.  Never a midpoint.  Pure; never raises.
+    """
+    out: dict[str, Any] = {"entry_executable_bid": None, "entry_executable_ask": None,
+                           "entry_bid_age_sec": None, "entry_bid_state": BID_UNKNOWN,
+                           "entry_fill_price": None, "entry_bid_size_at_fill": None,
+                           "entry_quote_synthesis": None}
+    try:
+        state = state or {}
+        bid, ask = _dec(state.get("entry_bid_at_fill")), _dec(state.get("entry_ask_at_fill"))
+        age, size = _num(state.get("entry_quote_age_at_fill_sec")), _num(state.get("entry_bid_size_at_fill"))
+        synthesis = state.get("entry_quote_synthesis")
+        out.update({"entry_bid_age_sec": age, "entry_bid_size_at_fill": size,
+                    "entry_quote_synthesis": str(synthesis) if synthesis else None,
+                    "entry_fill_price": _num(state.get("entry_fill_price_first"))})
+        if bid is None:
+            return out
+        if age is None or max_age_sec is None or not 0.0 <= age <= float(max_age_sec):
+            out["entry_bid_state"] = BID_STALE if age is not None and max_age_sec is not None else BID_UNKNOWN
+            return out
+        if synthesis == "missing_bid" or bid <= 0 or (size is not None and size <= 0):
+            out["entry_bid_state"] = BID_BOOK_EMPTY
+            return out
+        if synthesis:
+            return out  # crossed/repaired book: not an executable baseline
+        out.update({"entry_bid_state": BID_FRESH, "entry_executable_bid": float(bid),
+                    "entry_executable_ask": _num(ask)})
+        return out
+    except Exception:
+        return {**out, "entry_executable_bid": None, "entry_bid_state": BID_UNKNOWN}
+
+
 def _num(value: Any) -> Optional[float]:
     if value is None:
         return None

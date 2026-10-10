@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from statistics import mean
 from typing import Any
 
-from bot.research.provenance import PREDICTION_SCHEMA_VERSION
+from bot.research.provenance import PREDICTION_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION
 from bot.research.clocks import observed_source_reference
 import math
 import time
@@ -43,6 +43,70 @@ def _age(now_ts: float, source_ts: Any) -> float | None:
 
 def _fresh(age: float | None, max_age: float) -> bool:
     return age is not None and 0.0 <= age <= max_age
+
+
+# Per-side executable-bid state (research only).  BOOK_EMPTY is a fresh book
+# with no bids (the adapter publishes an empty bid side as MIN_PRICE with zero
+# size): exit value is unavailable -- severe, not unknown and not zero drawdown.
+BID_FRESH = "FRESH_BID"
+BID_STALE = "STALE"
+BID_BOOK_EMPTY = "BOOK_EMPTY"
+BID_UNKNOWN = "UNKNOWN"
+
+
+def side_bid_state(*, fresh: bool, observed: bool, bid: Any, bid_size: Any) -> str:
+    """Classify one token's bid from its OWN quote only (never the other side)."""
+    if not observed:
+        return BID_UNKNOWN
+    if not fresh:
+        return BID_STALE
+    price, size = _number(bid), _number(bid_size)
+    if price is None or price <= 0 or (size is not None and size <= 0):
+        return BID_BOOK_EMPTY
+    return BID_FRESH
+
+
+def _early_warning_fields(context: dict[str, Any], now: float, up_fresh: bool, down_fresh: bool) -> dict[str, Any]:
+    """Additive schema-v2 fields; a fault here never drops or alters the legacy row.
+
+    Chainlink spot reuses the raw RTDS stream already consumed by the runtime
+    and the existing raw-spot freshness rule (local receipt age < bound).  The
+    held side is the instrument of the actual live position, never inferred
+    from prices; without a live position no held-side field is claimed.
+    """
+    out: dict[str, Any] = {"snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION}
+    try:
+        price = _number(context.get("chainlink_spot"))
+        age = _age(now, context.get("chainlink_received_ts"))
+        max_age = float(context.get("chainlink_max_age_sec", 10.0))
+        fresh = price is not None and price > 0 and age is not None and 0.0 <= age < max_age
+        out.update({"chainlink_spot": price if fresh else None, "chainlink_spot_age_sec": age,
+                    "chainlink_spot_fresh": bool(fresh),
+                    "chainlink_source_ts": _number(context.get("chainlink_source_ts"))})
+        states = {}
+        for side, side_fresh in (("up", up_fresh), ("down", down_fresh)):
+            states[side] = side_bid_state(
+                fresh=side_fresh, observed=_number(context.get(f"market_{side}_received_ts")) is not None,
+                bid=context.get(f"best_bid_{side}"), bid_size=context.get(f"market_{side}_bid_size"))
+            out[f"{side}_bid_state"] = states[side]
+            out[f"{side}_bid_fresh"] = states[side] == BID_FRESH
+        held_side = str(context.get("held_side") or "").upper()
+        if held_side not in {"UP", "DOWN"} or not context.get("held_instrument_id"):
+            out["held_side"] = None
+            return out
+        key = held_side.lower()
+        state = states[key]
+        out.update({
+            "held_side": held_side, "held_instrument_id": str(context.get("held_instrument_id")),
+            "held_qty": _number(context.get("held_qty")),
+            "held_side_bid_state": state, "held_side_bid_fresh": state == BID_FRESH,
+            "held_side_bid": _number(context.get(f"best_bid_{key}")) if state in {BID_FRESH, BID_BOOK_EMPTY} else None,
+            "held_side_quote_age_sec": _age(now, context.get("held_quote_value_ts")),
+            "held_entry_executable_bid": _number(context.get("held_entry_executable_bid")),
+        })
+    except Exception as exc:
+        out = {"snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION, "early_warning_fields_error": type(exc).__name__}
+    return out
 
 
 def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
@@ -203,6 +267,7 @@ def build_prediction_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "entry_candidate_id": context.get("entry_candidate_id"),
     }
     result["joint_fresh"] = bool(result["p_ex_fresh"] and result["market_mid_fresh"] and result["btc_fresh"] and result["twap_fresh"])
+    result.update(_early_warning_fields(context, now, bool(up_fresh), bool(down_fresh)))
     return result
 
 
@@ -451,6 +516,7 @@ class PredictionResearchSnapshotter:
                                      "sigma_ex_market_fresh", "sigma_ex_market_age_sec", "required_move_mode",
                                      "required_future_avg_to_flip", "required_move_usd", "required_move_bps",
                                      "required_move_sigma", "remaining_final_window_sec", "settlement_state_side"}})
+            context.update(self._early_warning_context(strategy, up_inst, down_inst, research_ahead_of_handoff))
             context["snapshot_ts"] = now
             context["trigger"] = trigger
             context["identity"] = {"run_id": self.run_id, "market_slug": slug,
@@ -496,6 +562,57 @@ class PredictionResearchSnapshotter:
             if self._counters["errors"] == 1:
                 logger.warning(f"Prediction research snapshot disabled/skipped: {type(exc).__name__}: {exc}")
             return None
+
+    @staticmethod
+    def _early_warning_context(strategy: Any, up_inst: str, down_inst: str,
+                               research_ahead_of_handoff: bool) -> dict[str, Any]:
+        """Read-only inputs for the schema-v2 fields; never raises, never mutates."""
+        out: dict[str, Any] = {}
+        try:
+            out["chainlink_spot"] = getattr(strategy, "_polymarket_chainlink_price", None)
+            out["chainlink_received_ts"] = getattr(strategy, "_polymarket_chainlink_price_ts", None)
+            out["chainlink_source_ts"] = getattr(strategy, "_polymarket_chainlink_price_observation_ts", None)
+            out["chainlink_max_age_sec"] = float(getattr(strategy, "_RAW_SPOT_FRESHNESS_SEC", 10.0))
+        except Exception:
+            pass
+        try:
+            depth = getattr(strategy, "latest_quote_depth_by_inst", None) or {}
+            prewarm = (getattr(strategy, "quote_prewarm_latest_by_inst", None) or {}) if research_ahead_of_handoff else {}
+            for side, inst in (("up", up_inst), ("down", down_inst)):
+                if not inst:
+                    continue
+                size = (depth.get(inst) or (None,))[0]
+                if research_ahead_of_handoff and isinstance(prewarm.get(inst), dict):
+                    size = prewarm[inst].get("bid_size", size)
+                out[f"market_{side}_bid_size"] = size
+        except Exception:
+            pass
+        try:
+            if research_ahead_of_handoff:
+                return out
+            held = None
+            for inst_key, state in list((getattr(strategy, "live_inventory_cost", None) or {}).items()):
+                if str(inst_key) not in {up_inst, down_inst} or not up_inst or not down_inst:
+                    continue
+                qty = _number((state or {}).get("qty"))
+                if qty is not None and qty > 0 and (held is None or qty > held[2]):
+                    held = (str(inst_key), state, qty)
+            if held is None:
+                return out
+            from bot.stop_timing_telemetry import entry_bid_baseline
+            inst_key, state, qty = held
+            max_age = max(0.1, float(getattr(strategy, "quote_max_delivery_delay_sec", 2.0)))
+            out.update({
+                "held_instrument_id": inst_key, "held_side": "UP" if inst_key == up_inst else "DOWN",
+                "held_qty": qty,
+                "held_quote_value_ts": (getattr(strategy, "last_quote_update_ts_by_inst", None) or {}).get(inst_key),
+                "held_entry_executable_bid": entry_bid_baseline(state, max_age)["entry_executable_bid"],
+            })
+        except Exception:
+            for key in ("held_instrument_id", "held_side", "held_qty", "held_quote_value_ts",
+                        "held_entry_executable_bid"):
+                out.pop(key, None)
+        return out
 
     def recent_health(self, now_ts: float, *, window_sec: float = 300.0, slug: str | None = None) -> dict:
         """Bounded capture/accepted quality; accepted does not prove durable storage.

@@ -24,10 +24,14 @@ _SCHEMA_VERSIONS = {
     "research_schema_version": 1,
     "telemetry_schema_version": 1,
     "lifecycle_schema_version": 1,
+    # PREDICTION_RESEARCH_SNAPSHOT payload cohorts: 1 = rows without the key;
+    # 2 = Chainlink spot + per-side / held-side bid state (additive only).
+    "snapshot_schema_version": 2,
 }
 PREDICTION_SCHEMA_VERSION = _SCHEMA_VERSIONS["prediction_schema_version"]
 RESEARCH_SCHEMA_VERSION = _SCHEMA_VERSIONS["research_schema_version"]
 LIFECYCLE_SCHEMA_VERSION = _SCHEMA_VERSIONS["lifecycle_schema_version"]
+SNAPSHOT_SCHEMA_VERSION = _SCHEMA_VERSIONS["snapshot_schema_version"]
 
 
 def _safe(value: Any, key: str = "") -> Any:
