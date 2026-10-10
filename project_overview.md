@@ -12,6 +12,68 @@ this patch neither mutates nor archives it. BTC1s Parquet remains unchanged. The
 Historical entries below describe their recorded checkpoints, not current Outcome
 execution authority. Deployment and a new dry-run validation remain separate.
 
+## Effective PnL and settlement evidence (2026-10-10; branch `feat/effective-pnl`, not deployed)
+
+**Authority.** Every PnL a human reads (journal dashboard, `scripts/live_dashboard.py`,
+`scripts/pnl_attribution_report.py`, reconciliation) comes from one projection,
+`monitoring.pnl_attribution.load_effective_market_pnl`:
+
+`PnL = sell net proceeds + payout − buy total cost`, fees counted once, per market.
+
+- **Cash**: the venue's own trade legs (`VENUE_TRADE_CONFIRMED`) when journaled,
+  otherwise journal fills. The venue charges taker BUY fees in USDC, and the journal
+  has missed resting take-profit SELL fills, so venue cash wins.
+- **Outcome**: official (`MARKET_OUTCOME_CONFIRMED`, Gamma), otherwise the bot's TWAP
+  label (ESTIMATED), otherwise PENDING. UNKNOWN is never a zero payout.
+- **Payout**: confirmed redeem cash (`REDEEM_CASH_CONFIRMED`) when it matches the
+  tracked position; the venue's redeemed share count replaces the fee-share estimate.
+  Otherwise held winning shares × $1.
+- **Identity**: fills are keyed by token (official `clobTokenIds`) and corrected
+  from the order's submit row. Some taker-exit fills are journaled on the sibling
+  token; 0-priced duplicate rows are dropped.
+- **Basis** (`pnl_basis`): `FILLS_FINAL` / `CASH_CONFIRMED` / `OUTCOME_CONFIRMED`
+  (final), then `ESTIMATED`, `PENDING`, `OPEN`, and `INCOMPLETE`. INCOMPLETE covers a
+  missing BUY, a venue BUY absent from the journal, redeemed shares beyond the tracked
+  position, and an unmapped token; it is excluded from totals and never inflates
+  strategy PnL. Position, outcome and redeem state are separate fields. Totals are sums
+  of the same per-market rows.
+
+**Evidence is append-only.** Raw fills, `MARKET_SETTLEMENT` and `MARKET_CYCLE_PNL`
+are never edited and no second `MARKET_CYCLE_PNL` is written. Evidence rows carry a
+stable `evidence_key`; writers skip existing keys and the projection dedupes. The
+runtime worker `bot.settlement_confirmation` (`SETTLEMENT_CONFIRMATION_ENABLED`,
+default on, 120 s, 168 h lookback) appends evidence for ended traded markets. It is
+evidence only: it never touches orders, `MARKET_CYCLE_PNL`, the session PnL guard or
+the regime guard. `scripts/pnl_evidence_backfill.py` (fetch / report / apply /
+rollback) is the historical path: dry-run by default; `--confirm` needs a stopped bot
+(both locks), backs up first, runs in one transaction, and tags rows with a batch id.
+`scripts/backfill_redeem_activity.py` (in-place rewrite) is deprecated.
+
+**Still on raw `MARKET_CYCLE_PNL` (bot estimate), deliberately:**
+- the session PnL guard (including restart reconstruction) and the regime guard;
+- `alert_watcher` and Telegram (in-process records);
+- about 25 research scripts, so their PnL figures are bot estimates.
+
+Changing the guards' basis is a separate, unapproved decision. The proposal is an
+idempotent per-market delta for open sessions only (see the report).
+
+**Reconciliation (snapshot 2026-10-10 09:47Z, 135 markets):**
+- **Effective final PnL**: −$29.55 over 131 markets (4 INCOMPLETE).
+- **Journal raw vs effective**: on the 117 comparable markets, the journal says +$8.63
+  and the effective PnL is −$26.71.
+- **Official outcomes**: 137/137 agree with the bot's TWAP direction. The errors are in
+  the ledger (ghost inventory before `b0c383f`, missed fills, the fee model and the
+  token label), not in settlement timing.
+- **Version-verified post-fix runs**: 6 markets, no ghost or restart signature. This
+  sample is too small to call the fix verified.
+
+Report: `reports/pnl_reconciliation/pnl_reconciliation_20261010.md`.
+
+**Open trading-layer findings (not changed here):**
+- The taker BUY fee is modelled in shares, but the venue charges it in USDC.
+- Some taker-exit fills are journaled on the sibling token, so the runtime inventory
+  can drift.
+
 ## Entry sizing share_v1 — RESEARCH COHORT BOUNDARY (2026-10-09)
 
 `SIZING_RULE_VERSION = "share_v1_2026-10-09"` (`bot/entry_sizing.py`) is the single

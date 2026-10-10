@@ -1,0 +1,92 @@
+{
+ "generated_at": "2026-10-10T11:10:15.019767+00:00",
+ "journal": "/private/tmp/claude-501/-Users-cheng-kaihuang-Polymarket-BTC-15-Minute-Trading-Bot-main/8fe081da-3206-45b3-838d-2a7d5459b6af/scratchpad/snap/journal_snapshot.db",
+ "journal_sha256_prefix": "e5fb05fe606470f1",
+ "evidence_cache": "/private/tmp/claude-501/-Users-cheng-kaihuang-Polymarket-BTC-15-Minute-Trading-Bot-main/8fe081da-3206-45b3-838d-2a7d5459b6af/scratchpad/snap/evidence_v2.json",
+ "evidence_fetched_at": "2026-10-10T10:59:44.515514+00:00",
+ "as_of_ts": 1791625634.0,
+ "summary": {
+  "market_count": 135,
+  "by_basis": {
+   "FILLS_FINAL": {
+    "count": 74,
+    "pnl_usdc": 7.976165000000009
+   },
+   "CASH_CONFIRMED": {
+    "count": 30,
+    "pnl_usdc": -40.646893
+   },
+   "OUTCOME_CONFIRMED": {
+    "count": 27,
+    "pnl_usdc": 3.119751999999998
+   },
+   "ESTIMATED": {
+    "count": 0,
+    "pnl_usdc": 0.0
+   },
+   "PENDING": {
+    "count": 0,
+    "pnl_usdc": 0.0
+   },
+   "OPEN": {
+    "count": 0,
+    "pnl_usdc": 0.0
+   },
+   "INCOMPLETE": {
+    "count": 4,
+    "pnl_usdc": 0.0
+   }
+  },
+  "final_pnl_usdc": -29.55097599999999,
+  "estimated_pnl_usdc": 0.0,
+  "final_plus_estimated_pnl_usdc": -29.55097599999999,
+  "unresolved_count": 4,
+  "first_market_end_ts": 1788883200.0,
+  "last_market_end_ts": 1791625500.0
+ },
+ "comparable": {
+  "count": 117,
+  "journal_sum_usdc": 8.63353030397876,
+  "effective_sum_usdc": -26.709167999999995,
+  "abs_diff_ge_0_05": 47
+ },
+ "issue_counts": {
+  "no_journaled_buy": 4,
+  "venue_buy_not_in_journal": 3,
+  "fill_token_corrected_from_submit": 18,
+  "fill_reattributed_by_token": 4,
+  "zero_price_duplicate_fill_dropped": 2,
+  "venue_sell_not_in_journal": 5,
+  "journal_fill_not_in_venue": 2
+ },
+ "post_fix_versions": {
+  "fix_commit": "b0c383f",
+  "markets": 6,
+  "version_evidence_counts": {
+   "unverifiable": 129,
+   "yes_base_dirty": 3,
+   "yes": 3
+  },
+  "journal_vs_effective_ge_0_05": [
+   {
+    "slug": "btc-updown-15m-1791587700",
+    "loaded_version": "LIVE:f1a134e-dirty",
+    "pnl_basis": "FILLS_FINAL",
+    "position_state": "FULLY_SOLD",
+    "journal_cycle_pnl_usdc": -3.1549189374999997,
+    "effective_pnl_usdc": -3.2095499999999997,
+    "issues": ""
+   },
+   {
+    "slug": "btc-updown-15m-1791623700",
+    "loaded_version": "LIVE:7a59755",
+    "pnl_basis": "FILLS_FINAL",
+    "position_state": "FULLY_SOLD",
+    "journal_cycle_pnl_usdc": -3.093137960704,
+    "effective_pnl_usdc": -3.1524900000000002,
+    "issues": "fill_token_corrected_from_submit"
+   }
+  ],
+  "missing_cycle_pnl_with_position": []
+ }
+}

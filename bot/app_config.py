@@ -484,6 +484,9 @@ class OperationsConfig:
     auto_redeem_timeout_sec: int
     auto_redeem_min_gap_sec: int
     auto_redeem_slug_filter: str
+    settlement_confirmation_enabled: bool
+    settlement_confirmation_interval_sec: int
+    settlement_confirmation_lookback_hours: int
     market_settling_grace_sec: int
     market_next_poll_sec: int
     balance_check_interval_sec: int
@@ -1070,6 +1073,10 @@ class AppConfig:
                 auto_redeem_timeout_sec=max(30, _env_int("AUTO_REDEEM_TIMEOUT_SEC", 180)),
                 auto_redeem_min_gap_sec=max(0, _env_int("AUTO_REDEEM_MIN_GAP_SEC", 300)),
                 auto_redeem_slug_filter=_env_str("AUTO_REDEEM_SLUG_FILTER", "btc-updown-15m").strip(),
+                # Evidence-only (bot.settlement_confirmation): never changes orders or risk state.
+                settlement_confirmation_enabled=_env_bool_inverted("SETTLEMENT_CONFIRMATION_ENABLED", True),
+                settlement_confirmation_interval_sec=max(30, _env_int("SETTLEMENT_CONFIRMATION_INTERVAL_SEC", 120)),
+                settlement_confirmation_lookback_hours=max(1, _env_int("SETTLEMENT_CONFIRMATION_LOOKBACK_HOURS", 168)),
                 market_settling_grace_sec=max(1, _env_int("MARKET_SETTLING_GRACE_SEC", 15)),
                 market_next_poll_sec=max(5, _env_int("MARKET_NEXT_POLL_SEC", 15)),
                 balance_check_interval_sec=max(10, _env_int("MAKER_BALANCE_CHECK_INTERVAL_SEC", 30)),
