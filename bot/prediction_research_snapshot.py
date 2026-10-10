@@ -97,8 +97,9 @@ def _early_warning_fields(context: dict[str, Any], now: float, up_fresh: bool, d
         key = held_side.lower()
         state = states[key]
         out.update({
-            "held_side": held_side, "held_instrument_id": str(context.get("held_instrument_id")),
-            "held_qty": _number(context.get("held_qty")),
+            # The held token id is the row's up/down_instrument_id for held_side
+            # (identity from the position's instrument, not from price).
+            "held_side": held_side, "held_qty": _number(context.get("held_qty")),
             "held_side_bid_state": state, "held_side_bid_fresh": state == BID_FRESH,
             "held_side_bid": _number(context.get(f"best_bid_{key}")) if state in {BID_FRESH, BID_BOOK_EMPTY} else None,
             "held_side_quote_age_sec": _age(now, context.get("held_quote_value_ts")),
@@ -516,7 +517,10 @@ class PredictionResearchSnapshotter:
                                      "sigma_ex_market_fresh", "sigma_ex_market_age_sec", "required_move_mode",
                                      "required_future_avg_to_flip", "required_move_usd", "required_move_bps",
                                      "required_move_sigma", "remaining_final_window_sec", "settlement_state_side"}})
-            context.update(self._early_warning_context(strategy, up_inst, down_inst, research_ahead_of_handoff))
+            try:  # schema-v2 inputs must never cost the legacy snapshot
+                context.update(self._early_warning_context(strategy, up_inst, down_inst, research_ahead_of_handoff))
+            except Exception:
+                self._counters["early_warning_context_errors"] += 1
             context["snapshot_ts"] = now
             context["trigger"] = trigger
             context["identity"] = {"run_id": self.run_id, "market_slug": slug,

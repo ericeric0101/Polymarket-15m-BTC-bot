@@ -192,7 +192,8 @@ def test_capture_held_side_comes_from_live_inventory_not_price():
                           "entry_quote_age_at_fill_sec": 0.3, "entry_bid_size_at_fill": Decimal("12")}}
     row = PredictionResearchSnapshotter(db=_DB(), run_id="r").capture(
         _strategy(live_inventory_cost=inventory), now_ts=100.0, force=True)
-    assert row["held_side"] == "DOWN" and row["held_instrument_id"] == "down"
+    assert row["held_side"] == "DOWN" and row["down_instrument_id"] == "down"
+    assert "held_instrument_id" not in row  # identity = down_instrument_id in the same row
     assert row["held_qty"] == 6.0
     assert row["held_side_bid_state"] == BID_BOOK_EMPTY
     assert row["held_entry_executable_bid"] == 0.69
@@ -218,7 +219,19 @@ def test_added_capture_cost_is_small():
     samples = []
     for i in range(300):
         started = time.perf_counter()
-        snapper.capture(strategy, now_ts=100.0 + i * 0.001, force=True)
+        assert snapper.capture(strategy, now_ts=100.0 + i * 0.001, trigger="entry_decision", force=True)
         samples.append(time.perf_counter() - started)
     samples.sort()
     assert samples[len(samples) // 2] < 0.005  # whole capture (legacy + new) well under 5 ms p50
+
+
+def test_capture_keeps_legacy_row_when_new_input_gathering_itself_fails(monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("context gathering bug")
+
+    monkeypatch.setattr(PredictionResearchSnapshotter, "_early_warning_context", staticmethod(broken))
+    snapper = PredictionResearchSnapshotter(db=_DB(), run_id="r")
+    row = snapper.capture(_strategy(), now_ts=100.0, force=True)
+    assert row is not None and row["btc_spot"] == 100_010
+    assert row["chainlink_spot_fresh"] is False and row["held_side"] is None
+    assert snapper._counters["early_warning_context_errors"] == 1
