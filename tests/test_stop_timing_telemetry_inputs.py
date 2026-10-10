@@ -127,3 +127,22 @@ def test_entry_quote_capture_failure_never_blocks_the_fill():
     state = strategy.live_inventory_cost["inst-1"]
     assert state["qty"] == Decimal("5.2")
     assert state.get("entry_bid_at_fill") is None
+
+
+def test_exit_depth_small_negative_l2_age_is_same_cycle_skew_not_stale():
+    # LIVE run_1791621743: the L2 callback landed after the protective cycle
+    # captured now_ts, giving ages of -0.77..-0.88 s.  That is a same-cycle
+    # clock-read ordering artefact, not an old book.
+    for raw in (-0.77, -0.88, -1.0, -0.0):
+        m = exit_depth_metrics(LEVELS, Decimal("5"), l2_age_sec=raw)
+        assert m["exit_l2_state"] == "FRESH", raw
+        assert m["exit_l2_age_sec"] == 0.0, raw
+    # Beyond the documented bound the reading is not trusted as fresh.
+    far = exit_depth_metrics(LEVELS, Decimal("5"), l2_age_sec=-1.5)
+    assert far["exit_l2_state"] == "STALE" and far["exit_l2_age_sec"] == -1.5
+    # Genuinely old books stay STALE; the boundary stays FRESH.
+    assert exit_depth_metrics(LEVELS, Decimal("5"), l2_age_sec=2.5)["exit_l2_state"] == "STALE"
+    assert exit_depth_metrics(LEVELS, Decimal("5"), l2_age_sec=2.0)["exit_l2_state"] == "FRESH"
+    # No book: age is still normalised, state stays UNKNOWN.
+    none_book = exit_depth_metrics(None, Decimal("5"), l2_age_sec=-0.8)
+    assert none_book["exit_l2_state"] == "UNKNOWN" and none_book["exit_l2_age_sec"] == 0.0

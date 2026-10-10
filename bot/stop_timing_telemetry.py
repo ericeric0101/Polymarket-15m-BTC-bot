@@ -57,6 +57,19 @@ ABS_COMPONENTS = (
 
 # Held-token L2 is "FRESH" only within the same bound the depth gate uses.
 L2_FRESH_MAX_AGE_SEC = 2.0
+# ``now_ts`` is captured at the start of the protective cycle, but the L2
+# callback can stamp ``l2_update_ts_by_inst`` a moment later (same host clock),
+# producing a small negative age (LIVE run_1791621743: -0.77..-0.88 s).  A
+# negative age down to this bound is a clock-read ordering artefact and is
+# recorded as 0.0 / FRESH; anything more negative is not trusted as fresh.
+L2_NEGATIVE_AGE_TOLERANCE_SEC = 1.0
+
+
+def _normalise_l2_age(l2_age_sec: Any) -> Optional[float]:
+    age = _num(l2_age_sec)
+    if age is not None and -L2_NEGATIVE_AGE_TOLERANCE_SEC <= age < 0:
+        return 0.0
+    return age
 
 
 def exit_depth_metrics(levels: Any, qty: Any, *, l2_age_sec: Optional[float]) -> dict[str, Any]:
@@ -66,7 +79,7 @@ def exit_depth_metrics(levels: Any, qty: Any, *, l2_age_sec: Optional[float]) ->
     invented values, and never raise.
     """
     out: dict[str, Any] = {
-        "exit_l2_state": "UNKNOWN", "exit_l2_age_sec": _num(l2_age_sec), "exit_top_bid_size": None,
+        "exit_l2_state": "UNKNOWN", "exit_l2_age_sec": _normalise_l2_age(l2_age_sec), "exit_top_bid_size": None,
         "exit_depth_total_size": None, "exit_depth_covers_qty": None, "exit_depth_levels_used": None,
         "exit_vwap_for_qty": None,
     }
@@ -91,7 +104,8 @@ def exit_depth_metrics(levels: Any, qty: Any, *, l2_age_sec: Optional[float]) ->
             remaining -= take
             used += 1
         covers = need > 0 and remaining <= 0
-        fresh = l2_age_sec is not None and 0 <= float(l2_age_sec) <= L2_FRESH_MAX_AGE_SEC
+        age = out["exit_l2_age_sec"]
+        fresh = age is not None and 0 <= age <= L2_FRESH_MAX_AGE_SEC
         out.update({
             "exit_l2_state": "FRESH" if fresh else "STALE",
             "exit_top_bid_size": float(parsed[0][1]),
