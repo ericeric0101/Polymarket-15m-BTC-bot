@@ -1,6 +1,6 @@
 # PnL 資料流對帳報告（2026-10-10）
 
-分支 `feat/effective-pnl`（以 `94f1c47` 為基底）。正式 journal 未改寫；bot 全程維持 LIVE 執行（PID 91219，16:42 起），未停止也未重啟。
+分支 `feat/effective-pnl`（以 `94f1c47` 為基底）。正式 journal 未改寫。LIVE bot（PID 91219，16:42 起）在 17:47 左右由操作員停止：journal 最後寫入 17:47–17:49，結束時的 journal retention 在 17:48 被 KeyboardInterrupt 中斷。本次工作沒有停止或重啟 bot，只讀取 `backups/` 的備份。
 
 ## 1. 資料範圍與來源
 
