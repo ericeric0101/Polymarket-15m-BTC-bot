@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
+import json
+import sqlite3
+
 import time
 import threading
 from decimal import Decimal
 from typing import Any, Dict, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -80,6 +84,17 @@ def take_sync_journal_write_report(strategy: Any) -> Optional[dict[str, Any]]:
         report = getattr(strategy, "_journal_write_last_report", None)
         strategy._journal_write_last_report = None
         return report
+
+
+_TOKEN_IN_INSTRUMENT = re.compile(r"-([0-9]+)\.POLYMARKET$")
+
+
+def order_event_token_id(strategy: Any, instrument_id: Optional[str]) -> Optional[str]:
+    """Token of the row's own instrument; the current active side only as a fallback."""
+    match = _TOKEN_IN_INSTRUMENT.search(str(instrument_id or ""))
+    if match:
+        return match.group(1)
+    return getattr(strategy, "current_token_id", None)
 
 
 class StrategyDBRuntimeMixin:
@@ -517,6 +532,76 @@ class StrategyDBRuntimeMixin:
                 **reconciled,
             },
         )
+    def _apply_settlement_evidence_session_corrections(self) -> Dict[str, Any]:
+        """Idempotent per-market session-guard delta from settlement evidence (open session only).
+
+        For every market whose MARKET_CYCLE_PNL lies in the guard's current
+        session and whose effective PnL (monitoring.pnl_attribution) is final,
+        the guard should carry ``effective - journal estimate``. The increment
+        not yet applied is journaled first (SESSION_PNL_EVIDENCE_CORRECTION,
+        cumulative per market) and then applied once. Closed sessions are never
+        rewritten. Never touches orders or MARKET_CYCLE_PNL.
+        """
+        from monitoring.pnl_attribution import load_effective_market_pnl
+        from monitoring.trade_journal_db import SESSION_CORRECTION_EVENT, session_window_local
+
+        stats: Dict[str, Any] = {"applied": 0, "applied_usdc": 0.0, "skipped": {}}
+        guard = getattr(self, "_session_pnl_guard", None)
+        trade_db = getattr(self, "trade_db", None)
+        if guard is None or trade_db is None:
+            return stats
+        session_key = str(guard.state.session_date_taipei)
+        start_local, end_local = session_window_local(session_key)
+        conn = sqlite3.connect(f"file:{trade_db.db_path}?mode=ro", uri=True, timeout=30)
+        try:
+            cycles: Dict[str, Decimal] = {}
+            for ts, raw in conn.execute(
+                "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id"
+            ):
+                try:
+                    when = datetime.fromisoformat(str(ts))
+                    when = (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).astimezone(start_local.tzinfo)
+                    payload = json.loads(raw or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if start_local <= when < end_local and payload.get("slug"):
+                    cycles[str(payload["slug"])] = Decimal(str(payload.get("cycle_combined_pnl_usdc") or 0))
+            applied: Dict[str, Decimal] = {}
+            for slug, delta in conn.execute(
+                """SELECT json_extract(payload_json, '$.slug'), json_extract(payload_json, '$.delta_usdc')
+                   FROM strategy_events WHERE event_type=? AND json_extract(payload_json, '$.session_date_taipei')=?""",
+                (SESSION_CORRECTION_EVENT, session_key),
+            ):
+                applied[str(slug)] = applied.get(str(slug), Decimal("0")) + Decimal(str(delta or 0))
+        finally:
+            conn.close()
+        if not cycles:
+            return stats
+        effective = load_effective_market_pnl(trade_db.db_path, slugs=set(cycles))
+        for slug, journal_cycle in cycles.items():
+            row = effective.get(slug)
+            if row is None or not row["is_final"] or row["effective_pnl_usdc"] is None:
+                stats["skipped"][slug] = row["pnl_basis"] if row else "no_projection"
+                continue
+            target = Decimal(str(row["effective_pnl_usdc"])) - journal_cycle
+            increment = (target - applied.get(slug, Decimal("0"))).quantize(Decimal("0.000001"))
+            if abs(increment) < Decimal("0.01"):
+                continue
+            payload = {
+                "slug": slug, "session_date_taipei": session_key, "delta_usdc": float(increment),
+                "cumulative_delta_usdc": float(target), "pnl_basis": row["pnl_basis"],
+                "effective_pnl_usdc": row["effective_pnl_usdc"], "journal_cycle_pnl_usdc": float(journal_cycle),
+            }
+            if not self._db_strategy_event(SESSION_CORRECTION_EVENT, payload):
+                stats["skipped"][slug] = "journal_write_failed"
+                continue
+            if self._record_session_realized_pnl(increment, source="settlement_evidence_correction"):
+                stats["applied"] += 1
+                stats["applied_usdc"] += float(increment)
+            else:
+                stats["skipped"][slug] = "guard_persist_failed"
+        return stats
+
     def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> bool:
         if not self.trade_db:
             return False
@@ -617,7 +702,9 @@ class StrategyDBRuntimeMixin:
                 status=status,
                 reason=reason,
                 instrument_id=event_instrument_id or None,
-                token_id=self.current_token_id,
+                # The row's own instrument, not the current active side (which
+                # flips to the paired token after an invalidation).
+                token_id=order_event_token_id(self, instrument_id),
                 fee_rate_bps=self.last_observed_fee_rate_bps,
                 expected_net_usdc=expected_net_usdc,
                 commission_usdc=commission_usdc,

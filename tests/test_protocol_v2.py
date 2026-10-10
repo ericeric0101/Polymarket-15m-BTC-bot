@@ -178,10 +178,12 @@ def _taker_buy(protocol):
                                     filled_limit_price=Decimal("0.8"), filled_id="o", protocol=protocol)
 
 
-def test_v2_taker_buy_fee_is_collateral_not_shares():
-    v1, v2 = _taker_buy("v1"), _taker_buy("v2")
-    assert v1.effective_fee_shares_dec > 0 and v1.effective_fee_usdc_dec == 0
-    assert v2.effective_fee_shares_dec == 0 and v2.effective_fee_usdc_dec > 0
+def test_taker_buy_fee_is_collateral_not_shares_on_both_protocols():
+    # Venue evidence: v1 taker BUYs were also charged in USDC with full shares delivered.
+    for protocol in ("v1", "v2"):
+        fill = _taker_buy(protocol)
+        assert fill.effective_fee_shares_dec == 0 and fill.effective_fee_usdc_dec > 0
+    assert _taker_buy("v1").effective_fee_usdc_dec == _taker_buy("v2").effective_fee_usdc_dec
 
 
 def test_v2_buy_fee_reaches_inventory_cost_and_settlement_pnl():

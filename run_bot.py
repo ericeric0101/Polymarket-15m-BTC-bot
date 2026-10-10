@@ -4018,6 +4018,7 @@ class IntegratedBTCStrategy(
                 user_address=resolve_wallet_address(os.environ),
                 interval_sec=float(self.settlement_confirmation_interval_sec),
                 lookback_sec=float(self.settlement_confirmation_lookback_hours) * 3600.0,
+                after_cycle=self._apply_settlement_evidence_session_corrections,
             )
         except Exception as e:
             logger.warning(f"Settlement confirmation worker not started: {e}")

@@ -69,10 +69,62 @@ idempotent per-market delta for open sessions only (see the report).
 
 Report: `reports/pnl_reconciliation/pnl_reconciliation_20261010.md`.
 
-**Open trading-layer findings (not changed here):**
-- The taker BUY fee is modelled in shares, but the venue charges it in USDC.
-- Some taker-exit fills are journaled on the sibling token, so the runtime inventory
-  can drift.
+**Trading-layer follow-ups:** resolved in the next section.
+
+## Ledger fixes: USDC taker fee, fill token identity, session-guard evidence delta (2026-10-10)
+
+Branch `fix/ledger-fee-token-guard`. Approved by the operator on 2026-10-10.
+
+**Taker BUY fee in USDC** (`bot/fill_ledger.interpret_fill_liquidity`):
+- The venue charges a taker BUY fee in USDC on top of the spend and delivers the full
+  size, on both protocols. All 42 bot taker BUYs (2026-09-10..24) show
+  `usdc_size = price × size + fee`, and the redeemed share counts equal the filled size.
+- New fills therefore book `effective_fee_usdc` and set `effective_fee_shares = 0`. The
+  fee enters `entry_fee_remaining`, is realized once on SELL, and held shares now match
+  the venue. The fee amount is still the model estimate (mean |error| $0.02 against the
+  venue).
+- Behaviour change: held shares and the stop/exit cost basis include the fee as USDC
+  instead of fewer shares. Historical rows keep their old fee-share fields; the
+  effective-PnL projection already uses venue cash.
+
+**Fill token identity:**
+- Correction of the 2026-10-10 reconciliation note: the runtime inventory ledger was not
+  corrupted. `filled_inst` was the held token. What was wrong:
+  1. The journal `token_id` column always held the current active side
+     (`current_token_id`), which flips to the paired token after an invalidation (19
+     exit fills).
+  2. Before `cc1cd49`, so did the payload `instrument_id`.
+  3. Startup reconciliation (`reconcile_startup_resolved_cycle`) replayed lots by that
+     column, so it could book an exit SELL on the sibling lot and overstate the winner
+     payout applied to the session guard.
+- Fixes:
+  - The column is now the row's own instrument token (`bot.db_runtime.order_event_token_id`).
+  - Startup replay takes the order's submit-row token, then the fill instrument, then the
+    column.
+  - Defensively, a fill whose order is not a resting maker order is booked on the order's
+    own instrument from the Nautilus cache. A differing fill-event instrument is logged
+    and journaled as `fill_event_instrument_id`.
+
+**Session-guard evidence delta** (report §5; `StrategyDBRuntimeMixin._apply_settlement_evidence_session_corrections`,
+run by the settlement-confirmation worker after each cycle):
+- **Eligibility**: markets whose `MARKET_CYCLE_PNL` lies in the guard's *current*
+  session window and whose effective PnL is final (FILLS_FINAL / CASH_CONFIRMED /
+  OUTCOME_CONFIRMED).
+- **What is applied**: the guard should carry `effective − journal estimate`. Only the
+  increment not yet applied is used: it is journaled first as
+  `SESSION_PNL_EVIDENCE_CORRECTION` (per market, cumulative) and then applied once via
+  `_record_session_realized_pnl`.
+- **Threshold**: increments under $0.01 are ignored.
+- **Guarantees**:
+  - closed sessions are never rewritten;
+  - reconstruction (`reconstruct_session_pnl_state`) adds the corrections, so a restart
+    keeps them;
+  - repeated cycles are no-ops;
+  - orders, `MARKET_CYCLE_PNL` and the regime guard are untouched.
+- **Accepted residual risk**: a crash between the journal row and the guard persist
+  leaves the guard without that increment until the next reconstruction.
+
+Tests: `tests/test_ledger_fee_token_guard.py` (12 tests; 8 fail on `7e74b81`).
 
 ## Entry sizing share_v1 — RESEARCH COHORT BOUNDARY (2026-10-09)
 

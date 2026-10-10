@@ -9,7 +9,7 @@ from loguru import logger
 
 from bot.inventory import InventoryLedger
 from bot.post_trade import apply_fill_followup
-from execution.rebate_model import estimate_taker_buy_fee_shares, estimate_taker_fee_usdc
+from execution.rebate_model import estimate_taker_fee_usdc
 
 
 @dataclass
@@ -77,9 +77,12 @@ def interpret_fill_liquidity(
 ) -> FillLiquidityInterpretation:
     """Classify the fill and estimate its taker fee.
 
-    CTF (v1) takes the BUY fee in shares (fewer shares received).  Protocol V2's
-    Exchange takes the BUY fee in collateral on top of the spend, so the full
-    share quantity is received and the fee is booked in USDC like a SELL fee.
+    The venue takes a taker BUY fee in USDC on top of the spend and delivers the
+    full share quantity, for both protocols: every bot taker BUY 2026-09-10..24
+    shows ``usdc_size = price x size + fee`` and redeemed shares equal the
+    filled size (reports/pnl_reconciliation/). The fee is therefore booked in
+    USDC like a SELL fee and never reduces held shares. ``protocol`` is kept
+    for the caller's provenance.
     """
     liquidity_class = classify_fill_liquidity(
         liquidity_side=liquidity_side,
@@ -94,15 +97,7 @@ def interpret_fill_liquidity(
             shares=fill_qty_dec,
             probability=fill_price_dec,
         )
-        if side_for_ledger == "buy" and protocol == "v2":
-            effective_fee_usdc_dec = effective_fee_usdc_calc
-        elif side_for_ledger == "buy":
-            effective_fee_shares_dec = estimate_taker_buy_fee_shares(
-                shares=fill_qty_dec,
-                probability=fill_price_dec,
-            )
-        else:
-            effective_fee_usdc_dec = effective_fee_usdc_calc
+        effective_fee_usdc_dec = effective_fee_usdc_calc
     warning_message = ""
     if maker_matched and liquidity_class == "taker" and filled_limit_price > 0 and side_for_ledger:
         if (
