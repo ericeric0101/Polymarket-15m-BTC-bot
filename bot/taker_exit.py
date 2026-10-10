@@ -671,6 +671,13 @@ class TakerExitMixin:
                         exit_bid_levels = levels_fn(book, "bids", int(getattr(self, "orderbook_levels_limit", 10) or 10))
                 except Exception:
                     exit_bid_levels = None
+                held_bid_ts = held_bid_size = None
+                try:  # cached reads only; research inputs never raise into the exit path
+                    held_bid_ts = (getattr(self, "last_quote_update_ts_by_inst", None) or {}).get(inst_key)
+                    held_depth = (getattr(self, "latest_quote_depth_by_inst", None) or {}).get(inst_key)
+                    held_bid_size = held_depth[0] if held_depth else None
+                except Exception:
+                    held_bid_ts = held_bid_size = None
                 stop_timing.observe_safe(
                     now_ts=now_ts, slug=slug_for_confirmation, instrument_id=inst_key,
                     held_side=held_side, state=state, qty=qty, sellable_qty=position.sellable_qty,
@@ -686,6 +693,11 @@ class TakerExitMixin:
                     binance_spot=getattr(self, "_binance_ws_price", None),
                     binance_spot_ts=getattr(self, "_binance_ws_price_ts", None),
                     exit_bid_levels=exit_bid_levels, l2_age_sec=l2_age_sec,
+                    chainlink_spot=getattr(self, "_polymarket_chainlink_price", None),
+                    chainlink_spot_ts=getattr(self, "_polymarket_chainlink_price_ts", None),
+                    held_bid_ts=held_bid_ts, held_bid_size=held_bid_size,
+                    quote_fresh_max_age_sec=getattr(self, "quote_max_delivery_delay_sec", None),
+                    spot_fresh_max_age_sec=getattr(self, "_RAW_SPOT_FRESHNESS_SEC", None),
                 )
             # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
             # independently configured hard breaker may pass this boundary.

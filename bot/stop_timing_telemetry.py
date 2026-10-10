@@ -207,6 +207,66 @@ def signed_strike_distance(held_side: str, reference: Optional[Decimal],
     return float(distance), float(distance / strike * Decimal("10000")), ("ADVERSE" if adverse else "FAVORABLE")
 
 
+def _spot(value: Any, ts: Any, now_ts: float, max_age: Optional[float]) -> tuple[Optional[Decimal], Optional[float], bool]:
+    price, received = _dec(value), _num(ts)
+    age = max(0.0, now_ts - received) if price is not None and received and received > 0 else None
+    fresh = bool(price is not None and price > 0 and age is not None and max_age is not None and age < max_age)
+    return price, age, fresh
+
+
+def _early_warning_snapshot(
+    *, now_ts: float, held_side: str, state: Any, strike: Optional[Decimal], best_bid: Optional[Decimal],
+    binance_spot: Any, binance_spot_ts: Any, chainlink_spot: Any, chainlink_spot_ts: Any,
+    held_bid_ts: Any, held_bid_size: Any, quote_max_age: Optional[float], spot_max_age: Optional[float],
+) -> dict[str, Any]:
+    """Early-warning study fields for one protective observation (pure).
+
+    Chainlink spot vs strike is the canonical settlement-family spot cross
+    (``signed_strike_distance``: tie settles UP).  Binance is only a RELATIVE
+    move from the Binance spot captured at the first BUY fill; it is never
+    compared with the Chainlink-derived strike.  TOKEN_DD = executable entry
+    bid - current held-side executable bid; BOOK_EMPTY is EXIT_UNAVAILABLE.
+    """
+    state = state or {}
+    side = str(held_side).upper()
+    cl, cl_age, cl_fresh = _spot(chainlink_spot, chainlink_spot_ts, now_ts, spot_max_age)
+    _, cl_bps, cl_state = signed_strike_distance(side, cl if cl_fresh else None, strike)
+    bn, _, bn_fresh = _spot(binance_spot, binance_spot_ts, now_ts, spot_max_age)
+    entry_bn, entry_bn_age = _dec(state.get("entry_binance_spot")), _num(state.get("entry_binance_spot_age_sec"))
+    move = None
+    if (bn_fresh and entry_bn is not None and entry_bn > 0 and entry_bn_age is not None
+            and spot_max_age is not None and 0.0 <= entry_bn_age < spot_max_age and side in {"UP", "DOWN"}):
+        raw = (entry_bn - bn) / entry_bn * Decimal("10000")
+        move = float(raw if side == "UP" else -raw)
+    held_ts, size = _num(held_bid_ts), _num(held_bid_size)
+    held_age = max(0.0, now_ts - held_ts) if held_ts and held_ts > 0 else None
+    if held_age is None or quote_max_age is None:
+        held_state = BID_UNKNOWN
+    elif held_age > quote_max_age:
+        held_state = BID_STALE
+    elif best_bid is None or best_bid <= 0 or (size is not None and size <= 0):
+        held_state = BID_BOOK_EMPTY
+    else:
+        held_state = BID_FRESH
+    baseline = entry_bid_baseline(state, quote_max_age)
+    entry_bid = _dec(baseline["entry_executable_bid"])
+    if held_state == BID_BOOK_EMPTY:
+        token_dd, dd_state = None, "EXIT_UNAVAILABLE"
+    elif held_state == BID_FRESH and entry_bid is not None and best_bid is not None:
+        token_dd, dd_state = float(entry_bid - best_bid), "VALUE"
+    else:
+        token_dd, dd_state = None, "UNKNOWN"
+    return {
+        "chainlink_spot": _num(cl), "chainlink_spot_age_sec": cl_age, "chainlink_spot_fresh": cl_fresh,
+        "chainlink_signed_distance_bps": cl_bps, "chainlink_cross_state": cl_state,
+        "binance_spot_fresh": bn_fresh, "binance_adverse_move_bps": move,
+        "held_side_bid_age_sec": held_age, "held_side_bid_state": held_state,
+        "held_side_bid_fresh": held_state == BID_FRESH, "held_side_bid_size": size,
+        "token_dd": token_dd, "token_dd_state": dd_state,
+        "_baseline": baseline,
+    }
+
+
 class StopTimingTelemetry:
     def __init__(self, *, emit: Optional[Callable[[str, dict[str, Any]], Any]], run_id: str = "",
                  clock: Callable[[], float] = time.monotonic) -> None:
@@ -273,6 +333,9 @@ class StopTimingTelemetry:
         sizing_rule_version: Optional[str] = None,
         binance_spot: Any = None, binance_spot_ts: Optional[float] = None,
         exit_bid_levels: Any = None, l2_age_sec: Optional[float] = None,
+        chainlink_spot: Any = None, chainlink_spot_ts: Optional[float] = None,
+        held_bid_ts: Optional[float] = None, held_bid_size: Any = None,
+        quote_fresh_max_age_sec: Optional[float] = None, spot_fresh_max_age_sec: Optional[float] = None,
     ) -> None:
         self.counters["observations"] += 1
         mono = self._clock()
@@ -295,6 +358,11 @@ class StopTimingTelemetry:
             ref_state, cross_state = "DEGRADED", "UNKNOWN"
         else:
             ref_state = "FRESH"
+        early = _early_warning_snapshot(
+            now_ts=float(now_ts), held_side=held_side, state=state, strike=strike_d, best_bid=bid_d,
+            binance_spot=binance_spot, binance_spot_ts=binance_spot_ts, chainlink_spot=chainlink_spot,
+            chainlink_spot_ts=chainlink_spot_ts, held_bid_ts=held_bid_ts, held_bid_size=held_bid_size,
+            quote_max_age=_num(quote_fresh_max_age_sec), spot_max_age=_num(spot_fresh_max_age_sec))
         decision_reason = str(getattr(exit_decision, "reason", "") or "")
         net = _dec(getattr(exit_decision, "net_if_exit", None))
         gross = _dec(getattr(exit_decision, "gross_if_exit", None))
@@ -337,7 +405,9 @@ class StopTimingTelemetry:
             ),
             **exit_depth_metrics(exit_bid_levels, sellable_qty if sellable_qty is not None else qty,
                                  l2_age_sec=l2_age_sec),
+            **{k: v for k, v in early.items() if not k.startswith("_")},
         }
+        snap["exit_l2_fresh"] = snap.get("exit_l2_state") == "FRESH"
         if epoch is None:
             if len(self._epochs) >= MAX_EPOCHS:
                 self._epochs.pop(next(iter(self._epochs)))
@@ -356,6 +426,11 @@ class StopTimingTelemetry:
                 "entry_bid_at_fill": _num(state.get("entry_bid_at_fill")),
                 "entry_ask_at_fill": _num(state.get("entry_ask_at_fill")),
                 "entry_quote_age_at_fill_sec": _num(state.get("entry_quote_age_at_fill_sec")),
+                **early["_baseline"],
+                "entry_binance_spot": _num(state.get("entry_binance_spot")),
+                "entry_binance_spot_age_sec": _num(state.get("entry_binance_spot_age_sec")),
+                "entry_chainlink_spot": _num(state.get("entry_chainlink_spot")),
+                "entry_chainlink_spot_age_sec": _num(state.get("entry_chainlink_spot_age_sec")),
                 "tte_at_entry_sec": tte_entry, "sizing_rule_version": sizing_rule_version,
                 "first_observation_lag_sec": (float(now_ts) - opened_ts) if opened_ts > 0 else None,
             })

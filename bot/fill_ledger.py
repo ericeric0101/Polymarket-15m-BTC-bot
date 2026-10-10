@@ -192,6 +192,24 @@ class FillLedgerMixin:
                     except Exception:
                         state.pop("entry_bid_at_fill", None)
                         state.pop("entry_ask_at_fill", None)
+                    # Early-warning research baselines (FIRST fill only, same
+                    # host clock).  Observation only; never read by trading.
+                    state["entry_fill_price_first"] = fill_price
+                    for name, fn in (
+                        ("entry_bid_size_at_fill", lambda: Decimal(str(
+                            ((getattr(self, "latest_quote_depth_by_inst", None) or {}).get(inst_key) or (None,))[0]))),
+                        ("entry_quote_synthesis", lambda: self._quote_synthesis_reason(instrument_id)),
+                        ("entry_binance_spot", lambda: Decimal(str(getattr(self, "_binance_ws_price")))),
+                        ("entry_binance_spot_age_sec", lambda: max(
+                            0.0, time.time() - float(getattr(self, "_binance_ws_price_ts")))),
+                        ("entry_chainlink_spot", lambda: Decimal(str(getattr(self, "_polymarket_chainlink_price")))),
+                        ("entry_chainlink_spot_age_sec", lambda: max(
+                            0.0, time.time() - float(getattr(self, "_polymarket_chainlink_price_ts")))),
+                    ):
+                        try:
+                            state[name] = fn()
+                        except Exception:
+                            state[name] = None
                 # A new winning run starts from the fresh fill price.
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
