@@ -906,5 +906,15 @@ def initialize_strategy_settings(
         ),
         run_id=strategy.run_id,
     )
+    # E5B entry shadow (D/C/B): telemetry only, constructed only when a flag is on.
+    from bot.entry_shadow_runtime import build_entry_shadow, entry_shadow_summary
+    _ops = config.operations
+    _shadow_flags = (
+        bool(getattr(_ops, "price_adjusted_edge_shadow_enabled", False)),
+        bool(getattr(_ops, "early_cancel_shadow_enabled", False)),
+        bool(getattr(_ops, "maker_chase_shadow_enabled", False)),
+    )
+    strategy.entry_shadow = build_entry_shadow(strategy, d=_shadow_flags[0], c=_shadow_flags[1], b=_shadow_flags[2])
+    logger.info(entry_shadow_summary(*_shadow_flags))
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0
