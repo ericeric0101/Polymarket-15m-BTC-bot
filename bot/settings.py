@@ -921,5 +921,17 @@ def initialize_strategy_settings(
     )
     strategy.entry_shadow = build_entry_shadow(strategy, d=_shadow_flags[0], c=_shadow_flags[1], b=_shadow_flags[2])
     logger.info(entry_shadow_summary(*_shadow_flags))
+    # Entry V3 candidate telemetry: research only, constructed only when its flag is on.
+    from bot.candidate_telemetry import build_candidate_telemetry, candidate_telemetry_summary
+    _cand_flags = {
+        "CANDIDATE_DECISION_TELEMETRY_ENABLED": bool(getattr(_ops, "candidate_decision_telemetry_enabled", False)),
+        "FIRST_QUOTE_ONLY_SHADOW_ENABLED": bool(getattr(_ops, "first_quote_only_shadow_enabled", False)),
+        "HELD_SIDE_MARKOUT_TELEMETRY_ENABLED": bool(getattr(_ops, "held_side_markout_telemetry_enabled", False)),
+    }
+    strategy.candidate_telemetry = build_candidate_telemetry(
+        strategy, candidate=_cand_flags["CANDIDATE_DECISION_TELEMETRY_ENABLED"],
+        fqo=_cand_flags["FIRST_QUOTE_ONLY_SHADOW_ENABLED"], markout=_cand_flags["HELD_SIDE_MARKOUT_TELEMETRY_ENABLED"],
+        warn=logger.warning)
+    logger.info(candidate_telemetry_summary(_cand_flags))
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

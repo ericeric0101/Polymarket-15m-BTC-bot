@@ -664,6 +664,14 @@ class StrategyDBRuntimeMixin:
         payload: Optional[Dict[str, Any]] = None,
         instrument_id: Optional[str] = None,
     ) -> bool:
+        # Entry V3 candidate telemetry: read-only observer, no-op unless constructed (flag on).
+        candidate_observer = getattr(self, "candidate_telemetry", None)
+        if candidate_observer is not None:
+            try:
+                candidate_observer.observe_order_event(self, event_type=event_type, side=side, price=price, qty=qty,
+                                                       client_order_id=client_order_id, reason=reason, payload=payload)
+            except Exception:
+                pass
         if not self.trade_db:
             return False
         payload_out: Dict[str, Any] = dict(payload or {})

@@ -520,6 +520,10 @@ class OperationsConfig:
     price_adjusted_edge_shadow_enabled: bool = False
     early_cancel_shadow_enabled: bool = False
     maker_chase_shadow_enabled: bool = False
+    # Entry V3 candidate telemetry (bot/candidate_telemetry.py). Research only; default off.
+    candidate_decision_telemetry_enabled: bool = False
+    first_quote_only_shadow_enabled: bool = False
+    held_side_markout_telemetry_enabled: bool = False
 
     def __post_init__(self) -> None:
         supported = {"legacy", "target_scaled_v2", "shadow_target_scaled_v2"}
@@ -1130,5 +1134,8 @@ class AppConfig:
                 price_adjusted_edge_shadow_enabled=_env_bool("PRICE_ADJUSTED_EDGE_SHADOW_ENABLED", False),
                 early_cancel_shadow_enabled=_env_bool("EARLY_CANCEL_SHADOW_ENABLED", False),
                 maker_chase_shadow_enabled=_env_bool("MAKER_CHASE_SHADOW_ENABLED", False),
+                candidate_decision_telemetry_enabled=_env_bool("CANDIDATE_DECISION_TELEMETRY_ENABLED", False),
+                first_quote_only_shadow_enabled=_env_bool("FIRST_QUOTE_ONLY_SHADOW_ENABLED", False),
+                held_side_markout_telemetry_enabled=_env_bool("HELD_SIDE_MARKOUT_TELEMETRY_ENABLED", False),
             ),
         )
