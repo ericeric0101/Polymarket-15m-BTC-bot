@@ -78,7 +78,13 @@ def exit_policy_fingerprint(strategy: Any) -> dict[str, Any]:
     names = ("absolute_max_loss_enabled", "absolute_max_loss_usdc", "absolute_max_loss_twap_authority_gate_enabled",
              "catastrophic_stop_loss_enabled", "catastrophic_stop_loss_usdc", "tail_protect_tp_enabled",
              "tail_protect_tp_price", "hold_to_redeem_enabled", "taker_exit_enabled")
-    return {n: (str(getattr(strategy, n)) if getattr(strategy, n, None) is not None else None) for n in names}
+    out = {n: (str(getattr(strategy, n)) if getattr(strategy, n, None) is not None else None) for n in names}
+    from bot.exit_policy_state import effective_exit_policy
+    eff = effective_exit_policy(strategy)
+    out["conditional_breaker_enabled"] = eff["conditional_breaker_enabled"]
+    out["breaker_v2_effective_for_conditional_exit"] = eff["breaker_v2_effective_for_conditional_exit"]
+    out["catastrophic_breaker_enabled"] = eff["catastrophic_breaker_enabled"]
+    return out
 
 
 def strike_module_version() -> Optional[str]:

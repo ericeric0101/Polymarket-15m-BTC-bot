@@ -831,6 +831,11 @@ def initialize_strategy_settings(
     configure_entry_session_policy(allow_taipei_weekend_buys=strategy.entry_allow_taipei_weekend_buys)
     logger.info(entry_session_policy_summary())
     logger.info(breaker_v2_authority_summary(strategy.absolute_max_loss_twap_authority_gate_enabled))
+    # Make explicit whether the V2 gate actually governs any exit (it only gates the
+    # conditional absolute breaker; with that breaker off it is configured but inert).
+    from bot.exit_policy_state import effective_exit_policy, exit_policy_summary
+    strategy.effective_exit_policy = effective_exit_policy(strategy)
+    logger.info(exit_policy_summary(strategy.effective_exit_policy))
     # R is intentionally the existing per-trade risk authority, not a new
     # sizing input. V2 refuses startup if this value is absent/non-positive.
     strategy.session_guard_per_trade_risk_usdc = config.maker.depth_risk_max_loss_usdc
