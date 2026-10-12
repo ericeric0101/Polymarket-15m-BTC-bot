@@ -813,6 +813,92 @@ classification, not latency (`reports/consolidated_breaker_value_audit/`,
   TWAP-at-eligibility and stay UNKNOWN.
 - Tests: `tests/test_breaker_v2_authority.py`.
 
+**E5B entry shadow telemetry: D / C / B** (2026-10-11; branch
+`research/entry-edge-execution-shadow`, not deployed). Telemetry only: no D/C/B
+output can submit, cancel, replace, buy or sell. No entry, maker price, size, TP,
+breaker or inventory logic changed.
+
+Background:
+- E0–E4 found no day-robust positive-EV entry rule: the signal has ≈ zero edge at
+  executable prices, and maker fills are adversely selected.
+- E5A found the 71% vs 92% filled/unfilled gap was mostly cohort confounding;
+  chase was not robust; early cancel was weakly positive; H4 was NOT_ROBUST; and
+  score added nothing once price is accounted for
+  (`reports/entry_research_e0_e4_20261011/`,
+  `reports/entry_research_e5_maker_selection_20261011/`, untracked).
+
+Design:
+- **Flags** (default 0, operator surface): `PRICE_ADJUSTED_EDGE_SHADOW_ENABLED`,
+  `EARLY_CANCEL_SHADOW_ENABLED`, `MAKER_CHASE_SHADOW_ENABLED`.
+  - All off means `strategy.entry_shadow is None` and every hook returns
+    immediately (≈ 0.2 µs).
+  - The flags are in the manifest `config_hash` (operations section) and in the
+    startup log.
+- **Modules:**
+  - `bot/entry_shadow.py` is pure: no strategy, Nautilus or order imports, and an
+    AST test bans order calls.
+  - `bot/entry_shadow_runtime.py` is a read-only adapter. Its hooks run at maker
+    BUY submit, fill, cancel ack, reject, and the start of every quote cycle.
+  - Events go through the non-blocking `TradeJournalDB.enqueue_strategy_event`.
+- **Canonical attempt:** the first maker BUY in a market that is not rejected
+  (post-only crosses are skipped). Later BUYs and requotes are linked sub-orders.
+  Id = `slug|client_order_id`.
+- **Shared immutable `EntryShadowSnapshot`** per attempt and horizon; D, C and B
+  all read the same one.
+  - Observation at horizon h = the latest quote of the side received at or
+    before place+h, within 1.5 s (h ≤ 5) or 3 s; otherwise CENSORED → UNKNOWN.
+  - Placement baseline a0 = the side's ask, at most 3 s old at placement.
+
+The three evaluators:
+- **D `ENTRY_EDGE_SHADOW`** at h ∈ {0, 3, 5, 10, 15, 30}, using `edge_cal_v1`.
+  - The table is `config/research/entry_edge_calibration_v1.json`, built by
+    `scripts/build_entry_edge_calibration.py` from E0 points strictly before
+    `FORWARD_CUTOFF_TS=1791691110`.
+  - p_cal = ask + the shrunk (win − ask) residual of the ask × TTE cell (K = 20;
+    a cell is usable with n ≥ 20 and ≥ 3 days).
+  - RAW = p_cal − ask; fee_equivalent = p_cal × the official taker fee fraction;
+    NET_BEFORE = RAW − fee_equivalent; NET_AFTER is emitted for penalty 0 and
+    for the reference penalty 0.018.
+  - Pre-registration: `docs/research/e5b_d_prereg.md`. Amendment 1 (estimator
+    form) was made before any forward data was examined.
+- **C `ENTRY_EARLY_CANCEL_SHADOW`** = EC1@15s.
+  - Canonical order not filled by +15 s and ask_15 − a0 ≤ −0.01 → WOULD_CANCEL;
+    otherwise WOULD_KEEP, UNKNOWN, or NOT_APPLICABLE (already filled).
+  - Race fields (canonical fill within 2.4 s / 3.6 s) are recorded after the
+    decision.
+  - `ENTRY_CANCEL_RACE_TELEMETRY` records naturally occurring production cancels:
+    request → ack latency, and fills while a cancel is pending.
+- **B `ENTRY_CHASE_SHADOW`** = CH_B@10s.
+  - Not filled, ask_10 − a0 ≥ +0.05, signed score ≥ 0, spread ≤ 0.03 →
+    WOULD_CHASE.
+  - The ask at +2.4 s / +3.6 s, the depth state (SUPPORTED / PARTIAL / UNKNOWN;
+    UNKNOWN is never treated as executable) and the economic state are observed
+    after the decision and never feed back into it.
+
+Evidence and cost:
+- Deterministic replay (`scripts/replay_entry_shadow_e5a.py`) reproduces E5A's
+  EC1@15s and CH_B@10s trigger counts exactly in all 8 tier/split cells.
+- About 8 events and 13 KB per attempt, ≈ 1.2 MB/day at 96 attempts. Tick time
+  p50 4.5 µs, p99 40 µs.
+
+Forward evaluation:
+- Only on data after the cutoff, once the 48 h Breaker V2 run has ended and the
+  user approves a restart.
+- Target: ≥ 150 canonical attempts, ≥ 7 Taipei days, ≥ 2 weekend days, and ≥ 60
+  LIVE attempts with path telemetry.
+- Kill criteria: forward EV ≤ 0, any leave-one-day-out sign flip, cancel race
+  > 30%, or insufficient depth > 20%.
+
+Not claimed: Entry V3 validated, chase works, cancel works, or positive EV.
+
+Known limitations:
+- D is a coarse 10-cell residual calibration and assumes taker fees.
+- The cancel-race latency is assumed (2.4 s), not measured.
+- DRY-RUN paper orders are not covered.
+- Samples are taken only on quote cycles.
+
+Tests: `tests/test_entry_shadow.py`.
+
 **Kill-switch classes** (`bot/kill_switch.py`, decided 2026-10-09). Each
 `_activate_maker_kill_switch` call site passes a trigger code; classification
 is by execution semantics, never by free text, and anything not decided is

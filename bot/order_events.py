@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import bot.entry_shadow_runtime as entry_shadow_hooks
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Optional
@@ -165,6 +166,8 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     logger.info("=" * 80)
 
     filled_id = str(event.client_order_id)
+    # E5B shadow telemetry only (no-op unless a shadow flag is on).
+    entry_shadow_hooks.hook_fill(strategy, filled_id, getattr(event, "last_qty", None))
     filled_side: Optional[str] = None
     filled_econ = None
     filled_directional_snapshot: Dict[str, Any] = {}
@@ -711,6 +714,8 @@ def handle_order_canceled(strategy: Any, event: Any) -> None:
     if cancel_result.should_skip:
         logger.debug(f"Skip duplicate cancel ack log for {canceled_id}")
         return
+    # E5B shadow telemetry only (no-op unless a shadow flag is on).
+    entry_shadow_hooks.hook_cancel_ack(strategy, canceled_id, cancel_started_ns, cancel_result.cancel_reason)
     if strategy.terminal_dashboard and canceled_id:
         strategy.terminal_dashboard.record_order_canceled(client_order_id=canceled_id)
     strategy._update_terminal_dashboard_snapshot()
@@ -778,6 +783,8 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
     logger.error("=" * 80)
 
     denied_id = str(event.client_order_id)
+    # E5B shadow telemetry only (no-op unless a shadow flag is on).
+    entry_shadow_hooks.hook_reject(strategy, denied_id)
     taker_exit_reason = getattr(
         strategy,
         "taker_exit_reason_by_client_order_id",

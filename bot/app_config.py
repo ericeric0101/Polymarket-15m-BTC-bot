@@ -516,6 +516,10 @@ class OperationsConfig:
     monthly_net_target_usdc: Decimal | None
     # ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS; default False keeps the weekend BUY block.
     allow_taipei_weekend_buys: bool = False
+    # E5B entry shadow telemetry (bot/entry_shadow.py). Telemetry only; default off.
+    price_adjusted_edge_shadow_enabled: bool = False
+    early_cancel_shadow_enabled: bool = False
+    maker_chase_shadow_enabled: bool = False
 
     def __post_init__(self) -> None:
         supported = {"legacy", "target_scaled_v2", "shadow_target_scaled_v2"}
@@ -1123,5 +1127,8 @@ class AppConfig:
                     if os.getenv("MONTHLY_NET_TARGET_USDC") is not None else None
                 ),
                 allow_taipei_weekend_buys=_env_bool("ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS", False),
+                price_adjusted_edge_shadow_enabled=_env_bool("PRICE_ADJUSTED_EDGE_SHADOW_ENABLED", False),
+                early_cancel_shadow_enabled=_env_bool("EARLY_CANCEL_SHADOW_ENABLED", False),
+                maker_chase_shadow_enabled=_env_bool("MAKER_CHASE_SHADOW_ENABLED", False),
             ),
         )

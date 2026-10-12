@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from bot.entry_shadow_runtime import hook_buy_submit as hook_entry_shadow_buy_submit
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
@@ -680,6 +681,10 @@ def submit_maker_quote(
         target_version=int(target_version or 0),
         loss_sell_reason=loss_sell_reason,
     )
+    if side == "buy":
+        # E5B shadow telemetry only (no-op unless a shadow flag is on).
+        hook_entry_shadow_buy_submit(strategy, order=order, instrument_id=instrument_id,
+                                     limit_price=limit_price, qty=token_qty)
     if side == "buy" and inst_key:
         recent_buy_submits = getattr(strategy, "recent_buy_submit_by_inst", None)
         if not isinstance(recent_buy_submits, dict):

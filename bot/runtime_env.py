@@ -77,6 +77,10 @@ CORE_ENV_KEYS = frozenset(
         "ENDGAME_TWAP_EXIT_MAX_AGE_SEC",
         # Breaker V2 canonical-TWAP authority gate (default 0 = legacy breaker).
         "ABSOLUTE_MAX_LOSS_TWAP_AUTHORITY_GATE_ENABLED",
+        # E5B entry shadow telemetry (default 0; no order authority).
+        "PRICE_ADJUSTED_EDGE_SHADOW_ENABLED",
+        "EARLY_CANCEL_SHADOW_ENABLED",
+        "MAKER_CHASE_SHADOW_ENABLED",
         "AUTO_REDEEM_ENABLED",
         "TRADE_DB_ENABLED",
         "TRADE_DB_PATH",

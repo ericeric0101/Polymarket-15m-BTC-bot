@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from bot.entry_shadow_runtime import hook_tick as hook_entry_shadow_tick
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
 
@@ -162,6 +163,8 @@ class QuoteRuntimeMixin(ProtectiveExitMixin):
                 self._cancel_maker_order_side(order_key, reason=f"entry_paused_{reason}")
 
     async def _prepare_quote_cycle(self) -> Optional[Dict[str, Any]]:
+        # E5B shadow telemetry only (no-op unless a shadow flag is on).
+        hook_entry_shadow_tick(self)
         if self.maker_kill_switch:
             # Kill-switch semantics are unchanged (no order activity); held
             # inventory is reported as degraded. Exit policy under kill switch
