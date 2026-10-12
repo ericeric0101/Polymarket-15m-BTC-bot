@@ -27,6 +27,12 @@ from bot.market_data import (
     fetch_binance_open_price_sync,
     fetch_gamma_market_by_slug,
     fetch_crypto_price_to_beat,
+    fetch_crypto_price_snapshot_sync,
+)
+from bot.strike_finality import (
+    STATUS_PROVISIONAL as STRIKE_STATUS_PROVISIONAL,
+    StrikeFinalityPoller,
+    restore_finality_from_events,
 )
 from bot.price_streams import (
     BINANCE_AGGTRADE_WS_URL,
@@ -1371,6 +1377,61 @@ class SpotPricerMixin:
     # Strike extraction helpers
     # ------------------------------------------------------------------
 
+    def _strike_finality_poller(self) -> Optional[StrikeFinalityPoller]:
+        tracker = getattr(self, "strike_finality", None)
+        if tracker is None or not getattr(self, "strike_finality_polling_enabled", False):
+            return None
+        poller = getattr(self, "_strike_finality_poller_obj", None)
+        if poller is None:
+            lookback = 60
+
+            def fetch(start_ts: int, end_ts: int):
+                return fetch_crypto_price_snapshot_sync(
+                    start_ts=start_ts, end_ts=end_ts, twap_lookback_seconds=lookback,
+                )
+
+            poller = self._strike_finality_poller_obj = StrikeFinalityPoller(
+                tracker, fetch, self._on_strike_finality_events,
+            )
+        return poller
+
+    def _strike_finality_register(self, *, slug: str, start_ts: int, end_ts: int, strike: Decimal) -> None:
+        """Track the locked strike as PROVISIONAL and start bounded finalization polling.
+
+        Never changes the runtime strike cache (entry / exit decisions are unchanged)."""
+        tracker = getattr(self, "strike_finality", None)
+        if tracker is None:
+            return
+        try:
+            tracker.register_provisional(
+                slug, strike, source="polymarket_crypto_price_twap_open",
+                start_ts=start_ts, end_ts=end_ts, now=time.time(),
+            )
+            poller = self._strike_finality_poller()
+            if poller is not None:
+                poller.start(slug, int(start_ts), int(end_ts))
+        except Exception as exc:
+            logger.warning(f"[STRIKE] finality tracking failed to start for {slug}: {exc}")
+
+    def _strike_finality_restore_on_startup(self, slug: str) -> None:
+        """Rebuild finality from the journal after a restart; resume polling if needed."""
+        tracker = getattr(self, "strike_finality", None)
+        trade_db = getattr(self, "trade_db", None)
+        if tracker is None or not slug:
+            return
+        try:
+            loader = getattr(trade_db, "load_strike_finality_events", None)
+            rows = loader(slug) if callable(loader) else []
+            status = restore_finality_from_events(tracker, slug, rows)
+            start_ts = extract_market_start_ts_from_slug(slug)
+            if status == STRIKE_STATUS_PROVISIONAL and start_ts is not None:
+                poller = self._strike_finality_poller()
+                if poller is not None:
+                    poller.start(slug, int(start_ts), int(start_ts) + 900)
+            self._db_strategy_event("STRIKE_FINALITY_RESTORED", {"slug": slug, "strike_finality": status})
+        except Exception as exc:
+            logger.warning(f"[STRIKE] finality restore failed for {slug}: {exc}")
+
     def _extract_strike_from_question(self, question_text: str) -> Optional[Decimal]:
         return extract_strike_from_question(question_text, self.latest_external_spot)
 
@@ -1524,9 +1585,15 @@ class SpotPricerMixin:
                         source="polymarket_crypto_price_twap_open",
                         extra={
                             "strike_status": status,
+                            # In-window openPrice is never final (upstream
+                            # completed=false); see bot.strike_finality.
+                            "strike_finality": STRIKE_STATUS_PROVISIONAL,
                             "twap_lookback_seconds": twap_lookback_seconds,
                             "attempt_age_sec": attempt_age_sec,
                         },
+                    )
+                    self._strike_finality_register(
+                        slug=slug, start_ts=int(start_ts), end_ts=end_ts, strike=crypto_open_price,
                     )
                     logger.info(
                         f"[STRIKE] Locked verified frontend TWAP Price To Beat: "

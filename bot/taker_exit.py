@@ -30,6 +30,7 @@ from bot.breaker_authority import (
 )
 from bot.kill_switch import HARD_PROTECTIVE_EXIT_REASONS
 from bot.settlement_side import canonical_twap_side_state
+from bot.strike_finality import strike_finality_provenance
 from bot.order_ids import new_client_order_id
 from bot.enums import ActiveSide
 from bot.endgame_twap_exit import evaluate_endgame_twap_exit
@@ -257,6 +258,9 @@ class TakerExitMixin:
                 # Evaluation stratum only; never an input to the decision.
                 "market_day_type": breaker_v2_market_day_type(slug, now_ts),
                 "flag_enabled": True,
+                # Strike finality is recorded for audit only: the decision above
+                # used the runtime (possibly provisional) strike exactly as before.
+                **strike_finality_provenance(getattr(self, "strike_finality", None), slug)["provenance"],
             }
             persisted = False
             try:

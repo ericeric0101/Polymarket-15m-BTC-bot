@@ -785,6 +785,9 @@ class StrategyDBRuntimeMixin:
         self.market_strike_provisional_source_by_slug.pop(slug, None)
         if self.current_market_open_spot is None or Decimal(str(self.current_market_open_spot or "0")) <= 0:
             self.current_market_open_spot = strike
+        restore_finality = getattr(self, "_strike_finality_restore_on_startup", None)
+        if callable(restore_finality):
+            restore_finality(slug)
         sample_dt_sec = recovered.get("sample_dt_sec")
         logger.info(
             "Recovered authoritative market strike from trade journal: "

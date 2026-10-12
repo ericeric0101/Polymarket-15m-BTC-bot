@@ -38,6 +38,7 @@ from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
 from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
+from bot.strike_finality import StrikeFinalityTracker
 from bot.trade_telemetry import TradeTelemetry
 from bot.twap_forward_shadow import TwapForwardShadow
 from bot.trend_entry_shadow import TrendEntryShadow
@@ -604,6 +605,10 @@ def initialize_strategy_settings(
     strategy.market_strike_cache_by_slug = {}
     strategy.market_strike_source_by_slug = {}
     strategy.market_strike_status_by_slug = {}
+    # Opening Price To Beat finality (PROVISIONAL until upstream completed);
+    # FINAL_ONLY settlement consumers wait for it.  See bot.strike_finality.
+    strategy.strike_finality = StrikeFinalityTracker()
+    strategy.strike_finality_polling_enabled = True
     strategy.market_strike_provenance_by_slug = {}
     strategy.market_strike_provisional_by_slug = {}
     strategy.market_strike_provisional_source_by_slug = {}

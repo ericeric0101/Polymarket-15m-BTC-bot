@@ -156,6 +156,38 @@ async def fetch_crypto_price_to_beat(
         return None
 
 
+def fetch_crypto_price_snapshot_sync(
+    *,
+    start_ts: int,
+    end_ts: int,
+    twap_lookback_seconds: int = 60,
+    symbol: str = "BTC",
+    variant: str = "fifteen",
+    timeout_sec: float = 5.0,
+):
+    """Blocking read of the same frontend ``crypto-price`` request, with its
+    ``completed`` / ``incomplete`` flags (bot.strike_finality poller thread only)."""
+    import time as _time
+
+    from bot.strike_finality import parse_crypto_price_payload
+
+    if start_ts <= 0 or end_ts <= start_ts or twap_lookback_seconds not in {30, 60}:
+        return None
+    params = {
+        "symbol": str(symbol or "BTC").upper(),
+        "eventStartTime": datetime.fromtimestamp(start_ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "variant": str(variant or "fifteen"),
+        "endDate": datetime.fromtimestamp(end_ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "twapEnabled": "true",
+        "twapLookbackSeconds": str(twap_lookback_seconds),
+    }
+    with httpx.Client(timeout=timeout_sec) as client:
+        response = client.get("https://polymarket.com/api/crypto/crypto-price", params=params)
+    if response.status_code != 200:
+        return None
+    return parse_crypto_price_payload(response.json(), fetched_ts=_time.time())
+
+
 def resolve_opening_strike_from_history(
     external_spot_history: list[tuple[float, Decimal]],
     start_ts: int,

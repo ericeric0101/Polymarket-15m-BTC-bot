@@ -14,6 +14,12 @@ from bot.enums import ActiveSide, MarketPhase
 from bot.lifecycle import determine_lifecycle_timer_action, select_next_market_window
 from bot.ops import handle_waiting_phase_search
 from bot.post_trade import compute_settlement_summary
+from bot.strike_finality import (
+    EVENT_FINALIZATION_EXPIRED as STRIKE_EVENT_FINALIZATION_EXPIRED,
+    STATUS_FINAL as STRIKE_STATUS_FINAL,
+    STATUS_PROVISIONAL as STRIKE_STATUS_PROVISIONAL,
+    strike_finality_provenance,
+)
 
 
 # Near-tie guard: a 60s TWAP tick stamped `offset` seconds away from market end
@@ -37,6 +43,9 @@ SETTLEMENT_RELABEL_POLL_SEC = 0.25
 SETTLEMENT_RELABEL_END_TOLERANCE_SEC = 0.5
 _RECENT_TWAP_TICKS_MAXLEN = 16
 _SETTLEMENT_RELABEL_LOCK = threading.Lock()
+# Settlements waiting for the finalized Price To Beat (bot.strike_finality).
+_STRIKE_FINAL_SETTLEMENT_LOCK = threading.Lock()
+_MAX_PENDING_STRIKE_FINAL_SETTLEMENTS = 8
 
 
 def canonical_settlement_outcome(label: dict[str, Any]) -> str:
@@ -224,6 +233,12 @@ class StrategyLifecycleMixin:
             strike = 0.0
             if slug and slug in self.market_strike_cache_by_slug:
                 strike = float(self.market_strike_cache_by_slug[slug])
+            # FINAL_ONLY: the outcome and PnL use the finalized Price To Beat.
+            # An unfinalized (provisional) strike only yields a diagnostic label.
+            strike_gate = self._strike_finality_gate(slug)
+            if strike_gate["final_strike"] is not None:
+                strike = float(strike_gate["final_strike"])
+            strike_unfinalized = strike_gate["status"] == STRIKE_STATUS_PROVISIONAL
 
             # Single runtime settlement authority: the canonical official-TWAP
             # label. Missing/degraded TWAP -> UNKNOWN; never a spot fallback.
@@ -240,9 +255,16 @@ class StrategyLifecycleMixin:
                 market_end_ts=getattr(self, "current_market_end_timestamp", None),
             )
             settlement_outcome = canonical_settlement_outcome(shadow_label)
+            provisional_outcome = settlement_outcome
+            if strike_unfinalized:
+                settlement_outcome = "UNKNOWN"
             shadow_settlement_side = settlement_outcome
+            if strike_unfinalized:
+                outcome_source = "strike_unfinalized"
+            else:
+                outcome_source = "canonical_twap" if settlement_outcome != "UNKNOWN" else "unavailable"
             settlement_provenance = {
-                "outcome_source": "canonical_twap" if settlement_outcome != "UNKNOWN" else "unavailable",
+                "outcome_source": outcome_source,
                 "settlement_reference_source": shadow_label["source"],
                 "settlement_reference_is_canonical": shadow_label["canonical"],
                 "settlement_reference_age_sec": shadow_label["age_sec"],
@@ -251,10 +273,16 @@ class StrategyLifecycleMixin:
                 "settlement_near_tie_band_bps": shadow_label["near_tie_band_bps"],
                 "settlement_near_tie_unresolved": shadow_label["near_tie_unresolved"],
                 "latest_spot_diagnostic": spot,
+                **strike_gate["provenance"],
             }
+            if strike_unfinalized:
+                settlement_provenance["provisional_outcome_diagnostic"] = provisional_outcome
+                settlement_provenance["settlement_pending_reason"] = "strike_not_final"
             relabel_deadline = None
             market_end_ts = getattr(self, "current_market_end_timestamp", None)
-            if shadow_label["near_tie_unresolved"] and slug:
+            # The near-tie relabel decides against a strike; with an unfinalized
+            # strike the strike-finalization path below decides instead.
+            if shadow_label["near_tie_unresolved"] and slug and not strike_unfinalized:
                 try:
                     end_value = float(market_end_ts)
                     if math.isfinite(end_value) and end_value > 0:
@@ -281,77 +309,21 @@ class StrategyLifecycleMixin:
                     f"margin_bps={shadow_label['margin_bps']} end_offset={shadow_label['end_offset_sec']}) "
                     f"slug={slug} inv={inv}"
                 )
-            if hasattr(self, "_settle_shadow_simulation"):
-                self._settle_shadow_simulation(slug=slug, outcome=settlement_outcome, spot=spot, strike=strike)
-
-            stop_shadow = getattr(self, "stop_forensics_shadow", None)
-            if stop_shadow is not None and settlement_outcome != "UNKNOWN":
-                try:
-                    stop_shadow.record_settlement(
-                        slug=slug,
-                        settlement_side=shadow_settlement_side,
-                        settlement_ts=shadow_settlement_ts,
-                        settlement_reference_source=shadow_label["source"],
-                        settlement_reference_is_canonical=shadow_label["canonical"],
-                        settlement_reference_age_sec=shadow_label["age_sec"],
-                    )
-                except Exception as shadow_error:
-                    logger.warning(
-                        "Stop continuation shadow settlement capture failed: "
-                        f"{type(shadow_error).__name__}: {shadow_error}"
-                    )
-
-            stop_timing = getattr(self, "stop_timing_telemetry", None)
-            if stop_timing is not None:
-                stop_timing.on_settlement_safe(
-                    slug=slug, outcome=settlement_outcome, settlement_ts=shadow_settlement_ts,
-                    reference_source=shadow_label["source"],
-                    reference_is_canonical=shadow_label["canonical"],
-                )
-
-            trend_shadow = getattr(self, "trend_entry_shadow", None)
-            if trend_shadow is not None:
-                try:
-                    trend_shadow.on_settlement(
-                        slug=slug,
-                        outcome=settlement_outcome,
-                        settlement_ts=time.time(),
-                    )
-                except Exception as shadow_error:
-                    logger.warning(
-                        "Trend-entry shadow settlement capture failed: "
-                        f"{type(shadow_error).__name__}: {shadow_error}"
-                    )
-            forward_shadow = getattr(self, "forward_shadow_experiment", None)
-            if forward_shadow is not None:
-                try:
-                    forward_shadow.on_settlement(
-                        slug=slug,
-                        outcome=settlement_outcome,
-                        settlement_ts=shadow_settlement_ts,
-                        settlement_source=shadow_label["source"],
-                    )
-                except Exception as shadow_error:
-                    logger.warning(
-                        "Forward-shadow settlement capture failed: "
-                        f"{type(shadow_error).__name__}: {shadow_error}"
-                    )
-            twap_shadow = getattr(self, "twap_forward_shadow", None)
-            if twap_shadow is not None:
-                try:
-                    twap_shadow.finalize_market(
-                        slug,
-                        settlement_side=shadow_settlement_side,
-                        settlement_ts=shadow_settlement_ts,
-                        settlement_reference_source=shadow_label["source"],
-                        settlement_reference_is_canonical=shadow_label["canonical"],
-                        settlement_reference_age_sec=shadow_label["age_sec"],
-                    )
-                except Exception as shadow_error:
-                    logger.warning(
-                        "TWAP forward-shadow settlement capture failed: "
-                        f"{type(shadow_error).__name__}: {shadow_error}"
-                    )
+            research_hook_args = {
+                "slug": slug, "outcome": settlement_outcome, "spot": spot, "strike": strike,
+                "label": dict(shadow_label), "settlement_ts": shadow_settlement_ts,
+            }
+            if not strike_unfinalized:
+                self._dispatch_settlement_research_hooks(**research_hook_args)
+            strike_final_base = {
+                **relabel_base, "research_hook_args": research_hook_args,
+                "settlement_tick": (
+                    getattr(self, "_polymarket_chainlink_twap_price", None),
+                    getattr(self, "_polymarket_chainlink_twap_observation_ts", None),
+                    getattr(self, "_polymarket_chainlink_twap_window_sec", None),
+                    shadow_settlement_ts,
+                ),
+            }
 
             if inv < 0.001:
                 logger.info("Settlement: no inventory to settle.")
@@ -411,6 +383,12 @@ class StrategyLifecycleMixin:
                         "inventory_side": None, "live_inventory_cost": {},
                         "market_cycle_realized_net_usdc": Decimal("0"),
                     })
+                if strike_unfinalized:
+                    self._schedule_strike_final_settlement({
+                        **strike_final_base, "cycle_pnl_written": True, "inv": 0.0,
+                        "inventory_side": None, "live_inventory_cost": {},
+                        "market_cycle_realized_net_usdc": Decimal("0"),
+                    })
                 return
 
             if settlement_outcome == "UNKNOWN":
@@ -438,6 +416,13 @@ class StrategyLifecycleMixin:
                         "live_inventory_cost": copy.deepcopy(self.live_inventory_cost),
                         "market_cycle_realized_net_usdc": Decimal(str(self.market_cycle_realized_net_usdc)),
                     })
+                if strike_unfinalized:
+                    self._schedule_strike_final_settlement({
+                        **strike_final_base, "cycle_pnl_written": False, "inv": inv,
+                        "inventory_side": inventory_side,
+                        "live_inventory_cost": copy.deepcopy(self.live_inventory_cost),
+                        "market_cycle_realized_net_usdc": Decimal(str(self.market_cycle_realized_net_usdc)),
+                    })
                 self.market_cycle_realized_net_usdc = Decimal("0")
                 return
 
@@ -457,6 +442,91 @@ class StrategyLifecycleMixin:
             self._update_terminal_dashboard_snapshot()
         except Exception as e:
             logger.warning(f"Settlement recording failed: {e}")
+
+    def _dispatch_settlement_research_hooks(
+        self, *, slug: str, outcome: str, spot: float, strike: float,
+        label: Dict[str, Any], settlement_ts: float,
+    ) -> None:
+        """Research-only settlement consumers (shadows / telemetry); never raise.
+
+        With an unfinalized strike these run once, deferred, with the final
+        outcome (or UNKNOWN on finalization timeout) - FINAL_ONLY labels.
+        """
+        shadow_label = label
+        settlement_outcome = outcome
+        shadow_settlement_side = outcome
+        shadow_settlement_ts = settlement_ts
+        if hasattr(self, "_settle_shadow_simulation"):
+            self._settle_shadow_simulation(slug=slug, outcome=settlement_outcome, spot=spot, strike=strike)
+
+        stop_shadow = getattr(self, "stop_forensics_shadow", None)
+        if stop_shadow is not None and settlement_outcome != "UNKNOWN":
+            try:
+                stop_shadow.record_settlement(
+                    slug=slug,
+                    settlement_side=shadow_settlement_side,
+                    settlement_ts=shadow_settlement_ts,
+                    settlement_reference_source=shadow_label["source"],
+                    settlement_reference_is_canonical=shadow_label["canonical"],
+                    settlement_reference_age_sec=shadow_label["age_sec"],
+                )
+            except Exception as shadow_error:
+                logger.warning(
+                    "Stop continuation shadow settlement capture failed: "
+                    f"{type(shadow_error).__name__}: {shadow_error}"
+                )
+
+        stop_timing = getattr(self, "stop_timing_telemetry", None)
+        if stop_timing is not None:
+            stop_timing.on_settlement_safe(
+                slug=slug, outcome=settlement_outcome, settlement_ts=shadow_settlement_ts,
+                reference_source=shadow_label["source"],
+                reference_is_canonical=shadow_label["canonical"],
+            )
+
+        trend_shadow = getattr(self, "trend_entry_shadow", None)
+        if trend_shadow is not None:
+            try:
+                trend_shadow.on_settlement(
+                    slug=slug,
+                    outcome=settlement_outcome,
+                    settlement_ts=time.time(),
+                )
+            except Exception as shadow_error:
+                logger.warning(
+                    "Trend-entry shadow settlement capture failed: "
+                    f"{type(shadow_error).__name__}: {shadow_error}"
+                )
+        forward_shadow = getattr(self, "forward_shadow_experiment", None)
+        if forward_shadow is not None:
+            try:
+                forward_shadow.on_settlement(
+                    slug=slug,
+                    outcome=settlement_outcome,
+                    settlement_ts=shadow_settlement_ts,
+                    settlement_source=shadow_label["source"],
+                )
+            except Exception as shadow_error:
+                logger.warning(
+                    "Forward-shadow settlement capture failed: "
+                    f"{type(shadow_error).__name__}: {shadow_error}"
+                )
+        twap_shadow = getattr(self, "twap_forward_shadow", None)
+        if twap_shadow is not None:
+            try:
+                twap_shadow.finalize_market(
+                    slug,
+                    settlement_side=shadow_settlement_side,
+                    settlement_ts=shadow_settlement_ts,
+                    settlement_reference_source=shadow_label["source"],
+                    settlement_reference_is_canonical=shadow_label["canonical"],
+                    settlement_reference_age_sec=shadow_label["age_sec"],
+                )
+            except Exception as shadow_error:
+                logger.warning(
+                    "TWAP forward-shadow settlement capture failed: "
+                    f"{type(shadow_error).__name__}: {shadow_error}"
+                )
 
     def _write_canonical_settlement(
         self, *, slug: str, spot: float, strike: float, outcome: str,
@@ -553,6 +623,10 @@ class StrategyLifecycleMixin:
             pending = getattr(self, "_pending_settlement_relabel", None)
             if pending is not None and pending.get("end_tick") is None and self._is_relabel_end_tick(pending, tick):
                 pending["end_tick"] = tick
+        with _STRIKE_FINAL_SETTLEMENT_LOCK:
+            for strike_pending in (getattr(self, "_pending_strike_final_settlements", None) or {}).values():
+                if strike_pending.get("end_tick") is None and self._is_relabel_end_tick(strike_pending, tick):
+                    strike_pending["end_tick"] = tick
 
     @staticmethod
     def _is_relabel_end_tick(pending: Dict[str, Any], tick: tuple) -> bool:
@@ -690,6 +764,152 @@ class StrategyLifecycleMixin:
             pnl_source="settlement_deferred_relabel",
         )
         self._stop_timing_settlement_relabel(pending, outcome, label, now_ts)
+        self._update_terminal_dashboard_snapshot()
+
+    # ------------------------------------------------------------------
+    # Strike finality (FINAL_ONLY settlement)
+    # ------------------------------------------------------------------
+
+    def _strike_finality_gate(self, slug: str) -> Dict[str, Any]:
+        return strike_finality_provenance(getattr(self, "strike_finality", None), slug)
+
+    def _schedule_strike_final_settlement(self, pending: Dict[str, Any]) -> None:
+        """Hold a settlement snapshot until the Price To Beat is final (non-blocking)."""
+        slug = pending["slug"]
+        pending = dict(pending, end_tick=None)
+        with _SETTLEMENT_RELABEL_LOCK:
+            recent = tuple(getattr(self, "_recent_twap_ticks", None) or ())
+        for tick in recent:
+            if self._is_relabel_end_tick(pending, tick):
+                pending["end_tick"] = tick
+        dropped = None
+        with _STRIKE_FINAL_SETTLEMENT_LOCK:
+            book = getattr(self, "_pending_strike_final_settlements", None)
+            if book is None:
+                book = self._pending_strike_final_settlements = {}
+            book[slug] = pending
+            if len(book) > _MAX_PENDING_STRIKE_FINAL_SETTLEMENTS:
+                dropped = book.pop(next(iter(book)))
+        if dropped is not None:
+            self._expire_strike_final_settlement(dropped, reason="pending_book_overflow")
+        logger.warning(
+            f"Settlement waiting for final Price To Beat: slug={slug} "
+            f"provisional_outcome={pending['initial_provenance'].get('provisional_outcome_diagnostic')}"
+        )
+        # The strike may have been finalized between the gate and now.
+        tracker = getattr(self, "strike_finality", None)
+        if tracker is not None and tracker.status(slug) == STRIKE_STATUS_FINAL:
+            self._finalize_strike_final_settlement(slug)
+
+    def _on_strike_finality_events(self, slug: str, events: list) -> None:
+        """Poller callback (its own thread): journal, then settle or expire. Never raises."""
+        for event_type, payload in events or ():
+            try:
+                self._db_strategy_event(event_type, payload)
+            except Exception as exc:
+                logger.warning(f"[STRIKE] journal write failed for {event_type} slug={slug}: "
+                               f"{type(exc).__name__}: {exc}")
+        try:
+            tracker = getattr(self, "strike_finality", None)
+            if tracker is not None and tracker.status(slug) == STRIKE_STATUS_FINAL:
+                self._finalize_strike_final_settlement(slug)
+            elif any(e == STRIKE_EVENT_FINALIZATION_EXPIRED for e, _ in events or ()):
+                with _STRIKE_FINAL_SETTLEMENT_LOCK:
+                    pending = (getattr(self, "_pending_strike_final_settlements", None) or {}).pop(slug, None)
+                if pending is not None:
+                    self._expire_strike_final_settlement(pending, reason="strike_finalization_timeout")
+        except Exception as exc:
+            logger.warning(f"[STRIKE] final settlement failed for slug={slug}: {type(exc).__name__}: {exc}")
+
+    def _expire_strike_final_settlement(self, pending: Dict[str, Any], *, reason: str) -> None:
+        self._expire_settlement_relabel(pending, reason=reason)
+        self._dispatch_deferred_research_hooks(pending, outcome="UNKNOWN", label=None)
+
+    def _dispatch_deferred_research_hooks(self, pending: Dict[str, Any], *, outcome: str,
+                                          label: Dict[str, Any] | None) -> None:
+        args = dict(pending.get("research_hook_args") or {})
+        if not args:
+            return
+        args["outcome"] = outcome
+        if label is not None:
+            args["label"] = dict(label)
+        args["strike"] = pending.get("final_strike_float", args.get("strike"))
+        try:
+            self._dispatch_settlement_research_hooks(**args)
+        except Exception as exc:
+            logger.warning(f"Deferred settlement research hooks failed for slug={args.get('slug')}: {exc}")
+
+    def _finalize_strike_final_settlement(self, slug: str) -> None:
+        """Exactly-once: label + PnL from the FINAL strike and the market-end TWAP."""
+        tracker = getattr(self, "strike_finality", None)
+        final = tracker.final_strike(slug) if tracker is not None else None
+        if final is None:
+            return
+        with _STRIKE_FINAL_SETTLEMENT_LOCK:
+            pending = (getattr(self, "_pending_strike_final_settlements", None) or {}).pop(slug, None)
+        if pending is None:
+            return
+        now_ts = time.time()
+        if pending.get("end_tick") is not None:
+            price, source_ts, window, label_ts = pending["end_tick"]
+        else:
+            price, source_ts, window, label_ts = pending["settlement_tick"]
+        label = _canonical_twap_shadow_label(
+            twap_price=price, source_ts=source_ts, window_sec=window, strike=float(final),
+            settlement_ts=label_ts, freshness_sec=float(getattr(self, "_RAW_SPOT_FRESHNESS_SEC", 10.0)),
+            market_end_ts=pending["market_end_ts"],
+        )
+        outcome = canonical_settlement_outcome(label)
+        pending["final_strike_float"] = float(final)
+        if outcome == "UNKNOWN":
+            self._expire_strike_final_settlement(pending, reason="final_strike_label_not_canonical")
+            return
+        initial = pending["initial_provenance"]
+        provenance = {
+            "outcome_source": "canonical_twap_final_strike",
+            "settlement_reference_source": label["source"],
+            "settlement_reference_is_canonical": label["canonical"],
+            "settlement_reference_age_sec": label["age_sec"],
+            "settlement_reference_margin_bps": label["margin_bps"],
+            "settlement_reference_end_offset_sec": label["end_offset_sec"],
+            "settlement_near_tie_band_bps": label["near_tie_band_bps"],
+            "settlement_near_tie_unresolved": label["near_tie_unresolved"],
+            "latest_spot_diagnostic": pending["spot"],
+            "settlement_relabel_of_pending": True,
+            "settlement_strike_final_delay_sec": now_ts - float(pending["settled_ts"]),
+            "settlement_initial_provisional_outcome": initial.get("provisional_outcome_diagnostic"),
+            "settlement_used_end_stamped_tick": pending.get("end_tick") is not None,
+            **strike_finality_provenance(tracker, slug)["provenance"],
+        }
+        if outcome != initial.get("provisional_outcome_diagnostic"):
+            logger.warning(
+                f"Final Price To Beat changed the settlement side: slug={slug} "
+                f"provisional={initial.get('provisional_outcome_diagnostic')} final={outcome}"
+            )
+        if pending["cycle_pnl_written"]:
+            self._db_strategy_event("MARKET_SETTLEMENT", {
+                "slug": slug, "spot": pending["spot"], "strike": float(final),
+                "outcome": outcome, "outcome_only": True,
+                **provenance,
+                "active_side": pending["active_side"], "inventory_side": None,
+                "inventory_shares": 0.0, "redeem_per_share": 0.0, "redeem_value_usdc": 0.0,
+                "inventory_cost_usdc": 0.0, "settlement_pnl_usdc": 0.0,
+            })
+        else:
+            self._write_canonical_settlement(
+                slug=slug,
+                spot=pending["spot"],
+                strike=float(final),
+                outcome=outcome,
+                settlement_provenance=provenance,
+                inv=pending["inv"],
+                inventory_side=pending["inventory_side"],
+                active_side=pending["active_side"],
+                live_inventory_cost=pending["live_inventory_cost"],
+                market_cycle_realized_net_usdc=pending["market_cycle_realized_net_usdc"],
+                pnl_source="settlement_strike_finalized",
+            )
+        self._dispatch_deferred_research_hooks(pending, outcome=outcome, label=label)
         self._update_terminal_dashboard_snapshot()
 
     def _stop_timing_settlement_relabel(self, pending: Dict[str, Any], outcome: str,

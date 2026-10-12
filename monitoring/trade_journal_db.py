@@ -1855,3 +1855,29 @@ class TradeJournalDB:
         except Exception as e:
             logger.debug(f"TradeJournalDB load_latest_locked_strike failed: {e}")
         return None
+
+    def load_strike_finality_events(self, slug: str) -> list:
+        """``(event_type, payload)`` strike lock/finality rows for one slug (restart rebuild)."""
+        if not slug:
+            return []
+        sql = """
+        SELECT event_type, payload_json
+        FROM strategy_events
+        WHERE event_type IN ('MARKET_STRIKE_LOCKED', 'STRIKE_FINALIZED')
+        ORDER BY id DESC
+        LIMIT 400
+        """
+        out = []
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(sql).fetchall()
+            for event_type, payload_json in rows:
+                try:
+                    payload = json.loads(payload_json or "{}")
+                except Exception:
+                    continue
+                if str(payload.get("slug") or "") == str(slug):
+                    out.append((str(event_type), payload))
+        except Exception as e:
+            logger.debug(f"TradeJournalDB load_strike_finality_events failed: {e}")
+        return out
