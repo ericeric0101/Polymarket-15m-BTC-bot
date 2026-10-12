@@ -19,13 +19,39 @@ def epoch(value: Any) -> float | None:
         return None
 
 
+# Clock domains of captured timestamp fields (see reports/.../clock_domain_fix.md).
+# LOCAL fields are host-clock UTC seconds and decide causal availability.
+# UPSTREAM_SOURCE fields come from the venue/feed clock (Polymarket CLOB, Binance,
+# Chainlink); they are diagnostic metadata and are never compared with the host clock.
+LOCAL_TS_SUFFIXES = ('_received_ts', '_receive_ts', '_evidence_ts')
+LOCAL_TS_NAMES = frozenset({'snapshot_ts', 'fill_ts', 'actual_stop_ts', 'decision_ts'})
+UPSTREAM_SOURCE_SUFFIXES = ('_source_ts',)
+
+
+def timestamp_domain(name: str) -> str:
+    if name.endswith(UPSTREAM_SOURCE_SUFFIXES):
+        return 'UPSTREAM_SOURCE'
+    if name.endswith(('_received_ts', '_receive_ts')):
+        return 'LOCAL_RECEIPT'
+    if name.endswith('_evidence_ts') or name in LOCAL_TS_NAMES:
+        return 'LOCAL_WALL'
+    if name.endswith(('_monotonic', '_monotonic_ns', '_mono_ns')):
+        return 'LOCAL_MONOTONIC'
+    return 'UNKNOWN'
+
+
 def available_at(row: dict, decision_ts: float, *, timestamp: str = 'snapshot_ts',
                  max_age_sec: float | None = None) -> bool:
-    """A captured row is indivisible: reject it if any input/receipt is future.
+    """A captured row is indivisible: reject it if any LOCAL input/receipt is future.
 
-    Declared source/receive clocks must be UTC seconds; nanosecond monotonic
-    durations are not eligible as wall-clock evidence. Persistence clocks are
-    checked separately by journal readers, not confused with source clocks.
+    Causal availability uses host-clock (LOCAL) timestamps only: the row's own
+    timestamp, local receipt clocks and local evidence clocks must not be later
+    than the decision.  Upstream *_source_ts values are a different clock domain
+    (venue/feed clocks routinely lead the host by up to ~0.6 s) and are therefore
+    never compared with the host-clock decision time; they stay as diagnostics
+    (``source_clock_lead_sec``).  Declared clocks must be UTC seconds; nanosecond
+    monotonic durations are not eligible as wall-clock evidence.  Persistence
+    clocks are checked separately by journal readers.
     """
     ts = epoch(row.get(timestamp))
     decision = epoch(decision_ts)
@@ -38,13 +64,30 @@ def available_at(row: dict, decision_ts: float, *, timestamp: str = 'snapshot_ts
             if isinstance(value, dict):
                 if not inputs_available(value):
                     return False
-            elif value is not None and (name.endswith(('_source_ts', '_received_ts', '_receive_ts', '_evidence_ts'))
-                    or name in {'snapshot_ts', 'fill_ts', 'actual_stop_ts', 'decision_ts'}):
+            elif value is not None and (name.endswith(LOCAL_TS_SUFFIXES) or name in LOCAL_TS_NAMES):
                 observed = epoch(value)
                 if observed is None or observed > decision:
                     return False
         return True
     return inputs_available(row)
+
+
+def source_clock_lead_sec(row: dict, reference_ts: float) -> float | None:
+    """Largest upstream-source lead over a LOCAL reference time (diagnostic only)."""
+    ref = epoch(reference_ts)
+    if ref is None:
+        return None
+    leads = []
+    def walk(mapping):
+        for name, value in mapping.items():
+            if isinstance(value, dict):
+                walk(value)
+            elif value is not None and name.endswith(UPSTREAM_SOURCE_SUFFIXES):
+                observed = epoch(value)
+                if observed is not None and observed > 0:
+                    leads.append(observed - ref)
+    walk(row)
+    return max(leads) if leads else None
 
 
 def latest_evidence(rows: Iterable[dict], decision_ts: float, *, timestamp='snapshot_ts',

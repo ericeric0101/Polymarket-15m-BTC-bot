@@ -1,0 +1,741 @@
+{
+ "source": "frozen 44h LIVE BUY submits (2026-10-10T15:40Z..2026-10-12T12:34Z): latest prediction snapshot at the trace's captured_ts; old available_at rejected these, new accepts them",
+ "cases": [
+  {
+   "snapshot_age_sec": 0.0242,
+   "source_clock_lead_sec": 0.10438919067382812
+  },
+  {
+   "snapshot_age_sec": 0.005,
+   "source_clock_lead_sec": 0.09036064147949219
+  },
+  {
+   "snapshot_age_sec": 0.0033,
+   "source_clock_lead_sec": 0.11536383628845215
+  },
+  {
+   "snapshot_age_sec": 0.0032,
+   "source_clock_lead_sec": 0.14678359031677246
+  },
+  {
+   "snapshot_age_sec": 0.0077,
+   "source_clock_lead_sec": 0.03902578353881836
+  },
+  {
+   "snapshot_age_sec": 0.0228,
+   "source_clock_lead_sec": 0.27016496658325195
+  },
+  {
+   "snapshot_age_sec": 0.0035,
+   "source_clock_lead_sec": 0.12651491165161133
+  },
+  {
+   "snapshot_age_sec": 0.0078,
+   "source_clock_lead_sec": 0.22861313819885254
+  },
+  {
+   "snapshot_age_sec": 0.0202,
+   "source_clock_lead_sec": 0.0865480899810791
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.2006361484527588
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.2199251651763916
+  },
+  {
+   "snapshot_age_sec": 0.0038,
+   "source_clock_lead_sec": 0.3433871269226074
+  },
+  {
+   "snapshot_age_sec": 0.0034,
+   "source_clock_lead_sec": 0.19219303131103516
+  },
+  {
+   "snapshot_age_sec": 0.004,
+   "source_clock_lead_sec": 0.3087120056152344
+  },
+  {
+   "snapshot_age_sec": 0.0102,
+   "source_clock_lead_sec": 0.3371100425720215
+  },
+  {
+   "snapshot_age_sec": 0.0682,
+   "source_clock_lead_sec": 0.2077476978302002
+  },
+  {
+   "snapshot_age_sec": 0.0305,
+   "source_clock_lead_sec": 0.2741999626159668
+  },
+  {
+   "snapshot_age_sec": 0.0048,
+   "source_clock_lead_sec": 0.29110217094421387
+  },
+  {
+   "snapshot_age_sec": 0.0251,
+   "source_clock_lead_sec": 0.12258410453796387
+  },
+  {
+   "snapshot_age_sec": 0.0212,
+   "source_clock_lead_sec": 0.08793091773986816
+  },
+  {
+   "snapshot_age_sec": 0.0261,
+   "source_clock_lead_sec": 0.04000687599182129
+  },
+  {
+   "snapshot_age_sec": 0.0054,
+   "source_clock_lead_sec": 0.031891822814941406
+  },
+  {
+   "snapshot_age_sec": 0.0332,
+   "source_clock_lead_sec": 0.18847203254699707
+  },
+  {
+   "snapshot_age_sec": 0.0239,
+   "source_clock_lead_sec": 0.05418705940246582
+  },
+  {
+   "snapshot_age_sec": 0.0052,
+   "source_clock_lead_sec": 0.0322260856628418
+  },
+  {
+   "snapshot_age_sec": 0.0319,
+   "source_clock_lead_sec": 0.1978321075439453
+  },
+  {
+   "snapshot_age_sec": 0.0039,
+   "source_clock_lead_sec": 0.3304131031036377
+  },
+  {
+   "snapshot_age_sec": 0.0347,
+   "source_clock_lead_sec": 0.07199692726135254
+  },
+  {
+   "snapshot_age_sec": 0.0216,
+   "source_clock_lead_sec": 0.38114309310913086
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.3054819107055664
+  },
+  {
+   "snapshot_age_sec": 0.0241,
+   "source_clock_lead_sec": 0.24307703971862793
+  },
+  {
+   "snapshot_age_sec": 0.0039,
+   "source_clock_lead_sec": 0.25036191940307617
+  },
+  {
+   "snapshot_age_sec": 0.0226,
+   "source_clock_lead_sec": 0.38397789001464844
+  },
+  {
+   "snapshot_age_sec": 0.0219,
+   "source_clock_lead_sec": 0.14653587341308594
+  },
+  {
+   "snapshot_age_sec": 0.0204,
+   "source_clock_lead_sec": 0.2192668914794922
+  },
+  {
+   "snapshot_age_sec": 0.0196,
+   "source_clock_lead_sec": 0.2364358901977539
+  },
+  {
+   "snapshot_age_sec": 0.0047,
+   "source_clock_lead_sec": 0.13597798347473145
+  },
+  {
+   "snapshot_age_sec": 0.0053,
+   "source_clock_lead_sec": 0.06111311912536621
+  },
+  {
+   "snapshot_age_sec": 0.005,
+   "source_clock_lead_sec": 0.31295084953308105
+  },
+  {
+   "snapshot_age_sec": 0.0205,
+   "source_clock_lead_sec": 0.2062211036682129
+  },
+  {
+   "snapshot_age_sec": 0.0113,
+   "source_clock_lead_sec": 0.4267699718475342
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.33373212814331055
+  },
+  {
+   "snapshot_age_sec": 0.0144,
+   "source_clock_lead_sec": 0.103240966796875
+  },
+  {
+   "snapshot_age_sec": 0.003,
+   "source_clock_lead_sec": 0.17294692993164062
+  },
+  {
+   "snapshot_age_sec": 0.0042,
+   "source_clock_lead_sec": 0.0390777587890625
+  },
+  {
+   "snapshot_age_sec": 0.0175,
+   "source_clock_lead_sec": 0.2968869209289551
+  },
+  {
+   "snapshot_age_sec": 0.0243,
+   "source_clock_lead_sec": 0.21360111236572266
+  },
+  {
+   "snapshot_age_sec": 0.0026,
+   "source_clock_lead_sec": 0.28990793228149414
+  },
+  {
+   "snapshot_age_sec": 0.0231,
+   "source_clock_lead_sec": 0.06378602981567383
+  },
+  {
+   "snapshot_age_sec": 0.0017,
+   "source_clock_lead_sec": 0.1895298957824707
+  },
+  {
+   "snapshot_age_sec": 0.0018,
+   "source_clock_lead_sec": 0.24844694137573242
+  },
+  {
+   "snapshot_age_sec": 0.0051,
+   "source_clock_lead_sec": 0.15583586692810059
+  },
+  {
+   "snapshot_age_sec": 0.0183,
+   "source_clock_lead_sec": 0.09964394569396973
+  },
+  {
+   "snapshot_age_sec": 0.0157,
+   "source_clock_lead_sec": 0.16256308555603027
+  },
+  {
+   "snapshot_age_sec": 0.0239,
+   "source_clock_lead_sec": 0.06908512115478516
+  },
+  {
+   "snapshot_age_sec": 0.0196,
+   "source_clock_lead_sec": 0.1433250904083252
+  },
+  {
+   "snapshot_age_sec": 0.0038,
+   "source_clock_lead_sec": 0.16081786155700684
+  },
+  {
+   "snapshot_age_sec": 0.0039,
+   "source_clock_lead_sec": 0.03926706314086914
+  },
+  {
+   "snapshot_age_sec": 0.0213,
+   "source_clock_lead_sec": 0.053253173828125
+  },
+  {
+   "snapshot_age_sec": 0.0231,
+   "source_clock_lead_sec": 0.06282496452331543
+  },
+  {
+   "snapshot_age_sec": 0.021,
+   "source_clock_lead_sec": 0.030097007751464844
+  },
+  {
+   "snapshot_age_sec": 0.0229,
+   "source_clock_lead_sec": 0.08222627639770508
+  },
+  {
+   "snapshot_age_sec": 0.0032,
+   "source_clock_lead_sec": 0.03719305992126465
+  },
+  {
+   "snapshot_age_sec": 0.0041,
+   "source_clock_lead_sec": 0.1384258270263672
+  },
+  {
+   "snapshot_age_sec": 0.0238,
+   "source_clock_lead_sec": 0.2394089698791504
+  },
+  {
+   "snapshot_age_sec": 0.0288,
+   "source_clock_lead_sec": 0.19564318656921387
+  },
+  {
+   "snapshot_age_sec": 0.0085,
+   "source_clock_lead_sec": 0.0462338924407959
+  },
+  {
+   "snapshot_age_sec": 0.0032,
+   "source_clock_lead_sec": 0.06670522689819336
+  },
+  {
+   "snapshot_age_sec": 0.009,
+   "source_clock_lead_sec": 0.28545212745666504
+  },
+  {
+   "snapshot_age_sec": 0.0088,
+   "source_clock_lead_sec": 0.06333613395690918
+  },
+  {
+   "snapshot_age_sec": 0.0043,
+   "source_clock_lead_sec": 0.2802889347076416
+  },
+  {
+   "snapshot_age_sec": 0.0063,
+   "source_clock_lead_sec": 0.06508803367614746
+  },
+  {
+   "snapshot_age_sec": 0.0413,
+   "source_clock_lead_sec": 0.14226102828979492
+  },
+  {
+   "snapshot_age_sec": 0.0034,
+   "source_clock_lead_sec": 0.2693009376525879
+  },
+  {
+   "snapshot_age_sec": 0.0257,
+   "source_clock_lead_sec": 0.23474383354187012
+  },
+  {
+   "snapshot_age_sec": 0.0056,
+   "source_clock_lead_sec": 0.11231374740600586
+  },
+  {
+   "snapshot_age_sec": 0.0031,
+   "source_clock_lead_sec": 0.3764009475708008
+  },
+  {
+   "snapshot_age_sec": 0.0273,
+   "source_clock_lead_sec": 0.3793611526489258
+  },
+  {
+   "snapshot_age_sec": 0.0035,
+   "source_clock_lead_sec": 0.03188800811767578
+  },
+  {
+   "snapshot_age_sec": 0.0098,
+   "source_clock_lead_sec": 0.30193305015563965
+  },
+  {
+   "snapshot_age_sec": 0.0038,
+   "source_clock_lead_sec": 0.3734920024871826
+  },
+  {
+   "snapshot_age_sec": 0.0073,
+   "source_clock_lead_sec": 0.11105704307556152
+  },
+  {
+   "snapshot_age_sec": 0.0238,
+   "source_clock_lead_sec": 0.2970261573791504
+  },
+  {
+   "snapshot_age_sec": 0.0139,
+   "source_clock_lead_sec": 0.24001026153564453
+  },
+  {
+   "snapshot_age_sec": 0.0262,
+   "source_clock_lead_sec": 0.3652842044830322
+  },
+  {
+   "snapshot_age_sec": 0.025,
+   "source_clock_lead_sec": 0.3433518409729004
+  },
+  {
+   "snapshot_age_sec": 0.0072,
+   "source_clock_lead_sec": 0.09565281867980957
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.13273119926452637
+  },
+  {
+   "snapshot_age_sec": 0.0286,
+   "source_clock_lead_sec": 0.04942512512207031
+  },
+  {
+   "snapshot_age_sec": 0.0204,
+   "source_clock_lead_sec": 0.09377884864807129
+  },
+  {
+   "snapshot_age_sec": 0.022,
+   "source_clock_lead_sec": 0.19446492195129395
+  },
+  {
+   "snapshot_age_sec": 0.0051,
+   "source_clock_lead_sec": 0.2294788360595703
+  },
+  {
+   "snapshot_age_sec": 0.0044,
+   "source_clock_lead_sec": 0.12808012962341309
+  },
+  {
+   "snapshot_age_sec": 0.0127,
+   "source_clock_lead_sec": 0.07644295692443848
+  },
+  {
+   "snapshot_age_sec": 0.0195,
+   "source_clock_lead_sec": 0.028104066848754883
+  },
+  {
+   "snapshot_age_sec": 0.0181,
+   "source_clock_lead_sec": 0.03436279296875
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.026428937911987305
+  },
+  {
+   "snapshot_age_sec": 0.0033,
+   "source_clock_lead_sec": 0.06136298179626465
+  },
+  {
+   "snapshot_age_sec": 0.0231,
+   "source_clock_lead_sec": 0.024435997009277344
+  },
+  {
+   "snapshot_age_sec": 0.004,
+   "source_clock_lead_sec": 0.08689093589782715
+  },
+  {
+   "snapshot_age_sec": 0.0036,
+   "source_clock_lead_sec": 0.04445600509643555
+  },
+  {
+   "snapshot_age_sec": 0.0273,
+   "source_clock_lead_sec": 0.11141490936279297
+  },
+  {
+   "snapshot_age_sec": 0.0028,
+   "source_clock_lead_sec": 0.18762707710266113
+  },
+  {
+   "snapshot_age_sec": 0.0299,
+   "source_clock_lead_sec": 0.14441514015197754
+  },
+  {
+   "snapshot_age_sec": 0.0284,
+   "source_clock_lead_sec": 0.30574893951416016
+  },
+  {
+   "snapshot_age_sec": 0.025,
+   "source_clock_lead_sec": 0.24015593528747559
+  },
+  {
+   "snapshot_age_sec": 0.0037,
+   "source_clock_lead_sec": 0.12431597709655762
+  },
+  {
+   "snapshot_age_sec": 0.0313,
+   "source_clock_lead_sec": 0.048024892807006836
+  },
+  {
+   "snapshot_age_sec": 0.0214,
+   "source_clock_lead_sec": 0.3340919017791748
+  },
+  {
+   "snapshot_age_sec": 0.0865,
+   "source_clock_lead_sec": 0.15851402282714844
+  },
+  {
+   "snapshot_age_sec": 0.0287,
+   "source_clock_lead_sec": 0.6621236801147461
+  },
+  {
+   "snapshot_age_sec": 0.0804,
+   "source_clock_lead_sec": 0.15559792518615723
+  },
+  {
+   "snapshot_age_sec": 0.0239,
+   "source_clock_lead_sec": 0.6066231727600098
+  },
+  {
+   "snapshot_age_sec": 0.0155,
+   "source_clock_lead_sec": 0.31366705894470215
+  },
+  {
+   "snapshot_age_sec": 0.0039,
+   "source_clock_lead_sec": 0.5974459648132324
+  },
+  {
+   "snapshot_age_sec": 0.0057,
+   "source_clock_lead_sec": 0.4630310535430908
+  },
+  {
+   "snapshot_age_sec": 0.0245,
+   "source_clock_lead_sec": 0.34294605255126953
+  },
+  {
+   "snapshot_age_sec": 0.0249,
+   "source_clock_lead_sec": 0.07841992378234863
+  },
+  {
+   "snapshot_age_sec": 0.0993,
+   "source_clock_lead_sec": 0.2690610885620117
+  },
+  {
+   "snapshot_age_sec": 0.0266,
+   "source_clock_lead_sec": 0.0888519287109375
+  },
+  {
+   "snapshot_age_sec": 0.0229,
+   "source_clock_lead_sec": 0.2864980697631836
+  },
+  {
+   "snapshot_age_sec": 0.0045,
+   "source_clock_lead_sec": 0.29364919662475586
+  },
+  {
+   "snapshot_age_sec": 0.0105,
+   "source_clock_lead_sec": 0.056604862213134766
+  },
+  {
+   "snapshot_age_sec": 0.0216,
+   "source_clock_lead_sec": 0.2475888729095459
+  },
+  {
+   "snapshot_age_sec": 0.0194,
+   "source_clock_lead_sec": 0.38689303398132324
+  },
+  {
+   "snapshot_age_sec": 0.0142,
+   "source_clock_lead_sec": 0.2305130958557129
+  },
+  {
+   "snapshot_age_sec": 0.0542,
+   "source_clock_lead_sec": 0.13086318969726562
+  },
+  {
+   "snapshot_age_sec": 0.0039,
+   "source_clock_lead_sec": 0.15799403190612793
+  },
+  {
+   "snapshot_age_sec": 0.0255,
+   "source_clock_lead_sec": 0.13099384307861328
+  },
+  {
+   "snapshot_age_sec": 0.0033,
+   "source_clock_lead_sec": 0.16859889030456543
+  },
+  {
+   "snapshot_age_sec": 0.0218,
+   "source_clock_lead_sec": 0.18418288230895996
+  },
+  {
+   "snapshot_age_sec": 0.0121,
+   "source_clock_lead_sec": 0.13082599639892578
+  },
+  {
+   "snapshot_age_sec": 0.0105,
+   "source_clock_lead_sec": 0.10056877136230469
+  },
+  {
+   "snapshot_age_sec": 0.0026,
+   "source_clock_lead_sec": 0.14923787117004395
+  },
+  {
+   "snapshot_age_sec": 0.0511,
+   "source_clock_lead_sec": 0.07671713829040527
+  },
+  {
+   "snapshot_age_sec": 0.0211,
+   "source_clock_lead_sec": 0.11598682403564453
+  },
+  {
+   "snapshot_age_sec": 0.049,
+   "source_clock_lead_sec": 0.10137701034545898
+  },
+  {
+   "snapshot_age_sec": 0.0264,
+   "source_clock_lead_sec": 0.2054610252380371
+  },
+  {
+   "snapshot_age_sec": 0.0095,
+   "source_clock_lead_sec": 0.17798113822937012
+  },
+  {
+   "snapshot_age_sec": 0.0236,
+   "source_clock_lead_sec": 0.39072108268737793
+  },
+  {
+   "snapshot_age_sec": 0.0077,
+   "source_clock_lead_sec": 0.2846720218658447
+  },
+  {
+   "snapshot_age_sec": 0.0241,
+   "source_clock_lead_sec": 0.48148488998413086
+  },
+  {
+   "snapshot_age_sec": 0.0044,
+   "source_clock_lead_sec": 0.4620060920715332
+  },
+  {
+   "snapshot_age_sec": 0.0022,
+   "source_clock_lead_sec": 0.15920305252075195
+  },
+  {
+   "snapshot_age_sec": 0.0202,
+   "source_clock_lead_sec": 0.131850004196167
+  },
+  {
+   "snapshot_age_sec": 0.0645,
+   "source_clock_lead_sec": 0.06664228439331055
+  },
+  {
+   "snapshot_age_sec": 0.077,
+   "source_clock_lead_sec": 0.15124797821044922
+  },
+  {
+   "snapshot_age_sec": 0.0592,
+   "source_clock_lead_sec": 0.11751699447631836
+  },
+  {
+   "snapshot_age_sec": 0.0057,
+   "source_clock_lead_sec": 0.028533935546875
+  },
+  {
+   "snapshot_age_sec": 0.0345,
+   "source_clock_lead_sec": 0.13976073265075684
+  },
+  {
+   "snapshot_age_sec": 0.0233,
+   "source_clock_lead_sec": 0.08041691780090332
+  },
+  {
+   "snapshot_age_sec": 0.0515,
+   "source_clock_lead_sec": 0.19759225845336914
+  },
+  {
+   "snapshot_age_sec": 0.0033,
+   "source_clock_lead_sec": 0.08618593215942383
+  },
+  {
+   "snapshot_age_sec": 0.0229,
+   "source_clock_lead_sec": 0.16348600387573242
+  },
+  {
+   "snapshot_age_sec": 0.0085,
+   "source_clock_lead_sec": 0.18383216857910156
+  },
+  {
+   "snapshot_age_sec": 0.0038,
+   "source_clock_lead_sec": 0.2358558177947998
+  },
+  {
+   "snapshot_age_sec": 0.0029,
+   "source_clock_lead_sec": 0.24523687362670898
+  },
+  {
+   "snapshot_age_sec": 0.0235,
+   "source_clock_lead_sec": 0.1535811424255371
+  },
+  {
+   "snapshot_age_sec": 0.0045,
+   "source_clock_lead_sec": 0.23753905296325684
+  },
+  {
+   "snapshot_age_sec": 0.0027,
+   "source_clock_lead_sec": 0.08524394035339355
+  },
+  {
+   "snapshot_age_sec": 0.0283,
+   "source_clock_lead_sec": 0.11728382110595703
+  },
+  {
+   "snapshot_age_sec": 0.0142,
+   "source_clock_lead_sec": 0.03805828094482422
+  },
+  {
+   "snapshot_age_sec": 0.0564,
+   "source_clock_lead_sec": 0.3561389446258545
+  },
+  {
+   "snapshot_age_sec": 0.0041,
+   "source_clock_lead_sec": 0.17576098442077637
+  },
+  {
+   "snapshot_age_sec": 0.0255,
+   "source_clock_lead_sec": 0.23232603073120117
+  },
+  {
+   "snapshot_age_sec": 0.03,
+   "source_clock_lead_sec": 0.2556900978088379
+  },
+  {
+   "snapshot_age_sec": 0.0604,
+   "source_clock_lead_sec": 0.2728760242462158
+  },
+  {
+   "snapshot_age_sec": 0.0255,
+   "source_clock_lead_sec": 0.3087143898010254
+  },
+  {
+   "snapshot_age_sec": 0.0181,
+   "source_clock_lead_sec": 0.06905007362365723
+  },
+  {
+   "snapshot_age_sec": 0.0017,
+   "source_clock_lead_sec": 0.338623046875
+  },
+  {
+   "snapshot_age_sec": 0.0255,
+   "source_clock_lead_sec": 0.40238094329833984
+  },
+  {
+   "snapshot_age_sec": 0.0028,
+   "source_clock_lead_sec": 0.20466113090515137
+  },
+  {
+   "snapshot_age_sec": 0.0266,
+   "source_clock_lead_sec": 0.37936997413635254
+  },
+  {
+   "snapshot_age_sec": 0.0039,
+   "source_clock_lead_sec": 0.2983543872833252
+  },
+  {
+   "snapshot_age_sec": 0.1064,
+   "source_clock_lead_sec": 0.23203301429748535
+  },
+  {
+   "snapshot_age_sec": 0.0685,
+   "source_clock_lead_sec": 0.23184800148010254
+  },
+  {
+   "snapshot_age_sec": 0.004,
+   "source_clock_lead_sec": 0.3041191101074219
+  },
+  {
+   "snapshot_age_sec": 0.0042,
+   "source_clock_lead_sec": 0.19870495796203613
+  },
+  {
+   "snapshot_age_sec": 0.0034,
+   "source_clock_lead_sec": 0.3044440746307373
+  },
+  {
+   "snapshot_age_sec": 0.0126,
+   "source_clock_lead_sec": 0.054876089096069336
+  },
+  {
+   "snapshot_age_sec": 0.0027,
+   "source_clock_lead_sec": 0.23260092735290527
+  },
+  {
+   "snapshot_age_sec": 0.0082,
+   "source_clock_lead_sec": 0.15628385543823242
+  },
+  {
+   "snapshot_age_sec": 0.0205,
+   "source_clock_lead_sec": 0.08206510543823242
+  },
+  {
+   "snapshot_age_sec": 0.0732,
+   "source_clock_lead_sec": 0.12956500053405762
+  }
+ ]
+}

@@ -180,6 +180,30 @@ def annotate_decision(strategy, payload: dict, *, kind: str, decision=None,
             lifecycle_id=payload.get('position_lifecycle_id') or state.get('position_lifecycle_id'), evidence=evidence, l2=l2)
         trace['captured_ts'] = now
         trace['capture_clock'] = 'HOST_WALL_UTC'
+        trace['captured_monotonic_ns'] = time.monotonic_ns()
+        # Evidence selection compares LOCAL clocks only; upstream source clocks are diagnostics.
+        trace['evidence_clock_semantics'] = 'LOCAL_RECEIPT_V2'
+        try:
+            from bot.research.clocks import source_clock_lead_sec
+            trace['source_clock_lead_sec'] = (source_clock_lead_sec(captured, captured.get('snapshot_ts'))
+                                              if captured else None)
+        except Exception:
+            trace['source_clock_lead_sec'] = None
+        if trace['decision_ts'] is None and str(source_event_type or '').endswith('_SUBMIT'):
+            # The submit is journaled synchronously right after the decision, so the
+            # instrument's latest LOCAL quote tick is the decision input tick.  Never
+            # fabricated: left UNKNOWN when no local tick (or a future one) exists.
+            try:
+                key_fn = getattr(strategy, '_instrument_key', None)
+                key = str(key_fn(inst)) if callable(key_fn) and inst else inst
+                tick = (getattr(strategy, 'last_quote_update_ts_by_inst', None) or {}).get(key)
+                tick = float(tick) if tick is not None else None
+                if tick is not None and 0 < tick <= now:
+                    trace['decision_ts'] = tick
+                    trace['decision_ts_status'] = 'INPUT_TICK_LOCAL'
+                    trace['timestamp_kind'] = 'DECISION_INPUT_TICK_TS'
+            except Exception:
+                pass
         if l2['status'] == 'L2_AVAILABLE':
             # Raw depth uses the existing async writer only. Never grow the
             # synchronous authoritative journal write with an L2 payload.

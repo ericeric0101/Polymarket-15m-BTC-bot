@@ -28,7 +28,7 @@ def fill(qty=2, side='BUY', fill_id='f1', client='c1', ts=100, **updates):
             'payload':{'fill_event_id':fill_id,'effective_fee_shares':0,'market_slug':'m', **updates}}
 
 
-@pytest.mark.parametrize('field', ['btc_source_ts','p_ex_source_ts','market_up_source_ts',
+@pytest.mark.parametrize('field', ['btc_received_ts','p_ex_received_ts','market_up_received_ts',
                                  'settlement_evidence_ts','sigma_evidence_ts','fill_ts'])
 @pytest.mark.parametrize('nested', [False, True])
 def test_no_future_inputs_in_any_replay(field, nested):
@@ -36,6 +36,17 @@ def test_no_future_inputs_in_any_replay(field, nested):
     result = replay_evidence([row], kind='MARKET', decision_ts=100)
     assert not result['rows'] and result['excluded']
     assert result['classification'] == 'APPROXIMATE_REPLAY'
+
+
+@pytest.mark.parametrize('field', ['btc_source_ts','p_ex_source_ts','market_up_source_ts'])
+@pytest.mark.parametrize('nested', [False, True])
+def test_upstream_source_clock_lead_is_not_a_future_input(field, nested):
+    # Venue/feed source clocks are a different clock domain than the host (they lead by up to
+    # ~0.6 s); a row persisted locally before the decision is causally available.  Pre-fix these
+    # rows were excluded (clock-domain defect, reports/forward_shadow_readiness_20261013).
+    row = {'event_ts':100, field:100.6} if not nested else {'event_ts':100,'payload':{field:100.6}}
+    result = replay_evidence([row], kind='MARKET', decision_ts=100)
+    assert len(result['rows']) == 1 and not result['excluded']
 
 
 def test_replay_repeatability_ordering_and_pure_guard_reuse():
@@ -87,7 +98,10 @@ def test_external_clock_skew_not_faked_and_snapshot_selector_shared():
                           {'ts':99,'kind':'RECEIVE_TS','clock':'host'})['delta_sec'] is None
     rows=[{'snapshot_ts':95,'joint_fresh':True},{'snapshot_ts':101,'joint_fresh':True}]
     assert latest_evidence(rows,100,max_age_sec=8,require_joint_fresh=True)['snapshot_ts']==95
-    assert available_at({'snapshot_ts':100,'btc_source_ts':101},100) is False
+    # Upstream source clocks are a different domain (diagnostic only); a LOCAL receipt/evidence
+    # clock after the decision still fails closed.  (Pre-fix this asserted rejection on btc_source_ts.)
+    assert available_at({'snapshot_ts':100,'btc_source_ts':101},100) is True
+    assert available_at({'snapshot_ts':100,'btc_received_ts':101},100) is False
 
 
 def test_reconciliation_partial_cancel_duplicate_and_restart():
