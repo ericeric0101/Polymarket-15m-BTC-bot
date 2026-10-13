@@ -33,7 +33,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-SCHEMA_VERSION = "candidate_decision_v1"
+SCHEMA_VERSION = "candidate_decision_v2"
+# v2 (2026-10-13): atomic decision-time feature vector X_t for future P(win) research --
+# BTC reference by source (local receipt <= cutoff), short returns, TWAP state, other-side
+# BBO, top-of-book imbalance, explicit feature cutoff.  No future / outcome fields.
 ACCEPT_EVENTS = frozenset({"ORDER_SUBMIT", "ORDER_DRY_RUN_SUBMITTED"})
 REJECT_PREFIXES = ("ORDER_SKIP_", "ORDER_OBSERVE_BUY_BLOCKED")
 LIFECYCLE_EVENTS = frozenset({"ORDER_FILLED", "ORDER_CANCELED", "ORDER_REJECTED", "ORDER_DRY_RUN_CANCELLED",
@@ -44,6 +47,12 @@ STABLE_ROLES = ("FIRST_ACCEPTED", "FIRST_EVALUATION")
 PEX_MAX_AGE_SEC = 8.0
 BBO_MAX_AGE_SEC = 3.0
 TICK = 0.01
+RETURN_HORIZONS_SEC = (5, 15, 30, 60)
+REFERENCE_MAX_AGE_SEC = 10.0
+TWAP_STATE_MAX_AGE_SEC = 5.0
+# Never part of a decision snapshot (post-hoc label / linker tables only).
+FORBIDDEN_SNAPSHOT_FIELD_TOKENS = ("markout", "outcome", "final_strike", "fill_price", "filled", "requote",
+                                   "exit_type", "payoff", "hold_y", "pnl", "settle")
 DEFAULT_QUEUE_MAX = 4096
 DEFAULT_SAMPLE_INTERVAL_SEC = 0.25
 MAX_TRACKED_MARKETS = 8
@@ -173,6 +182,40 @@ class CandidateDecisionSnapshot:
     client_order_id: Optional[str]
     alignment_status: str
     missing_reasons: tuple = field(default_factory=tuple)
+    # ---- v2 decision-time features (all from local receipts <= feature_cutoff_ts) ----
+    feature_cutoff_ts: Optional[float] = None
+    feature_cutoff_basis: Optional[str] = None
+    top_imbalance: Optional[float] = None
+    other_side_bid: Optional[float] = None
+    other_side_ask: Optional[float] = None
+    other_side_bbo_receipt_ts: Optional[float] = None
+    other_side_bbo_age_sec: Optional[float] = None
+    btc_chainlink_price: Optional[float] = None
+    btc_chainlink_receipt_ts: Optional[float] = None
+    btc_chainlink_age_sec: Optional[float] = None
+    btc_chainlink_source_ts: Optional[float] = None
+    btc_binance_price: Optional[float] = None
+    btc_binance_receipt_ts: Optional[float] = None
+    btc_binance_age_sec: Optional[float] = None
+    btc_binance_source_ts: Optional[float] = None
+    btc_twap_price: Optional[float] = None
+    btc_twap_receipt_ts: Optional[float] = None
+    btc_twap_age_sec: Optional[float] = None
+    btc_twap_source_ts: Optional[float] = None
+    reference_spot: Optional[float] = None
+    reference_spot_source: Optional[str] = None
+    btc_ret_5s: Optional[float] = None
+    btc_ret_15s: Optional[float] = None
+    btc_ret_30s: Optional[float] = None
+    btc_ret_60s: Optional[float] = None
+    btc_ret_source: Optional[str] = None
+    twap_state_current: Optional[float] = None
+    twap_state_projected_side: Optional[str] = None
+    twap_state_observed_ts: Optional[float] = None
+    twap_state_age_sec: Optional[float] = None
+    twap_minus_strike_usd: Optional[float] = None
+    reference_minus_strike_usd: Optional[float] = None
+    p_ex_receipt_ts: Optional[float] = None
 
     def as_payload(self) -> dict[str, Any]:
         out = asdict(self)
@@ -221,6 +264,123 @@ def read_bbo(strategy: Any, inst_key: str) -> dict[str, Optional[float]]:
         return {"bid": None, "ask": None, "receipt_ts": None, "bid_size": None, "ask_size": None}
 
 
+def _receipt_value(price: Any, receipt: Any, source_ts: Any, cutoff: float, max_age: float,
+                   missing: dict, key: str) -> tuple:
+    """(price, receipt_ts, age, source_ts) only if received locally at or before the cutoff."""
+    p, r, src = _num(price), _num(receipt), _num(source_ts)
+    if p is None or r is None or r <= 0:
+        missing[key] = "REFERENCE_NOT_RECEIVED"
+        return None, None, None, None
+    if r > cutoff:
+        missing[key] = "RECEIPT_AFTER_DECISION"
+        return None, None, None, None
+    age = cutoff - r
+    if age > max_age:
+        missing[key] = "REFERENCE_STALE"
+    return p, r, age, src
+
+
+def _returns_from_history(history: Any, cutoff: float, missing: dict) -> dict[str, Optional[float]]:
+    """Binance aggTrade history (source_ts, price, receipt_ts); ordered by LOCAL receipt, <= cutoff."""
+    out: dict[str, Optional[float]] = {f"btc_ret_{h}s": None for h in RETURN_HORIZONS_SEC}
+    try:
+        pts = sorted(((float(p[2]), float(p[1])) for p in list(history or ())
+                      if len(p) >= 3 and p[2] is not None and float(p[2]) <= cutoff), key=lambda x: x[0])
+    except Exception:
+        pts = []
+    if not pts:
+        missing["btc_returns"] = "RETURN_HISTORY_EMPTY"
+        return out
+    now_r, now_p = pts[-1]
+    if cutoff - now_r > REFERENCE_MAX_AGE_SEC:
+        missing["btc_returns"] = "RETURN_HISTORY_STALE"
+        return out
+    short = []
+    for h in RETURN_HORIZONS_SEC:
+        target = now_r - h
+        then = None
+        for r, p in reversed(pts):
+            if r <= target:
+                then = p
+                break
+        if then is None or then <= 0:
+            short.append(h)
+            continue
+        out[f"btc_ret_{h}s"] = now_p / then - 1.0
+    if short:
+        missing["btc_returns"] = "RETURN_HISTORY_INSUFFICIENT:" + ",".join(str(h) for h in short)
+    return out
+
+
+def decision_features(strategy: Any, *, slug: str, side: Optional[str], inst: Any, strike: Optional[float],
+                      bid_size: Optional[float], ask_size: Optional[float], cutoff: float,
+                      missing: dict) -> dict[str, Any]:
+    """v2 feature groups, copied by value from existing in-memory state.  No I/O, never raises."""
+    f: dict[str, Any] = {"feature_cutoff_ts": cutoff, "feature_cutoff_basis": "DECISION_WALL_TS"}
+    try:
+        if bid_size is not None and ask_size is not None and (bid_size + ask_size) > 0:
+            f["top_imbalance"] = (bid_size - ask_size) / (bid_size + ask_size)
+        else:
+            missing["top_imbalance"] = "DEPTH_MISSING"
+        other_key = None
+        if side in ("UP", "DOWN"):
+            fn = getattr(strategy, "_instrument_for_side", None)
+            try:
+                from bot.enums import ActiveSide
+                other = fn(ActiveSide.DOWN if side == "UP" else ActiveSide.UP) if callable(fn) else None
+                other_key = _inst_key(strategy, other) if other is not None else None
+            except Exception:
+                other_key = None
+        if other_key:
+            ob = read_bbo(strategy, other_key)
+            if ob["receipt_ts"] is not None and ob["receipt_ts"] <= cutoff and ob["bid"] is not None:
+                f.update(other_side_bid=ob["bid"], other_side_ask=ob["ask"], other_side_bbo_receipt_ts=ob["receipt_ts"],
+                         other_side_bbo_age_sec=cutoff - ob["receipt_ts"])
+            else:
+                missing["other_side_bbo"] = "OTHER_SIDE_BBO_UNAVAILABLE"
+        else:
+            missing["other_side_bbo"] = "OTHER_SIDE_INSTRUMENT_UNKNOWN"
+        for prefix, price_attr, receipt_attr, source_attr, scale in (
+                ("btc_chainlink", "_polymarket_chainlink_price", "_polymarket_chainlink_price_ts",
+                 "_polymarket_chainlink_event_ts_ms", 1000.0),
+                ("btc_binance", "_binance_ws_price", "_binance_ws_price_ts", "_binance_ws_price_source_ts", 1.0),
+                ("btc_twap", "_polymarket_chainlink_twap_price", "_polymarket_chainlink_twap_price_ts",
+                 "_polymarket_chainlink_twap_observation_ts", 1.0)):
+            src_raw = _num(getattr(strategy, source_attr, None))
+            p, r, age, src = _receipt_value(getattr(strategy, price_attr, None), getattr(strategy, receipt_attr, None),
+                                            (src_raw / scale) if src_raw is not None else None, cutoff,
+                                            REFERENCE_MAX_AGE_SEC, missing, prefix)
+            f.update({f"{prefix}_price": p, f"{prefix}_receipt_ts": r, f"{prefix}_age_sec": age,
+                      f"{prefix}_source_ts": src})
+        ref = _num(getattr(strategy, "latest_external_spot", None))
+        f["reference_spot"] = ref
+        f["reference_spot_source"] = str(getattr(strategy, "latest_external_spot_source", "") or "") or None
+        f.update(_returns_from_history(getattr(strategy, "_prediction_btc_research_history", None), cutoff, missing))
+        f["btc_ret_source"] = "binance_ws_aggtrade_local_receipt"
+        twap_shadow = getattr(strategy, "twap_forward_shadow", None)
+        latest = twap_shadow.latest(slug) if twap_shadow is not None and hasattr(twap_shadow, "latest") else None
+        if latest:
+            observed = _num(latest.get("observed_ts"))
+            if observed is not None and observed <= cutoff:
+                f.update(twap_state_projected_side=latest.get("projected_settlement_side_trend"),
+                         twap_state_observed_ts=observed, twap_state_age_sec=cutoff - observed)
+                if cutoff - observed > TWAP_STATE_MAX_AGE_SEC:
+                    missing["twap_state"] = "TWAP_STATE_STALE"
+            else:
+                missing["twap_state"] = "TWAP_STATE_AFTER_DECISION"
+        else:
+            missing["twap_state"] = "TWAP_STATE_ABSENT"
+        if ref is not None and strike is not None:
+            f["reference_minus_strike_usd"] = ref - strike
+        twap_now = f.get("btc_twap_price")
+        f["twap_state_current"] = twap_now
+        if twap_now is not None and strike is not None:
+            f["twap_minus_strike_usd"] = twap_now - strike
+    except Exception:
+        missing["features_v2"] = "FEATURE_CAPTURE_ERROR"
+    return f
+
+
 def build_snapshot(strategy: Any, *, event_type: str, role: str, side_hint: Optional[str], price: Any, qty: Any,
                    client_order_id: Optional[str], reason: Optional[str], payload: dict, run_fingerprint: str,
                    seq: int, wall_ts: float, mono_ns: int) -> CandidateDecisionSnapshot:
@@ -267,6 +427,9 @@ def build_snapshot(strategy: Any, *, event_type: str, role: str, side_hint: Opti
         lead = max(leads) if leads else None
         if pup is None and pdn is None:
             pex_reason = "PEX_NOT_COMPUTED_AT_DECISION"
+        elif page is not None and page < 0:
+            pex_reason = "PEX_AFTER_DECISION"
+            pup = pdn = sigma = None
         elif page is None or page > PEX_MAX_AGE_SEC:
             pex_reason = "PEX_STALE"
             pup = pdn = None
@@ -305,6 +468,9 @@ def build_snapshot(strategy: Any, *, event_type: str, role: str, side_hint: Opti
     accepted = event_type in ACCEPT_EVENTS
     cid = candidate_id(slug, role, side or "", str(getattr(strategy, "run_id", "") or ""), seq)
     core_ok = all(k not in missing for k in ("bbo", "tte_sec", "side_score")) and side is not None
+    feats = decision_features(strategy, slug=slug, side=side, inst=inst, strike=strike, bid_size=bbo["bid_size"],
+                              ask_size=bbo["ask_size"], cutoff=wall_ts, missing=missing)
+    feats["p_ex_receipt_ts"] = psnap_ts
     return CandidateDecisionSnapshot(
         candidate_id=cid, candidate_role=role, market_slug=slug, token_id=token, instrument_id=str(inst) if inst else None,
         candidate_side=side, market_start_ts=start, market_end_ts=end, decision_ts=decision_ts,
@@ -321,7 +487,8 @@ def build_snapshot(strategy: Any, *, event_type: str, role: str, side_hint: Opti
         production_p_fair=_num(payload.get("p_fair")), proposed_maker_price=_num(price), proposed_qty=q,
         eligibility="ACCEPTED" if accepted else "REJECTED", eligibility_event_type=event_type,
         reject_reason=None if accepted else (reason or event_type), client_order_id=client_order_id,
-        alignment_status="ALIGNED" if core_ok else "PARTIAL", missing_reasons=tuple(sorted(missing.items())))
+        alignment_status="ALIGNED" if core_ok else "PARTIAL", missing_reasons=tuple(sorted(missing.items())),
+        **feats)
 
 
 class JsonlSink:

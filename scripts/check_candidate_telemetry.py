@@ -13,7 +13,12 @@ from pathlib import Path
 
 CORE = ("decision_ts", "best_bid", "best_ask", "tte_sec", "side_score", "candidate_side", "proposed_maker_price",
         "market_slug")
-SCHEMA = "candidate_decision_v1"
+SCHEMA = "candidate_decision_v2"
+# Optional feature groups: coverage reported separately; never fails the gate on its own
+# (a missing value must carry a reason code instead).
+OPTIONAL = ("raw_p_ex", "required_move_sigma", "top_bid_size", "top_ask_size", "top_imbalance", "btc_ret_5s",
+            "btc_ret_60s", "btc_chainlink_price", "btc_binance_price", "btc_twap_price", "twap_state_projected_side",
+            "other_side_bid", "runtime_strike", "signed_strike_distance_usd")
 COVERAGE_MIN = 0.99
 
 
@@ -45,12 +50,15 @@ def check(paths) -> dict:
         need = [r for r in cands if not (f == "proposed_maker_price" and r.get("eligibility") == "REJECTED"
                                          and r.get("proposed_maker_price") is None)]
         cov[f] = (sum(1 for r in need if r.get(f) is not None) / len(need)) if need else None
+    optional_cov = {f: (sum(1 for r in cands if r.get(f) is not None) / len(cands)) if cands else None
+                    for f in OPTIONAL}
     reasons = Counter(v for r in cands for v in (r.get("missing_reasons") or {}).values())
     pex_missing_without_reason = sum(1 for r in cands if r.get("raw_p_ex") is None and not r.get("pex_reason"))
     ok = bool(cands) and all(v is not None and v >= COVERAGE_MIN for v in cov.values())
     return {"records": len(recs), "candidates": len(cands), "bad_schema": bad_schema, "duplicate_ids": dup,
             "stable_role_duplicates_across_restarts": restart_dups, "non_monotonic_decisions": nonmono,
             "core_coverage": cov, "core_coverage_ok": ok and bad_schema == 0 and dup == 0,
+            "optional_coverage": optional_cov,
             "missing_reason_counts": dict(reasons), "pex_missing_without_reason": pex_missing_without_reason,
             "record_types": dict(Counter(r.get("record_type") for r in recs))}
 
