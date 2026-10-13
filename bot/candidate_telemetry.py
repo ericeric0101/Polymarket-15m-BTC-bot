@@ -18,6 +18,13 @@ rejection rule.
 Flags (read once at startup, default OFF):
 CANDIDATE_DECISION_TELEMETRY_ENABLED, FIRST_QUOTE_ONLY_SHADOW_ENABLED,
 HELD_SIDE_MARKOUT_TELEMETRY_ENABLED.  FQO and markouts require the candidate flag.
+
+DRY-RUN plumbing (``bot.dry_run_plumbing.PLUMBING_REVISION``): the paper maker lifecycle is
+recorded on the same candidate -- ``SHADOW_SIM_ENTRY_FILLED`` becomes LIFECYCLE
+``SIMULATED_FILL`` (joined by the paper order's own ``dry_run_client_order_id``, never by time),
+fill-anchored markouts use ``anchor=SIMULATED_FILL``, and every accepted DRY-RUN candidate whose
+market closes gets exactly one terminal LIFECYCLE record.  All of it carries
+``execution_mode=DRY_RUN`` / ``evidence_tier=SIMULATED_ENV``.
 """
 from __future__ import annotations
 
@@ -31,7 +38,9 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
+
+from bot.dry_run_plumbing import (EXECUTION_MODE_DRY_RUN, PLUMBING_REVISION, evidence_tier, execution_mode)
 
 SCHEMA_VERSION = "candidate_decision_v2"
 # v2 (2026-10-13): atomic decision-time feature vector X_t for future P(win) research --
@@ -42,6 +51,16 @@ REJECT_PREFIXES = ("ORDER_SKIP_", "ORDER_OBSERVE_BUY_BLOCKED")
 LIFECYCLE_EVENTS = frozenset({"ORDER_FILLED", "ORDER_CANCELED", "ORDER_REJECTED", "ORDER_DRY_RUN_CANCELLED",
                               "ORDER_DRY_RUN_FILLED", "ORDER_EXPIRED"})
 MARKOUT_HORIZONS_SEC = (1, 3, 5, 10, 15, 30)
+# DRY-RUN paper-order lifecycle (bot.shadow_simulation); LIVE semantics are untouched.
+DRY_RUN_SUBMIT_EVENT = "ORDER_DRY_RUN_SUBMITTED"
+SIM_FILL_EVENT = "SHADOW_SIM_ENTRY_FILLED"
+SIM_EXPIRE_EVENT = "SHADOW_SIM_ENTRY_EXPIRED"
+# Journaled by the paper-order code in the same submit call, immediately before ORDER_DRY_RUN_SUBMITTED;
+# its payload carries the decision's p_fair ("fair") and the quote time it came from (planned_quote_ts).
+SIM_ENTRY_EVENTS = frozenset({"SHADOW_SIM_ENTRY_CANDIDATE", "SHADOW_SIM_ENTRY_REQUOTED"})
+SIMULATED_FILL_EVENT_TYPE = "ORDER_DRY_RUN_FILLED"   # already read by the offline evaluator as a fill
+DRY_RUN_TERMINAL_EVENT_TYPE = "DRY_RUN_TERMINAL"
+TERMINAL_LIFECYCLE_EVENTS = ("SIMULATED_FILL", "SIMULATED_CANCEL", "SIMULATED_EXPIRE", "REJECTED")
 STABLE_ROLES = ("FIRST_ACCEPTED", "FIRST_EVALUATION")
 # Offline canonical rule: FIRST_ACCEPTED if the market has one, else FIRST_EVALUATION.
 PEX_MAX_AGE_SEC = 8.0
@@ -112,7 +131,11 @@ def build_run_header(strategy: Any, flags: dict[str, bool]) -> dict[str, Any]:
             "schema_version": SCHEMA_VERSION, "flags": dict(sorted(flags.items())),
             "exit_policy": exit_policy_fingerprint(strategy), "strike_module_version": strike_module_version(),
             # Deterministic research policy fingerprint (bot.research_startup_guard); None outside the profile.
-            "policy_fingerprint": getattr(strategy, "policy_fingerprint", None)}
+            "policy_fingerprint": getattr(strategy, "policy_fingerprint", None),
+            # Population identity: PRE_PLUMBING data has none of these keys and never pools with this.
+            "plumbing_revision": PLUMBING_REVISION, "execution_mode": execution_mode(strategy),
+            "evidence_tier": evidence_tier(execution_mode(strategy)),
+            "run_label": getattr(strategy, "run_label", None)}
     fp = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
     return {"record_type": "RUN_HEADER", "run_id": str(getattr(strategy, "run_id", "") or ""), **body,
             "run_fingerprint": fp}
@@ -216,6 +239,9 @@ class CandidateDecisionSnapshot:
     twap_minus_strike_usd: Optional[float] = None
     reference_minus_strike_usd: Optional[float] = None
     p_ex_receipt_ts: Optional[float] = None
+    # production_p_fair provenance: DECISION_EVENT_PAYLOAD = the value this decision used.
+    production_p_fair_source: Optional[str] = None
+    production_p_fair_asof_ts: Optional[float] = None
 
     def as_payload(self) -> dict[str, Any]:
         out = asdict(self)
@@ -471,6 +497,20 @@ def build_snapshot(strategy: Any, *, event_type: str, role: str, side_hint: Opti
     feats = decision_features(strategy, slug=slug, side=side, inst=inst, strike=strike, bid_size=bbo["bid_size"],
                               ask_size=bbo["ask_size"], cutoff=wall_ts, missing=missing)
     feats["p_ex_receipt_ts"] = psnap_ts
+    # production_p_fair: only the value carried by this decision event (captured atomically);
+    # absent or only available after the cutoff -> null with a reason, never recomputed or backfilled.
+    p_fair = _num(payload.get("p_fair"))
+    p_fair_asof = _num(payload.get("p_fair_asof_ts"))
+    p_fair_source = None
+    if p_fair is None:
+        missing["production_p_fair"] = "PRODUCTION_P_FAIR_NOT_IN_DECISION_EVENT"
+    elif p_fair_asof is not None and p_fair_asof > wall_ts:
+        p_fair, p_fair_asof = None, None
+        missing["production_p_fair"] = "PRODUCTION_P_FAIR_AFTER_DECISION"
+    else:
+        p_fair_source = str(payload.get("p_fair_source") or "DECISION_EVENT_PAYLOAD")
+    feats["production_p_fair_source"] = p_fair_source
+    feats["production_p_fair_asof_ts"] = p_fair_asof
     return CandidateDecisionSnapshot(
         candidate_id=cid, candidate_role=role, market_slug=slug, token_id=token, instrument_id=str(inst) if inst else None,
         candidate_side=side, market_start_ts=start, market_end_ts=end, decision_ts=decision_ts,
@@ -484,7 +524,7 @@ def build_snapshot(strategy: Any, *, event_type: str, role: str, side_hint: Opti
         side_score_abs=abs(score) if score is not None else None, required_move_sigma=sigma,
         signed_strike_distance_usd=dist, runtime_strike=strike, strike_status=status, strike_status_reason=status_reason,
         source_clock_lead_sec=lead, tte_sec=tte, elapsed_since_open_sec=(decision_ts - start) if start else None,
-        production_p_fair=_num(payload.get("p_fair")), proposed_maker_price=_num(price), proposed_qty=q,
+        production_p_fair=p_fair, proposed_maker_price=_num(price), proposed_qty=q,
         eligibility="ACCEPTED" if accepted else "REJECTED", eligibility_event_type=event_type,
         reject_reason=None if accepted else (reason or event_type), client_order_id=client_order_id,
         alignment_status="ALIGNED" if core_ok else "PARTIAL", missing_reasons=tuple(sorted(missing.items())),
@@ -597,6 +637,11 @@ class _MarketState:
     samples: int = 0
     end_ts: Optional[float] = None
     closed: bool = False
+    # DRY-RUN paper order chain: {coid, submit_ts, price, qty, state OPEN|CANCELLED|EXPIRED|FILLED|REJECTED, end_reason}
+    dry_orders: list = field(default_factory=list)
+    terminal: Optional[str] = None
+    fill_keys: set = field(default_factory=set)
+    fill_cum_qty: float = 0.0
 
 
 class CandidateTelemetryRecorder:
@@ -615,7 +660,13 @@ class CandidateTelemetryRecorder:
         self._lock = threading.Lock()
         self._markets: dict[str, _MarketState] = {}
         self._markouts: list[tuple[float, dict]] = []
-        self.counters = {"observed": 0, "candidates": 0, "lifecycle": 0, "exceptions": 0, "markouts": 0, "paths": 0}
+        self.counters = {"observed": 0, "candidates": 0, "lifecycle": 0, "exceptions": 0, "markouts": 0, "paths": 0,
+                         "sim_fills": 0, "sim_fill_unmapped": 0, "sim_fill_duplicates": 0, "sim_fill_late": 0,
+                         "terminals": 0}
+        self.execution_mode = run_header.get("execution_mode")
+        self._pending_paper_entry: dict[str, dict] = {}
+        self.tags = {"execution_mode": self.execution_mode, "evidence_tier": run_header.get("evidence_tier"),
+                     "plumbing_revision": run_header.get("plumbing_revision")}
         self._strategy_ref = None
         self._stop = threading.Event()
         self._sampler = None
@@ -652,6 +703,15 @@ class CandidateTelemetryRecorder:
                 self._on_decision(strategy, et, price, qty, client_order_id, reason, payload or {})
             elif et in LIFECYCLE_EVENTS:
                 self._on_lifecycle(strategy, et, s, price, qty, client_order_id, reason, payload or {})
+            elif et == SIM_FILL_EVENT and self.execution_mode == EXECUTION_MODE_DRY_RUN:
+                self._on_sim_fill(price, qty, client_order_id, payload or {})
+            elif et == SIM_EXPIRE_EVENT and self.execution_mode == EXECUTION_MODE_DRY_RUN:
+                self._on_sim_expire(payload or {})
+            elif et in SIM_ENTRY_EVENTS and self.execution_mode == EXECUTION_MODE_DRY_RUN:
+                p = payload or {}
+                slug = str(p.get("slug") or p.get("market_slug") or getattr(strategy, "current_market_slug", "") or "")
+                self._pending_paper_entry[slug] = {"order_key": p.get("order_key"), "fair": p.get("fair"),
+                                                   "planned_quote_ts": p.get("planned_quote_ts")}
         except Exception:
             self.counters["exceptions"] += 1
 
@@ -663,6 +723,13 @@ class CandidateTelemetryRecorder:
             return
         accepted = et in ACCEPT_EVENTS
         elig = ("ACCEPTED" if accepted else "REJECTED", None if accepted else (reason or et))
+        if et == DRY_RUN_SUBMIT_EVENT and (payload or {}).get("p_fair") is None:
+            # The DRY-RUN submit event does not carry p_fair; the paper order journaled in the same submit
+            # call does (same directional snapshot).  Joined by order_key, consumed once, never reused.
+            paper = self._pending_paper_entry.pop(slug, None)
+            if paper and paper.get("fair") is not None and paper.get("order_key") == (payload or {}).get("order_key"):
+                payload = {**payload, "p_fair": paper["fair"], "p_fair_asof_ts": paper.get("planned_quote_ts"),
+                           "p_fair_source": "DRY_RUN_PAPER_ORDER_EVENT"}
         with self._lock:
             st = self._markets.setdefault(slug, _MarketState())
             first_eval = st.seq == 0
@@ -678,9 +745,12 @@ class CandidateTelemetryRecorder:
                 st.requotes.append({"ts": wall, "price": _num(price), "client_order_id": coid})
                 if st.withdrawn_ts is None:
                     st.withdrawn_ts = wall
+            requoted = self._dry_chain_submit(st, et, coid, price, qty, wall) if accepted else None
             st.last_eligibility = elig
             st.seq += 1
             seq = st.seq
+        if requoted is not None:
+            self._emit(requoted)
         if role is None:
             return
         snap = build_snapshot(strategy, event_type=et, role=role, side_hint=None, price=price, qty=qty,
@@ -720,21 +790,156 @@ class CandidateTelemetryRecorder:
                 elif et in ("ORDER_CANCELED", "ORDER_DRY_RUN_CANCELLED", "ORDER_EXPIRED", "ORDER_REJECTED") \
                         and st.withdrawn_ts is None:
                     st.withdrawn_ts = wall
+            order = self._dry_order(st, coid) if st else None
+            if order is not None and order["state"] == "OPEN" and st.terminal is None:
+                if et == "ORDER_DRY_RUN_CANCELLED":
+                    order.update(state="CANCELLED", end_reason=reason)
+                elif et in ("ORDER_REJECTED", "ORDER_DRY_RUN_REJECTED"):
+                    order.update(state="REJECTED", end_reason=reason)
         if st is None:
             return
         self.counters["lifecycle"] += 1
-        self._emit({"record_type": "LIFECYCLE", "schema_version": SCHEMA_VERSION, "candidate_id": cid,
-                    "market_slug": slug, "event_type": et, "side": side or None, "price": _num(price), "qty": _num(qty),
-                    "client_order_id": coid, "reason": reason, "wall_ts": wall, "monotonic_ns": mono,
-                    "run_fingerprint": self.fingerprint})
+        rec = {"record_type": "LIFECYCLE", "schema_version": SCHEMA_VERSION, "candidate_id": cid,
+               "market_slug": slug, "event_type": et, "side": side or None, "price": _num(price), "qty": _num(qty),
+               "client_order_id": coid, "reason": reason, "wall_ts": wall, "monotonic_ns": mono,
+               "run_fingerprint": self.fingerprint, **self.tags}
+        if order is not None:
+            # Order-level DRY-RUN event; the candidate's single terminal state is a separate record.
+            rec.update(lifecycle_event="ORDER_CANCEL" if et == "ORDER_DRY_RUN_CANCELLED" else "ORDER_REJECT",
+                       terminal=False)
+        self._emit(rec)
         if is_canonical_fill and self.markout_enabled:
             self._schedule_markouts(slug, "FILL", wall, cid, coid)
 
     # ------------------------------------------------------------ path stats + markouts
-    def _schedule_markouts(self, slug, anchor, t0, cid, coid) -> None:
+    # ------------------------------------------------------------ DRY-RUN paper order chain
+    @staticmethod
+    def _dry_order(st: _MarketState, coid: Optional[str]) -> Optional[dict]:
+        if not coid:
+            return None
+        return next((o for o in st.dry_orders if o["coid"] == coid), None)
+
+    def _lifecycle_base(self, st: _MarketState, slug: str, coid: Optional[str], wall: float) -> dict:
+        return {"record_type": "LIFECYCLE", "schema_version": SCHEMA_VERSION, "candidate_id": st.canonical_id,
+                "run_id": self.run_header.get("run_id"), "market_slug": slug, "client_order_id": coid,
+                "canonical_client_order_id": st.canonical_coid, "candidate_side": st.side, "wall_ts": wall,
+                "monotonic_ns": self.mono(), "run_fingerprint": self.fingerprint, "simulation": True, **self.tags}
+
+    def _dry_chain_submit(self, st: _MarketState, et: str, coid: Optional[str], price: Any, qty: Any,
+                          wall: float) -> Optional[dict]:
+        """Caller holds the lock.  Returns a REQUOTED record when a later order replaces an earlier one."""
+        if et != DRY_RUN_SUBMIT_EVENT or not coid or self._dry_order(st, coid) is not None or st.terminal is not None:
+            return None
+        prev = st.dry_orders[-1] if st.dry_orders else None
+        st.dry_orders.append({"coid": coid, "submit_ts": wall, "price": _num(price), "qty": _num(qty),
+                              "state": "OPEN", "end_reason": None})
+        if prev is None:
+            return None
+        end = {"CANCELLED": "REQUOTE_CANCEL", "EXPIRED": "EXPIRED_THEN_REQUOTED", "REJECTED": "REJECTED_THEN_REQUOTED",
+               "OPEN": "REPLACED_WITHOUT_CANCEL"}.get(prev["state"], prev["state"])
+        if prev["state"] == "OPEN":
+            prev.update(state="CANCELLED", end_reason="REPLACED_WITHOUT_CANCEL")
+        slug = next((s for s, m in self._markets.items() if m is st), "")
+        return {**self._lifecycle_base(st, slug, coid, wall), "event_type": DRY_RUN_SUBMIT_EVENT,
+                "lifecycle_event": "REQUOTED", "terminal": False, "replaces_client_order_id": prev["coid"],
+                "replaced_order_end": end, "replaced_order_end_reason": prev.get("end_reason"),
+                "price": _num(price), "qty": _num(qty), "side": "BUY"}
+
+    def _on_sim_fill(self, price: Any, qty: Any, sim_id: Optional[str], payload: dict) -> None:
+        """SHADOW_SIM_ENTRY_FILLED -> LIFECYCLE SIMULATED_FILL on the existing candidate (never a new identity)."""
+        wall = self.clock()
+        slug = str(payload.get("slug") or payload.get("market_slug") or "")
+        coid = payload.get("dry_run_client_order_id")
+        fill_seq = int(payload.get("fill_seq") or 1)
+        q = _num(qty) if _num(qty) is not None else _num(payload.get("qty"))
+        schedule = None
+        with self._lock:
+            st = self._markets.get(slug)
+            order = self._dry_order(st, coid) if st is not None else None
+            if order is None:
+                # No stable key, or a key outside this candidate's order chain: report, never guess.
+                self.counters["sim_fill_unmapped"] += 1
+                rec = {"record_type": "LIFECYCLE", "schema_version": SCHEMA_VERSION, "candidate_id": None,
+                       "market_slug": slug, "event_type": SIM_FILL_EVENT, "lifecycle_event": "SIMULATED_FILL_UNMAPPED",
+                       "terminal": False, "client_order_id": coid, "simulation_id": sim_id, "price": _num(price),
+                       "qty": q, "wall_ts": wall, "run_fingerprint": self.fingerprint, "simulation": True,
+                       "source_event": SIM_FILL_EVENT, **self.tags}
+            elif (coid, fill_seq) in st.fill_keys:
+                self.counters["sim_fill_duplicates"] += 1
+                return
+            elif st.terminal is not None and st.terminal != "SIMULATED_FILL":
+                self.counters["sim_fill_late"] += 1
+                return
+            else:
+                st.fill_keys.add((coid, fill_seq))
+                first = st.terminal is None
+                st.fill_cum_qty += float(q or 0.0)
+                if first:
+                    st.terminal = "SIMULATED_FILL"
+                    order.update(state="FILLED", end_reason="SIMULATED_FILL")
+                    if coid == st.canonical_coid and st.canonical_fill_ts is None:
+                        st.canonical_fill_ts = wall
+                    self.counters["terminals"] += 1
+                    if self.markout_enabled:
+                        schedule = (slug, wall, st.canonical_id, coid, st.end_ts)
+                self.counters["sim_fills"] += 1
+                fill_ts = _num(payload.get("filled_ts"))
+                rec = {**self._lifecycle_base(st, slug, coid, wall), "event_type": SIMULATED_FILL_EVENT_TYPE,
+                       "lifecycle_event": "SIMULATED_FILL", "terminal": first, "side": "BUY",
+                       "instrument_id": payload.get("instrument_id"), "submit_ts": order["submit_ts"],
+                       # Event time (simulator quote receipt) and local receipt time; ordering uses wall_ts.
+                       "fill_event_ts": fill_ts, "price": _num(price), "qty": q, "fill_seq": fill_seq,
+                       "cumulative_qty": st.fill_cum_qty, "is_canonical_order": coid == st.canonical_coid,
+                       "simulation_id": sim_id, "source_event": SIM_FILL_EVENT, "reason": payload.get("status")}
+        self._emit(rec)
+        if schedule is not None:
+            slug, t0, cid, coid, end_ts = schedule
+            self._schedule_markouts(slug, "SIMULATED_FILL", t0, cid, coid, market_end_ts=end_ts)
+
+    def _on_sim_expire(self, payload: dict) -> None:
+        wall = self.clock()
+        slug = str(payload.get("slug") or payload.get("market_slug") or "")
+        coid = payload.get("dry_run_client_order_id")
+        with self._lock:
+            st = self._markets.get(slug)
+            order = self._dry_order(st, coid) if st is not None else None
+            if order is None or order["state"] != "OPEN" or st.terminal is not None:
+                return
+            order.update(state="EXPIRED", end_reason="SIM_ORDER_TTL")
+            rec = {**self._lifecycle_base(st, slug, coid, wall), "event_type": SIM_EXPIRE_EVENT,
+                   "lifecycle_event": "ORDER_EXPIRE", "terminal": False, "source_event": SIM_EXPIRE_EVENT}
+        self._emit(rec)
+
+    def _dry_terminal_on_close(self, slug: str, st: _MarketState, now: float) -> Optional[dict]:
+        """Caller holds the lock.  Exactly one terminal state per accepted DRY-RUN candidate."""
+        if not st.dry_orders or st.terminal is not None:
+            return None
+        last = st.dry_orders[-1]
+        reason = last.get("end_reason")
+        if last["state"] == "OPEN":
+            kind, why = "SIMULATED_EXPIRE", "MARKET_ENDED"
+        elif last["state"] == "EXPIRED":
+            kind, why = "SIMULATED_EXPIRE", "SIM_ORDER_TTL"
+        elif last["state"] == "REJECTED":
+            kind, why = "REJECTED", reason
+        elif str(reason or "").endswith(":ttl"):
+            kind, why = "SIMULATED_EXPIRE", "ORDER_TTL"
+        else:
+            kind, why = "SIMULATED_CANCEL", reason
+        st.terminal = kind
+        self.counters["terminals"] += 1
+        return {**self._lifecycle_base(st, slug, last["coid"], now), "event_type": DRY_RUN_TERMINAL_EVENT_TYPE,
+                "lifecycle_event": kind, "terminal": True, "terminal_reason": why, "side": "BUY",
+                "price": last.get("price"), "qty": last.get("qty"), "orders_in_chain": len(st.dry_orders),
+                "market_end_ts": st.end_ts}
+
+    def _schedule_markouts(self, slug, anchor, t0, cid, coid, market_end_ts=None) -> None:
         for h in MARKOUT_HORIZONS_SEC:
-            self._markouts.append((t0 + h, {"slug": slug, "anchor": anchor, "horizon_sec": h, "anchor_ts": t0,
-                                            "candidate_id": cid, "client_order_id": coid}))
+            m = {"slug": slug, "anchor": anchor, "anchor_type": anchor, "horizon_sec": h, "anchor_ts": t0,
+                 "candidate_id": cid, "client_order_id": coid}
+            if market_end_ts is not None:
+                m["market_end_ts"] = market_end_ts
+            self._markouts.append((t0 + h, m))
 
     def sample(self, strategy: Any = None, now: Optional[float] = None) -> None:
         """One sampling pass (called by the sampler thread; callable directly in tests)."""
@@ -750,6 +955,12 @@ class CandidateTelemetryRecorder:
                 self._markouts = keep
                 states = list(self._markets.items())
             for _, m in due:
+                if m.get("market_end_ts") is not None and m["anchor_ts"] + m["horizon_sec"] > m["market_end_ts"]:
+                    self.counters["markouts"] += 1
+                    self._emit({"record_type": "MARKOUT", "schema_version": SCHEMA_VERSION, **m, "sample_ts": now,
+                                "best_bid": None, "best_ask": None, "mid": None, "bbo_age_sec": None,
+                                "reason": "MARKET_ENDED", "run_fingerprint": self.fingerprint, **self.tags})
+                    continue
                 st = dict(states).get(m["slug"])
                 key = st.inst_key if st else None
                 bbo = read_bbo(strategy, key) if key else {"bid": None, "ask": None, "receipt_ts": None}
@@ -760,7 +971,7 @@ class CandidateTelemetryRecorder:
                             "best_bid": None if stale else bbo["bid"], "best_ask": None if stale else bbo["ask"],
                             "mid": None if stale else (bbo["bid"] + bbo["ask"]) / 2, "bbo_age_sec": age,
                             "reason": ("BBO_MISSING" if bbo.get("receipt_ts") is None else "BBO_STALE") if stale else None,
-                            "run_fingerprint": self.fingerprint})
+                            "run_fingerprint": self.fingerprint, **self.tags})
             if self.fqo_enabled:
                 for slug, st in states:
                     self._sample_path(strategy, slug, st, now)
@@ -819,9 +1030,12 @@ class CandidateTelemetryRecorder:
                    "t_through_after_withdraw": st.t_through_after_withdraw,
                    "path_sample_interval_sec": self.sample_interval_sec, "path_samples": st.samples,
                    "path_end_ts": st.end_ts if st.end_ts is not None else now, "fqo_enabled": self.fqo_enabled,
-                   "run_fingerprint": self.fingerprint}
+                   "run_fingerprint": self.fingerprint, **self.tags}
+            terminal = self._dry_terminal_on_close(slug, st, self.clock() if now is None else float(now))
         self.counters["paths"] += 1
         self._emit(rec)
+        if terminal is not None:
+            self._emit(terminal)
 
     def _sample_loop(self) -> None:
         while not self._stop.wait(self.sample_interval_sec):
@@ -837,6 +1051,15 @@ def flags_from_env(env: Optional[dict] = None) -> dict[str, bool]:
             "HELD_SIDE_MARKOUT_TELEMETRY_ENABLED": b("HELD_SIDE_MARKOUT_TELEMETRY_ENABLED")}
 
 
+def candidate_telemetry_dir(project_root: Path, env: Optional[dict] = None) -> Path:
+    """CANDIDATE_TELEMETRY_DIR (repo-root anchored) or the default data/research/candidate_telemetry."""
+    raw = str((os.environ if env is None else env).get("CANDIDATE_TELEMETRY_DIR") or "").strip()
+    if not raw:
+        return Path(project_root) / "data/research/candidate_telemetry"
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else Path(project_root) / p
+
+
 def build_candidate_telemetry(strategy: Any, *, candidate: bool, fqo: bool, markout: bool,
                               directory: Optional[Path] = None, warn: Callable[[str], None] = lambda m: None
                               ) -> Optional[CandidateTelemetryRecorder]:
@@ -847,7 +1070,7 @@ def build_candidate_telemetry(strategy: Any, *, candidate: bool, fqo: bool, mark
                  "CANDIDATE_DECISION_TELEMETRY_ENABLED is off")
         return None
     try:
-        root = Path(directory) if directory else Path(getattr(strategy, "project_root", ".")) / "data/research/candidate_telemetry"
+        root = Path(directory) if directory else candidate_telemetry_dir(Path(getattr(strategy, "project_root", ".")))
         sink = JsonlSink(root, warn=warn)
         flags = {"CANDIDATE_DECISION_TELEMETRY_ENABLED": True, "FIRST_QUOTE_ONLY_SHADOW_ENABLED": bool(fqo),
                  "HELD_SIDE_MARKOUT_TELEMETRY_ENABLED": bool(markout),
@@ -866,3 +1089,52 @@ def build_candidate_telemetry(strategy: Any, *, candidate: bool, fqo: bool, mark
 def candidate_telemetry_summary(flags: dict[str, bool]) -> str:
     return "Entry V3 candidate telemetry (research only, no order authority): " + " ".join(
         f"{k}={int(v)}" for k, v in sorted(flags.items()))
+
+
+def reconcile_dry_run_fills(records: Iterable[dict], journal_rows: Iterable[dict]) -> dict[str, Any]:
+    """Offline 1:1 reconciliation of journal paper fills vs candidate telemetry (pure; no I/O).
+
+    ``journal_rows``: order_events rows with ``event_type`` / ``price`` / ``qty`` / ``payload``.
+    A journal fill joins a SIMULATED_FILL only by the paper order's ``dry_run_client_order_id``.
+    """
+    records = list(records)
+    jfill = {}
+    jfill_without_key = 0
+    for r in journal_rows:
+        if r.get("event_type") != SIM_FILL_EVENT:
+            continue
+        payload = r.get("payload") or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload or "{}")
+        key = payload.get("dry_run_client_order_id")
+        if not key:
+            jfill_without_key += 1
+            continue
+        jfill[key] = {"price": _num(r.get("price")), "qty": _num(r.get("qty")), "filled_ts": _num(payload.get("filled_ts"))}
+    tfill = {r.get("client_order_id"): r for r in records if r.get("record_type") == "LIFECYCLE"
+             and r.get("lifecycle_event") == "SIMULATED_FILL" and int(r.get("fill_seq") or 1) == 1}
+    matched = set(jfill) & set(tfill)
+    mismatches = sum(1 for k in matched if (jfill[k]["price"], jfill[k]["qty"], jfill[k]["filled_ts"]) !=
+                     (_num(tfill[k].get("price")), _num(tfill[k].get("qty")), _num(tfill[k].get("fill_event_ts"))))
+    accepted = {r.get("market_slug"): r.get("candidate_id") for r in records
+                if r.get("record_type") == "CANDIDATE" and r.get("candidate_role") == "FIRST_ACCEPTED"}
+    closed = {r.get("market_slug") for r in records if r.get("record_type") == "PATH_STATS"}
+    terminals: dict[str, list] = {}
+    for r in records:
+        if r.get("record_type") == "LIFECYCLE" and r.get("terminal") is True:
+            terminals.setdefault(r.get("market_slug"), []).append(r.get("lifecycle_event"))
+    accepted_closed = [s for s in accepted if s in closed]
+    return {
+        "journal_fills": len(jfill) + jfill_without_key, "journal_fills_without_key": jfill_without_key,
+        "telemetry_simulated_fills": len(tfill), "matched": len(matched),
+        "join_completeness": (len(matched) / (len(jfill) + jfill_without_key)) if (jfill or jfill_without_key) else None,
+        "unmatched_journal_fills": len(set(jfill) - set(tfill)) + jfill_without_key,
+        "unmatched_telemetry_fills": len(set(tfill) - set(jfill)), "field_mismatches": mismatches,
+        "accepted_candidates": len(accepted), "accepted_closed": len(accepted_closed),
+        "accepted_closed_with_one_terminal": sum(1 for s in accepted_closed if len(terminals.get(s, [])) == 1),
+        "accepted_without_terminal_closed": sum(1 for s in accepted_closed if not terminals.get(s)),
+        "accepted_with_multiple_terminals": sum(1 for s in accepted if len(terminals.get(s, [])) > 1),
+        "accepted_still_open": sum(1 for s in accepted if s not in closed and not terminals.get(s)),
+        "terminal_kinds": dict(sorted({k: sum(1 for v in terminals.values() for x in v if x == k)
+                                       for k in TERMINAL_LIFECYCLE_EVENTS}.items())),
+    }

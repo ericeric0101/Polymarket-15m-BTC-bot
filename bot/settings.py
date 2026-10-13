@@ -811,7 +811,11 @@ def initialize_strategy_settings(
     ))
     strategy._maker_worker_lock = threading.Lock()
     strategy._maker_worker_running = False
-    strategy.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    # RESEARCH_RUN_LABEL (e.g. PLUMBING_SMOKE) prefixes the run id and is recorded in the RUN_HEADER;
+    # labelled plumbing runs are refused by the evaluators (bot.dry_run_plumbing.check_population).
+    from bot.dry_run_plumbing import labelled_run_id, run_label_from_env
+    strategy.run_label = run_label_from_env()
+    strategy.run_id = labelled_run_id(f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}", strategy.run_label)
     strategy.trade_db_enabled = config.operations.trade_db_enabled
     # Anchored at the repo root by the canonical resolver (same path the
     # launcher's journal writer lock, dashboard and scripts use).
@@ -923,14 +927,17 @@ def initialize_strategy_settings(
         run_id=strategy.run_id,
     )
     # E5B entry shadow (D/C/B): telemetry only, constructed only when a flag is on.
-    from bot.entry_shadow_runtime import build_entry_shadow, entry_shadow_summary
+    from bot.dry_run_observer import build_entry_shadow
+    from bot.entry_shadow_runtime import entry_shadow_summary
     _ops = config.operations
     _shadow_flags = (
         bool(getattr(_ops, "price_adjusted_edge_shadow_enabled", False)),
         bool(getattr(_ops, "early_cancel_shadow_enabled", False)),
         bool(getattr(_ops, "maker_chase_shadow_enabled", False)),
     )
-    strategy.entry_shadow = build_entry_shadow(strategy, d=_shadow_flags[0], c=_shadow_flags[1], b=_shadow_flags[2])
+    # Same frozen tracker; records additionally carry execution_mode / evidence_tier / plumbing_revision.
+    strategy.entry_shadow = build_entry_shadow(strategy, d=_shadow_flags[0], c=_shadow_flags[1],
+                                                        b=_shadow_flags[2])
     logger.info(entry_shadow_summary(*_shadow_flags))
     # Entry V3 candidate telemetry: research only, constructed only when its flag is on.
     from bot.candidate_telemetry import build_candidate_telemetry, candidate_telemetry_summary

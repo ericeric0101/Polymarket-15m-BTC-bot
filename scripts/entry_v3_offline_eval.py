@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import bot.execution_selection_eval as ev  # noqa: E402
+from bot.dry_run_plumbing import PopulationMergeRefused, check_population  # noqa: E402
 
 
 def _load(paths):
@@ -29,6 +30,12 @@ def _load(paths):
 
 def evaluate(jsonl_paths, outcomes: dict, v1_labels: dict) -> dict:
     recs = _load(jsonl_paths)
+    # Data wiring only: refuse to pool execution populations (DRY_RUN vs LIVE, plumbing revision,
+    # fingerprint, non-evaluable run labels), including E5B v1 labels from another mode.
+    population = check_population(recs)
+    label_modes = {str(v.get("execution_mode")) for v in v1_labels.values() if isinstance(v, dict) and v.get("execution_mode")}
+    if label_modes and (len(label_modes) > 1 or (population["execution_mode"] and label_modes != {population["execution_mode"]})):
+        raise PopulationMergeRefused(f"v1 label execution_mode {sorted(label_modes)} != telemetry {population['execution_mode']}")
     canon = ev.canonical_candidates(recs)
     life = [r for r in recs if r.get("record_type") == "LIFECYCLE"]
     paths = {r["market_slug"]: r for r in recs if r.get("record_type") == "PATH_STATS"}

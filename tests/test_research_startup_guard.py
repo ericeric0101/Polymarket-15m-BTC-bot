@@ -194,8 +194,10 @@ def test_guard_has_no_bypass_environment_reads():
     src = (ROOT / "bot/research_startup_guard.py").read_text()
     assert not re.search(r"(?i)(bypass|skip|disable|force)[a-z_]*\s*=\s*.*environ", src)
     env_reads = set(re.findall(r'env\.get\("([A-Z0-9_]+)"', src)) | set(re.findall(r'environ\.get\("([A-Z0-9_]+)"', src))
+    # CANDIDATE_TELEMETRY_DIR is a data-path key read so the guard can VALIDATE it (inside the allowed
+    # roots, outside the frozen LIVE dataset) -- the same class as TRADE_DB_PATH, not a bypass.
     assert env_reads <= {"TRADE_DB_PATH", "TWAP_RESEARCH_DB_PATH", "BTC_1S_HISTORY_DIR", "REBATE_REPORT_DIR",
-                         "RESEARCH_OFFSITE_DIR", "STRATEGY_PROFILE"}
+                         "RESEARCH_OFFSITE_DIR", "STRATEGY_PROFILE", "CANDIDATE_TELEMETRY_DIR"}
 
 
 # ------------------------------------------------------------------ coverage

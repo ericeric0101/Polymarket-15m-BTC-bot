@@ -442,6 +442,22 @@ class ShadowSimulationMixin:
             payload=state,
         )
 
+    def _stamp_dry_run_client_order_id(self, state: Dict[str, Any]) -> None:
+        """Record which DRY-RUN order this paper order is (stable join key for research telemetry).
+
+        The resting order is the active maker order linked by ``dry_run_simulation_id`` -- the same
+        link used to retire it on fill.  More than one match is ambiguous: no key is recorded.
+        """
+        matches = [
+            str(order_state.get("dry_run_client_order_id"))
+            for order_state in getattr(self, "active_maker_orders", {}).values()
+            if str(order_state.get("dry_run_simulation_id") or "") == str(state.get("simulation_id"))
+            and order_state.get("dry_run_client_order_id")
+        ]
+        state["dry_run_client_order_id"] = matches[0] if len(matches) == 1 else None
+        if len(matches) > 1:
+            state["dry_run_client_order_id_ambiguous"] = sorted(matches)
+
     def _shadow_simulation_on_quote(
         self,
         instrument_id: Any,
@@ -462,6 +478,7 @@ class ShadowSimulationMixin:
             if now_ts > float(state.get("expires_ts") or 0.0):
                 state["status"] = "EXPIRED"
                 state["expired_ts"] = now_ts
+                self._stamp_dry_run_client_order_id(state)
                 self._db_order_event(
                     event_type="SHADOW_SIM_ENTRY_EXPIRED",
                     client_order_id=state["simulation_id"],
@@ -490,6 +507,7 @@ class ShadowSimulationMixin:
                     ),
                 }
             )
+            self._stamp_dry_run_client_order_id(state)
             for order_key, order_state in list(getattr(self, "active_maker_orders", {}).items()):
                 if str(order_state.get("dry_run_simulation_id") or "") == str(state["simulation_id"]):
                     self.active_maker_orders.pop(order_key, None)

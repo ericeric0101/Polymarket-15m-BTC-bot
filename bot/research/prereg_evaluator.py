@@ -249,6 +249,10 @@ def evaluate(rows: Sequence[Mapping[str, Any]], *, run_headers: Sequence[Mapping
     """rows: one per canonical candidate (decision_ts order not assumed) with keys market_slug,
     taipei_day, decision_ts, run_fingerprint, excluded (None or reason), qty_planned and the Delta
     keys in DELTA_KEYS.  Returns counts only unless the gate is met AND params are fully resolved."""
+    # One execution population only (DRY_RUN vs LIVE, plumbing revision, policy fingerprint, run label),
+    # enforced even when an explicit fingerprint allow-list is supplied.
+    from bot.dry_run_plumbing import check_population
+    check_population(run_headers)
     fingerprint = check_fingerprints([r.get("run_fingerprint") for r in rows] +
                                      [h.get("run_fingerprint") for h in run_headers], allowed=allowed_fingerprints)
     used = sorted((r for r in rows if not r.get("excluded")), key=lambda r: (r.get("decision_ts") or 0.0))

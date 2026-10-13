@@ -264,7 +264,8 @@ def resolve_runtime_data_paths(environ: Mapping[str, str], *, project_root: Path
         "REBATE_REPORT_DIR": _anchor(environ.get("REBATE_REPORT_DIR") or "./logs/rebate", cwd),
         "TERMINAL_LOG_DIR": _anchor("logs/bot", cwd),
         # bot.candidate_telemetry.build_candidate_telemetry / launcher / research_maintenance: repo root.
-        "CANDIDATE_TELEMETRY_DIR": project_root / "data/research/candidate_telemetry",
+        "CANDIDATE_TELEMETRY_DIR": _anchor(str(environ.get("CANDIDATE_TELEMETRY_DIR") or "").strip()
+                                           or "data/research/candidate_telemetry", project_root),
         "RESEARCH_PARTITIONS_DIR": project_root / "data/research_partitions",
         "PROJECT_LOG_DIR": project_root / "logs",
     }
@@ -325,6 +326,7 @@ def _jsonable(value: Any) -> Any:
 def build_policy_fingerprint(app_config: Any, *, profile_name: str, git: Mapping[str, Any]) -> dict[str, Any]:
     """Deterministic (no run id, no clock): equal for every restart of the same policy."""
     from bot.candidate_telemetry import SCHEMA_VERSION as CANDIDATE_SCHEMA
+    from bot.dry_run_plumbing import PLUMBING_REVISION
     from bot.entry_shadow import SCHEMA_VERSION as E5B_SCHEMA
     from bot.entry_sizing import SIZING_RULE_VERSION
     side = _jsonable(getattr(app_config, "side", None))
@@ -349,6 +351,8 @@ def build_policy_fingerprint(app_config: Any, *, profile_name: str, git: Mapping
                          "e5b_schema": E5B_SCHEMA, "entry_shadow_sha12": _file_sha12("entry_shadow.py"),
                          "execution_selection_eval_sha12": _file_sha12("execution_selection_eval.py")},
         "telemetry_schema": CANDIDATE_SCHEMA,
+        # Measurement plumbing revision: data before/after the DRY-RUN plumbing fix never share a fingerprint.
+        "plumbing_revision": PLUMBING_REVISION,
         "strike_finality_sha12": _file_sha12("strike_finality.py"),
         "prereg_sha256": PINNED_PREREG_SHA256,
         "evaluator_version": PREREG_EVALUATOR_VERSION,

@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
 from bot.session_pnl_guard import SessionPnlGuard, SessionPnlGuardConfig, SessionPnlState, SessionBuyGuardDecision
+from bot.dry_run_observer import DRY_RUN_OBSERVED_EVENTS, observe_dry_run_order_event
 
 
 def _record_sync_journal_write_duration(
@@ -670,6 +671,14 @@ class StrategyDBRuntimeMixin:
             try:
                 candidate_observer.observe_order_event(self, event_type=event_type, side=side, price=price, qty=qty,
                                                        client_order_id=client_order_id, reason=reason, payload=payload)
+            except Exception:
+                pass
+        # E5B C/B/D in DRY-RUN: the simulated maker lifecycle reaches the same frozen observer.
+        # Only DRY-RUN-specific event names are considered, so LIVE events never reach this branch.
+        if event_type in DRY_RUN_OBSERVED_EVENTS and getattr(self, "entry_shadow", None) is not None:
+            try:
+                observe_dry_run_order_event(self, event_type=event_type, client_order_id=client_order_id, side=side,
+                                            price=price, qty=qty, reason=reason, payload=payload)
             except Exception:
                 pass
         if not self.trade_db:
