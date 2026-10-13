@@ -1,4 +1,8 @@
-"""Entry V3 forward research profile: conditional absolute breaker OFF, everything else unchanged.
+"""Entry V3 forward research profile: every strategy-level conditional SELL OFF, TP 0.97 kept.
+
+Updated by the forward profile cleanup (2026-10-13): catastrophic, endgame TWAP, invalidation
+recovery and maker urgent exits are now OFF too and HOLD_TO_REDEEM=1 is pinned in the profile
+(see reports/forward_profile_cleanup_20261013/research_profile_diff.md).
 
 Hermetic: reads only versioned profiles in config/profiles (never a local .env).
 """
@@ -25,6 +29,13 @@ RESEARCH_PROFILE = ROOT / f"config/profiles/{RESEARCH}.env"
 SHADOW_FLAGS = {"CANDIDATE_DECISION_TELEMETRY_ENABLED", "FIRST_QUOTE_ONLY_SHADOW_ENABLED",
                 "HELD_SIDE_MARKOUT_TELEMETRY_ENABLED", "EARLY_CANCEL_SHADOW_ENABLED", "MAKER_CHASE_SHADOW_ENABLED",
                 "PRICE_ADJUSTED_EDGE_SHADOW_ENABLED"}
+EXIT_CHANGES = {"ABSOLUTE_MAX_LOSS_ENABLED": ("1", "0"), "CATASTROPHIC_STOP_LOSS_ENABLED": (None, "0"),
+                "HOLD_TO_REDEEM": (None, "1"), "RECOVERY_EXIT_ENABLED": (None, "0"),
+                "MAKER_URGENT_EXIT_ENABLED": ("1", "0"), "TAKER_EXIT_ONLY_AFTER_INVALIDATION": ("1", "0"),
+                "ENDGAME_TWAP_EXIT_ENABLED": ("1", "0"), "RECOVERY_EXIT_LADDER_ENABLED": ("1", "0")}
+EXIT_FIELDS = {"absolute_max_loss_enabled", "catastrophic_stop_loss_enabled", "hold_to_redeem_enabled",
+               "taker_exit_enabled", "maker_urgent_exit_enabled", "taker_exit_only_after_invalidation",
+               "endgame_twap_exit_enabled", "recovery_exit_ladder_enabled"}
 
 
 def _profile_config(monkeypatch, tmp_path, profile=RESEARCH, extra_env=None, local_env=""):
@@ -41,13 +52,14 @@ def _profile_config(monkeypatch, tmp_path, profile=RESEARCH, extra_env=None, loc
     return AppConfig.from_env(enable_terminal_dashboard=False)
 
 
-def test_research_profile_differs_from_live_profile_only_in_breaker_and_shadow_flags():
+def test_research_profile_differs_from_live_profile_only_in_exit_switches_and_shadow_flags():
     live, research = dotenv_values(LIVE_PROFILE), dotenv_values(RESEARCH_PROFILE)
     changed = {k for k in set(live) | set(research) if live.get(k) != research.get(k)}
-    assert changed == {"ABSOLUTE_MAX_LOSS_ENABLED"} | SHADOW_FLAGS
-    assert live["ABSOLUTE_MAX_LOSS_ENABLED"] == "1" and research["ABSOLUTE_MAX_LOSS_ENABLED"] == "0"
+    assert changed == set(EXIT_CHANGES) | SHADOW_FLAGS
+    for k, (live_value, research_value) in EXIT_CHANGES.items():
+        assert live.get(k) == live_value and research[k] == research_value, k
     assert all(research[k] == "1" for k in SHADOW_FLAGS)
-    # TP, sizing, entry thresholds, catastrophic settings: byte-identical values.
+    # TP, sizing, entry thresholds: byte-identical values.
     for k in ("TAIL_PROTECT_TP_PRICE", "TAIL_PROTECT_TP_ENABLED", "ABSOLUTE_MAX_LOSS_USDC"):
         assert research[k] == live[k]
     assert research["TAIL_PROTECT_TP_PRICE"] == "0.97"
@@ -56,7 +68,9 @@ def test_research_profile_differs_from_live_profile_only_in_breaker_and_shadow_f
 def test_config_precedence_resolves_breaker_off_and_is_explicit(monkeypatch, tmp_path):
     cfg = _profile_config(monkeypatch, tmp_path)
     assert cfg.exit.absolute_max_loss_enabled is False
-    assert cfg.exit.catastrophic_stop_loss_enabled is True
+    assert cfg.exit.catastrophic_stop_loss_enabled is False
+    assert cfg.exit.endgame_twap_exit_enabled is False and cfg.exit.taker_exit_enabled is False
+    assert cfg.exit.maker_urgent_exit_enabled is False and cfg.exit.hold_to_redeem_enabled is True
     assert cfg.exit.tail_protect_tp_price == Decimal("0.97")
     assert cfg.operations.candidate_decision_telemetry_enabled is True
     # .env beats the profile; a shell value beats both (documented precedence).
@@ -70,8 +84,8 @@ def test_live_and_research_profiles_resolve_identical_entry_and_sizing(monkeypat
     live = _profile_config(monkeypatch, tmp_path, profile="btc15_twap_v3")
     research = _profile_config(monkeypatch, tmp_path)
     assert live.maker == research.maker and live.side == research.side
-    assert {k: v for k, v in vars(live.exit).items() if k != "absolute_max_loss_enabled"} == \
-        {k: v for k, v in vars(research.exit).items() if k != "absolute_max_loss_enabled"}
+    assert {k: v for k, v in vars(live.exit).items() if k not in EXIT_FIELDS} == \
+        {k: v for k, v in vars(research.exit).items() if k not in EXIT_FIELDS}
 
 
 def _engine_kwargs(cfg):
@@ -118,9 +132,13 @@ def test_1_conditional_breaker_off_emits_no_conditional_sell(monkeypatch, tmp_pa
     assert all(reason != "absolute_max_loss_breaker" for _, reason in subs)
 
 
-def test_2_catastrophic_breaker_still_permits_emergency_sell(monkeypatch, tmp_path):
+def test_2_catastrophic_breaker_is_off_in_research_profile(monkeypatch, tmp_path):
+    # Changed 2026-10-13 (forward profile cleanup): catastrophic is a thesis-conditional
+    # strategy SELL and is OFF for the research run; LIVE keeps it (code default ON).
     research = _profile_config(monkeypatch, tmp_path)
-    assert _host(research, bid="0.55") == [("stop_loss", "catastrophic_stop_loss_confirmed")]
+    live = _profile_config(monkeypatch, tmp_path, profile="btc15_twap_v3")
+    assert _host(research, bid="0.55") == []
+    assert _host(live, bid="0.55") == [("stop_loss", "catastrophic_stop_loss_confirmed")]
 
 
 def test_3_4_tp_and_integrity_protections_unchanged():

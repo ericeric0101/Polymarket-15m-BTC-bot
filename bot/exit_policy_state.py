@@ -31,6 +31,9 @@ def effective_exit_policy(strategy: Any) -> dict[str, Any]:
         "stop_loss_enabled": _flag(strategy, "stop_loss_enabled"),
         "endgame_twap_exit_enabled": _flag(strategy, "endgame_twap_exit_enabled"),
         "taker_exit_enabled": _flag(strategy, "taker_exit_enabled"),
+        "invalidation_recovery_enabled": _flag(strategy, "taker_exit_only_after_invalidation"),
+        "recovery_exit_ladder_enabled": _flag(strategy, "recovery_exit_ladder_enabled"),
+        "maker_urgent_exit_enabled": _flag(strategy, "maker_urgent_exit_enabled"),
     }
 
 
@@ -40,4 +43,8 @@ def exit_policy_summary(state: dict[str, Any]) -> str:
             f"breaker_v2_gate_enabled={int(state['breaker_v2_gate_enabled'])} "
             f"breaker_v2_effective_for_conditional_exit={int(state['breaker_v2_effective_for_conditional_exit'])} "
             f"catastrophic_breaker_enabled={int(state['catastrophic_breaker_enabled'])} "
-            f"tail_tp_enabled={int(state['tail_tp_enabled'])} tail_tp_price={state['tail_tp_price']}")
+            f"tail_tp_enabled={int(state['tail_tp_enabled'])} tail_tp_price={state['tail_tp_price']} "
+            f"endgame_twap_exit_enabled={int(state['endgame_twap_exit_enabled'])} "
+            f"recovery_exit_enabled={int(state['taker_exit_enabled'])} "
+            f"maker_urgent_exit_enabled={int(state['maker_urgent_exit_enabled'])} "
+            f"hold_to_redeem_enabled={int(state['hold_to_redeem_enabled'])}")

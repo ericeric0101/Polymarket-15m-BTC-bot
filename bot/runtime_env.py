@@ -155,13 +155,32 @@ def _profile_path(profile_name: str, repo_root: Path) -> Path:
     return path
 
 
+# Per-key provenance of the last load into the real process environment
+# (shell / .env / profile).  Observability only: values and precedence are
+# unchanged.  Keys absent here resolve to the code default.
+LAST_PROCESS_ENV_SOURCES: dict[str, str] = {}
+LAST_PROCESS_PROFILE: dict[str, str] = {}
+
+SOURCE_SHELL = "SHELL"
+SOURCE_DOTENV = "DOTENV"
+SOURCE_PROFILE = "PROFILE"
+SOURCE_DEFAULT = "DEFAULT"
+
+
 def load_runtime_env(
     *,
     repo_root: Path | None = None,
     env_path: Path | None = None,
     environ: MutableMapping[str, str] | None = None,
+    sources: MutableMapping[str, str] | None = None,
 ) -> Path:
-    """Load profile then local .env without overriding shell-provided values."""
+    """Load profile then local .env without overriding shell-provided values.
+
+    ``sources`` (optional) receives the provenance of every key this load could
+    have set: SHELL (pre-existing in the target environment), DOTENV or PROFILE.
+    A load into the real ``os.environ`` also records it in
+    ``LAST_PROCESS_ENV_SOURCES`` / ``LAST_PROCESS_PROFILE``.
+    """
     root = (repo_root or PROJECT_ROOT).resolve()
     local_env_path = (env_path or (root / ".env")).resolve()
     target_environ = os.environ if environ is None else environ
@@ -176,8 +195,33 @@ def load_runtime_env(
     )
     profile_path = _profile_path(str(profile_name), root)
 
-    for key, value in dotenv_values(profile_path).items():
+    profile_values = dotenv_values(profile_path)
+    for key, value in profile_values.items():
         _set_if_not_external(target_environ, key, value, external_keys)
     for key, value in local_values.items():
         _set_if_not_external(target_environ, key, value, external_keys)
+    provenance: dict[str, str] = {}
+    for key in set(profile_values) | set(local_values) | external_keys:
+        if key in external_keys:
+            provenance[key] = SOURCE_SHELL
+        elif local_values.get(key) is not None:
+            provenance[key] = SOURCE_DOTENV
+        elif profile_values.get(key) is not None:
+            provenance[key] = SOURCE_PROFILE
+    if sources is not None:
+        sources.clear()
+        sources.update(provenance)
+    if environ is None or target_environ is os.environ:
+        LAST_PROCESS_ENV_SOURCES.clear()
+        LAST_PROCESS_ENV_SOURCES.update(provenance)
+        LAST_PROCESS_PROFILE.clear()
+        LAST_PROCESS_PROFILE.update({"name": str(profile_name), "path": str(profile_path),
+                                     "env_path": str(local_env_path),
+                                     "env_file_present": str(local_env_path.is_file())})
     return profile_path
+
+
+def value_source(key: str, sources: Mapping[str, str] | None = None) -> str:
+    """SHELL / DOTENV / PROFILE / DEFAULT for one key (process load when ``sources`` is None)."""
+    table = LAST_PROCESS_ENV_SOURCES if sources is None else sources
+    return table.get(key, SOURCE_DEFAULT)

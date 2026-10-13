@@ -485,6 +485,12 @@ def initialize_strategy_settings(
         )
     )
     strategy.runtime_git_revision = detect_runtime_git_revision_fn(project_root)
+    # Entry V3 research profile: verify the instantiated exit objects and fail
+    # closed before any journal, research DB or shadow writer is constructed.
+    from bot.research_startup_guard import enforce_instantiated_strategy, startup_banner
+    strategy.policy_fingerprint = enforce_instantiated_strategy(strategy, config, project_root=project_root)
+    if strategy.policy_fingerprint is not None:
+        logger.info(startup_banner(strategy.policy_fingerprint))
     strategy.regime_guard_enabled = config.risk.regime_guard_enabled
     strategy.regime_guard_n_markets = config.risk.regime_guard_n_markets
     strategy.regime_guard_trigger_sum_pnl_usdc = config.risk.regime_guard_trigger_sum_pnl_usdc

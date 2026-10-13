@@ -1,0 +1,16 @@
+{
+  "source": "reports/forward_profile_cleanup_20261013/exit_path_inventory.csv (S1; rows X01-X10, keys that enable or block a strategy-level SELL or the TP)",
+  "strategy_sell_control_keys": [
+    "ABSOLUTE_MAX_LOSS_ENABLED",
+    "CATASTROPHIC_STOP_LOSS_ENABLED",
+    "STOP_LOSS_ENABLED",
+    "ENDGAME_TWAP_EXIT_ENABLED",
+    "RECOVERY_EXIT_ENABLED",
+    "TAKER_EXIT_ONLY_AFTER_INVALIDATION",
+    "RECOVERY_EXIT_LADDER_ENABLED",
+    "MAKER_URGENT_EXIT_ENABLED",
+    "HOLD_TO_REDEEM",
+    "TAIL_PROTECT_TP_ENABLED",
+    "TAIL_PROTECT_TP_PRICE"
+  ]
+}

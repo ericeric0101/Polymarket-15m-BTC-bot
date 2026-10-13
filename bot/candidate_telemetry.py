@@ -84,6 +84,9 @@ def exit_policy_fingerprint(strategy: Any) -> dict[str, Any]:
     out["conditional_breaker_enabled"] = eff["conditional_breaker_enabled"]
     out["breaker_v2_effective_for_conditional_exit"] = eff["breaker_v2_effective_for_conditional_exit"]
     out["catastrophic_breaker_enabled"] = eff["catastrophic_breaker_enabled"]
+    for key in ("stop_loss_enabled", "endgame_twap_exit_enabled", "invalidation_recovery_enabled",
+                "recovery_exit_ladder_enabled", "maker_urgent_exit_enabled"):
+        out[key] = eff[key]
     return out
 
 
@@ -98,7 +101,9 @@ def strike_module_version() -> Optional[str]:
 def build_run_header(strategy: Any, flags: dict[str, bool]) -> dict[str, Any]:
     body = {"git_head": str(getattr(strategy, "runtime_git_revision", "") or "") or None,
             "schema_version": SCHEMA_VERSION, "flags": dict(sorted(flags.items())),
-            "exit_policy": exit_policy_fingerprint(strategy), "strike_module_version": strike_module_version()}
+            "exit_policy": exit_policy_fingerprint(strategy), "strike_module_version": strike_module_version(),
+            # Deterministic research policy fingerprint (bot.research_startup_guard); None outside the profile.
+            "policy_fingerprint": getattr(strategy, "policy_fingerprint", None)}
     fp = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()[:16]
     return {"record_type": "RUN_HEADER", "run_id": str(getattr(strategy, "run_id", "") or ""), **body,
             "run_fingerprint": fp}

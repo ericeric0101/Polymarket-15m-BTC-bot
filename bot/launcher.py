@@ -43,6 +43,7 @@ from bot.market_discovery import (
     resolve_btc_15m_market_slugs,
     resolve_primary_btc_15m_instrument_ids,
 )
+from bot.research_startup_guard import ResearchStartupAssertionError
 from bot.journal_path import (
     acquire_journal_writer_lock,
     journal_writer_lock_path,
@@ -1066,6 +1067,9 @@ def _run_integrated_bot_cycles(
                 f"Node cycle {cycle_idx} deferred: {e} "
                 f"Retrying market discovery in {retry_delay_sec:.0f}s."
             )
+        except ResearchStartupAssertionError:
+            # Strategy-level research guard: never retried under the failure budget.
+            raise
         except Exception as e:
             _collection_transition(node, "exception", stop_request_source="exception", exception_type=type(e).__name__)
             consecutive_failures += 1
@@ -1372,6 +1376,17 @@ def main():
     app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
     if not enforce_entry_sizing_startup_policy(app_config, live=not simulation):
         return
+    # Entry V3 research profile: fail closed before auth resolution, any
+    # order-capable client or any shadow writer exists (no bypass flag).
+    from bot.research_startup_guard import ResearchStartupAssertionError, enforce_startup_guard, startup_banner
+    try:
+        research_fingerprint = enforce_startup_guard(app_config)
+    except ResearchStartupAssertionError as exc:
+        logger.error(str(exc))
+        print(str(exc))
+        return
+    if research_fingerprint is not None:
+        logger.info(startup_banner(research_fingerprint))
 
     if enable_terminal_dashboard:
         logger.remove()
