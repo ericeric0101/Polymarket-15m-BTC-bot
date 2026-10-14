@@ -19,6 +19,30 @@ def _f(value: Decimal | float | None) -> float | None:
     return None if value is None else float(value)
 
 
+_OBSERVER_OWNED_KEYS = frozenset({"fast_spot", "fast_spot_source", "chainlink_spot", "binance_minus_chainlink_bps"})
+_CHAINLINK_PATH_SOURCE = "polymarket_chainlink_spot"
+
+
+def _chainlink_basis_fields(fast_spot: Decimal | None, diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+    """Raw Chainlink spot and the Binance-minus-Chainlink basis, research-only.
+
+    Only a fresh raw Chainlink path spot counts; the Binance fallback path spot
+    is the same feed as ``fast_spot`` and would report a zero basis.
+    """
+    diagnostics = diagnostics or {}
+    chainlink = None
+    if diagnostics.get("path_spot_source") == _CHAINLINK_PATH_SOURCE:
+        try:
+            value = float(diagnostics.get("path_spot"))
+            chainlink = value if value > 0 else None
+        except (TypeError, ValueError):
+            chainlink = None
+    basis = None
+    if chainlink is not None and fast_spot is not None and fast_spot > 0:
+        basis = (float(fast_spot) - chainlink) / chainlink * 1e4
+    return {"chainlink_spot": chainlink, "binance_minus_chainlink_bps": basis}
+
+
 def _side(value: Decimal | None, strike: Decimal | None) -> str:
     if value is None or strike is None:
         return "UNKNOWN"
@@ -165,7 +189,10 @@ class TwapForwardShadow:
         except (TypeError, ValueError):
             pass
         if settlement_diagnostics:
-            result.update(settlement_diagnostics)
+            # The Binance observation is owned by this observer; diagnostics may
+            # carry a Chainlink path spot and must never relabel it (775dbee).
+            result.update({k: v for k, v in settlement_diagnostics.items() if k not in _OBSERVER_OWNED_KEYS})
+        result.update(_chainlink_basis_fields(fast_spot, settlement_diagnostics))
         self._update_summary(str(slug), result)
         with self._lock:
             self._latest[str(slug)] = dict(result)
