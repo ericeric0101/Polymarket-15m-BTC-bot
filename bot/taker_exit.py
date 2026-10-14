@@ -35,12 +35,21 @@ from bot.enums import ActiveSide
 from bot.endgame_twap_exit import evaluate_endgame_twap_exit
 from bot.exit_audit import build_invalidation_exit_audit
 from bot.recovery_exit_ladder import select_recovery_exit_action
+from bot.reference_basis import reference_spot_provenance
 from bot.models import (
     ExitDecisionType,
     MarketSnapshot,
     PositionState,
     SignalDecision,
 )
+
+
+def _with_reference_spot_provenance(host: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Exit payload plus the reference spot's source/age/basis; existing keys win."""
+    extra = reference_spot_provenance(host)
+    if not extra:
+        return payload
+    return {**extra, **payload}
 
 
 class TakerExitHost(Protocol):
@@ -1673,7 +1682,7 @@ class TakerExitMixin:
         if now_ts - last_ts < float(self.taker_exit_skip_log_interval_sec):
             return
         self._taker_exit_skip_log_ts_by_key[key] = now_ts
-        self._db_strategy_event("EXIT_POLICY_DECISION", payload)
+        self._db_strategy_event("EXIT_POLICY_DECISION", _with_reference_spot_provenance(self, payload))
 
     def _record_exit_audit_throttled(
         self,
@@ -1687,7 +1696,7 @@ class TakerExitMixin:
         if now_ts - last_ts < float(self.taker_exit_skip_log_interval_sec):
             return
         self._taker_exit_skip_log_ts_by_key[key] = now_ts
-        self._db_strategy_event("EXIT_AUDIT", payload)
+        self._db_strategy_event("EXIT_AUDIT", _with_reference_spot_provenance(self, payload))
 
     # ------------------------------------------------------------------
     # Maker-Style Urgent Exit

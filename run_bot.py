@@ -93,6 +93,7 @@ from loguru import logger
 from bot.inventory import InventoryLedger
 from bot.runtime_env import load_runtime_env
 from bot.edge_state import build_edge_state
+from bot.reference_basis import apply_reference_basis, observe_reference_basis
 from bot.edge_observation import build_quote_age_telemetry
 from bot.entry_decision import EntryDecision
 from bot.live_entry_research import (
@@ -1025,6 +1026,7 @@ class IntegratedBTCStrategy(
     def _capture_market_open_spot_detail(self, *, now_ts: Optional[float] = None) -> tuple[Optional[Decimal], str, Optional[float]]:
         now = float(now_ts or time.time())
         fresh_sec = 10.0
+        observe_reference_basis(self, now)
 
         def _candidate(price: Optional[Decimal], ts: float, source: str) -> tuple[Optional[Decimal], str, Optional[float]]:
             if price is None or price <= 0:
@@ -1062,12 +1064,12 @@ class IntegratedBTCStrategy(
         for cand in (twap, poly, binance, latest):
             price, source, age = cand
             if price is not None and age is not None and age < fresh_sec:
-                return cand
+                return apply_reference_basis(self, cand, now)
 
         stale_candidates = [cand for cand in (twap, poly, binance, latest) if cand[0] is not None]
         if stale_candidates:
             stale_candidates.sort(key=lambda item: item[2] if item[2] is not None else float("inf"))
-            return stale_candidates[0]
+            return apply_reference_basis(self, stale_candidates[0], now)
 
         last_external = getattr(self, "last_external_spot", None)
         if last_external is not None and last_external > 0:

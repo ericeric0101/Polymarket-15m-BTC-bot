@@ -44,6 +44,7 @@ from bot.trend_entry_shadow import TrendEntryShadow
 from bot.forward_shadow import ForwardShadowExperiment
 from bot.btc_1s_history import BTC1sHistoryCollector
 from bot.prediction_research_snapshot import PredictionResearchSnapshotter
+from bot.reference_basis import RollingBasisEstimator
 
 
 TWAP_RESEARCH_DB_DEFAULT = "data/research/twap_forward_shadow.db"
@@ -768,6 +769,9 @@ def initialize_strategy_settings(
             logger.warning(f"BTC 1s history collector unavailable; live strategy continues: {exc}")
     strategy._polymarket_chainlink_price = None
     strategy._polymarket_chainlink_price_ts = 0.0
+    # Binance-vs-Chainlink basis for the degraded reference-spot fallback.
+    strategy._reference_basis_estimator = RollingBasisEstimator()
+    strategy._reference_spot_basis_state = {}
     strategy._polymarket_chainlink_event_ts_ms = None
     strategy._polymarket_chainlink_twap_price = None
     strategy._polymarket_chainlink_twap_price_ts = 0.0
