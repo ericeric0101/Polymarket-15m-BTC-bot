@@ -21,6 +21,7 @@ from loguru import logger
 from bot.enums import ActiveSide, MarketPhase
 from bot.edge_state import build_edge_state
 from bot.market_data import extract_market_start_ts_from_slug
+from bot.reference_basis import is_degraded_reference_source
 from bot.signal_engine import SignalEngine
 from execution.maker_engine import MakerEngine
 
@@ -489,6 +490,11 @@ class SideDecisionMixin:
         self._populate_spot_source_inputs(inputs, reference_spot=spot, now_ts=now_ts)
         if spot is None or spot <= 0:
             return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_unavailable", inputs
+        if is_degraded_reference_source(inputs.get("selected_spot_source")):
+            # Binance/Coinbase sit at a drifting premium to the Chainlink strike
+            # (1.6-10 bps); a direction derived from them is not settlement-aligned.
+            # Skip, leaving the current side and any pending flip untouched.
+            return self._normalize_active_side(self.bi_side_default_mode), Decimal("0"), "spot_reference_degraded", inputs
 
         strike_dec = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
         if strike_dec is None or strike_dec <= 0:
@@ -725,7 +731,7 @@ class SideDecisionMixin:
 
         side, score, reason, inputs = self._compute_side_decision(now_ts)
         pre_entry_flip_allowed = self._pre_entry_flip_allowed(proposed_side=side)
-        if reason in {"spot_unavailable", "strike_unavailable", "strike_unverified"}:
+        if reason in {"spot_unavailable", "strike_unavailable", "strike_unverified", "spot_reference_degraded"}:
             self.side_decision_score = score
             self.side_decision_reason = reason
             self.side_decision_ts = now_ts

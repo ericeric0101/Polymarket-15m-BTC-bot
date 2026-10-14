@@ -12,6 +12,33 @@ this patch neither mutates nor archives it. BTC1s Parquet remains unchanged. The
 Historical entries below describe their recorded checkpoints, not current Outcome
 execution authority. Deployment and a new dry-run validation remain separate.
 
+## Reference-spot Binance fallback: basis and fail-closed direction (2026-10-15; branch `fix/shadow-fast-spot-provenance`, not deployed)
+
+Binance BTCUSDT sits above the Chainlink BTC/USD stream that settles these
+markets by a drifting basis (daily median 1.6-9.1 bps, 2026-09-30..10-09;
+Binance-TWAP ~10 bps by 10-12). `_capture_market_open_spot_detail` falls back
+to Binance when the Chainlink TWAP and raw spot are both older than 10 s.
+
+- **Direction:** `_compute_side_decision_new` returns `spot_reference_degraded`
+  for a Binance/Coinbase reference (`bot.reference_basis.is_degraded_reference_source`).
+  It is handled like `spot_unavailable`: `SIDE_DECISION_SKIPPED`, active side and
+  pending flip state unchanged.
+- **Spot-vs-strike consumers (exit snapshot `spot_minus_strike_bps`, stop regime
+  current price, research/dashboard readers):** a Binance candidate is mapped onto
+  the Chainlink level with a rolling median basis (`RollingBasisEstimator`: pairs of
+  fresh Binance and raw Chainlink receipts <=1 s apart, trailing 3600 s, >=30 pairs,
+  no look-ahead). Source becomes `binance_ws_basis_adjusted`. Without enough pairs
+  the raw Binance value is kept (legacy) and `reference_basis_unavailable` is set.
+- **Provenance:** `EXIT_POLICY_DECISION` and `EXIT_AUDIT` now carry
+  `reference_spot_source/price/age_sec/degraded` and `reference_basis_*`
+  (existing payload keys win).
+- Unchanged: entry is already fail-closed (`ORDER_SKIP_TWAP_REFERENCE_DEGRADED`);
+  `_fetch_external_spot_price` (fair value) Binance fallback; endgame TWAP exit and
+  Breaker V2 (canonical TWAP only).
+- Measured impact before the change (journal 09-07..10-12): 0 pre-submit entries,
+  54/38,108 side decisions (all `active_side=NONE`), no exit actions
+  (`reports/spot_fallback_duty_cycle_20261015`).
+
 ## Effective PnL and settlement evidence (2026-10-10; branch `feat/effective-pnl`, not deployed)
 
 **Authority.** Every PnL a human reads (journal dashboard, `scripts/live_dashboard.py`,
