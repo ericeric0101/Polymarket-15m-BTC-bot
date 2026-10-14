@@ -1,0 +1,67 @@
+{
+  "side_decision": [
+    {
+      "mode": "LIVE",
+      "n": 18487,
+      "fallback": 28,
+      "rate": 0.0015145778114350624
+    },
+    {
+      "mode": "TEST_DRY_RUN",
+      "n": 19621,
+      "fallback": 26,
+      "rate": 0.0013251108506192346
+    }
+  ],
+  "side_decision_sources": {
+    "polymarket_chainlink_twap_60s_ws": 38054,
+    "binance_ws": 42,
+    "polymarket_chainlink_ws": 12
+  },
+  "entry_pre_submit": {
+    "n": 38611,
+    "non_twap": 0
+  },
+  "entry_confirmation_time_share_proxy": [
+    {
+      "mode": "LIVE",
+      "n": 15059,
+      "fallback": 0,
+      "rate": 0.0
+    },
+    {
+      "mode": "TEST_DRY_RUN",
+      "n": 35131,
+      "fallback": 0,
+      "rate": 0.0
+    }
+  ],
+  "entry_confirmation_sources": {
+    "polymarket_chainlink_twap_60s_ws": 50190
+  },
+  "TWAP_REFERENCE_DEGRADED": {
+    "n": 390,
+    "by_mode": {
+      "LIVE": 312,
+      "TEST_DRY_RUN": 78
+    },
+    "days_with_events": 25
+  },
+  "POLYMARKET_TWAP_SILENT_STALL": {
+    "n": 204,
+    "by_mode": {
+      "LIVE": 116,
+      "TEST_DRY_RUN": 88
+    },
+    "days_with_events": 24
+  },
+  "binance_minus_twap_bps_overall": {
+    "median": 2.9441951417199252,
+    "p10": 1.2467319420060095,
+    "p90": 10.744809197618867
+  },
+  "journal_span": {
+    "a": "2026-09-07T11:48:10.157490+00:00",
+    "b": "2026-10-12T12:34:45.608318+00:00"
+  }
+}

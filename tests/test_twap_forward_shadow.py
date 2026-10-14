@@ -457,7 +457,8 @@ def test_spot_shadow_probability_reuses_forecast_without_mutating_live_state():
     assert first["best_ask_up"] == .11
     assert first["p_down_ex_market"] == 1 - first["p_up_ex_market"]
     assert first["official_current_twap"] == 100
-    assert first["fast_spot"] == 102
+    assert first["path_spot"] == 102
+    assert "fast_spot" not in first
     assert first["path_spot_source"] == "polymarket_chainlink_spot"
     assert first["sigma_ex_market_source"] == "polymarket_chainlink_spot_history"
     assert first["sigma_ex_market"] == float(host._estimate_polymarket_raw_spot_sigma_annualized())
@@ -653,13 +654,15 @@ def test_probability_path_uses_fresh_binance_if_raw_chainlink_stale_and_never_tw
     host.last_quote_update_ts_by_inst = {}
     out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now)
     assert out["path_spot_source"] == "binance_ws"
-    assert out["fast_spot"] == 103
+    assert out["path_spot"] == 103
+    assert "fast_spot" not in out
     assert out["p_up_ex_market"] is None
     assert out["required_move_sigma"] is None
     host._binance_ws_price_ts = now - 20
     out = host._settlement_probability_shadow_inputs(slug="m", official_twap=Decimal("100"), strike=Decimal("101"), time_left_sec=121, now_ts=now)
     assert out["path_spot_source"] == "unavailable"
-    assert out["fast_spot"] is None
+    assert out["path_spot"] is None
+    assert "fast_spot" not in out
     assert out["p_up_ex_market"] is None
 
 
@@ -749,3 +752,41 @@ def test_free_space_warning_overrides_cap_and_recovers(monkeypatch, tmp_path):
     model._storage_health(102)
     assert component_health(model.storage_guard_status(), domain='Storage')['state'] == 'DEGRADED'
     assert len([r for r in db.rows if r['payload']['event_type'] == 'RESEARCH_STORAGE_GUARD_TRIGGERED']) == 2
+
+
+def _observe_with_diagnostics(diagnostics):
+    model = TwapForwardShadow()
+    return model.observe(
+        slug="m", now_ts=1.0, source_ts=1.0, fast_spot=Decimal("100.02"), official_twap=Decimal("100"),
+        strike=Decimal("100"), time_left_sec=30, settlement_diagnostics=diagnostics,
+    )
+
+
+def test_settlement_diagnostics_cannot_overwrite_binance_fast_spot():
+    # Regression for 775dbee: diagnostics carried "fast_spot": <Chainlink path spot>
+    # and silently replaced the Binance value while the label stayed binance_ws.
+    out = _observe_with_diagnostics({
+        "fast_spot": 99.0, "fast_spot_source": "polymarket_chainlink_spot",
+        "path_spot": 100.0, "path_spot_source": "polymarket_chainlink_spot",
+    })
+    assert out["fast_spot"] == pytest.approx(100.02)
+    assert out["fast_spot_source"] == "binance_ws"
+    assert out["path_spot"] == 100.0
+
+
+def test_chainlink_basis_fields_only_from_raw_chainlink_path_spot():
+    out = _observe_with_diagnostics({"path_spot": 100.0, "path_spot_source": "polymarket_chainlink_spot"})
+    assert out["chainlink_spot"] == 100.0
+    assert out["binance_minus_chainlink_bps"] == pytest.approx(2.0)
+    # Binance fallback path spot is the same feed: no basis claimed.
+    out = _observe_with_diagnostics({"path_spot": 100.02, "path_spot_source": "binance_ws"})
+    assert out["chainlink_spot"] is None and out["binance_minus_chainlink_bps"] is None
+    out = _observe_with_diagnostics({"path_spot": None, "path_spot_source": "unavailable"})
+    assert out["chainlink_spot"] is None and out["binance_minus_chainlink_bps"] is None
+    out = _observe_with_diagnostics(None)
+    assert out["chainlink_spot"] is None and out["binance_minus_chainlink_bps"] is None
+
+
+def test_spot_pricer_diagnostics_do_not_emit_fast_spot():
+    source = inspect.getsource(SpotPricerMixin._settlement_probability_shadow_inputs)
+    assert '"fast_spot"' not in source

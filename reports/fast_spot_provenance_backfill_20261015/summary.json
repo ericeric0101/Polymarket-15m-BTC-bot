@@ -1,0 +1,13 @@
+{
+  "rows": 29389,
+  "validation_pairs": 7037,
+  "reconstructed_minus_btc_spot_bps": {
+    "median_abs": 1.7075197401868794e-12,
+    "p90_abs": 0.0011808883896034658
+  },
+  "stored_fast_spot_minus_btc_spot_bps": {
+    "median": -1.6961397638407194,
+    "median_abs": 1.7003062285494757
+  },
+  "inputs_unchanged": true
+}
