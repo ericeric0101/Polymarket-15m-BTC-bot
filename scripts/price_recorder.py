@@ -1,10 +1,12 @@
-"""Standalone 1-second recorder: Chainlink RTDS (raw spot + 60 s TWAP), Binance BTCUSDT, Coinbase BTC-USD.
+"""Standalone 1-second recorder: Chainlink RTDS (raw spot + 60 s TWAP), Binance BTCUSDT, Coinbase BTC-USD,
+and the current/next BTC 15m Polymarket order books (best bid/ask per token).
 
 Research only. Runs as its own process, independent of the trading bot:
 
     .venv/bin/python scripts/price_recorder.py
 
-Output: data/price_sources_1s/YYYY-MM-DD/HH.parquet (one file per UTC hour),
+Output: data/price_sources_1s/YYYY-MM-DD/HH.parquet and
+data/polymarket_book_1s/YYYY-MM-DD/HH.parquet (one file per UTC hour each),
 retention 30 days, writes paused below 10 GiB free. See bot/research/price_recorder.py.
 """
 from __future__ import annotations
@@ -35,12 +37,19 @@ from bot.price_streams import (  # noqa: E402
     safe_json_loads,
 )
 from bot.research.price_recorder import (  # noqa: E402
+    BookSampler,
     HourlyParquetStore,
     SecondBucketer,
+    book_schema,
+    market_tokens_for,
     parse_coinbase_ticker,
 )
 
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
+CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+GAMMA_MARKETS_URL = "https://gamma-api.polymarket.com/markets?slug={slug}&limit=5"
+CLOB_PING_SEC = 10.0
+MARKET_REFRESH_SEC = 30.0
 COINBASE_SUBSCRIBE = {"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["ticker"]}
 SILENCE_RECONNECT_SEC = 30.0
 MAX_CONNECTION_SEC = 23 * 3600
@@ -98,7 +107,87 @@ class Feed(threading.Thread):
             delay = min(delay * 2, 30.0)
 
 
-def build_feeds(bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
+def fetch_gamma_market(slug: str):
+    from urllib.request import Request, urlopen
+    req = Request(GAMMA_MARKETS_URL.format(slug=slug), headers={"User-Agent": "price-recorder/1.0"})
+    with urlopen(req, timeout=10) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    return payload[0] if isinstance(payload, list) and payload else None
+
+
+class MarketTracker(threading.Thread):
+    """Keeps the sampler on the current and next BTC 15m markets; queues new tokens to subscribe."""
+
+    def __init__(self, sampler: BookSampler, stop: threading.Event) -> None:
+        super().__init__(name="market-tracker", daemon=True)
+        self.sampler, self.stop_event = sampler, stop
+        self.pending: list[str] = []
+        self.lock = threading.Lock()
+        self.errors = 0
+        self._previous: dict = {}
+
+    def refresh(self) -> None:
+        start = int(time.time()) // 900 * 900
+        slugs = [f"btc-updown-15m-{start + 900 * k}" for k in (0, 1)]
+        meta = {}
+        for slug in slugs:
+            try:
+                meta.update(market_tokens_for([slug], fetch_gamma_market))
+            except Exception as exc:
+                self.errors += 1
+                logger.warning(f"market lookup failed {slug}: {type(exc).__name__}: {exc}")
+        # Keep tokens of a market that just ended until its book rows stop (sampler drops end+5s).
+        for token, info in ((t, i) for t, i in self._previous.items() if i["end_ts"] + 10 > time.time()):
+            meta.setdefault(token, info)
+        self._previous = meta
+        new = self.sampler.set_tokens(meta)
+        if new:
+            with self.lock:
+                self.pending.extend(new)
+
+    def take_pending(self) -> list[str]:
+        with self.lock:
+            out, self.pending = self.pending, []
+        return out
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            self.stop_event.wait(MARKET_REFRESH_SEC)
+            if not self.stop_event.is_set():
+                self.refresh()
+
+
+def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event) -> Feed:
+    last_ping = {"t": 0.0}
+
+    def on_open(ws) -> None:
+        sampler.reset()          # books must be rebuilt from fresh snapshots on this connection
+        tracker.take_pending()   # everything tracked is subscribed below
+        tokens = sampler.tokens()
+        if tokens:
+            ws.send(json.dumps({"assets_ids": tokens, "type": "market"}))
+
+    def heartbeat(ws, now: float) -> None:
+        if now - last_ping["t"] >= CLOB_PING_SEC:
+            ws.send("PING")
+            last_ping["t"] = now
+        new = tracker.take_pending()
+        if new:
+            ws.send(json.dumps({"assets_ids": new, "operation": "subscribe"}))
+
+    def on_message(raw) -> int:
+        if raw == "PONG":
+            return 1             # keeps the silence watchdog satisfied on a quiet book
+        payload = safe_json_loads(raw)
+        if payload is None:
+            return 0
+        sampler.apply(payload, time.time())
+        return 1
+
+    return Feed("polymarket_book", CLOB_MARKET_WS_URL, stop, on_open, on_message, heartbeat)
+
+
+def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
     def rtds_open(ws) -> None:
         ws.send(json.dumps(build_polymarket_chainlink_subscribe_payload(
             use_twap=True, window_seconds=60, symbol="btc/usd", include_spot=True)))
@@ -123,7 +212,7 @@ def build_feeds(bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
             source = "chainlink_spot"
         else:
             return 0
-        bucketer.observe(source, float(tick.price), tick.received_at_ts, tick.updated_at_ms)
+        chainlink_bucketer.observe(source, float(tick.price), tick.received_at_ts, tick.updated_at_ms)
         return 1
 
     def binance_message(raw) -> int:
@@ -153,7 +242,8 @@ def build_feeds(bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
     ]
 
 
-def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStore, started: float) -> None:
+def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStore, started: float,
+                 book_store: Optional[HourlyParquetStore] = None) -> None:
     now = time.time()
     status = {
         "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
@@ -163,6 +253,7 @@ def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStor
                                                       if f.last_tick_monotonic else None)}
                   for f in feeds},
         "store": vars(store.stats),
+        "book_store": vars(book_store.stats) if book_store is not None else None,
         "disk_ok": store.disk_ok(),
     }
     try:
@@ -176,6 +267,7 @@ def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStor
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data-dir", default=str(REPO_ROOT / "data" / "price_sources_1s"))
+    parser.add_argument("--book-dir", default=str(REPO_ROOT / "data" / "polymarket_book_1s"))
     parser.add_argument("--retention-days", type=int, default=30)
     parser.add_argument("--min-free-disk-gb", type=float, default=10.0)
     parser.add_argument("--max-buffer-rows", type=int, default=60_000)
@@ -185,12 +277,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     store = HourlyParquetStore(args.data_dir, retention_days=args.retention_days,
                                min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.max_buffer_rows)
     bucketer = SecondBucketer(store.add)
+    chainlink_bucketer = SecondBucketer(store.add, by_source_clock=True, grace_sec=5.0)
+    book_store = HourlyParquetStore(args.book_dir, retention_days=args.retention_days,
+                                    min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.max_buffer_rows,
+                                    schema=book_schema(), count_key="outcome",
+                                    sort_cols=("ts_sec", "market_slug", "outcome"))
+    sampler = BookSampler()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
 
     store.enforce_retention()
-    feeds = build_feeds(bucketer, stop)
+    book_store.enforce_retention()
+    tracker = MarketTracker(sampler, stop)
+    tracker.refresh()            # first subscription list before the book socket opens
+    tracker.start()
+    feeds = build_feeds(bucketer, chainlink_bucketer, stop) + [build_book_feed(sampler, tracker, stop)]
     for feed in feeds:
         feed.start()
     started = time.time()
@@ -201,12 +303,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         while not stop.wait(1.0):
             now = time.time()
             bucketer.flush_older_than(now)
-            for path in store.flush():  # completed UTC hours only
-                logger.info(f"wrote {path}")
-                store.enforce_retention()
+            chainlink_bucketer.flush_older_than(now)
+            for row in sampler.sample(now):
+                book_store.add(row)
+            for st in (store, book_store):
+                for path in st.flush():  # completed UTC hours only
+                    logger.info(f"wrote {path}")
+                    st.enforce_retention()
             if now - last_status >= 60.0:
                 last_status = now
-                write_status(status_path, feeds, store, started)
+                write_status(status_path, feeds, store, started, book_store)
             if args.duration_sec and now - started >= args.duration_sec:
                 stop.set()
     finally:
@@ -214,9 +320,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         for feed in feeds:
             feed.join(timeout=10)
         bucketer.flush_older_than(time.time() + 2)
-        for path in store.flush(include_current_hour=True):
-            logger.info(f"wrote {path}")
-        write_status(status_path, feeds, store, started)
+        chainlink_bucketer.flush_older_than(time.time() + 10)
+        for st in (store, book_store):
+            for path in st.flush(include_current_hour=True):
+                logger.info(f"wrote {path}")
+        write_status(status_path, feeds, store, started, book_store)
         logger.info(f"price recorder stopped: {vars(store.stats)}")
     return 0
 

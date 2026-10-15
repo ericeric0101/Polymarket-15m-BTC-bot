@@ -65,17 +65,31 @@ class _Bucket:
 
 
 class SecondBucketer:
-    """Collapses ticks into one row per source per local-receipt second."""
+    """Collapses ticks into one row per source per second.
 
-    def __init__(self, emit: Callable[[dict[str, Any]], None]) -> None:
+    ``by_source_clock=False`` keys rows by local receipt second (exchanges: one
+    local clock for lead/lag). ``by_source_clock=True`` keys by the feed's own
+    second (Chainlink spot/TWAP are 1 Hz source-stamped, so every source second
+    is kept for TWAP reconstruction); ``grace_sec`` waits for late arrivals.
+    """
+
+    def __init__(self, emit: Callable[[dict[str, Any]], None], *, by_source_clock: bool = False,
+                 grace_sec: float = 0.0) -> None:
         self._emit = emit
+        self.by_source_clock = bool(by_source_clock)
+        self.grace_sec = float(grace_sec)
         self._lock = threading.Lock()
         self._open: dict[str, _Bucket] = {}
 
     def observe(self, source: str, price: float, received_ts: float, source_ms: Optional[int]) -> None:
         if not (price > 0) or price != price:
             return
-        sec = int(received_ts)
+        if self.by_source_clock:
+            if not source_ms:
+                return
+            sec = int(source_ms // 1000)
+        else:
+            sec = int(received_ts)
         received_ms = int(received_ts * 1000)
         finished = None
         with self._lock:
@@ -96,7 +110,7 @@ class SecondBucketer:
 
     def flush_older_than(self, now_ts: float) -> None:
         """Close buckets whose second has passed (a quiet feed must not hold its last row)."""
-        sec = int(now_ts)
+        sec = int(now_ts - self.grace_sec)
         done = []
         with self._lock:
             for source, bucket in list(self._open.items()):
@@ -112,7 +126,8 @@ def _hour_key(ts_sec: int) -> tuple[str, str]:
     return dt.date().isoformat(), f"{dt.hour:02d}"
 
 
-def write_hour_file(root: Path, day: str, hour: str, rows: list[dict[str, Any]]) -> Path:
+def write_hour_file(root: Path, day: str, hour: str, rows: list[dict[str, Any]], schema=None,
+                    sort_cols: tuple[str, ...] = ("ts_sec", "source")) -> Path:
     """Atomically write one hour's rows; a second write in the same hour gets a suffix."""
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -125,9 +140,10 @@ def write_hour_file(root: Path, day: str, hour: str, rows: list[dict[str, Any]])
         n += 1
         final = directory / f"{hour}_{n}.parquet"
     temp = directory / f".{final.name}.{uuid.uuid4().hex}.tmp"
-    rows = sorted(rows, key=lambda r: (r["ts_sec"], r["source"]))
+    rows = sorted(rows, key=lambda r: tuple(str(r[c]) if c != "ts_sec" else r[c] for c in sort_cols))
     try:
-        pq.write_table(pa.Table.from_pylist(rows, schema=_schema()), temp, compression="zstd")
+        pq.write_table(pa.Table.from_pylist(rows, schema=schema if schema is not None else _schema()),
+                       temp, compression="zstd")
         os.replace(temp, final)
     finally:
         temp.unlink(missing_ok=True)
@@ -159,8 +175,12 @@ class HourlyParquetStore:
         max_buffer_rows: int = 60_000,
         free_disk_provider: Callable[[Path], Any] = shutil.disk_usage,
         clock: Callable[[], float] = time.time,
+        schema=None,
+        count_key: str = "source",
+        sort_cols: tuple[str, ...] = ("ts_sec", "source"),
     ) -> None:
         self.root = Path(root)
+        self.schema, self.count_key, self.sort_cols = schema, count_key, sort_cols
         self.retention_days = int(retention_days)
         self.min_free_disk_gb = float(min_free_disk_gb)
         self.max_buffer_rows = int(max_buffer_rows)
@@ -179,7 +199,7 @@ class HourlyParquetStore:
             self._rows.setdefault(_hour_key(int(row["ts_sec"])), []).append(row)
             self._buffered += 1
             self.stats.rows_buffered = self._buffered
-            src = str(row["source"])
+            src = str(row.get(self.count_key))
             self.stats.rows_by_source[src] = self.stats.rows_by_source.get(src, 0) + 1
 
     def disk_ok(self) -> bool:
@@ -207,7 +227,7 @@ class HourlyParquetStore:
         written = []
         for (day, hour), rows in sorted(batches.items()):
             try:
-                written.append(write_hour_file(self.root, day, hour, rows))
+                written.append(write_hour_file(self.root, day, hour, rows, self.schema, self.sort_cols))
                 self.stats.rows_written += len(rows)
                 self.stats.files_written += 1
             except Exception as exc:
@@ -256,3 +276,155 @@ def parse_coinbase_ticker(payload: Any) -> Optional[tuple[float, Optional[int]]]
         except ValueError:
             source_ms = None
     return price, source_ms
+
+
+# --- Polymarket order books ---------------------------------------------------------------
+
+_BOOK_SCHEMA = None
+
+
+def book_schema():
+    global _BOOK_SCHEMA
+    if _BOOK_SCHEMA is None:
+        import pyarrow as pa
+        _BOOK_SCHEMA = pa.schema([
+            ("ts_sec", pa.int64()),                    # local wall-clock second of the sample
+            ("market_slug", pa.string()),
+            ("outcome", pa.string()),                  # "Up" / "Down"
+            ("token_id", pa.string()),
+            ("best_bid", pa.float64()), ("best_ask", pa.float64()),
+            ("bid_size", pa.float64()), ("ask_size", pa.float64()),
+            ("n_updates", pa.int32()),                 # book messages applied during this second
+            ("last_update_received_ms", pa.int64()),   # local receipt of the last change to this book
+            ("last_event_ms", pa.int64()),             # venue timestamp of that change, if given
+        ])
+    return _BOOK_SCHEMA
+
+
+def _num(value: Any) -> Optional[float]:
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return x if x == x and abs(x) != float("inf") else None
+
+
+def _event_ms(value: Any) -> Optional[int]:
+    x = _num(value)
+    if x is None or x <= 0:
+        return None
+    return int(x if x > 10_000_000_000 else x * 1000)
+
+
+class BookSampler:
+    """Local L2 books for tracked tokens, sampled once per second (state carried forward).
+
+    Only books initialised by a full ``book`` snapshot on the current connection are
+    sampled; ``reset()`` on (re)connect invalidates them, so a sampled row always
+    reflects a live, synchronised book.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._meta: dict[str, dict[str, Any]] = {}   # token -> {slug, outcome, end_ts}
+        self._books: dict[str, dict[str, Any]] = {}
+
+    def set_tokens(self, meta: dict[str, dict[str, Any]]) -> list[str]:
+        """Replace tracked tokens; returns tokens that were not tracked before."""
+        with self._lock:
+            new = [t for t in meta if t not in self._meta]
+            self._meta = dict(meta)
+            for token in list(self._books):
+                if token not in self._meta:
+                    del self._books[token]
+            return new
+
+    def tokens(self) -> list[str]:
+        with self._lock:
+            return list(self._meta)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._books.clear()
+
+    def apply(self, payload: Any, received_ts: float) -> int:
+        items = payload if isinstance(payload, list) else [payload]
+        applied = 0
+        received_ms = int(received_ts * 1000)
+        with self._lock:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("event_type") or item.get("type") or "").lower()
+                if kind == "book":
+                    token = str(item.get("asset_id") or "")
+                    if token not in self._meta:
+                        continue
+                    book = {"bids": {}, "asks": {}, "n": 0}
+                    for side in ("bids", "asks"):
+                        for level in item.get(side) or []:
+                            price, size = _num(level.get("price")), _num(level.get("size"))
+                            if price is not None and size is not None and 0 <= price <= 1 and size > 0:
+                                book[side][price] = size
+                    prev = self._books.get(token)
+                    book["n"] = (prev or {}).get("n", 0) + 1
+                    book["last_ms"], book["event_ms"] = received_ms, _event_ms(item.get("timestamp"))
+                    self._books[token] = book
+                    applied += 1
+                elif kind == "price_change":
+                    event_ms = _event_ms(item.get("timestamp"))
+                    for ch in item.get("price_changes") or item.get("changes") or []:
+                        token = str(ch.get("asset_id") or item.get("asset_id") or "")
+                        book = self._books.get(token)
+                        price, size = _num(ch.get("price")), _num(ch.get("size"))
+                        side = {"BUY": "bids", "SELL": "asks"}.get(str(ch.get("side") or "").upper())
+                        if book is None or price is None or size is None or side is None:
+                            continue
+                        if size <= 0:
+                            book[side].pop(price, None)
+                        else:
+                            book[side][price] = size
+                        book["n"] += 1
+                        book["last_ms"], book["event_ms"] = received_ms, event_ms
+                        applied += 1
+        return applied
+
+    def sample(self, now_ts: float) -> list[dict[str, Any]]:
+        sec = int(now_ts)
+        rows = []
+        with self._lock:
+            for token, book in self._books.items():
+                meta = self._meta.get(token)
+                if meta is None or now_ts > float(meta["end_ts"]) + 5:
+                    continue
+                bids, asks = book["bids"], book["asks"]
+                bb = max(bids) if bids else None
+                ba = min(asks) if asks else None
+                rows.append({"ts_sec": sec, "market_slug": meta["slug"], "outcome": meta["outcome"],
+                             "token_id": token, "best_bid": bb, "best_ask": ba,
+                             "bid_size": bids.get(bb) if bb is not None else None,
+                             "ask_size": asks.get(ba) if ba is not None else None,
+                             "n_updates": book["n"], "last_update_received_ms": book["last_ms"],
+                             "last_event_ms": book["event_ms"]})
+                book["n"] = 0
+        return rows
+
+
+def market_tokens_for(slugs: list[str], fetch_market: Callable[[str], Optional[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+    """token -> {slug, outcome, end_ts} for the given BTC 15m slugs (Up/Down only, v1 or v2)."""
+    from bot.protocol_v2 import UnsupportedMarketProtocol, select_market_assets
+
+    meta: dict[str, dict[str, Any]] = {}
+    for slug in slugs:
+        market = fetch_market(slug)
+        if not market:
+            continue
+        try:
+            assets = select_market_assets(market)
+        except UnsupportedMarketProtocol:
+            continue
+        end_ts = float(slug.rsplit("-", 1)[-1]) + 900
+        for outcome, token in zip(assets.outcomes, assets.asset_ids):
+            if outcome.strip().lower() in ("up", "down"):
+                meta[str(token)] = {"slug": slug, "outcome": outcome.strip().capitalize(), "end_ts": end_ts}
+    return meta

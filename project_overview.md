@@ -847,8 +847,13 @@ expects `TAKER_EXIT_MAX_TIME_LEFT_SEC`, renamed to
 ## Multi-source 1-second price recorder (2026-10-15; research only, separate process)
 
 `scripts/price_recorder.py` (logic in `bot/research/price_recorder.py`) records
-Chainlink RTDS raw spot and 60 s TWAP, Binance BTCUSDT aggTrade and Coinbase
-BTC-USD ticker. It runs as its own process and never imports or touches the
+Chainlink RTDS raw spot and 60 s TWAP, Binance BTCUSDT aggTrade, Coinbase
+BTC-USD ticker, and the current and next BTC 15m Polymarket order books
+(public CLOB market channel; best bid/ask and top sizes per Up/Down token,
+sampled every second from a local book rebuilt from snapshots + deltas, written
+to `data/polymarket_book_1s/`). Chainlink rows are keyed by the feed's own
+second so every 1 Hz tick is kept for TWAP reconstruction; exchange rows are
+keyed by local receipt second. It runs as its own process and never imports or touches the
 trading bot, so it has no effect on trading I/O, memory or threads.
 
 - One row per source per local-receipt second: `close`, `high`, `low`,
