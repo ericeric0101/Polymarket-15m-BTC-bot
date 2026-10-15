@@ -844,6 +844,25 @@ expects `TAKER_EXIT_MAX_TIME_LEFT_SEC`, renamed to
   entry, exit, stop, sizing, order-routing, session-guard, or TWAP runtime
   behavior.
 
+## Multi-source 1-second price recorder (2026-10-15; research only, separate process)
+
+`scripts/price_recorder.py` (logic in `bot/research/price_recorder.py`) records
+Chainlink RTDS raw spot and 60 s TWAP, Binance BTCUSDT aggTrade and Coinbase
+BTC-USD ticker. It runs as its own process and never imports or touches the
+trading bot, so it has no effect on trading I/O, memory or threads.
+
+- One row per source per local-receipt second: `close`, `high`, `low`,
+  `n_updates`, `last_source_ms` (feed clock), `last_received_ms` (local clock).
+- Rows are buffered in memory and written as one zstd Parquet file per UTC hour:
+  `data/price_sources_1s/YYYY-MM-DD/HH.parquet` (~24 files/day; a restart in the
+  same hour adds `HH_2.parquet`, never overwrites). A crash loses at most the
+  current hour.
+- Bounded buffer (60,000 rows; drops are counted). Writes pause below 10 GiB free.
+  Day directories older than 30 days are deleted. `_status.json` is rewritten
+  every minute with per-feed connects/ticks/last-tick age and store counters.
+- Exchange `last_source_ms` uses each exchange's clock; compare lead/lag on
+  `last_received_ms` (one local clock).
+
 ## BTC 1-second historical research data
 
 - The observer-only `BTC1sHistoryCollector` passively reuses the existing
