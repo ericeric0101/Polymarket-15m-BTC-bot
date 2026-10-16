@@ -1,3 +1,15 @@
+from decimal import Decimal
+from types import SimpleNamespace
+from datetime import datetime, timezone
+import sqlite3
+import time
+
+import bot.db_runtime as db_runtime
+import bot.market_runtime as market_runtime
+from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
+
+from bot.db_runtime import StrategyDBRuntimeMixin
+from bot.recovery import StrategyRecoveryMixin
 from monitoring.trade_journal_db import TradeJournalDB
 
 
@@ -11,6 +23,287 @@ def _fill(db, *, slug, order_id, side, price, qty, fee=0.0):
         qty=qty,
         payload={"slug": slug, "effective_fee_usdc": fee},
     )
+
+
+def test_fresh_journal_created_at_startup_is_buy_ready(tmp_path):
+    db = TradeJournalDB(tmp_path / "missing-journal.db")
+
+    health = db.startup_health()
+
+    assert health["ready"] is True
+    assert health["reason"] == "fresh_initialized"
+    assert (tmp_path / "journal_meta.json").is_file()
+    db.stop()
+
+
+def test_markout_calibration_scan_uses_partial_buy_fill_markout_index(tmp_path):
+    db = TradeJournalDB(tmp_path / "markout-index.db")
+    try:
+        with sqlite3.connect(db.db_path) as conn:
+            plan = conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT id FROM order_events
+                WHERE event_type='FILL_MARKOUT' AND side='BUY'
+                  AND julianday(ts) >= julianday('now', '-720 hours')
+                ORDER BY ts ASC, id ASC
+                """
+            ).fetchall()
+
+        assert any("idx_order_events_fill_markout_buy_ts_id" in row[3] for row in plan)
+    finally:
+        db.stop()
+
+
+def test_existing_empty_journal_without_recovery_evidence_is_buy_ready(tmp_path):
+    path = tmp_path / "empty-journal.db"
+    first = TradeJournalDB(path)
+    first.stop()
+
+    second = TradeJournalDB(path)
+    health = second.startup_health()
+
+    assert health["ready"] is True
+    assert health["reason"] == "empty_journal_no_recovery_evidence"
+    second.stop()
+
+
+def test_missing_new_path_migrates_healthy_legacy_journal_atomically(tmp_path):
+    legacy = tmp_path / "logs" / "trade_journal.db"
+    target = tmp_path / "data" / "trading" / "trade_journal.db"
+    source = TradeJournalDB(legacy)
+    _fill(source, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    source.stop()
+
+    db = TradeJournalDB(target, legacy_db_path=legacy)
+
+    assert db.startup_health()["ready"] is True
+    assert db.startup_health()["reason"] == "migrated_legacy_journal"
+    assert target.is_file()
+    assert (target.parent / "journal_meta.json").is_file()
+    assert db.load_market_guard_counts("btc-updown-test")["buy_count"] == 1
+    db.stop()
+
+
+def test_previously_initialized_install_with_missing_journal_fails_closed(tmp_path):
+    path = tmp_path / "data" / "trading" / "trade_journal.db"
+    first = TradeJournalDB(path)
+    first.stop()
+    assert (path.parent / "journal_meta.json").is_file()
+    path.unlink()
+
+    restarted = TradeJournalDB(path, legacy_db_path=tmp_path / "logs" / "trade_journal.db")
+
+    assert restarted.startup_health()["ready"] is False
+    assert restarted.startup_health()["reason"] == "journal_unexpectedly_missing"
+    restarted.stop()
+
+
+def test_legacy_journal_schema_is_not_buy_ready(tmp_path):
+    path = tmp_path / "legacy-journal.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE strategy_runs (run_id TEXT PRIMARY KEY)")
+
+    health = TradeJournalDB(path).startup_health()
+
+    assert health["ready"] is False
+    assert health["reason"] == "schema_invalid"
+
+
+def test_order_event_write_creates_atomic_journal_backup(tmp_path):
+    path = tmp_path / "trading" / "trade_journal.db"
+    backup_path = tmp_path / "backups" / "trade_journal.db"
+    db = TradeJournalDB(path, backup_path=backup_path)
+
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    db.flush_backup()
+
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM order_events").fetchone()[0] == 1
+
+
+def test_stop_flushes_last_dirty_journal_backup(tmp_path):
+    path = tmp_path / "trading" / "trade_journal.db"
+    backup_path = tmp_path / "backups" / "trade_journal.db"
+    db = TradeJournalDB(path, backup_path=backup_path, backup_interval_sec=3600)
+
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+
+    assert db._backup_dirty is True
+    db.stop()
+
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as conn:
+        assert conn.execute("SELECT client_order_id FROM order_events").fetchone()[0] == "buy-1"
+
+
+def test_production_shutdown_flushes_final_trade_journal_backup(monkeypatch, tmp_path):
+    path = tmp_path / "trading" / "trade_journal.db"
+    backup_path = tmp_path / "backups" / "trade_journal.db"
+    db = TradeJournalDB(path, backup_path=backup_path, backup_interval_sec=3600)
+    db._last_backup_monotonic = time.monotonic()
+    db.log_run_start("run", "TEST", True, True)
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    assert db._backup_dirty is True
+
+    monkeypatch.setattr(market_runtime, "stop_event_threads", lambda **_kwargs: None)
+    strategy = SimpleNamespace(
+        _stopping=False,
+        hyperliquid_outcome_observer=None,
+        outcome_lead_lag_runtime=None,
+        lead_lag_db=None,
+        _lifecycle_stop_event=None, _reload_stop_event=None, _quote_watchdog_stop_event=None,
+        _redeem_stop_event=None, _balance_stop_event=None, _binance_ws_stop_event=None,
+        _polymarket_chainlink_ws_stop_event=None, _terminal_dashboard_stop_event=None,
+        _lifecycle_thread=None, _reload_thread=None, _quote_watchdog_thread=None,
+        _redeem_thread=None, _balance_thread=None, _binance_ws_thread=None,
+        _polymarket_chainlink_ws_thread=None, _terminal_dashboard_thread=None,
+        smart_money_tracker=None,
+        _cancel_active_maker_orders=lambda: None,
+        rebate_reporter=SimpleNamespace(flush_daily_report=lambda: None),
+        _db_strategy_event=lambda event, payload: db.log_strategy_event("run", event, payload),
+        _is_dry_run_mode=lambda: True,
+        inventory_delta_shares=Decimal("0"), active_side=SimpleNamespace(value="NONE"),
+        trade_db=db, run_id="run", test_mode=True, maker_mode=True, instrument_id=None,
+        selected_slug=None, market_cycle_realized_net_usdc=Decimal("0"), terminal_dashboard=None,
+    )
+
+    market_runtime.handle_stop(strategy)
+
+    assert backup_path.is_file()
+    with sqlite3.connect(backup_path) as conn:
+        assert conn.execute("SELECT client_order_id FROM order_events").fetchone()[0] == "buy-1"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM strategy_events WHERE event_type='STRATEGY_STOP'"
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT ended_at FROM strategy_runs WHERE run_id='run'").fetchone()[0] is not None
+
+
+def test_failed_backup_stays_dirty_and_retries_without_marking_journal_unhealthy(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db", backup_interval_sec=3600)
+    db._last_backup_monotonic = time.monotonic()
+    _fill(db, slug="btc-updown-test", order_id="buy-1", side="BUY", price=0.6, qty=5)
+    attempts = []
+
+    def backup_once():
+        attempts.append(True)
+        return len(attempts) > 1
+
+    monkeypatch.setattr(db, "_backup_after_write", backup_once)
+    db.flush_backup()
+    assert db._backup_dirty is True
+    assert db.runtime_health()["ready"] is True
+
+    db.flush_backup()
+    assert db._backup_dirty is False
+    assert len(attempts) == 2
+    db.stop()
+
+
+def test_critical_runtime_write_failure_marks_journal_not_buy_ready(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk full")))
+
+    assert db.log_order_event(run_id="r", event_type="ORDER_FILLED") is False
+
+    assert db.runtime_health()["ready"] is False
+    assert db.runtime_health()["reason"] == "write_failed"
+    assert db.runtime_health()["event_type"] == "ORDER_FILLED"
+    assert "disk full" in db.runtime_health()["error"]
+
+
+def test_transient_critical_write_failure_recovers_after_a_successful_probe(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    original_connect = db._connect
+    attempts = []
+
+    def fail_once():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_connect()
+
+    monkeypatch.setattr(db, "_connect", fail_once)
+    assert db.log_order_event(run_id="r", event_type="ORDER_FILLED") is False
+    assert db.runtime_health()["state"] == "HEALTHY"
+    assert db.runtime_health()["ready"] is True
+    db.stop()
+
+
+def test_noncritical_runtime_write_failure_keeps_buy_health_ready(monkeypatch, tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    monkeypatch.setattr(db, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+
+    assert db.log_order_event(run_id="r", event_type="ENTRY_EDGE_OBSERVATION") is False
+
+    assert db.runtime_health()["ready"] is True
+
+
+def test_strategy_order_event_accepts_explicit_instrument_id(tmp_path):
+    class Strategy(StrategyDBRuntimeMixin):
+        def _normalize_side_text(self, side):
+            return str(side).lower()
+
+    captured = []
+    strategy = Strategy()
+    strategy.trade_db = SimpleNamespace(
+        log_order_event=lambda **kwargs: captured.append(kwargs) or True,
+    )
+    strategy.run_id = "run"
+    strategy.current_market_slug = "slug"
+    strategy.instrument_id = "DEFAULT.INST"
+    strategy.current_token_id = None
+    strategy.last_observed_fee_rate_bps = None
+
+    assert strategy._db_order_event(
+        event_type="ORDER_FAST_FOLLOW_INTENT",
+        side="BUY",
+        instrument_id="FAST_FOLLOW.INST",
+    ) is True
+    assert captured[0]["instrument_id"] == "FAST_FOLLOW.INST"
+
+
+def test_schema_missing_critical_recovery_column_is_not_buy_ready(tmp_path):
+    path = tmp_path / "partial-journal.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE order_events (id INTEGER, ts TEXT, run_id TEXT, event_type TEXT, side TEXT, price REAL, qty REAL, payload_json TEXT)")
+
+    assert TradeJournalDB(path).startup_health()["reason"] in {"schema_invalid", "schema_init_failed"}
+
+
+class _RecoveryStrategy(StrategyDBRuntimeMixin):
+    def __init__(self, db, slug="btc-updown-15m-test"):
+        self.trade_db = db
+        self.current_market_slug = slug
+        self.market_strike_cache_by_slug = {}
+        self.market_strike_source_by_slug = {}
+        self.market_strike_status_by_slug = {}
+        self.market_strike_provisional_by_slug = {}
+        self.market_strike_provisional_source_by_slug = {}
+        self.current_market_open_spot = None
+        self.events = []
+
+    def _is_authoritative_strike_source(self, source):
+        return source == "polymarket_crypto_price_twap_open"
+
+    def _db_strategy_event(self, event_type, payload):
+        self.events.append((event_type, payload))
+
+
+class _FallbackCalibrationStrategy(StrategyDBRuntimeMixin):
+    def __init__(self):
+        self.trade_db = None
+        self.maker_engine = SimpleNamespace(config=SimpleNamespace())
+        self.maker_execution_empirical_markout_lookback_hours = 168.0
+        self.maker_execution_empirical_markout_min_samples = 30
+        self.maker_fixed_shares = Decimal("10")
+        self.maker_buy_markout_calibrations = {}
+        self.strong_directional_regime_calibration = None
+        self.events = []
+
+    def _db_strategy_event(self, event_type, payload):
+        self.events.append((event_type, payload))
 
 
 def test_market_guard_counts_survive_restart_and_ignore_partial_fill_rows(tmp_path):
@@ -30,8 +323,122 @@ def test_market_guard_counts_survive_restart_and_ignore_partial_fill_rows(tmp_pa
 
     assert db.load_market_guard_counts(slug) == {
         "buy_count": 1,
+        "unresolved_buy_intent_count": 0,
         "protective_exit_count": 1,
     }
+
+
+def test_recovery_preserves_explicitly_verified_authoritative_strike(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-test"
+    db.log_strategy_event(
+        "run",
+        "MARKET_STRIKE_LOCKED",
+        {
+            "slug": slug,
+            "strike": 66611.11,
+            "strike_source": "polymarket_crypto_price_twap_open",
+            "authoritative": True,
+            "strike_status": "verified",
+        },
+    )
+
+    strategy = _RecoveryStrategy(db, slug)
+    strategy._recover_market_strike_from_trade_db_on_startup()
+
+    assert strategy.market_strike_cache_by_slug[slug] == Decimal("66611.11")
+    assert strategy.market_strike_status_by_slug[slug] == "verified"
+    recovered = strategy.events[-1][1]
+    assert recovered["strike_status"] == "verified"
+
+
+def test_recovery_keeps_legacy_strike_unverified_without_recorded_status(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-test"
+    db.log_strategy_event(
+        "run",
+        "MARKET_STRIKE_LOCKED",
+        {
+            "slug": slug,
+            "strike": 66611.11,
+            "strike_source": "polymarket_crypto_price_twap_open",
+            "authoritative": True,
+        },
+    )
+
+    strategy = _RecoveryStrategy(db, slug)
+    strategy._recover_market_strike_from_trade_db_on_startup()
+
+    assert strategy.market_strike_status_by_slug[slug] == "recovered_unverified"
+
+
+def test_insufficient_journal_uses_portable_d4_168h_penalty_fallback(monkeypatch):
+    strategy = _FallbackCalibrationStrategy()
+    strategy.maker_execution_empirical_markout_lookback_hours = 48.0
+    strategy.maker_execution_empirical_markout_min_samples = 5
+    monkeypatch.setattr(
+        db_runtime,
+        "load_execution_penalty_snapshot",
+        lambda: {
+            "snapshot_id": "test-d4-snapshot",
+            "expires_at": "2026-10-08T00:00:00+00:00",
+            "source": "d4_portable_168h_snapshot",
+            "sample_count": 84,
+            "horizon_sec": 10,
+            "lookback_hours": 168.0,
+            "adverse_markout_per_share": Decimal("0.02515"),
+            "raw_mean_adverse_markout_per_share": Decimal("0.02454"),
+            "winsor_cap_per_share": None,
+            "method": "d4_frozen_168h_estimator",
+            "fallback_reason": "insufficient_current_journal_samples",
+            "minimum_independent_samples": 30,
+            "evidence": {"settled_training_samples": 84},
+        },
+    )
+
+    strategy._apply_empirical_execution_penalty_calibration()
+
+    assert strategy.maker_engine.config.maker_execution_empirical_adverse_markout_per_share == Decimal("0.02515")
+    event_type, payload = strategy.events[0]
+    assert event_type == "EXECUTION_PENALTY_FALLBACK_APPLIED"
+    assert payload["fallback_applied"] is True
+    assert payload["source"] == "d4_portable_168h_snapshot"
+    assert payload["lookback_hours"] == 168.0
+    assert payload["configured_lookback_hours"] == 48.0
+    assert payload["minimum_independent_samples"] == 30
+    assert payload["snapshot_id"] == "test-d4-snapshot"
+
+
+def test_startup_execution_calibration_has_begin_and_duration_diagnostics(monkeypatch):
+    strategy = _FallbackCalibrationStrategy()
+    messages = []
+    clock_values = iter([10.0, 12.5])
+    monkeypatch.setattr(db_runtime.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(db_runtime.logger, "info", messages.append)
+    strategy._apply_empirical_execution_penalty_calibration = lambda: None
+
+    strategy._run_startup_execution_calibration()
+
+    assert any("Startup execution calibration started" in message for message in messages)
+    assert any("elapsed_sec=2.500" in message for message in messages)
+
+
+def test_execution_penalty_snapshot_is_valid_before_its_expiry():
+    snapshot = load_execution_penalty_snapshot(
+        now=datetime(2026, 9, 8, tzinfo=timezone.utc),
+    )
+
+    assert snapshot is not None
+    assert snapshot["source"] == "d4_portable_168h_snapshot"
+    assert snapshot["adverse_markout_per_share"] == Decimal("0.02515")
+
+
+def test_execution_penalty_snapshot_fails_closed_after_expiry():
+    snapshot = load_execution_penalty_snapshot(
+        now=datetime(2026, 10, 8, tzinfo=timezone.utc),
+    )
+
+    assert snapshot is None
 
 
 def test_strong_directional_regime_calibration_uses_one_first_observation_per_market(tmp_path):
@@ -165,3 +572,104 @@ def test_reconcile_redeem_cycle_updates_existing_cycle_without_duplicate(tmp_pat
     assert len(pnl_rows) == 1
     assert '"cycle_pnl_reconciled_source": "onchain_redeem"' in pnl_rows[0][0]
     assert '"redeem_value_usdc": 9.9' in settlement[0]
+
+
+def test_startup_resolved_loss_reconciliation_writes_one_cycle_pnl(tmp_path):
+    """A restart can safely close a settled losing token that has no SELL fill."""
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-1790602200"
+    db.log_order_event(
+        run_id="run",
+        event_type="ORDER_FILLED",
+        client_order_id="buy-down",
+        side="BUY",
+        price=0.65,
+        qty=10,
+        token_id="222222222222222222222",
+        payload={"slug": slug, "effective_fee_usdc": 0.0},
+    )
+
+    reconciled = db.reconcile_startup_resolved_cycle(
+        slug=slug,
+        winning_token_id="up-token",
+        settlement_source="gamma_resolved",
+    )
+
+    assert reconciled is not None
+    assert reconciled["settlement_pnl_usdc"] == -6.5
+    assert reconciled["cycle_combined_pnl_usdc"] == -6.5
+    assert reconciled["new_cycle_pnl"] is True
+    # The operation is idempotent: a second boot cannot debit the same loss.
+    assert db.reconcile_startup_resolved_cycle(
+        slug=slug,
+        winning_token_id="up-token",
+        settlement_source="gamma_resolved",
+    ) is None
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT event_type, payload_json FROM strategy_events ORDER BY id"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["MARKET_SETTLEMENT", "MARKET_CYCLE_PNL"]
+    assert '"startup_reconciliation"' in rows[-1][1]
+
+
+def test_startup_settlement_reconciliation_applies_loss_to_persisted_profit_guard(tmp_path, monkeypatch):
+    """A missed losing settlement must lock an already-armed session after restart."""
+    class Host(StrategyRecoveryMixin, StrategyDBRuntimeMixin):
+        session_pnl_guard_enabled = True
+        session_profit_arm_usdc = 8
+        session_profit_drawdown_usdc = 4
+        session_hard_profit_lock_enabled = False
+        session_hard_profit_lock_usdc = 10
+        session_max_loss_enabled = True
+        session_max_loss_usdc = 6
+
+        def __init__(self, db):
+            self.trade_db = db
+            self.events = []
+
+        @staticmethod
+        def _taipei_session_date(now_ts=None):
+            return "2026-09-28"
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+            return True
+
+        def _block_new_buys_for_trade_db(self, reason):
+            self.block_reason = reason
+
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-1790602200"
+    db.log_order_event(
+        run_id="run", event_type="ORDER_FILLED", client_order_id="buy-down",
+        side="BUY", price=0.65, qty=10, token_id="down-token",
+        payload={"slug": slug, "effective_fee_usdc": 0.0},
+    )
+    assert db.save_session_pnl_state({
+        "session_date_taipei": "2026-09-28", "realized_pnl_usdc": 11.45,
+        "realized_high_water_usdc": 11.45, "profit_guard_armed": True,
+        "buy_lock_active": False, "buy_lock_reason": "",
+    })
+    monkeypatch.setattr(db, "find_unsettled_expired_session_slugs", lambda _date: [slug])
+    monkeypatch.setattr(
+        "bot.recovery.fetch_gamma_market_by_slug_sync",
+        lambda _slug: {
+            "version": "v1",
+            "conditionId": "0x" + "c" * 64,
+            "closed": True,
+            "outcomes": ["Up", "Down"],
+            "outcomePrices": ["1", "0"],
+            "clobTokenIds": ["111111111111111111111", "222222222222222222222"],
+        },
+    )
+    host = Host(db)
+    host._initialize_session_pnl_guard()
+
+    assert host._reconcile_unsettled_session_cycles_on_startup() == 1
+    decision = host.session_buy_guard_decision()
+    assert not decision.allowed
+    assert decision.reason == "session_profit_drawdown_lock"
+    assert decision.realized_pnl_usdc == Decimal("4.95")
+    assert decision.realized_high_water_usdc == Decimal("11.45")
+    assert any(event == "STARTUP_SETTLEMENT_RECONCILED" for event, _ in host.events)

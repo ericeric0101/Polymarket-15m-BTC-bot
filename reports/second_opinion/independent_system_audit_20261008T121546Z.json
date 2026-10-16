@@ -1,0 +1,526 @@
+{
+ "meta": {
+  "ts": "20261008T121546Z",
+  "head": "9352e6939bf7d2978e0e6747c1ceba148a5c8579",
+  "branch": "codex/db-resilience-and-stoploss-priority",
+  "dirty": true,
+  "completeness": "PARTIAL",
+  "auditor_incident": "7 tracked test files accidentally deleted and restored byte-identically from HEAD; see notes_pass_C.md"
+ },
+ "coverage": "# Coverage ledger (TS=20261008T121546Z)\n| Area | Status | Notes |\n|---|---|---|\n| Pass 0 orientation | EXAMINED_FULLY | HEAD, status, ps, df, file sizes, schemas |\n| Live/dry-run gating, order submit sites (Ph12) | EXAMINED_FULLY | all 4 submit_order sites traced |\n| Entry path (Ph3) | SAMPLED | run_bot._evaluate_quote_targets read ~2096-2560 + grep of rest; maker_engine fully; quote_service.evaluate_buy_entry_controls sampled |\n| Stop/invalidation (Ph4) | SAMPLED | taker_exit entry gates, urgent exit, invalidation state; exit_engine not read line-by-line |\n| Rollover/L2 (Ph8) | SAMPLED | L2 publish state + tests; prewarm/handoff code in market_runtime not fully read |\n| Freshness (Ph7) | SAMPLED | prediction_research_snapshot fully; spot_pricer partial; research scripts grep only |\n| Storage (Ph9) | EXAMINED_FULLY (journal backup, TWAP guard); SAMPLED (storage_retention) | DB growth measured |\n",
+ "findings": [
+  {
+   "id": "P1-001",
+   "severity": "P1",
+   "layer": "A/D",
+   "title": "Live-capable urgent-exit submit path has no dry-run guard",
+   "status": "VERIFIED",
+   "evidence": "bot/taker_exit.py:1396-1617; bot/launcher.py:828,1091-1094; bot/app_config.py:980,1016; profile STOP_LOSS_ENABLED=0",
+   "affected_path": "dry-run with STOP_LOSS_ENABLED=1",
+   "likelihood": "low now / medium once stop re-enabled",
+   "impact": "real SELL with RiskEngine bypassed",
+   "recommendation": "assert not test_mode at single submit choke point; gate urgent exit",
+   "requires_code_change_now": "yes - before re-enabling stop",
+   "confidence": "high"
+  },
+  {
+   "id": "P1-002",
+   "severity": "P1",
+   "layer": "B/D",
+   "title": "Canonical TWAP crossing/checkpoint events suppressed from 2026-10-04T18:25Z through Oct 7",
+   "status": "VERIFIED",
+   "evidence": "evidence/05_twap_by_day_type.txt, 06_tj_twap_events.txt, 07_guard_first.txt; 9352e69 diff",
+   "affected_path": "flip-hazard research",
+   "likelihood": "occurred",
+   "impact": "crossing timing unrecoverable at event resolution for Oct 5-7",
+   "recommendation": "reconstruct from 1 Hz snapshots with resolution label; soak-verify HEAD REQUIRED_EVENT_TYPES",
+   "requires_code_change_now": "no (HEAD fix exists, unverified)",
+   "confidence": "high"
+  },
+  {
+   "id": "P1-003",
+   "severity": "P1",
+   "layer": "B",
+   "title": "Weekday/weekend inference invalid: pseudo-replication and outcome-associated exclusion",
+   "status": "VERIFIED",
+   "evidence": "evidence/13_flip_stats.txt, 14_selection_check.txt; prior report regime/...final md line 27",
+   "affected_path": "regime research",
+   "likelihood": "n/a",
+   "impact": "false regime conclusion",
+   "recommendation": "day-level inference, pre-registration, multi-week data",
+   "requires_code_change_now": "no",
+   "confidence": "high"
+  },
+  {
+   "id": "P1-004",
+   "severity": "P1",
+   "layer": "B",
+   "title": "required_move_sigma is not a diffusion z-score (TTE-decayed sigma, floor, average variance, Binance fallback)",
+   "status": "VERIFIED",
+   "evidence": "bot/forecast_state.py:119-127; bot/live_entry_research.py:348-359; bot/spot_pricer.py:~975-990,1155-1270",
+   "affected_path": "difficulty bins / hazard covariates",
+   "likelihood": "n/a",
+   "impact": "miscalibration",
+   "recommendation": "add model-consistent z field",
+   "requires_code_change_now": "yes (research field)",
+   "confidence": "high"
+  },
+  {
+   "id": "P1-005",
+   "severity": "P1",
+   "layer": "B",
+   "title": "freshness_clock_semantics_version not enforced by any reader; native v2 window ~23 h",
+   "status": "VERIFIED",
+   "evidence": "bot/prediction_research_snapshot.py:118; grep; evidence/11_v2_provenance.txt",
+   "affected_path": "research readers",
+   "likelihood": "medium",
+   "impact": "silent v1/v2 mixing",
+   "recommendation": "enforce version in readers",
+   "requires_code_change_now": "yes (scripts)",
+   "confidence": "high"
+  },
+  {
+   "id": "P1-006",
+   "severity": "P1",
+   "layer": "C",
+   "title": "Maker BUY EV gate excludes adverse selection; no real fills since 2026-09-30",
+   "status": "VERIFIED",
+   "evidence": "execution/maker_engine.py:497-510,577-586; evidence/01_runs_by_day.txt",
+   "affected_path": "live readiness",
+   "likelihood": "n/a",
+   "impact": "unproven entry edge",
+   "recommendation": "calibrate markout from real fills; tiny live",
+   "requires_code_change_now": "no",
+   "confidence": "high"
+  },
+  {
+   "id": "P1-007",
+   "severity": "P1",
+   "layer": "C/D",
+   "title": "STOP_LOSS_ENABLED=0 removes every per-position loss cap; dry-run never executes exits",
+   "status": "VERIFIED",
+   "evidence": "622e97e diff; bot/taker_exit.py:119-123,1398",
+   "affected_path": "live risk",
+   "likelihood": "high",
+   "impact": "full stake loss per market",
+   "recommendation": "decouple absolute max-loss breaker",
+   "requires_code_change_now": "yes (before live)",
+   "confidence": "high"
+  },
+  {
+   "id": "P2-001",
+   "severity": "P2",
+   "layer": "A/C",
+   "title": "Side-invalidation counter increments twice per quote cycle",
+   "status": "VERIFIED",
+   "evidence": "run_bot.py:2276 loop / :2402 call; execution/maker_engine.py:573-639",
+   "affected_path": "locked side / invalidation",
+   "likelihood": "high",
+   "impact": "persistence threshold ~halved",
+   "recommendation": "time-based persistence",
+   "requires_code_change_now": "yes",
+   "confidence": "high"
+  },
+  {
+   "id": "P2-002",
+   "severity": "P2",
+   "layer": "D",
+   "title": "Unbounded storage; journal >90% diagnostics",
+   "status": "VERIFIED",
+   "evidence": "evidence/05, 08, 09",
+   "affected_path": "disk",
+   "likelihood": "high",
+   "impact": "disk full / backups refused",
+   "recommendation": "split diagnostics DB, hard caps, rate limits",
+   "requires_code_change_now": "yes",
+   "confidence": "high"
+  },
+  {
+   "id": "P2-003",
+   "severity": "P2",
+   "layer": "D",
+   "title": "HEAD backup/guard changes never ran in production; backup on same volume",
+   "status": "VERIFIED",
+   "evidence": "git log 9352e69 time; log interval_sec=900",
+   "affected_path": "backup",
+   "likelihood": "n/a",
+   "impact": "RPO unverified",
+   "recommendation": "soak run; off-volume backup",
+   "requires_code_change_now": "no",
+   "confidence": "high"
+  },
+  {
+   "id": "P2-004",
+   "severity": "P2",
+   "layer": "B",
+   "title": "~19 s opening snapshot blind spot; 187/480 markets with >10 s gaps; 1 clean POST_B market",
+   "status": "VERIFIED",
+   "evidence": "evidence/12_manifest_summary.txt",
+   "affected_path": "research coverage",
+   "likelihood": "high",
+   "impact": "small usable sample",
+   "recommendation": "fix capture timing",
+   "requires_code_change_now": "yes",
+   "confidence": "high"
+  },
+  {
+   "id": "P2-005",
+   "severity": "P2",
+   "layer": "A",
+   "title": "Runtime provenance not reproducible (git_dirty=true, null diff hash; no manifest before Oct 5)",
+   "status": "VERIFIED",
+   "evidence": "evidence/runs_phase.json",
+   "affected_path": "cohort attribution",
+   "likelihood": "high",
+   "impact": "cannot map runs to code",
+   "recommendation": "archive dirty diff per run",
+   "requires_code_change_now": "yes",
+   "confidence": "high"
+  },
+  {
+   "id": "P2-006",
+   "severity": "P2",
+   "layer": "A",
+   "title": "BBO fabrication for missing/crossed sides",
+   "status": "VERIFIED",
+   "evidence": "bot/order_runtime.py:100-119",
+   "affected_path": "fair/econ",
+   "likelihood": "low (L2 gate)",
+   "impact": "quotes on fabricated fair",
+   "recommendation": "reject missing/crossed",
+   "requires_code_change_now": "yes",
+   "confidence": "medium"
+  },
+  {
+   "id": "P2-007",
+   "severity": "P2",
+   "layer": "A",
+   "title": "Millisecond-timestamp client order ids, not idempotent",
+   "status": "VERIFIED (code); collision INFERRED",
+   "evidence": "bot/order_submission.py:523; bot/taker_exit.py:1013,1603",
+   "affected_path": "live orders",
+   "likelihood": "low",
+   "impact": "duplicate/reject",
+   "recommendation": "persistent uuid/sequence",
+   "requires_code_change_now": "yes (before live)",
+   "confidence": "medium"
+  },
+  {
+   "id": "P3-001",
+   "severity": "P3",
+   "layer": "A",
+   "title": "Legacy LeadLagDB schema / FF compatibility residue / retired .env key",
+   "status": "VERIFIED",
+   "evidence": "evidence/18_outcome_refs.txt",
+   "affected_path": "maintenance",
+   "likelihood": "n/a",
+   "impact": "confusion",
+   "recommendation": "cleanup",
+   "requires_code_change_now": "no",
+   "confidence": "high"
+  },
+  {
+   "id": "P3-002",
+   "severity": "P3",
+   "layer": "D",
+   "title": "Derived health is never a gate yet shows Storage CRITICAL with tradable=YES",
+   "status": "VERIFIED",
+   "evidence": "bot/research/health.py:1; terminal_bot.log",
+   "affected_path": "operations",
+   "likelihood": "n/a",
+   "impact": "misread state",
+   "recommendation": "document/clarify",
+   "requires_code_change_now": "no",
+   "confidence": "high"
+  },
+  {
+   "id": "P3-003",
+   "severity": "P3",
+   "layer": "B",
+   "title": "BTC1S telemetry negative source_receive latency (cross-domain)",
+   "status": "VERIFIED (log)",
+   "evidence": "logs/bot/terminal_bot.log BTC1S lines",
+   "affected_path": "telemetry",
+   "likelihood": "n/a",
+   "impact": "misleading",
+   "recommendation": "same-source clocks",
+   "requires_code_change_now": "no",
+   "confidence": "medium"
+  }
+ ],
+ "suspected": [
+  {
+   "id": "S-1",
+   "candidate_severity": "P0",
+   "title": "Dry-run urgent exit sells real wallet tokens rehydrated from venue reconciliation",
+   "evidence_needed": "STOP_LOSS=1 run in dry-run with wallet holding current-market tokens; confirm cache.positions_open populated by reconciliation; evidence/20 shows no STARTUP_INVENTORY_REHYDRATED ever"
+  },
+  {
+   "id": "S-2",
+   "candidate_severity": "P1",
+   "title": "Crash after BUY submit leaves orphan GTC order; restart re-buys (guard counts only ORDER_FILLED)",
+   "evidence_needed": "crash-injection test with fake venue"
+  },
+  {
+   "id": "S-3",
+   "candidate_severity": "P2",
+   "title": "APFS/TM snapshots retain replaced backup extents",
+   "evidence_needed": "extent-level attribution or df/du deltas around snapshot create/thin excluding os.update snapshots"
+  }
+ ],
+ "commits": [
+  {
+   "sha": "e4e87ee",
+   "intent": "init L2 retry state",
+   "files": [
+    "bot/adapter_overrides.py",
+    "tests/test_market_data_backpressure.py"
+   ],
+   "classification": "STRONG_FIX",
+   "tests_cover_failure": "yes (3/4 fail pre-fix)",
+   "runtime_evidence": "ran from 2026-10-07T13:26Z; no retry_at errors in log window"
+  },
+  {
+   "sha": "9f60f63",
+   "intent": "freshness clock domains",
+   "files": [
+    "bot/prediction_research_snapshot.py",
+    "bot/research/clocks.py",
+    "bot/spot_pricer.py"
+   ],
+   "classification": "LIKELY_CORRECT",
+   "tests_cover_failure": "yes (22 fail pre-fix)",
+   "runtime_evidence": "v2 rows from 2026-10-06T16:30:58Z; readers do not enforce"
+  },
+  {
+   "sha": "3b50637",
+   "intent": "retire FF execution authority",
+   "files": [
+    "bot/market_runtime.py",
+    "bot/outcome_lead_lag_exit_handoff.py",
+    "bot/settings.py",
+    "run_bot.py"
+   ],
+   "classification": "LIKELY_CORRECT",
+   "tests_cover_failure": "API-only (ImportError)",
+   "runtime_evidence": "no FF intents under 3b50637; observational telemetry only"
+  },
+  {
+   "sha": "33896ce",
+   "intent": "retire Outcome/Hyperliquid",
+   "files": [
+    "many; see git show --stat"
+   ],
+   "classification": "PARTIALLY_VERIFIED",
+   "tests_cover_failure": "yes (7/7 fail pre-fix)",
+   "runtime_evidence": "31-minute run only, git_dirty=true"
+  },
+  {
+   "sha": "1fa2ba0",
+   "intent": "harden backup failures",
+   "files": [
+    "monitoring/trade_journal_db.py"
+   ],
+   "classification": "LIKELY_CORRECT",
+   "tests_cover_failure": "yes (8 fail)",
+   "runtime_evidence": "final backup OK 6.16 s"
+  },
+  {
+   "sha": "b034b4e",
+   "intent": "reduce backup write amplification",
+   "files": [
+    "monitoring/trade_journal_db.py"
+   ],
+   "classification": "LIKELY_CORRECT",
+   "tests_cover_failure": "yes (5 fail)",
+   "runtime_evidence": "interval_sec=900 in log"
+  },
+  {
+   "sha": "8309152",
+   "intent": "bounded retention policy",
+   "files": [
+    "monitoring/storage_retention.py"
+   ],
+   "classification": "UNVERIFIED",
+   "tests_cover_failure": "not run",
+   "runtime_evidence": "none examined"
+  },
+  {
+   "sha": "49aa9ca",
+   "intent": "3 h scheduled rollover",
+   "files": [
+    "bot/launcher.py"
+   ],
+   "classification": "LIKELY_CORRECT",
+   "tests_cover_failure": "yes (3 fail)",
+   "runtime_evidence": "cycles 10831-10835 s"
+  },
+  {
+   "sha": "9352e69",
+   "intent": "bound research growth, 3 h backup",
+   "files": [
+    "bot/twap_forward_shadow.py",
+    "bot/forward_shadow.py",
+    "monitoring/trade_journal_db.py"
+   ],
+   "classification": "RISKY",
+   "tests_cover_failure": "API-only (AttributeError)",
+   "runtime_evidence": "never ran; still unbounded"
+  },
+  {
+   "sha": "622e97e",
+   "intent": "disable stop-loss by default",
+   "files": [
+    "bot/exit_engine.py",
+    "bot/taker_exit.py",
+    "config/profiles/btc15_twap_v3.env"
+   ],
+   "classification": "RISKY",
+   "tests_cover_failure": "tests modified",
+   "runtime_evidence": "also disables absolute max-loss breaker"
+  }
+ ],
+ "claims": [
+  {
+   "id": "K1",
+   "verdict": "CONFIRM",
+   "evidence": "33896ce tests 7/7 fail pre-fix; no runtime import",
+   "counter_argument": "legacy schema/compat code remain"
+  },
+  {
+   "id": "K2",
+   "verdict": "CONFIRM",
+   "evidence": "evidence/21; FAST_FOLLOW_EXECUTION_ENABLED=False",
+   "counter_argument": "PRE_A cohorts contaminated"
+  },
+  {
+   "id": "K3",
+   "verdict": "PARTIAL",
+   "evidence": "9f60f63 tests fail pre-fix",
+   "counter_argument": "readers do not enforce version; BTC1S negative latency"
+  },
+  {
+   "id": "K4",
+   "verdict": "UNRESOLVED",
+   "evidence": "evidence/13,14 (prior significance claim rejected)",
+   "counter_argument": "T-180/T-120 direction persists"
+  },
+  {
+   "id": "K5",
+   "verdict": "PARTIAL",
+   "evidence": "evidence/15",
+   "counter_argument": "uncalibrated, inconsistent definition"
+  },
+  {
+   "id": "K6",
+   "verdict": "CONFIRM",
+   "evidence": "no executed stops; P1-007",
+   "counter_argument": "shadow forensics exist"
+  },
+  {
+   "id": "K7",
+   "verdict": "PARTIAL",
+   "evidence": "3 full 3 h cycles",
+   "counter_argument": "gaps correlate with volatile markets; HEAD untested"
+  },
+  {
+   "id": "K8",
+   "verdict": "CONFIRM",
+   "evidence": "code + evidence/03",
+   "counter_argument": "stamp = delivery not book validity"
+  },
+  {
+   "id": "K9",
+   "verdict": "UNRESOLVED",
+   "evidence": "prior experiment + evidence/19",
+   "counter_argument": "os.update snapshots; free space self-recovers"
+  },
+  {
+   "id": "K10",
+   "verdict": "CONFIRM",
+   "evidence": "evidence/05 (production period); HEAD fix unverified",
+   "counter_argument": "1 Hz snapshots allow partial reconstruction"
+  },
+  {
+   "id": "K11",
+   "verdict": "REJECT",
+   "evidence": "P1-002, P2-004; 57 Tier-1 markets",
+   "counter_argument": "1 Hz snapshots approximate"
+  },
+  {
+   "id": "K12",
+   "verdict": "CONFIRM",
+   "evidence": "P1-001, P1-006, P1-007",
+   "counter_argument": "-"
+  }
+ ],
+ "verdicts": {
+  "CODE_READY": "NO",
+  "RESEARCH_READY": "NO",
+  "TINY_LIVE_READY": "NO",
+  "FULL_LIVE_READY": "NO"
+ },
+ "next_actions": [
+  {
+   "rank": 1,
+   "action": "Single choke-point dry-run assertion in submit_order + gate urgent exit; failing-first test",
+   "blocks_tiny_live": "yes",
+   "blocks_research": "no"
+  },
+  {
+   "rank": 2,
+   "action": "Decouple absolute max-loss breaker from STOP_LOSS_ENABLED",
+   "blocks_tiny_live": "yes",
+   "blocks_research": "no"
+  },
+  {
+   "rank": 3,
+   "action": "Split diagnostics from TradeJournal; cap/rate-limit prediction snapshots; primary free-space guard; 24 h HEAD soak",
+   "blocks_tiny_live": "yes",
+   "blocks_research": "yes"
+  },
+  {
+   "rank": 4,
+   "action": "Crash safety: cancel/adopt venue open orders at startup; count intents; idempotent COIDs",
+   "blocks_tiny_live": "yes",
+   "blocks_research": "no"
+  },
+  {
+   "rank": 5,
+   "action": "Enforce freshness v2 in all research readers",
+   "blocks_tiny_live": "no",
+   "blocks_research": "yes"
+  },
+  {
+   "rank": 6,
+   "action": "Fix 19 s opening blind spot; persist canonical crossings at source resolution",
+   "blocks_tiny_live": "no",
+   "blocks_research": "yes"
+  },
+  {
+   "rank": 7,
+   "action": "Model-consistent z (no TTE decay, TWAP-average variance, single reference)",
+   "blocks_tiny_live": "no",
+   "blocks_research": "yes"
+  },
+  {
+   "rank": 8,
+   "action": "Pre-register one day-level confirmatory hypothesis; collect 4-6 weeks",
+   "blocks_tiny_live": "no",
+   "blocks_research": "yes"
+  },
+  {
+   "rank": 9,
+   "action": "Time-based invalidation persistence + test",
+   "blocks_tiny_live": "yes",
+   "blocks_research": "no"
+  },
+  {
+   "rank": 10,
+   "action": "Archive dirty diff per run; non-null dirty_diff_hash",
+   "blocks_tiny_live": "no",
+   "blocks_research": "yes"
+  }
+ ],
+ "summary": "INDEPENDENT_SECOND_OPINION\nTIMESTAMP_UTC=20261008T121546Z\nCURRENT_HEAD=9352e6939bf7d2978e0e6747c1ceba148a5c8579\nWORKING_TREE_DIRTY=YES\nAUDIT_COMPLETENESS=PARTIAL\nARCHITECTURE_RECONSTRUCTED=YES\nRUNTIME_PATH_UNDERSTOOD=YES\nP0_FINDINGS=0\nP1_FINDINGS=7\nP2_FINDINGS=7\nP3_FINDINGS=3\nSUSPECTED_UNVERIFIED=3\nENTRY_ARCHITECTURE=WARNING\nSTOP_ARCHITECTURE=FAIL\nFLIP_RESEARCH=FAIL\nSIGMA_MODEL=WARNING\nFRESHNESS=WARNING\nROLLOVER=WARNING\nL2_AUTHORITY=PASS\nSTORAGE=FAIL\nSTORAGE_BOUNDEDNESS=UNBOUNDED\nBACKUP=WARNING\nRECOVERY=WARNING\nLIVE_ORDER_SAFETY=FAIL\nRUNTIME_EFFICIENCY=PASS\nTEST_QUALITY=WARNING\nOUTCOME_REMOVAL=CONFIRM\nMAKER_INDEPENDENCE=CONFIRM\nFRESHNESS_FIX=PARTIAL\nWEEKDAY_WEEKEND_EFFECT=UNRESOLVED\nSIGMA_DIFFICULTY_USEFULNESS=PARTIAL\nSTOP_NOT_YET_VALIDATED=CONFIRM\nROLLOVER_SAFETY=PARTIAL\nNEUTRAL_L2_CORRECTNESS=CONFIRM\nAPFS_BACKUP_ATTRIBUTION=UNRESOLVED\nTWAP_PARTIAL_SUPPRESSION=CONFIRM\nFLIP_HAZARD_DATA_READINESS=REJECT\nNOT_READY_FOR_FULL_LIVE=CONFIRM\nCODE_READY=NO\nRESEARCH_READY=NO\nTINY_LIVE_READY=NO\nFULL_LIVE_READY=NO\nTOP_5_REMAINING_RISKS=\n1. Live-capable urgent-exit submit path lacks dry-run guard (dormant behind STOP_LOSS_ENABLED=0; risk engine bypassed in dry-run)\n2. No per-position loss cap when STOP_LOSS_ENABLED=0 (absolute max loss breaker also disabled); stop never executed in evidence window\n3. Unbounded storage: journal 200-290 MB/day mostly diagnostics, research store 2.4x cap, 3.17 GB full images, 12-16 GB free; HEAD fixes never ran\n4. Canonical TWAP crossing/checkpoint evidence lost 2026-10-04 18:25Z..10-07; native-v2 window only ~23 h / 57 Tier-1 markets\n5. Weekday/weekend and sigma-difficulty conclusions rest on pseudo-replicated, outcome-selected, 2-4 day samples with a non-z-score metric\nTOP_5_NEXT_ACTIONS=\n1. Single choke-point dry-run assertion in submit_order + gate urgent exit; regression test that fails on current code\n2. Decouple absolute max-loss breaker from STOP_LOSS_ENABLED\n3. Split diagnostics out of TradeJournal, hard-cap/rate-limit prediction snapshots, primary free-space guard, 24 h HEAD soak\n4. Crash safety: startup cancel/adopt venue open orders, count intents in buy guard, persistent idempotent client order ids\n5. Enforce freshness v2 in readers, fix 19 s opening blind spot, persist canonical crossings, pre-register a single day-level confirmatory test over 4-6 weeks\nCODE_CHANGED=NO\nCOMMIT=NONE\nPUSHED=NO\nBOT_RESTARTED=NO\n"
+}

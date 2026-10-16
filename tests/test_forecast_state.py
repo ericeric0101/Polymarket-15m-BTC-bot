@@ -47,3 +47,25 @@ def test_shared_forecast_uses_instantaneous_model_for_degraded_source():
     assert state.settlement_model == "instantaneous_digital"
     assert state.twap_average_up_probability is None
     assert state.selected_up_probability == state.standard_up_probability
+
+
+def test_market_independent_probability_ignores_market_mid_and_market_floor_is_explicit():
+    common = {
+        "spot": Decimal("100.001"), "strike": Decimal("100"), "time_left_sec": 300.0,
+        "reference_source": "polymarket_chainlink_twap_60s_ws", "outcome": "up",
+        "sigma_default": Decimal("0.6"), "sigma_raw_realized": Decimal("0.05"),
+        "sigma_scale": Decimal("1"), "sigma_floor": Decimal("0.05"),
+        "sigma_ceiling": Decimal("2"), "time_decay_enabled": False,
+        "time_decay_ref_sec": 600.0, "time_decay_min": .3,
+        "twap_window_sec": 60, "observed_twap_average": None,
+        "observed_twap_seconds": 0.0,
+    }
+    first = build_forecast_state(**common, market_mid=Decimal("0.10"), implied_sigma_enabled=False)
+    second = build_forecast_state(**common, market_mid=Decimal("0.90"), implied_sigma_enabled=False)
+    assert first.sigma_after_time_decay == second.sigma_after_time_decay
+    assert first.twap_average_up_probability == second.twap_average_up_probability
+    market_conditioned = build_forecast_state(
+        **common, market_mid=Decimal("0.10"), implied_sigma_enabled=True
+    )
+    assert market_conditioned.implied_sigma_floor_applied is True
+    assert market_conditioned.twap_average_up_probability != first.twap_average_up_probability

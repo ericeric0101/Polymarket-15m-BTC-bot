@@ -1,0 +1,5 @@
+dimension,status,detail
+coverage / settlement,PARTIAL,21 Monday and 144 weekend settled catalog markets have prediction timelines; checkpoint-valid N varies.
+freshness / cadence,PARTIAL,Some checkpoint probability fields are missing; full freshness/cadence distributions unavailable.
+schema / run provenance,NOT_COMPARABLE,"404/404 journal-linked runs LEGACY_UNKNOWN; no commit, config hash, or schema-version manifests."
+restart continuity,NOT_COMPARABLE,Run manifests absent; multi-run market continuity not established.

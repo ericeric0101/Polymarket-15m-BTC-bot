@@ -1,0 +1,8 @@
+weekend_et,resolution_bin,observations,mean_public_trade_size,mean_local_spread
+False,T-10m_to_T-5m,27260,,0.010191159207630227
+False,T-15m_to_T-10m,16802,,0.010158850136888465
+False,T-15s_to_settlement,819,,0.004007326007326007
+False,T-2m_to_T-1m,4113,,0.008454655968879165
+False,T-30s_to_T-15s,750,,0.005064
+False,T-5m_to_T-2m,14684,,0.009588804140561154
+False,T-60s_to_T-30s,1654,,0.0064860943168077384

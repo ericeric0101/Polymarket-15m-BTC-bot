@@ -7,7 +7,7 @@ from scripts.inspect_env_contract import OPERATOR_KEYS, _code_keys, _keys
 
 
 def test_operator_template_has_no_duplicate_or_empty_keys():
-    assert len(OPERATOR_KEYS) == 53
+    assert len(OPERATOR_KEYS) == 62
     assert "AUTO_NODE_RESTART_ON_UNEXPECTED_EXIT" not in CORE_ENV_KEYS
     assert all(key and key.upper() == key for key in OPERATOR_KEYS)
     template = Path(__file__).parents[1] / "config" / "operator.env.example"
@@ -44,3 +44,56 @@ def test_market_entry_budget_is_hard_limited_to_one_successful_buy(monkeypatch):
     config = AppConfig.from_env(enable_terminal_dashboard=False)
 
     assert config.exit.market_max_buy_events_per_market == 1
+
+
+def test_stop_loss_master_switch_is_operator_configurable(monkeypatch):
+    monkeypatch.setenv("STOP_LOSS_ENABLED", "0")
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.exit.stop_loss_enabled is False
+
+
+def test_outcome_config_is_no_longer_a_runtime_section(monkeypatch):
+    monkeypatch.setenv("OUTCOME_FAST_FOLLOW_MAX_FORECAST_AGE_SEC", "4.5")
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert not hasattr(config, "outcome_lead_lag")
+
+
+
+def test_entry_quality_size_down_is_configurable(monkeypatch):
+    monkeypatch.setenv("ENTRY_QUALITY_SIZE_DOWN_ENABLED", "1")
+
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+
+    assert config.maker.entry_quality_size_down_enabled is True
+
+
+def test_active_profile_uses_five_minute_first_entry_warmup_and_effective_loss_breaker():
+    profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
+    contents = profile.read_text(encoding="utf-8")
+
+    assert "FIRST_ENTRY_MAX_TIME_LEFT_SEC=600" in contents
+    assert "ABSOLUTE_MAX_LOSS_USDC=2.00" in contents
+    assert "STOP_LOSS_ENABLED=0" in contents
+    assert "ENTRY_QUALITY_SIZE_DOWN_ENABLED=1" in contents
+
+
+def test_quote_delivery_delay_gate_defaults_to_two_seconds_and_is_configurable(monkeypatch):
+    monkeypatch.delenv("QUOTE_MAX_DELIVERY_DELAY_SEC", raising=False)
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert config.market_data.quote_max_delivery_delay_sec == 2.0
+
+    monkeypatch.setenv("QUOTE_MAX_DELIVERY_DELAY_SEC", "3.5")
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert config.market_data.quote_max_delivery_delay_sec == 3.5
+
+
+def test_session_daily_loss_limit_defaults_to_eight_usdc_and_is_configurable(monkeypatch):
+    monkeypatch.delenv("SESSION_MAX_LOSS_USDC", raising=False)
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert config.operations.session_max_loss_usdc == Decimal("8.0")
+
+    monkeypatch.setenv("SESSION_MAX_LOSS_USDC", "7.25")
+    config = AppConfig.from_env(enable_terminal_dashboard=False)
+    assert config.operations.session_max_loss_usdc == Decimal("7.25")

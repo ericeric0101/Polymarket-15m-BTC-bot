@@ -4,7 +4,15 @@ import os
 from dataclasses import dataclass
 from decimal import Decimal
 
+from bot.entry_sizing import (
+    HIGH_PRICE_TARGET_SHARES,
+    HIGH_PRICE_THRESHOLD,
+    LOW_PRICE_TARGET_SHARES,
+    EntrySizingRule,
+    resolve_entry_sizing_rule,
+)
 from bot.enums import ActiveSide
+from bot.journal_path import DEFAULT_TRADE_DB_PATH
 from bot.quoting import normalize_quote_mode
 from execution.rebate_model import CRYPTO_FEE_CURVE
 
@@ -68,19 +76,27 @@ class CompatibilityConfig:
 @dataclass(frozen=True)
 class MakerConfig:
     maker_mode: bool
+    normal_maker_buy_enabled: bool
+    entry_quality_size_down_enabled: bool
     quote_refresh_sec: int
     half_spread: Decimal
     quote_size_usdc: Decimal
     min_shares: Decimal
     exchange_min_shares: Decimal
     fixed_shares: Decimal
+    depth_risk_sizing_enabled: bool
+    depth_risk_max_entry_notional_usdc: Decimal
+    depth_risk_max_loss_usdc: Decimal
+    depth_risk_depth_fraction: Decimal
+    depth_risk_price_boundary_ticks: int
+    depth_risk_shadow_enabled: bool
+    depth_risk_shadow_interval_sec: float
     weak_pfair_size_adjust_enabled: bool
     weak_pfair_size_adjust_lower: Decimal
     weak_pfair_size_adjust_upper: Decimal
     weak_pfair_size_adjust_multiplier: Decimal
-    high_entry_price_size_adjust_enabled: bool
-    high_entry_price_size_adjust_threshold: Decimal
-    high_entry_price_size_adjust_multiplier: Decimal
+    entry_sizing_rule: EntrySizingRule
+    entry_sizing_violations: tuple[str, ...]
     kelly_sizing_enabled: bool
     kelly_sizing_fraction: Decimal
     kelly_sizing_max_collateral_fraction: Decimal
@@ -212,10 +228,6 @@ class MakerConfig:
             raise ValueError("MAKER_QUOTE_SIZE_USDC must be > 0")
         if self.min_shares <= 0 or self.exchange_min_shares <= 0:
             raise ValueError("Maker min share settings must be > 0")
-        if self.high_entry_price_size_adjust_threshold < 0:
-            raise ValueError("HIGH_PRICE_THRESHOLD must be >= 0")
-        if self.high_entry_price_size_adjust_multiplier <= 0:
-            raise ValueError("High-price size multiplier must be > 0")
         if self.kelly_sizing_fraction < 0 or self.kelly_sizing_fraction > 1:
             raise ValueError("KELLY_SIZING_FRACTION must be in [0, 1]")
         if self.kelly_sizing_max_collateral_fraction < 0 or self.kelly_sizing_max_collateral_fraction > 1:
@@ -375,9 +387,17 @@ class ExitConfig:
     exit_policy_aggressive_stage_sec: int
     exit_policy_taker_stage_sec: int
     maker_signal_flip_cooldown_cycles: int
+    endgame_twap_exit_enabled: bool
+    endgame_twap_exit_max_time_left_sec: int
+    endgame_twap_exit_min_distance_usd: Decimal
+    endgame_twap_exit_max_age_sec: float
     absolute_max_loss_enabled: bool = True
-    absolute_max_loss_usdc: Decimal = Decimal("1.50")
+    absolute_max_loss_usdc: Decimal = Decimal("2.00")
     absolute_max_loss_min_hold_sec: int = 60
+    stop_loss_enabled: bool = True
+    # Breaker V2: canonical-TWAP SELL authority gate for the conditional
+    # absolute-loss breaker (bot.breaker_authority).  Default off.
+    absolute_max_loss_twap_authority_gate_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.tail_protect_tp_price <= 0 or self.tail_protect_tp_price > Decimal("1"):
@@ -406,6 +426,12 @@ class ExitConfig:
             raise ValueError("RECOVERY_EXIT_PASSIVE_TTL_SEC must be >= 1")
         if self.recovery_exit_passive_min_time_left_sec < 0:
             raise ValueError("RECOVERY_EXIT_PASSIVE_MIN_TIME_LEFT_SEC must be >= 0")
+        if self.endgame_twap_exit_max_time_left_sec < 0:
+            raise ValueError("ENDGAME_TWAP_EXIT_MAX_TIME_LEFT_SEC must be >= 0")
+        if self.endgame_twap_exit_min_distance_usd <= 0:
+            raise ValueError("ENDGAME_TWAP_EXIT_MIN_DISTANCE_USD must be > 0")
+        if self.endgame_twap_exit_max_age_sec <= 0:
+            raise ValueError("ENDGAME_TWAP_EXIT_MAX_AGE_SEC must be > 0")
 
 
 @dataclass(frozen=True)
@@ -426,6 +452,7 @@ class MarketDataConfig:
     polymarket_chainlink_twap_enabled: bool
     polymarket_chainlink_twap_window_sec: int
     polymarket_chainlink_twap_symbol: str
+    polymarket_chainlink_twap_silence_reconnect_sec: float
     require_twap_reference_spot: bool
     twap_degraded_block_new_entries: bool
     external_spot_source_delta_abs_max_usd: Decimal
@@ -433,6 +460,7 @@ class MarketDataConfig:
     market_strike_anchor_near_sec: int
     market_strike_rest_retry_sec: int
     quote_stale_sec: int
+    quote_max_delivery_delay_sec: float
     quote_event_clock_skew_tolerance_sec: Decimal
     quote_resubscribe_grace_sec: int
     stale_quote_synth_max_age_sec: float
@@ -445,6 +473,8 @@ class MarketDataConfig:
             raise ValueError("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC must be 30 or 60")
         if self.require_twap_reference_spot and not self.polymarket_chainlink_twap_enabled:
             raise ValueError("REQUIRE_TWAP_REFERENCE_SPOT requires POLYMARKET_CHAINLINK_TWAP_ENABLED")
+        if self.polymarket_chainlink_twap_silence_reconnect_sec < 10:
+            raise ValueError("POLYMARKET_CHAINLINK_TWAP_SILENCE_RECONNECT_SEC must be >= 10")
 
 
 @dataclass(frozen=True)
@@ -457,6 +487,9 @@ class OperationsConfig:
     auto_redeem_timeout_sec: int
     auto_redeem_min_gap_sec: int
     auto_redeem_slug_filter: str
+    settlement_confirmation_enabled: bool
+    settlement_confirmation_interval_sec: int
+    settlement_confirmation_lookback_hours: int
     market_settling_grace_sec: int
     market_next_poll_sec: int
     balance_check_interval_sec: int
@@ -472,6 +505,31 @@ class OperationsConfig:
     shadow_simulation_fill_timeout_sec: float
     shadow_simulation_max_quote_age_sec: float
     shadow_simulation_aged_quote_max_age_sec: float
+    session_pnl_guard_enabled: bool
+    session_profit_arm_usdc: Decimal
+    session_profit_drawdown_usdc: Decimal
+    session_hard_profit_lock_enabled: bool
+    session_hard_profit_lock_usdc: Decimal
+    session_max_loss_enabled: bool
+    session_max_loss_usdc: Decimal
+    session_pnl_guard_mode: str
+    monthly_net_target_usdc: Decimal | None
+    # ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS; default False keeps the weekend BUY block.
+    allow_taipei_weekend_buys: bool = False
+
+    def __post_init__(self) -> None:
+        supported = {"legacy", "target_scaled_v2", "shadow_target_scaled_v2"}
+        if self.session_pnl_guard_mode not in supported:
+            raise ValueError("SESSION_PNL_GUARD_MODE must be legacy, target_scaled_v2, or shadow_target_scaled_v2")
+        if self.monthly_net_target_usdc is not None and not self.monthly_net_target_usdc.is_finite():
+            raise ValueError("MONTHLY_NET_TARGET_USDC must be finite")
+        if self.session_pnl_guard_mode != "legacy" and (
+            self.monthly_net_target_usdc is None or not self.monthly_net_target_usdc.is_finite()
+            or self.monthly_net_target_usdc <= 0
+        ):
+            raise ValueError("MONTHLY_NET_TARGET_USDC must be positive when SESSION_PNL_GUARD_MODE is V2")
+
+
 
 
 @dataclass(frozen=True)
@@ -487,6 +545,10 @@ class AppConfig:
 
     @classmethod
     def from_env(cls, *, enable_terminal_dashboard: bool) -> "AppConfig":
+        retired = sorted(key for key in os.environ if key.startswith(("OUTCOME_", "HYPERLIQUID_", "FAST_FOLLOW_")))
+        if retired:
+            from loguru import logger
+            logger.warning("Retired Outcome configuration ignored; remove these legacy keys: {}", ", ".join(retired))
         startup_verbose = _env_bool("STARTUP_VERBOSE", False)
         terminal_dashboard_enabled = bool(enable_terminal_dashboard)
         terminal_dashboard_refresh_sec = max(0.5, _env_float("TERMINAL_DASHBOARD_REFRESH_SEC", 1.0))
@@ -502,24 +564,20 @@ class AppConfig:
 
         maker_min_shares = _env_decimal("MAKER_MIN_SHARES", "5")
         maker_exchange_min_shares = _env_decimal("MAKER_EXCHANGE_MIN_SHARES", "5")
-        maker_fixed_shares = _env_decimal("MARKET_TARGET_SHARES", "0")
-        high_price_target_shares = _env_decimal(
-            "HIGH_PRICE_TARGET_SHARES", str(maker_fixed_shares)
+        # Share sizing is validated on the final resolved values (shell > .env >
+        # profile > code default). An out-of-bounds rule resolves to the
+        # canonical one so it can never enlarge sizing; LIVE startup refuses it.
+        entry_sizing_rule, entry_sizing_violations = resolve_entry_sizing_rule(
+            low_price_target_shares=_env_str("MARKET_TARGET_SHARES", str(LOW_PRICE_TARGET_SHARES)),
+            high_price_target_shares=_env_str("HIGH_PRICE_TARGET_SHARES", str(HIGH_PRICE_TARGET_SHARES)),
+            high_price_threshold=_env_str("HIGH_PRICE_THRESHOLD", str(HIGH_PRICE_THRESHOLD)),
         )
-        if maker_fixed_shares > 0 and (
-            high_price_target_shares <= 0 or high_price_target_shares > maker_fixed_shares
-        ):
-            raise ValueError("HIGH_PRICE_TARGET_SHARES must be > 0 and <= MARKET_TARGET_SHARES")
-        high_price_size_multiplier = (
-            high_price_target_shares / maker_fixed_shares
-            if maker_fixed_shares > 0
-            else Decimal("1")
-        )
+        maker_fixed_shares = entry_sizing_rule.low_price_target_shares
         external_conflict_action = _env_str("EXTERNAL_CONFLICT_ACTION", "skip").strip().lower()
         if external_conflict_action not in {"skip", "size_down"}:
             raise ValueError("EXTERNAL_CONFLICT_ACTION must be 'skip' or 'size_down'")
         entry_min_time_left_sec = max(0.0, _env_float("ENTRY_MIN_TIME_LEFT_SEC", 180.0))
-        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "25")
+        market_max_position_shares = _env_decimal("MARKET_MAX_POSITION_SHARES", "10.0")
         fee_rate_default_decimal = _env_decimal("MAKER_FEE_RATE_DEFAULT_DECIMAL", str(CRYPTO_FEE_CURVE.fee_rate))
         if fee_rate_default_decimal < 0:
             fee_rate_default_decimal = CRYPTO_FEE_CURVE.fee_rate
@@ -577,24 +635,43 @@ class AppConfig:
             ),
             maker=MakerConfig(
                 maker_mode=_env_bool_inverted("MAKER_MODE", True),
+                normal_maker_buy_enabled=_env_bool("NORMAL_MAKER_BUY_ENABLED", True),
+                entry_quality_size_down_enabled=_env_bool(
+                    "ENTRY_QUALITY_SIZE_DOWN_ENABLED", False
+                ),
                 quote_refresh_sec=_env_int("MAKER_QUOTE_REFRESH_SEC", 5),
                 half_spread=_env_decimal("MAKER_HALF_SPREAD", "0.01"),
+                # Deprecated as a sizing driver (share_v1): entry quantity comes from
+                # bot.entry_sizing. Still read only by the MakerEngine fixed-share
+                # fallback (unreachable: the share target is always >= 5.5) and the
+                # run-start journal note (bot/ops.py).
                 quote_size_usdc=_env_decimal("MAKER_QUOTE_SIZE_USDC", "1.0"),
                 min_shares=maker_min_shares,
                 exchange_min_shares=maker_exchange_min_shares,
                 fixed_shares=maker_fixed_shares,
+                depth_risk_sizing_enabled=_env_bool_inverted("DEPTH_RISK_SIZING_ENABLED", True),
+                depth_risk_max_entry_notional_usdc=max(
+                    Decimal("0"), _env_decimal("DEPTH_RISK_MAX_ENTRY_NOTIONAL_USDC", "10.0")
+                ),
+                depth_risk_max_loss_usdc=max(
+                    Decimal("0"), _env_decimal("DEPTH_RISK_MAX_LOSS_USDC", "10.0")
+                ),
+                depth_risk_depth_fraction=max(
+                    Decimal("0"), min(Decimal("1"), _env_decimal("DEPTH_RISK_DEPTH_FRACTION", "0.10"))
+                ),
+                depth_risk_price_boundary_ticks=max(
+                    0, _env_int("DEPTH_RISK_PRICE_BOUNDARY_TICKS", 2)
+                ),
+                depth_risk_shadow_enabled=_env_bool_inverted("DEPTH_RISK_SHADOW_ENABLED", True),
+                depth_risk_shadow_interval_sec=max(
+                    1.0, _env_float("DEPTH_RISK_SHADOW_INTERVAL_SEC", 15.0)
+                ),
                 weak_pfair_size_adjust_enabled=_env_bool("MAKER_WEAK_PFAIR_SIZE_ADJUST_ENABLED", True),
                 weak_pfair_size_adjust_lower=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_LOWER", "0.47"),
                 weak_pfair_size_adjust_upper=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_UPPER", "0.53"),
                 weak_pfair_size_adjust_multiplier=_env_decimal("MAKER_WEAK_PFAIR_SIZE_ADJUST_MULTIPLIER", "0.5"),
-                high_entry_price_size_adjust_enabled=(
-                    maker_fixed_shares > 0 and high_price_target_shares < maker_fixed_shares
-                ),
-                high_entry_price_size_adjust_threshold=_env_decimal(
-                    "HIGH_PRICE_THRESHOLD",
-                    "0.70",
-                ),
-                high_entry_price_size_adjust_multiplier=high_price_size_multiplier,
+                entry_sizing_rule=entry_sizing_rule,
+                entry_sizing_violations=tuple(entry_sizing_violations),
                 kelly_sizing_enabled=_env_bool("KELLY_SIZING_ENABLED", False),
                 kelly_sizing_fraction=_env_decimal("KELLY_SIZING_FRACTION", "0.25"),
                 kelly_sizing_max_collateral_fraction=_env_decimal(
@@ -644,7 +721,7 @@ class AppConfig:
                 ),
                 smart_money_wallet_db_path=_env_str(
                     "SMART_MONEY_WALLET_DB_PATH",
-                    "./logs/smart_money_wallets.db",
+                    "./data/reference/smart_money_wallets.db",
                 ),
                 smart_money_wallet_label_cache_ttl_sec=max(
                     1.0,
@@ -928,9 +1005,23 @@ class AppConfig:
                 exit_policy_aggressive_stage_sec=max(30, _env_int("EXIT_POLICY_AGGRESSIVE_STAGE_SEC", 180)),
                 exit_policy_taker_stage_sec=max(15, _env_int("EXIT_POLICY_TAKER_STAGE_SEC", 75)),
                 maker_signal_flip_cooldown_cycles=max(1, _env_int("MAKER_SIGNAL_FLIP_COOLDOWN_CYCLES", 2)),
+                endgame_twap_exit_enabled=_env_bool_inverted("ENDGAME_TWAP_EXIT_ENABLED", True),
+                endgame_twap_exit_max_time_left_sec=max(
+                    0, _env_int("ENDGAME_TWAP_EXIT_MAX_TIME_LEFT_SEC", 120),
+                ),
+                endgame_twap_exit_min_distance_usd=_env_decimal(
+                    "ENDGAME_TWAP_EXIT_MIN_DISTANCE_USD", "10",
+                ),
+                endgame_twap_exit_max_age_sec=max(
+                    0.1, _env_float("ENDGAME_TWAP_EXIT_MAX_AGE_SEC", 5.0),
+                ),
                 absolute_max_loss_enabled=_env_bool_inverted("ABSOLUTE_MAX_LOSS_ENABLED", True),
-                absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "1.50"),
+                absolute_max_loss_usdc=_env_decimal("ABSOLUTE_MAX_LOSS_USDC", "2.00"),
                 absolute_max_loss_min_hold_sec=max(0, _env_int("ABSOLUTE_MAX_LOSS_MIN_HOLD_SEC", 60)),
+                stop_loss_enabled=_env_bool("STOP_LOSS_ENABLED", True),
+                absolute_max_loss_twap_authority_gate_enabled=_env_bool(
+                    "ABSOLUTE_MAX_LOSS_TWAP_AUTHORITY_GATE_ENABLED", False,
+                ),
             ),
             risk=RiskConfig(
                 regime_guard_enabled=_env_bool_inverted("REGIME_GUARD_ENABLED", True),
@@ -950,6 +1041,10 @@ class AppConfig:
                 polymarket_chainlink_twap_enabled=_env_bool_inverted("POLYMARKET_CHAINLINK_TWAP_ENABLED", True),
                 polymarket_chainlink_twap_window_sec=polymarket_twap_window_sec,
                 polymarket_chainlink_twap_symbol=_env_str("POLYMARKET_CHAINLINK_TWAP_SYMBOL", "btc/usd").strip().lower() or "btc/usd",
+                polymarket_chainlink_twap_silence_reconnect_sec=max(
+                    10.0,
+                    _env_float("POLYMARKET_CHAINLINK_TWAP_SILENCE_RECONNECT_SEC", 15.0),
+                ),
                 require_twap_reference_spot=_env_bool_inverted("REQUIRE_TWAP_REFERENCE_SPOT", True),
                 twap_degraded_block_new_entries=_env_bool_inverted(
                     "TWAP_DEGRADED_BLOCK_NEW_ENTRIES", True
@@ -962,6 +1057,9 @@ class AppConfig:
                 market_strike_anchor_near_sec=max(5, _env_int("MARKET_STRIKE_ANCHOR_NEAR_SEC", 30)),
                 market_strike_rest_retry_sec=max(10, _env_int("MARKET_STRIKE_REST_RETRY_SEC", 60)),
                 quote_stale_sec=_env_int("QUOTE_STALE_SEC", 30),
+                quote_max_delivery_delay_sec=max(
+                    0.1, _env_float("QUOTE_MAX_DELIVERY_DELAY_SEC", 2.0),
+                ),
                 quote_event_clock_skew_tolerance_sec=max(
                     Decimal("0"),
                     _env_decimal("QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC", "0.25"),
@@ -981,6 +1079,10 @@ class AppConfig:
                 auto_redeem_timeout_sec=max(30, _env_int("AUTO_REDEEM_TIMEOUT_SEC", 180)),
                 auto_redeem_min_gap_sec=max(0, _env_int("AUTO_REDEEM_MIN_GAP_SEC", 300)),
                 auto_redeem_slug_filter=_env_str("AUTO_REDEEM_SLUG_FILTER", "btc-updown-15m").strip(),
+                # Evidence-only (bot.settlement_confirmation): never changes orders or risk state.
+                settlement_confirmation_enabled=_env_bool_inverted("SETTLEMENT_CONFIRMATION_ENABLED", True),
+                settlement_confirmation_interval_sec=max(30, _env_int("SETTLEMENT_CONFIRMATION_INTERVAL_SEC", 120)),
+                settlement_confirmation_lookback_hours=max(1, _env_int("SETTLEMENT_CONFIRMATION_LOOKBACK_HOURS", 168)),
                 market_settling_grace_sec=max(1, _env_int("MARKET_SETTLING_GRACE_SEC", 15)),
                 market_next_poll_sec=max(5, _env_int("MARKET_NEXT_POLL_SEC", 15)),
                 balance_check_interval_sec=max(10, _env_int("MAKER_BALANCE_CHECK_INTERVAL_SEC", 30)),
@@ -993,7 +1095,7 @@ class AppConfig:
                 sell_delay_after_buy_sec=max(0.0, _env_float("SELL_DELAY_AFTER_BUY_SEC", 10.0)),
                 sell_balance_retry_pause_sec=max(1.0, _env_float("SELL_BALANCE_RETRY_PAUSE_SEC", 3.0)),
                 trade_db_enabled=_env_bool_inverted("TRADE_DB_ENABLED", True),
-                trade_db_path=_env_str("TRADE_DB_PATH", "./logs/trade_journal.db"),
+                trade_db_path=_env_str("TRADE_DB_PATH", DEFAULT_TRADE_DB_PATH),
                 shadow_simulation_enabled=_env_bool_inverted("SHADOW_SIMULATION_ENABLED", True),
                 fair_edge_bucket_shadow_enabled=_env_bool_inverted("FAIR_EDGE_BUCKET_SHADOW_ENABLED", True),
                 shadow_simulation_fill_timeout_sec=max(
@@ -1008,5 +1110,18 @@ class AppConfig:
                     0.1,
                     _env_float("SHADOW_SIMULATION_AGED_QUOTE_MAX_AGE_SEC", 30.0),
                 ),
+                session_pnl_guard_enabled=_env_bool_inverted("SESSION_PNL_GUARD_ENABLED", True),
+                session_profit_arm_usdc=max(Decimal("0"), _env_decimal("SESSION_PROFIT_ARM_USDC", "8.0")),
+                session_profit_drawdown_usdc=max(Decimal("0"), _env_decimal("SESSION_PROFIT_DRAWDOWN_USDC", "4.0")),
+                session_hard_profit_lock_enabled=_env_bool("SESSION_HARD_PROFIT_LOCK_ENABLED", False),
+                session_hard_profit_lock_usdc=max(Decimal("0"), _env_decimal("SESSION_HARD_PROFIT_LOCK_USDC", "10.0")),
+                session_max_loss_enabled=_env_bool_inverted("SESSION_MAX_LOSS_ENABLED", True),
+                session_max_loss_usdc=max(Decimal("0"), _env_decimal("SESSION_MAX_LOSS_USDC", "8.0")),
+                session_pnl_guard_mode=_env_str("SESSION_PNL_GUARD_MODE", "legacy").strip().lower() or "legacy",
+                monthly_net_target_usdc=(
+                    _env_decimal("MONTHLY_NET_TARGET_USDC", "0")
+                    if os.getenv("MONTHLY_NET_TARGET_USDC") is not None else None
+                ),
+                allow_taipei_weekend_buys=_env_bool("ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS", False),
             ),
         )

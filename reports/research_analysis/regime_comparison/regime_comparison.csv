@@ -1,0 +1,13 @@
+metric,weekday_N_markets,weekend_N_markets,weekday_value,weekend_value,difference,ratio_if_meaningful
+btc_abs_return_5s_bps_median,85,15,,0.0011818935319318769,,
+btc_abs_return_10s_bps_median,85,15,,0.0011827883494852642,,
+btc_abs_return_30s_bps_median,85,15,,0.4983428030314041,,
+btc_abs_return_60s_bps_median,85,15,,1.2881115575513746,,
+spot_strike_distance_bps_median,85,15,,,,
+required_move_sigma_median,85,15,,0.7309950760057271,,
+median_spread,85,15,,0.010000000000000009,,
+median_top_size,85,15,,,,
+median_quote_interval_sec,85,15,,3.2089885473251343,,
+joint_fresh_rate,85,15,,0.28688524590163933,,
+repricing_events_ge_5c_per_market,85,15,0.0,4.066666666666666,4.066666666666666,
+repricing_events_ge_10c_per_market,85,15,0.0,4.066666666666666,4.066666666666666,

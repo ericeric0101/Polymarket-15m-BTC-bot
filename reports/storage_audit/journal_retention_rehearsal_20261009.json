@@ -1,0 +1,91 @@
+{
+ "cutoff_day": "2026-09-25",
+ "orig_survivors": {
+  "strategy_events": [
+   638888,
+   "c36ef9819ec320720ba814977915ce89998abe8c19b857acfdfd1628cf1a694b"
+  ],
+  "order_events": [
+   319806,
+   "dc820d0f15fdd96112d0b2a2cb545633ce77f345f0e0110a9aab907d7513ab07"
+  ]
+ },
+ "orig_removed": {
+  "strategy_events": [
+   347281,
+   "d21ce7091f32348148cb97cb4a9a23244b92f40453cbbf855771b28180a138fc"
+  ],
+  "order_events": [
+   82518,
+   "7074c48cb01a37eee7212c83a05cf2e1e6abc44a0d695a2293aa40ba6fadbd80"
+  ]
+ },
+ "dry_run": {
+  "status": "ok",
+  "apply": false,
+  "cutoff_day": "2026-09-25",
+  "deleted_rows": 0,
+  "errors": [],
+  "mirror": {
+   "status": "disabled",
+   "copied": 0
+  },
+  "days": 11
+ },
+ "dry_run_sec": 171.3,
+ "after_dry_run_unchanged": true,
+ "apply": {
+  "status": "ok",
+  "apply": true,
+  "cutoff_day": "2026-09-25",
+  "deleted_rows": 429799,
+  "errors": [],
+  "mirror": {
+   "status": "disabled",
+   "copied": 0
+  },
+  "days": 11
+ },
+ "apply_sec": 98.4,
+ "survivors_identical": true,
+ "removed_left": {
+  "strategy_events": [
+   0,
+   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ],
+  "order_events": [
+   0,
+   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  ]
+ },
+ "rerun": {
+  "status": "ok",
+  "apply": true,
+  "cutoff_day": "2026-09-25",
+  "deleted_rows": 0,
+  "errors": [],
+  "mirror": {
+   "status": "disabled",
+   "copied": 0
+  },
+  "days": 0
+ },
+ "rerun_archive_unchanged": true,
+ "archive_vs_orig_removed": {
+  "strategy_events": true,
+  "order_events": true
+ },
+ "archive_bytes": 26794692,
+ "archive_files": 22,
+ "db_bytes_before_vacuum": 3205967872,
+ "vacuum": {
+  "bytes_before": 3205967872,
+  "bytes_after": 2345553920,
+  "integrity_check": "ok",
+  "duration_sec": 76.5,
+  "at_utc": "2026-10-09T13:44:11.360303+00:00"
+ },
+ "vacuum_sec": 160.9,
+ "survivors_identical_after_vacuum": true,
+ "second_vacuum": "refused: one-time VACUUM already performed"
+}

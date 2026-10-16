@@ -3,7 +3,7 @@
 Check Polymarket positions by user address and optionally redeem resolved winners.
 
 Official references:
-- Data API /positions (user, redeemable): https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user
+- Data API v2 /positions (user, redeemable): https://docs.polymarket.com/api-reference/wallet/list-positions-for-a-user-or-market
 - CTF redeemPositions: https://docs.polymarket.com/trading/ctf/redeem
 
 Examples:
@@ -37,8 +37,18 @@ from bot.collateral_tokens import (
     USDCE_ADDRESS,
     get_ctf_collateral,
 )
+from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_next_cursor, v2_rows
+from bot.protocol_v2 import (
+    POSITION_MANAGER_ABI,
+    POSITION_MANAGER_ADDRESS,
+    PROTOCOL_V2,
+    ROUTER_ABI,
+    ROUTER_ADDRESS,
+    UnsupportedMarketProtocol,
+    select_market_assets,
+)
 
-DATA_API = "https://data-api.polymarket.com"
+DATA_API = DATA_API_V2_BASE_URL
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
 CTF_REDEEM_ABI = [
@@ -183,6 +193,32 @@ def _estimate_redeem_gas(tx_func, tx_params: dict[str, Any]) -> int:
     return max(estimate, int(estimate * 1.2))
 
 
+def classify_nonce_advanced_redeem(
+    *, submitted_nonce: int, latest_nonce: int, remaining_position_balance: int,
+) -> str:
+    """Classify an unreceipted transaction after the account nonce has moved."""
+    if int(latest_nonce) <= int(submitted_nonce):
+        return "retry_same_nonce_or_timeout"
+    if int(remaining_position_balance) <= 0:
+        return "already_redeemed"
+    return "retry_with_new_nonce"
+
+
+def _condition_position_balance(contract, owner: str, collateral: str, condition: bytes) -> int:
+    """Read both binary CTF balances for one condition and collateral token."""
+    parent_collection_id = b"\x00" * 32
+    total_balance = 0
+    for index_set in (1, 2):
+        collection_id = contract.functions.getCollectionId(
+            parent_collection_id,
+            condition,
+            index_set,
+        ).call()
+        position_id = contract.functions.getPositionId(collateral, collection_id).call()
+        total_balance += int(contract.functions.balanceOf(owner, position_id).call())
+    return total_balance
+
+
 def _wait_for_receipt_with_replacement_check(w3, txh, owner: str, nonce: int, *, timeout_sec: int) -> Any:
     from web3.exceptions import TimeExhausted, TransactionNotFound
 
@@ -220,16 +256,26 @@ def _address_from_private_key(private_key: str) -> str:
 def _fetch_positions(user: str, redeemable: bool | None = None) -> list[dict[str, Any]]:
     params: dict[str, Any] = {
         "user": user,
-        "sizeThreshold": 0,
-        "limit": 500,
-        "offset": 0,
+        "limit": 1000,
+        "status": "OPEN",
     }
-    if redeemable is not None:
-        params["redeemable"] = str(redeemable).lower()
-    r = requests.get(f"{DATA_API}/positions", params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    return data if isinstance(data, list) else []
+    # v2 documents status as the server-side way to select redeemable rows.
+    # Do not rely on the old v1 ``redeemable`` request flag.
+    if redeemable is True:
+        params["status"] = "REDEEMABLE"
+    rows: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while True:
+        request_params = dict(params)
+        if cursor:
+            request_params["cursor"] = cursor
+        r = requests.get(f"{DATA_API}/positions", params=request_params, timeout=20)
+        r.raise_for_status()
+        payload = r.json()
+        rows.extend(v2_rows(payload))
+        cursor = v2_next_cursor(payload)
+        if not cursor:
+            return rows
 
 
 def _slug_match(rec: dict[str, Any], slug_filter: str | None) -> bool:
@@ -250,7 +296,7 @@ def _print_user_report(user: str, positions: list[dict[str, Any]], slug_filter: 
     # Group by condition to avoid noisy duplicate lines.
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for p in subset:
-        grouped[str(p.get("conditionId") or "")].append(p)
+        grouped[str(p.get("condition_id") or "")].append(p)
 
     for condition_id, rows in grouped.items():
         rows = [r for r in rows if condition_id]
@@ -259,12 +305,92 @@ def _print_user_report(user: str, positions: list[dict[str, Any]], slug_filter: 
         title = str(rows[0].get("title") or "")
         slug = str(rows[0].get("slug") or "")
         redeemable = any(bool(r.get("redeemable")) for r in rows)
-        total_size = sum(float(r.get("size") or 0) for r in rows)
+        total_size = sum(float(r.get("current_size") or 0) for r in rows)
         outcomes = ", ".join(sorted({str(r.get("outcome") or "") for r in rows}))
         print(
             f"- condition={condition_id} redeemable={redeemable} size={total_size:.6f} "
             f"outcomes=[{outcomes}] slug={slug} title={title}"
         )
+
+
+GAMMA_API = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
+
+
+def _gamma_market_for_condition(condition_id: str) -> dict[str, Any] | None:
+    """Gamma market for a condition (closed or open); None when not found."""
+    for closed in ("true", "false"):
+        try:
+            r = requests.get(f"{GAMMA_API}/markets", params={"condition_ids": condition_id, "closed": closed}, timeout=20)
+            r.raise_for_status()
+            rows = r.json()
+        except Exception:
+            continue
+        for row in rows if isinstance(rows, list) else []:
+            if str(row.get("conditionId") or "").lower() == condition_id.lower():
+                return row
+    return None
+
+
+def split_conditions_by_protocol(condition_ids: list[str], market_lookup=_gamma_market_for_condition):
+    """-> (v1 condition ids, {condition id: MarketAssets} for v2, {condition id: reason} skipped).
+
+    The protocol comes from the market's Gamma ``version``; a condition whose
+    market cannot be read or has an unsupported version is skipped, never guessed.
+    """
+    v1: list[str] = []
+    v2: dict[str, Any] = {}
+    skipped: dict[str, str] = {}
+    for cid in condition_ids:
+        market = market_lookup(cid)
+        if market is None:
+            skipped[cid] = "gamma market not found"
+            continue
+        try:
+            assets = select_market_assets(market)
+        except UnsupportedMarketProtocol as exc:
+            skipped[cid] = str(exc)
+            continue
+        if assets.protocol == PROTOCOL_V2:
+            v2[cid] = assets
+        else:
+            v1.append(cid)
+    return v1, v2, skipped
+
+
+def _redeem_v2_conditions(private_key: str, owner_address: str, chain_id: int, rpc_url: str,
+                          markets: dict[str, Any]) -> None:
+    """Protocol V2: Router.redeem(bytes31 condition, outcomeIndex, amount) for each held outcome."""
+    from web3 import Web3
+    from web3.middleware import ExtraDataToPOAMiddleware
+
+    if not markets:
+        return
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    owner = Web3.to_checksum_address(owner_address)
+    manager = w3.eth.contract(address=Web3.to_checksum_address(POSITION_MANAGER_ADDRESS), abi=POSITION_MANAGER_ABI)
+    router_address = Web3.to_checksum_address(ROUTER_ADDRESS)
+    if not manager.functions.isApprovedForAll(owner, router_address).call():
+        print("Skip V2 redeem: Router is not approved on PositionManager "
+              "(run scripts/check_allowance.py --setup-v2-approvals --apply)")
+        return
+    router = w3.eth.contract(address=router_address, abi=ROUTER_ABI)
+    receipt_timeout_sec = max(30, int(os.getenv("AUTO_REDEEM_RECEIPT_TIMEOUT_SEC", "120")))
+    for cid, assets in markets.items():
+        for outcome_index, asset_id in enumerate(assets.asset_ids):
+            balance = int(manager.functions.balanceOf(owner, int(asset_id)).call())
+            if balance <= 0:
+                continue
+            tx = router.functions.redeem(assets.condition_bytes31, outcome_index, balance).build_transaction({
+                "chainId": chain_id,
+                "from": owner,
+                "nonce": w3.eth.get_transaction_count(owner, "pending"),
+            })
+            signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
+            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=receipt_timeout_sec)
+            print(f"routerRedeem condition={cid} outcome_index={outcome_index} amount={balance / 1_000_000:.6f} "
+                  f"tx={receipt.transactionHash.hex()} status={receipt.status} protocol=v2")
 
 
 def _redeem_conditions(
@@ -426,15 +552,9 @@ def _redeem_conditions(
         zero_parent_collection = b"\x00" * 32
         collateral_balances: list[tuple[str, str, int]] = []
         for symbol, collateral_address in collateral_candidates:
-            total_balance = 0
-            for index_set in (1, 2):
-                collection_id = contract.functions.getCollectionId(
-                    zero_parent_collection,
-                    condition_bytes,
-                    index_set,
-                ).call()
-                position_id = contract.functions.getPositionId(collateral_address, collection_id).call()
-                total_balance += int(contract.functions.balanceOf(owner, position_id).call())
+            total_balance = _condition_position_balance(
+                contract, owner, collateral_address, condition_bytes,
+            )
             collateral_balances.append((symbol, collateral_address, total_balance))
 
         selected_symbol, selected_collateral_address, selected_balance = max(
@@ -472,7 +592,9 @@ def _redeem_conditions(
 
         last_error: Exception | None = None
         receipt = None
+        reconciled_without_receipt = False
         for attempt in range(1, max_attempts + 1):
+            receipt = None
             tx_params = dict(tx_base)
             fee_params = _build_fee_params(w3)
             if "maxPriorityFeePerGas" in fee_params and "maxFeePerGas" in fee_params:
@@ -508,31 +630,77 @@ def _redeem_conditions(
                     nonce,
                     timeout_sec=receipt_timeout_sec,
                 )
+                if int(getattr(receipt, "status", 0)) != 1:
+                    raise RuntimeError(
+                        f"redeem transaction reverted tx={txh.hex()} status={getattr(receipt, 'status', None)}"
+                    )
                 break
             except Exception as exc:
                 last_error = exc
                 latest_nonce = int(w3.eth.get_transaction_count(owner, "latest"))
+                # A mined revert still consumes its nonce even if this RPC's
+                # latest-count view is lagging behind the returned receipt.
+                if receipt is not None and int(getattr(receipt, "status", 0)) == 0:
+                    latest_nonce = max(latest_nonce, nonce + 1)
+                if latest_nonce > nonce:
+                    try:
+                        remaining_balance = _condition_position_balance(
+                            contract, owner, selected_collateral_address, condition_bytes,
+                        )
+                    except Exception as reconcile_error:
+                        raise RuntimeError(
+                            "nonce advanced but redeem outcome cannot be reconciled from CTF balances; "
+                            f"condition={cid_txt} nonce={nonce} latest_nonce={latest_nonce} "
+                            f"tx={txh.hex()}"
+                        ) from reconcile_error
+                    recovery = classify_nonce_advanced_redeem(
+                        submitted_nonce=nonce,
+                        latest_nonce=latest_nonce,
+                        remaining_position_balance=remaining_balance,
+                    )
+                    if recovery == "already_redeemed":
+                        print(
+                            "redeem reconciled without receipt: "
+                            f"condition={cid_txt} tx={txh.hex()} remaining_ctf_balance=0 "
+                            f"latest_nonce={latest_nonce}"
+                        )
+                        pending_nonce = int(w3.eth.get_transaction_count(owner, "pending"))
+                        nonce = max(latest_nonce, pending_nonce)
+                        reconciled_without_receipt = True
+                        receipt = None
+                        break
+                    if recovery == "retry_with_new_nonce":
+                        pending_nonce = int(w3.eth.get_transaction_count(owner, "pending"))
+                        nonce = max(latest_nonce, pending_nonce)
+                        tx_base["nonce"] = nonce
+                        print(
+                            "redeem nonce was consumed but position remains; retrying with fresh nonce: "
+                            f"condition={cid_txt} remaining_ctf_balance={remaining_balance} nonce={nonce}"
+                        )
+                        if attempt >= max_attempts:
+                            raise RuntimeError(
+                                "nonce advanced without a receipt and the redeemable CTF position remains; "
+                                f"condition={cid_txt} remaining={remaining_balance} latest_nonce={latest_nonce}"
+                            ) from exc
+                        time.sleep(2)
+                        continue
                 print(
                     "redeem wait timeout/retry "
                     f"condition={cid_txt} attempt={attempt}/{max_attempts} "
                     f"tx={txh.hex()} latest_nonce={latest_nonce} error={exc}"
                 )
-                if latest_nonce > nonce:
-                    raise RuntimeError(
-                        f"nonce advanced for redeem tx but no receipt was found. "
-                        f"condition={cid_txt} nonce={nonce} latest_nonce={latest_nonce}"
-                    ) from exc
                 if attempt >= max_attempts:
                     raise
                 time.sleep(2)
 
-        if receipt is None:
+        if receipt is None and not reconciled_without_receipt:
             raise RuntimeError(
                 f"Failed to confirm redeem tx for condition={cid_txt}"
             ) from last_error
 
-        print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
-        nonce += 1
+        if receipt is not None:
+            print(f"redeemPositions condition={cid_txt} tx={receipt.transactionHash.hex()} status={receipt.status}")
+            nonce += 1
 
         expected_base_units = int(max(0.0, float(condition_sizes.get(cid_txt, 0.0))) * 1_000_000)
         amount_base_units = expected_base_units if expected_base_units > 0 else selected_balance
@@ -681,10 +849,10 @@ def main() -> int:
             continue
         if not bool(p.get("redeemable")):
             continue
-        cid = str(p.get("conditionId") or "")
+        cid = str(p.get("condition_id") or "")
         if not cid:
             continue
-        redeemable_condition_sizes[cid] += float(p.get("size") or 0.0)
+        redeemable_condition_sizes[cid] += float(p.get("current_size") or 0.0)
         if cid not in seen:
             seen.add(cid)
             redeemable_conditions.append(cid)
@@ -723,14 +891,26 @@ def main() -> int:
         print("Redeem flow complete.")
         return 0
 
+    v1_conditions, v2_markets, skipped_protocol = split_conditions_by_protocol(filtered_redeemable_conditions)
+    for cid, reason in skipped_protocol.items():
+        print(f"Skip condition={cid}: protocol unknown ({reason})")
+    if v2_markets:
+        print(f"Protocol V2 conditions: {json.dumps(sorted(v2_markets))}")
     _redeem_conditions(
         private_key=private_key,
         owner_address=owner,
         chain_id=chain_id,
         rpc_url=rpc_url,
-        condition_ids=filtered_redeemable_conditions,
+        condition_ids=v1_conditions,
         condition_sizes=redeemable_condition_sizes,
         wrap_existing_usdce=bool(args.wrap_existing_usdce),
+    )
+    _redeem_v2_conditions(
+        private_key=private_key,
+        owner_address=owner,
+        chain_id=chain_id,
+        rpc_url=rpc_url,
+        markets=v2_markets,
     )
     print("Redeem flow complete.")
     return 0

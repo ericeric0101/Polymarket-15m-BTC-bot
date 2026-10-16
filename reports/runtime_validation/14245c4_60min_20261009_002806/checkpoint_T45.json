@@ -1,0 +1,193 @@
+{
+ "label": "T45",
+ "ts": 1791479619.1145759,
+ "elapsed_min": 44.854987649122876,
+ "pid_alive": true,
+ "run": {
+  "run_id": "run_1791476945_b68a37e0",
+  "started_at": "2026-10-08T16:30:33.116002+00:00",
+  "mode": "TEST_DRY_RUN",
+  "test_mode": 1,
+  "git_commit": "14245c485c8568fd8970233f44d55f4b301e8230",
+  "git_dirty": false,
+  "execution_mode": "TEST_DRY_RUN"
+ },
+ "orders": {
+  "real_lifecycle_events": {},
+  "dry_run": {
+   "SHADOW_SIM_ENTRY_CANDIDATE": 3,
+   "ORDER_DRY_RUN_SUBMITTED": 4,
+   "SHADOW_SIM_ENTRY_FILLED": 3,
+   "SHADOW_SIM_MARKOUT": 6,
+   "SHADOW_SIM_SETTLED": 2,
+   "SHADOW_SIM_ENTRY_CANCELLED": 1,
+   "ORDER_DRY_RUN_CANCELLED": 1,
+   "SHADOW_SIM_ENTRY_REQUOTED": 1
+  },
+  "skip_unreal_quote": 0
+ },
+ "entry_trace": {
+  "rows": 602,
+  "lifecycle_written_at_last_summary": 586,
+  "rows_up_to_last_summary": 586,
+  "lifecycle_write_failures": 0
+ },
+ "diagnostic_sampling_summaries": [],
+ "invalidation_confirmed": 1,
+ "prediction": {
+  "rows": 738,
+  "versions": {
+   "2": 738
+  },
+  "interval_policies": {
+   "storage_db_size_cap": 696,
+   "opening_full_rate": 42
+  }
+ },
+ "markets": [
+  {
+   "slug": "btc-updown-15m-1791477900",
+   "first_snapshot_sec": 2.96,
+   "first_strike_available_sec": 2.96,
+   "first_joint_fresh_sec": 2.96,
+   "pre_handoff_rows": 14,
+   "strike_provenance_attempts": [
+    [
+     2.94,
+     "verified"
+    ]
+   ],
+   "strike_locked_sec": 2.96,
+   "strike_fill_lag_after_lock_sec": 0.0,
+   "trading_active_sec": 21.8,
+   "max_gap_sec": 9.11
+  },
+  {
+   "slug": "btc-updown-15m-1791478800",
+   "first_snapshot_sec": 3.11,
+   "first_strike_available_sec": 3.11,
+   "first_joint_fresh_sec": 3.11,
+   "pre_handoff_rows": 11,
+   "strike_provenance_attempts": [
+    [
+     3.11,
+     "verified"
+    ]
+   ],
+   "strike_locked_sec": 3.11,
+   "strike_fill_lag_after_lock_sec": 0.0,
+   "trading_active_sec": 18.58,
+   "max_gap_sec": 9.81
+  }
+ ],
+ "research_events": {
+  "PREDICTION_RESEARCH_SNAPSHOT": {
+   "rows": 738,
+   "payload_mb": 3.381
+  },
+  "SHADOW_POSITION_MARK": {
+   "rows": 900,
+   "payload_mb": 1.466
+  },
+  "SETTLEMENT_PATH_THRESHOLD_CROSS": {
+   "rows": 206,
+   "payload_mb": 0.877
+  },
+  "TWAP_PROJECTED_SIDE_CHANGE": {
+   "rows": 167,
+   "payload_mb": 0.704
+  },
+  "DECISION_POINT_L2": {
+   "rows": 602,
+   "payload_mb": 0.594
+  },
+  "MARKET_OPENING_TWAP_SAMPLE": {
+   "rows": 41,
+   "payload_mb": 0.161
+  },
+  "SHADOW_BBO_SNAPSHOT": {
+   "rows": 76,
+   "payload_mb": 0.083
+  },
+  "SHADOW_SETTLEMENT": {
+   "rows": 72,
+   "payload_mb": 0.075
+  },
+  "SHADOW_EXIT": {
+   "rows": 72,
+   "payload_mb": 0.055
+  },
+  "TMINUS_CHECKPOINT": {
+   "rows": 13,
+   "payload_mb": 0.055
+  },
+  "PREDICTION_RESEARCH_HEALTH": {
+   "rows": 43,
+   "payload_mb": 0.038
+  },
+  "TREND_ENTRY_SHADOW_CANDIDATE": {
+   "rows": 24,
+   "payload_mb": 0.032
+  },
+  "SHADOW_ENTRY_CANDIDATE": {
+   "rows": 9,
+   "payload_mb": 0.029
+  },
+  "TWAP_STRIKE_CROSS": {
+   "rows": 4,
+   "payload_mb": 0.017
+  },
+  "SHADOW_LOSS_WARNING": {
+   "rows": 18,
+   "payload_mb": 0.009
+  },
+  "SHADOW_SIGNAL_REVERSAL": {
+   "rows": 18,
+   "payload_mb": 0.007
+  },
+  "TREND_ENTRY_SHADOW_SETTLEMENT": {
+   "rows": 12,
+   "payload_mb": 0.006
+  },
+  "MARKET_TWAP_SUMMARY": {
+   "rows": 2,
+   "payload_mb": 0.004
+  },
+  "FORWARD_SHADOW_CAPTURE_HEALTH": {
+   "rows": 2,
+   "payload_mb": 0.002
+  },
+  "RESEARCH_STORAGE_GUARD_TRIGGERED": {
+   "rows": 1,
+   "payload_mb": 0.0
+  }
+ },
+ "shadow_capture_policies": {
+  "storage_db_size_cap": 976
+ },
+ "storage": {
+  "journal_payload_mb": 7.123,
+  "research_payload_mb": 7.595,
+  "file_delta_mb": {
+   "logs/trade_journal.db": 10.25,
+   "logs/trade_journal.db-wal": -3.965,
+   "backups/trade_journal.db": 0.0,
+   "data/research/twap_forward_shadow.db": 9.164,
+   "data/research/twap_forward_shadow.db-wal": -3.949
+  },
+  "free_gib": 13.282
+ },
+ "log": {
+  "error_lines": 0,
+  "traceback": 0,
+  "retry_at_keyerror": 0,
+  "sqlite_errors": 0,
+  "storage_guard": [
+   "STORAGE UNKNOWN -> WARNING"
+  ],
+  "last_prediction_metrics": "prediction_snapshot: written=714 dropped=0 eligible=815 pex_fresh_pct=96.2 market_fresh_pct=98.3 joint_fresh_pct=95.5 avg_interval=3.43s p95_interval=5.86s compute_enqueue_p95_ms=9.38 queue_depth=1 queue_drops=0",
+  "last_btc1s": "BTC1S history: bars_completed=2520 buffered=2 written=2497 dropped=0 last_receive_age=0.00 receive_jitter_p50_ms=0.0 receive_jitter_p95_ms=15.0 cross_clock_recv_minus_source_p50_ms=158.0 writer_queue_depth=0 enabled=True",
+  "last_dataengine": "DataEngine queue: depth=1/unknown peak=4 util=unknown rate=15.9->15.9/s l2=0(total=70) coalesced=0(total=45) qlat_ms=p50:0.8/p95:14.7/p99:22.3 l2_active=[none] events=[OrderBookDeltas:77(hi=3),QuoteTick:83(hi=4)]",
+  "last_errors": []
+ }
+}

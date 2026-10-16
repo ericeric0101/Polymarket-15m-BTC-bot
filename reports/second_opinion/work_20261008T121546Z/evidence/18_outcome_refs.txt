@@ -1,0 +1,88 @@
+bot/app_config.py:537:        retired = sorted(key for key in os.environ if key.startswith(("OUTCOME_", "HYPERLIQUID_", "FAST_FOLLOW_")))
+bot/live_entry_research.py:172:    comparable = str(method) == "fast_follow_resolution_ev_minus_fee_minus_markout"
+bot/order_events.py:173:        filled_entry_mode = "fast_follow"
+bot/order_events.py:175:            "entry_mode": "fast_follow",
+bot/order_events.py:176:            "entry_source": "outcome_fast_follow",
+bot/recovery.py:243:                    'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT'
+bot/settings.py:51:    historical = Path(__file__).resolve().parents[1] / "data/research/hyperliquid_lead_lag.db"
+bot/settings.py:53:    if path.resolve().name == "hyperliquid_lead_lag.db" or same_historical:
+bot/settings.py:54:        raise ValueError("Historical Hyperliquid DB cannot be used as a runtime research store")
+monitoring/lead_lag_db.py:88:                    hyperliquid_market_id INTEGER,
+monitoring/lead_lag_db.py:93:                  ON snapshots(run_id, polymarket_slug, hyperliquid_market_id, observed_ts_ms);
+monitoring/lead_lag_db.py:127:    def enqueue_snapshot(self, *, run_id: str, polymarket_slug: str, hyperliquid_market_id: int | None, observed_ts: float, payload: dict[st
+monitoring/lead_lag_db.py:129:        row = (str(run_id), str(polymarket_slug), hyperliquid_market_id, int(float(observed_ts) * 1000), versioned_payload)
+monitoring/lead_lag_db.py:193:                        "INSERT INTO snapshots (run_id, polymarket_slug, hyperliquid_market_id, observed_ts_ms, payload_json) VALUES (?, ?, 
+monitoring/legacy/fast_follow_economics.py:20:def evaluate_fast_follow_economics(*, fair_price: Decimal, limit_price: Decimal,
+monitoring/legacy/outcome_lead_lag_state.py:8:from monitoring.legacy.outcome_lead_lag_types import LeadLagDecision, ReferenceTick
+monitoring/legacy/outcome_lead_lag_state.py:13:    feature_version: str = "outcome_lead_lag_v2"
+monitoring/outcome_lead_lag_replay.py:7:from monitoring.legacy.outcome_lead_lag_state import OutcomeLeadLagState, OutcomeLeadLagStateConfig
+monitoring/outcome_lead_lag_replay.py:8:from monitoring.legacy.outcome_lead_lag_types import ReferenceTick
+monitoring/pnl_attribution.py:46:    if explicit in {"outcome_fast_follow", "normal_maker"}:
+monitoring/pnl_attribution.py:50:        return "outcome_fast_follow"
+monitoring/pnl_attribution.py:184:def load_fast_follow_pnl_summary(db_path: str | Path) -> dict[str, Any]:
+monitoring/pnl_attribution.py:193:        if row["entry_source"] == "outcome_fast_follow"
+monitoring/pnl_attribution.py:203:            if row["entry_source"] == "outcome_fast_follow"
+monitoring/pnl_attribution.py:209:            and "outcome_fast_follow" in row["entry_sources"]
+monitoring/trade_journal_db.py:105:        "ORDER_SUBMIT", "ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_FILLED",
+monitoring/trade_journal_db.py:108:        "FAST_FOLLOW_RISK_STATE", "MARKET_BUY_COUNT_UPDATED",
+monitoring/trade_journal_db.py:732:    def load_fast_follow_night_risk(self, night_key: str) -> Optional[Dict[str, Any]]:
+monitoring/trade_journal_db.py:751:                    WHERE event_type='FAST_FOLLOW_RISK_STATE'
+monitoring/trade_journal_db.py:776:            logger.error(f"TradeJournalDB load_fast_follow_night_risk failed; fast-follow BUYs blocked: {e}")
+monitoring/trade_journal_db.py:827:    def load_fast_follow_buy_markout_calibration(self, *, lookback_hours: float,
+monitoring/trade_journal_db.py:865:                calibration["source"] = "outcome_fast_follow_taker_first_market"
+monitoring/trade_journal_db.py:1732:            'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT'
+scripts/analyze_weekend_liquidity.py:40:    "ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_SUBMIT",
+scripts/analyze_weekend_liquidity.py:41:    "ORDER_FAST_FOLLOW_SUBMIT", "ORDER_TAKER_EXIT_SUBMIT",
+scripts/analyze_weekend_liquidity.py:54:    "ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_SUBMIT",
+scripts/analyze_weekend_liquidity.py:55:    "ORDER_FAST_FOLLOW_SUBMIT", "ORDER_TAKER_EXIT_SUBMIT",
+scripts/analyze_weekend_liquidity.py:377:            "ORDER_SUBMIT", "ORDER_FAST_FOLLOW_SUBMIT", "ORDER_MAKER_INTENT",
+scripts/analyze_weekend_liquidity.py:378:            "ORDER_FAST_FOLLOW_INTENT", "ORDER_TAKER_EXIT_SUBMIT",
+scripts/analyze_weekend_liquidity.py:385:        submitted = next((event for event in events if event["event_type"] in {"ORDER_SUBMIT", "ORDER_FAST_FOLLOW_SUBMIT"}), None
+scripts/analyze_weekend_liquidity.py:391:            if any(event["event_type"].startswith("ORDER_FAST_FOLLOW") for event in events):
+scripts/analyze_weekend_liquidity.py:392:                entry_source = "outcome_fast_follow"
+scripts/analyze_weekend_liquidity.py:407:            "order_type": "fast_follow" if "fast_follow" in entry_source else ("maker" if data.get("maker") else "other"),
+scripts/analyze_weekend_liquidity.py:1450:                    event["event_type"] in {"ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT"}
+scripts/compact_research_db.py:11:    parser.add_argument("--db", default="data/research/hyperliquid_lead_lag.db")
+scripts/compact_research_db.py:14:    if not path.is_file() and args.db == "data/research/hyperliquid_lead_lag.db": path = Path("logs/hyperliquid_lead_lag.db")
+scripts/execution_path_penalty_report.py:24:        return "fast_follow_fok_buy"
+scripts/fast_follow_execution_report.py:55:                 AND event_type IN ('ORDER_FAST_FOLLOW_SUBMIT', 'ORDER_FILLED', 'ORDER_REJECTED', 'ORDER_DENIED')
+scripts/fast_follow_execution_report.py:61:            if event_type == "ORDER_FAST_FOLLOW_SUBMIT":
+scripts/feed_health_report.py:35:                  OR event_type LIKE 'HYPERLIQUID_OUTCOME_OBSERVER_%'"""
+scripts/feed_health_report.py:51:            elif event_type == "HYPERLIQUID_OUTCOME_OBSERVER_DISCONNECTED":
+scripts/four_market_prediction_forensics.py:369:def _fast_follow_case(timeline: list[dict[str, Any]], candidate_ts: float) -> list[dict[str, Any]]:
+scripts/four_market_prediction_forensics.py:448:    fast_follow = _fast_follow_case(timelines.get("btc-updown-15m-1790987400", []), candidate_ts)
+scripts/four_market_prediction_forensics.py:449:    _write_csv(output / "fast_follow_case.csv", fast_follow)
+scripts/four_market_prediction_forensics.py:492:- **Q6 wrong DOWN fast-follow cause: YES — the existing ex-market and market variables already contradicted it.** At the
+scripts/hyperliquid_outcome_lead_lag_report.py:5:The research question is whether the BTC mark received from Hyperliquid's
+scripts/hyperliquid_outcome_lead_lag_report.py:54:            "SELECT run_id, polymarket_slug, hyperliquid_market_id, observed_ts_ms, payload_json FROM snapshots ORDER BY
+scripts/hyperliquid_outcome_lead_lag_report.py:60:            outcome_mark = _number(payload.get("hyperliquid_outcome_btc_mark"))
+scripts/hyperliquid_outcome_lead_lag_report.py:63:                not bool(payload.get("hyperliquid_outcome_available"))
+scripts/hyperliquid_outcome_lead_lag_report.py:64:                or not _fresh_age(payload, "hyperliquid_outcome_mids_age_sec")
+scripts/live_entry_quality_report.py:108:            side=str(row.get("outcome_side") or (row.get("wanted_side") if row.get("entry_source")=="outcome_fast_follow" else ""
+scripts/live_entry_quality_report.py:135:        strategy_rows=conn.execute("SELECT id,ts,event_type,payload_json FROM strategy_events WHERE event_type IN ('ENTRY_DECISIO
+scripts/live_entry_quality_report.py:136:        order_rows=conn.execute("SELECT id,ts,event_type,client_order_id,side,price,qty,status,expected_net_usdc,payload_json FRO
+scripts/live_entry_quality_report.py:190:                     "entry_source":snap.get("entry_source") or ("outcome_fast_follow" if "FAST_FOLLOW" in row["event_type"] else
+scripts/live_entry_quality_report.py:209:        if typ in {"ORDER_MAKER_INTENT","ORDER_SUBMIT","ORDER_FAST_FOLLOW_SUBMIT","ORDER_FAST_FOLLOW_INTENT","ORDER_DRY_RUN_SUBMI
+scripts/live_entry_quality_report.py:210:            actual_submit=typ in {"ORDER_SUBMIT","ORDER_FAST_FOLLOW_SUBMIT","ORDER_DRY_RUN_SUBMITTED"}
+scripts/live_entry_quality_report.py:344:            method=("fast_follow_resolution_ev_minus_fee_minus_markout" if source=="outcome_fast_follow" else "maker_quote_econom
+scripts/live_entry_quality_report.py:395:        r.get("entry_source")=="outcome_fast_follow"
+scripts/live_entry_quality_report.py:400:    complete_edge_candidates=sum(bool(r.get("edge_cost_complete")) for r in candidates.values() if r.get("entry_source")=="outcom
+scripts/outcome_fast_follow_pnl_report.py:13:from monitoring.pnl_attribution import load_fast_follow_pnl_summary
+scripts/outcome_fast_follow_pnl_report.py:20:    summary = load_fast_follow_pnl_summary(Path(args.db))
+scripts/outcome_lead_lag_threshold_replay.py:13:from monitoring.outcome_lead_lag_replay import ReplayConfig, replay_rows
+scripts/research_analysis.py:951:            legacy_events_by_type[name] = [{**row, "research_event_source": "LEGACY_OUTCOME_LEAD_LAG_DB"}
+scripts/research_analysis.py:1012:        source_audit.append({"source": "hyperliquid_lead_lag.lead_lag_decisions", "event_type": event_type,
+scripts/stop_forensics_report.py:18:    if not db_path.is_file() and args.db == "data/research/hyperliquid_lead_lag.db" and Path("logs/hyperliquid_lead_lag.db").is_file()
+scripts/stop_forensics_report.py:19:        db_path = Path("logs/hyperliquid_lead_lag.db")
+scripts/trade_path_pnl_report.py:33:    if source == "outcome_fast_follow" or str(order_id).startswith("BTC-15M-FAST-FOLLOW-BUY-"):
+scripts/trade_path_pnl_report.py:34:        return "outcome_fast_follow"
+scripts/trade_path_pnl_report.py:64:                 'ORDER_MAKER_INTENT', 'ORDER_FAST_FOLLOW_INTENT', 'ORDER_SUBMIT',
+scripts/trade_path_pnl_report.py:65:                 'ORDER_FAST_FOLLOW_SUBMIT', 'ORDER_FILLED'
+scripts/trade_path_pnl_report.py:108:            if event_type in {"ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT"}:
+scripts/trade_path_pnl_report.py:110:                route = "outcome_fast_follow" if event_type == "ORDER_FAST_FOLLOW_INTENT" else "normal_maker"
+scripts/trade_path_pnl_report.py:111:                if event_type == "ORDER_FAST_FOLLOW_INTENT":
+scripts/trade_path_pnl_report.py:122:            if event_type in {"ORDER_SUBMIT", "ORDER_FAST_FOLLOW_SUBMIT"}:
+scripts/trade_path_pnl_report.py:126:                    route = "outcome_fast_follow" if event_type == "ORDER_FAST_FOLLOW_SUBMIT" else "normal_maker"
+scripts/twap_forward_report.py:165:        db = Path("data/research/hyperliquid_lead_lag.db")
+scripts/twap_forward_report.py:166:    if not db.is_file() and args.db == "data/research/hyperliquid_lead_lag.db":
+scripts/twap_forward_report.py:167:        db = Path("logs/hyperliquid_lead_lag.db")

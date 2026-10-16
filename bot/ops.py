@@ -20,6 +20,7 @@ def log_strategy_run_start(
     selected_slug: str | None,
     maker_quote_sides: str,
     maker_quote_size_usdc: Any,
+    run_manifest: dict[str, Any] | None = None,
 ) -> None:
     if not trade_db:
         return
@@ -33,6 +34,7 @@ def log_strategy_run_start(
         notes={
             "quote_sides": maker_quote_sides,
             "quote_size_usdc": float(maker_quote_size_usdc),
+            **({"run_manifest": dict(run_manifest)} if isinstance(run_manifest, dict) else {}),
         },
     )
 
@@ -147,6 +149,26 @@ def should_run_quote_watchdog(
     return stale_hit or invalid_hit, stale_for
 
 
+def quote_age_status_reason(
+    *,
+    now_ts: float,
+    last_valid_quote_ts: float,
+    stale_after_sec: float,
+) -> str | None:
+    """Return a status-only reason when the last valid market quote is stale."""
+    try:
+        last_ts = float(last_valid_quote_ts)
+        age = float(now_ts) - last_ts
+        threshold = max(0.0, float(stale_after_sec))
+    except (TypeError, ValueError):
+        return "quote_age_unavailable"
+    if last_ts <= 0:
+        return "quote_age_unavailable"
+    if age >= threshold:
+        return f"quote_stale_{max(0, int(age))}s"
+    return None
+
+
 def should_attempt_quote_watchdog_recovery(
     *,
     now_ts: float,
@@ -166,7 +188,7 @@ def handle_quote_watchdog_recovery(
     last_valid_quote_ts: float,
     consecutive_invalid_quote_ticks: int,
     db_strategy_event_fn: Callable[[str, dict[str, Any]], None],
-    cancel_active_maker_orders_fn: Callable[[], None],
+    cancel_active_buy_orders_fn: Callable[[], None],
     find_btc_instrument_fn: Callable[[], bool],
     logger_warning_fn: Callable[[str], None],
     logger_error_fn: Callable[[str], None],
@@ -195,7 +217,10 @@ def handle_quote_watchdog_recovery(
             "trigger_count": trigger_count,
         },
     )
-    cancel_active_maker_orders_fn()
+    # A stale quote stream is not a reason to withdraw a protective SELL.
+    # It is still a valid limit order at the venue and may be the only live
+    # exit protection while the data client is being rebuilt.
+    cancel_active_buy_orders_fn()
     selected_ok = find_btc_instrument_fn()
     return selected_ok, now_ts, stale_for, prev_instrument
 
@@ -280,8 +305,9 @@ def run_auto_redeem_script(
                         condition_size_by_id[condition_id] = float(parts["size"])
                     except ValueError:
                         pass
-            # Parse: redeemPositions condition=0x... tx=0x... status=1
-            if line_s.startswith("redeemPositions "):
+            # Parse: redeemPositions condition=0x... tx=0x... status=1 (CTF)
+            #        routerRedeem condition=0x... outcome_index=0 ... tx=0x... status=1 protocol=v2
+            if line_s.startswith("redeemPositions ") or line_s.startswith("routerRedeem "):
                 parts: dict[str, str] = {}
                 for token in line_s.split():
                     if "=" in token:
@@ -293,6 +319,7 @@ def run_auto_redeem_script(
                     "condition_id": condition_id,
                     "tx_hash": parts.get("tx", ""),
                     "status": int(parts.get("status", "0")),
+                    "protocol": parts.get("protocol", "v1"),
                 }
                 if condition_id in condition_size_by_id:
                     # This is the size of the winning/losing position token,
@@ -384,3 +411,21 @@ def stop_event_threads(stop_events: list[Any], threads: list[Any], join_timeout_
     for thread in threads:
         if thread and thread.is_alive():
             thread.join(timeout=join_timeout_sec)
+
+
+def collection_lifecycle(strategy: Any, transition: str, *, synchronous: bool = False, **context: Any) -> bool:
+    """Single journal authority. Synchronous only after node.run, outside hot path."""
+    import time
+    try:
+        db = getattr(strategy, "trade_db", None)
+        payload = {
+            **getattr(strategy, "collection_identity", {}),
+            "run_id": getattr(strategy, "run_id", None),
+            "current_market_slug": getattr(strategy, "current_market_slug", None),
+            "transition": transition, "timestamp": time.time(),
+            "monotonic_ts": time.monotonic(), **context,
+        }
+        fn = db.log_strategy_event if synchronous else db.enqueue_strategy_event
+        return bool(fn(strategy.run_id, "COLLECTION_LIFECYCLE", payload))
+    except Exception:
+        return False

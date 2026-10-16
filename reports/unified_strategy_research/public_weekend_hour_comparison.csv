@@ -1,0 +1,17 @@
+et_hour_block,metric,weekday_n,weekday_mean,weekend_n,weekend_mean,weekend_minus_weekday,market_level_permutation_p,warning
+00-06,trade_count,25,808.24,25,779.2,-29.039999999999964,0.7556221889055472,small within-hour samples; exploratory
+00-06,volume_shares,25,22082.88115164,25,19988.62005,-2094.261101639997,0.4767616191904048,small within-hour samples; exploratory
+00-06,volume_usdc_estimate,25,11846.789724726681,25,10666.110971371125,-1180.6787533555562,0.3823088455772114,small within-hour samples; exploratory
+00-06,max_no_trade_interval_sec,25,85.88,25,43.24,-42.63999999999999,0.1374312843578211,small within-hour samples; exploratory
+06-12,trade_count,25,1000.16,25,793.56,-206.60000000000002,0.026486756621689155,small within-hour samples; exploratory
+06-12,volume_shares,25,27444.96781284,25,20038.72798832,-7406.239824520002,0.006496751624187906,small within-hour samples; exploratory
+06-12,volume_usdc_estimate,25,14776.712006361333,25,10925.521608616975,-3851.190397744358,0.0074962518740629685,small within-hour samples; exploratory
+06-12,max_no_trade_interval_sec,25,34.8,25,31.48,-3.3199999999999967,0.5387306346826587,small within-hour samples; exploratory
+12-18,trade_count,25,881.36,25,842.08,-39.27999999999997,0.6536731634182908,small within-hour samples; exploratory
+12-18,volume_shares,25,24839.92904852,25,20093.93087928,-4745.99816924,0.07896051974012994,small within-hour samples; exploratory
+12-18,volume_usdc_estimate,25,13032.069477997864,25,10414.765524847815,-2617.303953150049,0.050474762618690654,small within-hour samples; exploratory
+12-18,max_no_trade_interval_sec,25,70.6,25,67.36,-3.239999999999995,0.7391304347826086,small within-hour samples; exploratory
+18-24,trade_count,25,1025.48,25,992.64,-32.84000000000003,0.8745627186406797,small within-hour samples; exploratory
+18-24,volume_shares,25,34372.53971992,25,32414.6991176,-1957.8406023200005,0.7976011994002998,small within-hour samples; exploratory
+18-24,volume_usdc_estimate,25,17444.25539510178,25,17013.461144113626,-430.7942509881541,0.9160419790104948,small within-hour samples; exploratory
+18-24,max_no_trade_interval_sec,25,54.48,25,48.16,-6.32,0.6806596701649176,small within-hour samples; exploratory

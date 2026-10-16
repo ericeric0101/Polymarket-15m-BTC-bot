@@ -1,0 +1,7 @@
+historical_observation,judgment,evidence
+DD0.10/0.15 回顧經濟為正,MIXED,17:15 CF1 比actual省2.49，但比hold少1.71；17:30 would cut winner，CF1/2深度未知，不能算合計
+Binance 常早且吵,MIXED,本次1bps與0.05同格；3bps與0.15同格；4.18bps仍官方贏，不能證明一般早領先
+TWAP 晚、作確認,SUPPORT,17:15 17:29:05才cross，比exit fill晚24.24s
+贏家經歷meaningful DD,SUPPORT,17:30 DD0.19後TP；17:15 DD0.59後官方贏
+固定−2不足辨識doomed,SUPPORT,17:15跨−2卻官方DOWN贏
+breaker 在−2後等待,SUPPORT,本次24.78s等待trend；成交另2.77s

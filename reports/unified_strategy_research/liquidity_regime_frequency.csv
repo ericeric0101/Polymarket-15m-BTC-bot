@@ -1,0 +1,7 @@
+weekday_weekend,regime,market_count,group_markets,share
+weekday,low,26,100,0.26
+weekday,medium,34,100,0.34
+weekday,high,40,100,0.4
+weekend,low,41,100,0.41
+weekend,medium,32,100,0.32
+weekend,high,27,100,0.27

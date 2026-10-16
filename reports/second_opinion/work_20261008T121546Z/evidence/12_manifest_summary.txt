@@ -1,0 +1,27 @@
+N markets 480
+('2026-10-03', 'RECOMPUTED_RESOLVED', '2') 29
+('2026-10-03', 'RECOMPUTED_RESOLVED', '3') 50
+('2026-10-03', 'RECOMPUTED_UNRESOLVED', '3') 17
+('2026-10-04', 'NO_DATA', '3') 1
+('2026-10-04', 'RECOMPUTED_RESOLVED', '2') 17
+('2026-10-04', 'RECOMPUTED_RESOLVED', '3') 56
+('2026-10-04', 'RECOMPUTED_UNRESOLVED', '3') 22
+('2026-10-05', 'NO_DATA', '3') 3
+('2026-10-05', 'RECOMPUTED_RESOLVED', '2') 18
+('2026-10-05', 'RECOMPUTED_RESOLVED', '3') 61
+('2026-10-05', 'RECOMPUTED_UNRESOLVED', '3') 14
+('2026-10-06', 'NATIVE_V2', '1') 7
+('2026-10-06', 'NATIVE_V2', '3') 7
+('2026-10-06', 'NO_DATA', '3') 16
+('2026-10-06', 'RAW_PRE_V2', '3') 15
+('2026-10-06', 'RECOMPUTED_RESOLVED', '2') 31
+('2026-10-06', 'RECOMPUTED_RESOLVED', '3') 11
+('2026-10-06', 'RECOMPUTED_UNRESOLVED', '3') 9
+('2026-10-07', 'NATIVE_V2', '1') 50
+('2026-10-07', 'NATIVE_V2', '3') 10
+('2026-10-07', 'NO_DATA', '3') 36
+tier totals [('1', 57), ('2', 95), ('3', 328)]
+phase x tier [(('NONE', '3'), 56), (('POST_A', '1'), 39), (('POST_A', '3'), 7), (('POST_A|PRE_A', '3'), 1), (('POST_B', '1'), 1), (('POST_B', '3'), 2), (('PRE_A', '1'), 17), (('PRE_A', '2'), 47), (('PRE_A', '3'), 68), (('PRE_A_BY_TIME', '2'), 48), (('PRE_A_BY_TIME', '3'), 194)]
+exclusion reasons (non-exclusive) [('gap>10s', 187), ('incomplete_edges_or_gap', 182), ('settlement_missing', 108), ('insufficient_span', 107), ('recomputed_unresolved', 62), ('no_snapshots', 56), ('startup_partial', 52), ('raw_pre_v2', 15), ('mixed_runtime_phase', 1)]
+tier by date [(('2026-10-03', '2'), 29), (('2026-10-03', '3'), 67), (('2026-10-04', '2'), 17), (('2026-10-04', '3'), 79), (('2026-10-05', '2'), 18), (('2026-10-05', '3'), 78), (('2026-10-06', '1'), 7), (('2026-10-06', '2'), 31), (('2026-10-06', '3'), 58), (('2026-10-07', '1'), 50), (('2026-10-07', '3'), 46)]
+joint provenance Counter({'JOINT_UNRESOLVED': 335, 'NATIVE_V2': 74, 'NO_DATA': 56, 'RAW_PRE_V2': 15})

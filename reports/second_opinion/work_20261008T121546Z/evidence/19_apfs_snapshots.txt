@@ -1,0 +1,12 @@
+Thu Oct  8 12:35:01 UTC 2026
+Snapshots for volume group containing disk /:
+com.apple.TimeMachine.2026-10-08-030052.local
+com.apple.TimeMachine.2026-10-08-040043.local
+com.apple.TimeMachine.2026-10-08-050054.local
+com.apple.TimeMachine.2026-10-08-060043.local
+com.apple.os.update-8F406C5750C35D04EA6D4595721419F1760E7DAA896C5F77C1F03BC7E4734CB64B25165643663F58088E8B29B0D11765
+com.apple.os.update-9C7AC3379C9BCA825C5E3CEB27FC945471A4DC2766A5F06BE5215AB07C8650CA
+com.apple.os.update-MSUPrepareUpdate
+Filesystem   1024-blocks      Used Available Capacity iused     ifree %iused  Mounted on
+/dev/disk3s5   239362496 180397368  16461528    92% 2091433 164615280    1%   /System/Volumes/Data
+Pass0 df avail 12Gi (00_df.txt) at ~12:15Z; at 12:35Z df -k avail 16,461,528 KiB. Auditor created only small /tmp extracts. Free space rose ~4.4 GB without auditor deletions -> volume free space is driven by external APFS/purgeable/snapshot dynamics.

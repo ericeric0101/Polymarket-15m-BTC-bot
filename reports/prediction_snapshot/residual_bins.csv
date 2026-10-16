@@ -1,0 +1,8 @@
+residual_bin,observations,episodes,markets,mean_mid_repricing_30s,median_mid_repricing_30s,directional_hit_rate,market_cluster_bootstrap_ci_low,market_cluster_bootstrap_ci_high
+<= -0.10,0,0,0,,,,,
+-0.10 to -0.05,0,0,0,,,,,
+-0.05 to -0.02,0,0,0,,,,,
+-0.02 to +0.02,0,0,0,,,,,
++0.02 to +0.05,0,0,0,,,,,
++0.05 to +0.10,0,0,0,,,,,
+>= +0.10,0,0,0,,,,,

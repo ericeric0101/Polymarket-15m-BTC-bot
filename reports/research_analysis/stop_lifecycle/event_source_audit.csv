@@ -1,0 +1,7 @@
+source,event_type,count,join_key,notes,with_position_lifecycle_id
+trade_journal.order_events,ORDER_FILLED_BUY,125,market_slug + instrument_id + entry_client_order_id,entry anchor; historical identity may be reconstructed,
+twap_forward_shadow.lead_lag_decisions,POSITION_LIFECYCLE_ENTRY,0,position_lifecycle_id,sparse research event,0
+twap_forward_shadow.lead_lag_decisions,STOP_SHADOW_ADVERSE_EPISODE_STARTED,0,position_lifecycle_id,sparse research event,0
+twap_forward_shadow.lead_lag_decisions,STOP_SHADOW_CANDIDATE,0,position_lifecycle_id,sparse research event,0
+twap_forward_shadow.lead_lag_decisions,STOP_SHADOW_ACTUAL_STOP,0,position_lifecycle_id,sparse research event,0
+twap_forward_shadow.lead_lag_decisions,STOP_SHADOW_POST_STOP_SETTLEMENT,0,position_lifecycle_id,sparse research event,0

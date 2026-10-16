@@ -283,3 +283,38 @@ async def fetch_gamma_market_by_slug(slug: str) -> Optional[Dict[str, Any]]:
     except Exception:
         pass
     return None
+
+
+def fetch_gamma_market_by_slug_sync(slug: str, *, timeout_sec: float = 4.0) -> Optional[Dict[str, Any]]:
+    """Bounded synchronous Gamma lookup for startup-only reconciliation.
+
+    This deliberately returns no result on an API failure.  A restart must
+    never invent a settlement outcome merely to make a PnL guard look current.
+    """
+    api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
+
+    def market_from_response(data: Any) -> Optional[Dict[str, Any]]:
+        event = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data else None)
+        if not isinstance(event, dict) or str(event.get("slug") or "") != str(slug):
+            return None
+        markets = event.get("markets", [])
+        if not isinstance(markets, list) or not markets:
+            return None
+        market = dict(markets[0])
+        market["_gamma_event_slug"] = str(event.get("slug") or "")
+        market["_gamma_event_id"] = event.get("id")
+        return market
+
+    try:
+        with httpx.Client(timeout=max(0.5, float(timeout_sec))) as client:
+            response = client.get(f"{api_base}/events/slug/{quote(str(slug), safe='')}")
+            if response.status_code == 200:
+                market = market_from_response(response.json())
+                if market is not None:
+                    return market
+            response = client.get(f"{api_base}/events", params={"slug": slug})
+            if response.status_code == 200:
+                return market_from_response(response.json())
+    except Exception:
+        pass
+    return None

@@ -1,0 +1,429 @@
+{
+ "ADVERSE_CROSS": {
+  "n_candidates": 77,
+  "n_days": 7,
+  "p_final_adverse": 0.6753,
+  "mean_stop_minus_hold": 0.0717,
+  "by_tte_sec": {
+   "[0,120)": {
+    "n": 21,
+    "n_days": 6,
+    "p_final_adverse": 0.857,
+    "mean_stop_minus_hold": 0.51,
+    "descriptive_only": false
+   },
+   "[120,300)": {
+    "n": 21,
+    "n_days": 5,
+    "p_final_adverse": 0.714,
+    "mean_stop_minus_hold": 0.493,
+    "descriptive_only": false
+   },
+   "[300,480)": {
+    "n": 28,
+    "n_days": 7,
+    "p_final_adverse": 0.5,
+    "mean_stop_minus_hold": -0.864,
+    "descriptive_only": false
+   },
+   "[480,900)": {
+    "n": 7,
+    "n_days": 3,
+    "p_final_adverse": 0.714,
+    "mean_stop_minus_hold": 1.236,
+    "descriptive_only": false
+   }
+  },
+  "by_exit_bid": {
+   ">=0.8": {
+    "n": 2,
+    "n_days": 2,
+    "p_final_adverse": 0.0,
+    "mean_stop_minus_hold": -0.733,
+    "descriptive_only": true
+   },
+   "[0,0.2)": {
+    "n": 17,
+    "n_days": 5,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.431,
+    "descriptive_only": false
+   },
+   "[0.2,0.4)": {
+    "n": 33,
+    "n_days": 6,
+    "p_final_adverse": 0.667,
+    "mean_stop_minus_hold": -0.016,
+    "descriptive_only": false
+   },
+   "[0.4,0.6)": {
+    "n": 23,
+    "n_days": 6,
+    "p_final_adverse": 0.522,
+    "mean_stop_minus_hold": -0.112,
+    "descriptive_only": false
+   },
+   "[0.6,0.8)": {
+    "n": 2,
+    "n_days": 2,
+    "p_final_adverse": 0.5,
+    "mean_stop_minus_hold": 1.39,
+    "descriptive_only": true
+   }
+  },
+  "by_distance_bps": {
+   ">=20": {
+    "n": 1,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.01,
+    "descriptive_only": true
+   },
+   "[0,2)": {
+    "n": 69,
+    "n_days": 7,
+    "p_final_adverse": 0.652,
+    "mean_stop_minus_hold": -0.001,
+    "descriptive_only": false
+   },
+   "[10,20)": {
+    "n": 2,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.0,
+    "descriptive_only": true
+   },
+   "[2,5)": {
+    "n": 3,
+    "n_days": 3,
+    "p_final_adverse": 0.667,
+    "mean_stop_minus_hold": 1.067,
+    "descriptive_only": false
+   },
+   "[5,10)": {
+    "n": 2,
+    "n_days": 2,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 1.203,
+    "descriptive_only": true
+   }
+  },
+  "by_legacy_sigma": {
+   ">=2": {
+    "n": 4,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.253,
+    "descriptive_only": true
+   },
+   "NA": {
+    "n": 8,
+    "n_days": 4,
+    "p_final_adverse": 0.875,
+    "mean_stop_minus_hold": -0.21,
+    "descriptive_only": false
+   },
+   "[0,0.5)": {
+    "n": 48,
+    "n_days": 6,
+    "p_final_adverse": 0.562,
+    "mean_stop_minus_hold": -0.121,
+    "descriptive_only": false
+   },
+   "[0.5,1)": {
+    "n": 9,
+    "n_days": 6,
+    "p_final_adverse": 0.778,
+    "mean_stop_minus_hold": 0.543,
+    "descriptive_only": false
+   },
+   "[1,2)": {
+    "n": 8,
+    "n_days": 3,
+    "p_final_adverse": 0.875,
+    "mean_stop_minus_hold": 0.887,
+    "descriptive_only": false
+   }
+  }
+ },
+ "HARD_LOSS_EQUIVALENT": {
+  "n_candidates": 80,
+  "n_days": 7,
+  "p_final_adverse": 0.65,
+  "mean_stop_minus_hold": 0.4556,
+  "by_tte_sec": {
+   "[0,120)": {
+    "n": 12,
+    "n_days": 6,
+    "p_final_adverse": 0.833,
+    "mean_stop_minus_hold": 0.648,
+    "descriptive_only": false
+   },
+   "[120,300)": {
+    "n": 24,
+    "n_days": 5,
+    "p_final_adverse": 0.667,
+    "mean_stop_minus_hold": 0.44,
+    "descriptive_only": false
+   },
+   "[300,480)": {
+    "n": 37,
+    "n_days": 7,
+    "p_final_adverse": 0.541,
+    "mean_stop_minus_hold": -0.009,
+    "descriptive_only": false
+   },
+   "[480,900)": {
+    "n": 7,
+    "n_days": 3,
+    "p_final_adverse": 0.857,
+    "mean_stop_minus_hold": 2.635,
+    "descriptive_only": false
+   }
+  },
+  "by_exit_bid": {
+   "[0,0.2)": {
+    "n": 7,
+    "n_days": 4,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.004,
+    "descriptive_only": false
+   },
+   "[0.2,0.4)": {
+    "n": 16,
+    "n_days": 5,
+    "p_final_adverse": 0.688,
+    "mean_stop_minus_hold": 0.408,
+    "descriptive_only": false
+   },
+   "[0.4,0.6)": {
+    "n": 57,
+    "n_days": 7,
+    "p_final_adverse": 0.596,
+    "mean_stop_minus_hold": 0.524,
+    "descriptive_only": false
+   }
+  },
+  "by_distance_bps": {
+   ">=20": {
+    "n": 1,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.01,
+    "descriptive_only": true
+   },
+   "[0,2)": {
+    "n": 34,
+    "n_days": 7,
+    "p_final_adverse": 0.706,
+    "mean_stop_minus_hold": 0.847,
+    "descriptive_only": false
+   },
+   "[10,20)": {
+    "n": 4,
+    "n_days": 2,
+    "p_final_adverse": 0.75,
+    "mean_stop_minus_hold": -0.407,
+    "descriptive_only": true
+   },
+   "[2,5)": {
+    "n": 31,
+    "n_days": 5,
+    "p_final_adverse": 0.516,
+    "mean_stop_minus_hold": -0.176,
+    "descriptive_only": false
+   },
+   "[5,10)": {
+    "n": 10,
+    "n_days": 5,
+    "p_final_adverse": 0.8,
+    "mean_stop_minus_hold": 1.472,
+    "descriptive_only": false
+   }
+  },
+  "by_legacy_sigma": {
+   ">=2": {
+    "n": 2,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.005,
+    "descriptive_only": true
+   },
+   "NA": {
+    "n": 9,
+    "n_days": 5,
+    "p_final_adverse": 0.889,
+    "mean_stop_minus_hold": 0.181,
+    "descriptive_only": false
+   },
+   "[0,0.5)": {
+    "n": 64,
+    "n_days": 7,
+    "p_final_adverse": 0.594,
+    "mean_stop_minus_hold": 0.443,
+    "descriptive_only": false
+   },
+   "[0.5,1)": {
+    "n": 4,
+    "n_days": 2,
+    "p_final_adverse": 0.75,
+    "mean_stop_minus_hold": 0.887,
+    "descriptive_only": true
+   },
+   "[1,2)": {
+    "n": 1,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 2.933,
+    "descriptive_only": true
+   }
+  }
+ },
+ "ADVERSE_CROSS_PERSIST_15S": {
+  "n_candidates": 67,
+  "n_days": 7,
+  "p_final_adverse": 0.7015,
+  "mean_stop_minus_hold": 0.2212,
+  "by_tte_sec": {
+   "[0,120)": {
+    "n": 18,
+    "n_days": 5,
+    "p_final_adverse": 0.944,
+    "mean_stop_minus_hold": 0.742,
+    "descriptive_only": false
+   },
+   "[120,300)": {
+    "n": 20,
+    "n_days": 6,
+    "p_final_adverse": 0.75,
+    "mean_stop_minus_hold": 0.808,
+    "descriptive_only": false
+   },
+   "[300,480)": {
+    "n": 24,
+    "n_days": 5,
+    "p_final_adverse": 0.5,
+    "mean_stop_minus_hold": -0.739,
+    "descriptive_only": false
+   },
+   "[480,900)": {
+    "n": 5,
+    "n_days": 2,
+    "p_final_adverse": 0.6,
+    "mean_stop_minus_hold": 0.607,
+    "descriptive_only": true
+   }
+  },
+  "by_exit_bid": {
+   ">=0.8": {
+    "n": 1,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 5.5,
+    "descriptive_only": true
+   },
+   "[0,0.2)": {
+    "n": 16,
+    "n_days": 5,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.422,
+    "descriptive_only": false
+   },
+   "[0.2,0.4)": {
+    "n": 28,
+    "n_days": 6,
+    "p_final_adverse": 0.679,
+    "mean_stop_minus_hold": -0.112,
+    "descriptive_only": false
+   },
+   "[0.4,0.6)": {
+    "n": 16,
+    "n_days": 6,
+    "p_final_adverse": 0.562,
+    "mean_stop_minus_hold": 0.466,
+    "descriptive_only": false
+   },
+   "[0.6,0.8)": {
+    "n": 6,
+    "n_days": 3,
+    "p_final_adverse": 0.333,
+    "mean_stop_minus_hold": -0.293,
+    "descriptive_only": false
+   }
+  },
+  "by_distance_bps": {
+   ">=20": {
+    "n": 1,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.01,
+    "descriptive_only": true
+   },
+   "[0,2)": {
+    "n": 51,
+    "n_days": 7,
+    "p_final_adverse": 0.647,
+    "mean_stop_minus_hold": 0.14,
+    "descriptive_only": false
+   },
+   "[10,20)": {
+    "n": 2,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.003,
+    "descriptive_only": true
+   },
+   "[2,5)": {
+    "n": 11,
+    "n_days": 5,
+    "p_final_adverse": 0.818,
+    "mean_stop_minus_hold": 0.401,
+    "descriptive_only": false
+   },
+   "[5,10)": {
+    "n": 2,
+    "n_days": 1,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 1.628,
+    "descriptive_only": true
+   }
+  },
+  "by_legacy_sigma": {
+   ">=2": {
+    "n": 6,
+    "n_days": 2,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.003,
+    "descriptive_only": true
+   },
+   "NA": {
+    "n": 4,
+    "n_days": 4,
+    "p_final_adverse": 1.0,
+    "mean_stop_minus_hold": 0.178,
+    "descriptive_only": false
+   },
+   "[0,0.5)": {
+    "n": 42,
+    "n_days": 6,
+    "p_final_adverse": 0.595,
+    "mean_stop_minus_hold": 0.328,
+    "descriptive_only": false
+   },
+   "[0.5,1)": {
+    "n": 10,
+    "n_days": 5,
+    "p_final_adverse": 0.8,
+    "mean_stop_minus_hold": 0.135,
+    "descriptive_only": false
+   },
+   "[1,2)": {
+    "n": 5,
+    "n_days": 3,
+    "p_final_adverse": 0.8,
+    "mean_stop_minus_hold": -0.209,
+    "descriptive_only": false
+   }
+  }
+ }
+}

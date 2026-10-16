@@ -1,0 +1,3 @@
+signal,N_events,lead_gt_2s,lag_gt_2s,median_lead_seconds,interpretation,weekday_flips,weekend_flips
+p_ex_lead_vs_market,336,9,223,-3.7987,"Descriptive only; pooled synchronized batch and event-level, not causal or regime-specific.",,
+T300_flip_earliest_labels,,,,,Too few weekday events; label ordering is not causal BTC evidence.,2,15

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Set
 from loguru import logger
 
 from bot.enums import ActiveSide, MarketPhase
+from bot.entry_session_policy import new_buy_session_decision
 from bot.quote_service import (
     build_directional_snapshot,
     compute_requote_target_version,
@@ -16,10 +17,38 @@ from bot.quote_service import (
     reconcile_unwanted_quotes,
     should_requote_existing_order,
 )
+from bot.protective_exit import ProtectiveExitMixin
 from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
 
 
-class QuoteRuntimeMixin:
+class QuoteRuntimeMixin(ProtectiveExitMixin):
+    def _inventory_overage_requires_sell_only(self) -> bool:
+        """Block new BUYs on verified inventory overage without cancelling exits."""
+        inventory = abs(Decimal(str(getattr(self, "inventory_delta_shares", "0"))))
+        maximum = Decimal(str(getattr(self, "maker_max_inventory_shares", "0")))
+        overage = maximum > 0 and inventory > maximum
+        active = bool(getattr(self, "_inventory_overage_sell_only", False))
+        if overage and not active:
+            self._inventory_overage_sell_only = True
+            # Cancel only pending BUY exposure. In particular, never cancel a
+            # tail-protect TP SELL merely because a venue fill exceeded its
+            # requested amount.
+            self._cancel_maker_order_side("buy", reason="inventory_overage")
+            self._db_strategy_event("INVENTORY_OVERAGE_SELL_ONLY", {
+                "inventory_shares": float(inventory), "max_inventory_shares": float(maximum),
+            })
+            logger.error(
+                "Inventory exceeds BUY cap; entering sell-only protection "
+                f"(inventory={float(inventory):.6f}, max={float(maximum):.6f})."
+            )
+        elif not overage and active:
+            self._inventory_overage_sell_only = False
+            self._db_strategy_event("INVENTORY_OVERAGE_CLEARED", {
+                "inventory_shares": float(inventory), "max_inventory_shares": float(maximum),
+            })
+            logger.info("Inventory overage cleared; normal BUY eligibility may resume.")
+        return bool(getattr(self, "_inventory_overage_sell_only", False))
+
     @staticmethod
     def _reason_family(reason: str) -> str:
         r = str(reason or "")
@@ -117,10 +146,27 @@ class QuoteRuntimeMixin:
             return True
         return False
 
+    def _entry_authority_block_reason(self) -> str:
+        """Why NEW BUY authority is paused; protective SELL authority is separate."""
+        dashboard_state = getattr(self, "dashboard_state", None)
+        if dashboard_state is not None and bool(getattr(dashboard_state, "bot_paused", False)):
+            return "telegram_pause"
+        if time.time() < float(getattr(self, "quote_pause_until_ts", 0.0) or 0.0):
+            return "error_pause"
+        return ""
+
+    def _cancel_resting_buys_for_pause(self, reason: str) -> None:
+        for order_key, state in list(self.active_maker_orders.items()):
+            side = str(state.get("side", "") or "").lower()
+            if side == "buy" or str(order_key).lower().startswith("buy:"):
+                self._cancel_maker_order_side(order_key, reason=f"entry_paused_{reason}")
+
     async def _prepare_quote_cycle(self) -> Optional[Dict[str, Any]]:
         if self.maker_kill_switch:
-            return None
-        if time.time() < self.quote_pause_until_ts:
+            # Kill-switch semantics are unchanged (no order activity); held
+            # inventory is reported as degraded. Exit policy under kill switch
+            # is UNRESOLVED and needs an explicit operator decision.
+            await self._run_protective_exit_cycle(time.time(), entry_block_reason="kill_switch")
             return None
 
         phase = self._update_market_phase()
@@ -128,39 +174,78 @@ class QuoteRuntimeMixin:
             self._cancel_active_maker_orders()
             return None
         await self._maybe_finalize_side_decision(time.time(), phase)
+        entry_block_reason = self._entry_authority_block_reason()
+        if entry_block_reason:
+            # Pausing entries never disables protection for held inventory:
+            # cancel resting BUYs only, keep protective SELLs, evaluate exits.
+            self._cancel_resting_buys_for_pause(entry_block_reason)
+            await self._run_protective_exit_cycle(time.time(), entry_block_reason=entry_block_reason)
+            if entry_block_reason == "telegram_pause":
+                now_log_ts = time.time()
+                if now_log_ts - float(getattr(self, "_last_dashboard_pause_log_ts", 0.0)) >= 30.0:
+                    logger.info("Telegram pause active; new BUYs blocked, protective exits remain active.")
+                    self._last_dashboard_pause_log_ts = now_log_ts
+            return None
         if self.bi_side_enabled and self.active_side == ActiveSide.NONE:
             if self.inventory_delta_shares <= 0:
                 self._cancel_active_maker_orders()
                 return None
 
+        decision_fn = getattr(
+            self,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        entry_session = decision_fn(time.time())
+        session_forced_sell_only = (
+            not entry_session.allowed
+            and not self._is_dry_run_mode()
+        )
+        session_guard = getattr(self, "session_buy_guard_decision", None)
+        pnl_guard_decision = session_guard(time.time()) if callable(session_guard) else None
+        if pnl_guard_decision is not None and not pnl_guard_decision.allowed and not self._is_dry_run_mode():
+            session_forced_sell_only = True
+            if time.time() - float(getattr(self, "_last_session_pnl_guard_log_ts", 0.0)) >= 60.0:
+                self._last_session_pnl_guard_log_ts = time.time()
+                self._db_strategy_event("SESSION_BUY_LOCKED", {
+                    "reason": pnl_guard_decision.reason,
+                    "session_date_taipei": pnl_guard_decision.session_date_taipei,
+                    "realized_pnl_usdc": float(pnl_guard_decision.realized_pnl_usdc),
+                    "realized_high_water_usdc": float(pnl_guard_decision.realized_high_water_usdc),
+                    "boundary": "quote_cycle_prepare", "sell_authority_preserved": True,
+                })
+        if session_forced_sell_only:
+            for order_key, state in list(self.active_maker_orders.items()):
+                side = str(state.get("side", "") or "").lower()
+                if side == "buy" or str(order_key).lower().startswith("buy:"):
+                    self._cancel_maker_order_side(order_key, reason="entry_session_or_session_pnl_guard_blocked")
+            now_session_ts = time.time()
+            if now_session_ts - float(getattr(self, "_last_entry_session_block_log_ts", 0.0)) >= 60.0:
+                self._last_entry_session_block_log_ts = now_session_ts
+                record_event = getattr(self, "_db_strategy_event", None)
+                if callable(record_event):
+                    record_event(
+                        "ENTRY_SESSION_BUY_BLOCKED",
+                        {
+                            "reason": entry_session.reason,
+                            "local_time": entry_session.local_time.isoformat(),
+                            "boundary": "quote_cycle_prepare",
+                            "sell_authority_preserved": True,
+                        },
+                    )
+                logger.info(
+                    "New BUY session is closed; maker remains SELL-only: "
+                    f"reason={entry_session.reason} local_time={entry_session.local_time.isoformat()}"
+                )
+
         balance_forced_sell_only = False
         regime_guard_active = False
+        # share_v1: collateral is checked per BUY at the submit boundary against
+        # the exact final quantity x tick-normalized limit price x 1.1
+        # (bot/order_submission.py). The former cycle gate used the deprecated
+        # MAKER_QUOTE_SIZE_USDC x 1.1 and could not know the real notional.
         if not self._is_dry_run_mode():
-            balance = self._refresh_balance_cache()
-            if balance is not None:
-                required = self.maker_quote_size_usdc * Decimal("1.1")
-                if balance < required:
-                    gross_sellable = self._get_total_sellable_qty(self._maker_quote_instruments())
-                    if gross_sellable > 0:
-                        balance_forced_sell_only = True
-                        if time.time() - getattr(self, "_last_balance_warn_ts", 0) >= 60:
-                            logger.warning(
-                                f"Balance pre-check: low USDC "
-                                f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
-                                f"Switching to SELL-only until balance recovers. "
-                                f"net_inventory={float(self.inventory_delta_shares):.4f} "
-                                f"gross_sellable={float(gross_sellable):.4f}"
-                            )
-                            self._last_balance_warn_ts = time.time()
-                    else:
-                        if time.time() - getattr(self, "_last_balance_warn_ts", 0) >= 60:
-                            logger.warning(
-                                f"Balance pre-check: insufficient USDC and no inventory "
-                                f"(available={float(balance):.2f}, needed≈{float(required):.2f}). "
-                                f"Skipping maker quotes."
-                            )
-                            self._last_balance_warn_ts = time.time()
-                        return None
+            self._refresh_balance_cache()
         if self.regime_guard_enabled:
             now_guard_ts = time.time()
             if self.regime_guard_conservative_until_ts > 0 and now_guard_ts >= self.regime_guard_conservative_until_ts:
@@ -170,10 +255,27 @@ class QuoteRuntimeMixin:
                 regime_guard_active = True
         if self.inventory_delta_shares <= 0 and self._startup_rehydrated_inventory_force_sell_only:
             self._startup_rehydrated_inventory_force_sell_only = False
-        forced_sell_only = balance_forced_sell_only or self._startup_rehydrated_inventory_force_sell_only
+        inventory_overage_sell_only = self._inventory_overage_requires_sell_only()
+        # Startup ambiguity is a market-wide recovery risk. A later transient
+        # journal fault is not: each BUY path owns the durable write it needs,
+        # so it can reject that one order and retry after the journal probe
+        # recovers without disabling unrelated maker opportunities.
+        journal_forced_sell_only = not bool(getattr(self, "trade_db_buy_ready", True))
+        if journal_forced_sell_only and time.time() - getattr(self, "_last_trade_db_warn_ts", 0) >= 60:
+            logger.error(
+                "Trade journal recovery health is not ready; running SELL-only and blocking maker BUYs: "
+                f"reason={getattr(self, 'trade_db_health_reason', 'unknown')}"
+            )
+            self._last_trade_db_warn_ts = time.time()
+        forced_sell_only = (
+            balance_forced_sell_only
+            or self._startup_rehydrated_inventory_force_sell_only
+            or inventory_overage_sell_only
+            or journal_forced_sell_only
+            or session_forced_sell_only
+        )
 
-        await self._maybe_taker_exit_positions(time.time(), is_simulation=self._is_dry_run_mode())
-        await self._maybe_maker_urgent_exit(time.time())
+        await self._run_protective_exit_cycle(time.time())
 
         now_ts = time.time()
         force_quote_refresh_once = bool(getattr(self, "_force_quote_refresh_once", False))
@@ -206,12 +308,6 @@ class QuoteRuntimeMixin:
                 is_urgent = " (urgent_exit)" if state.get("is_urgent_exit") else ""
                 logger.info(f"Maker order [{side}]{is_urgent} exceeded TTL={ttl}s, cancel and requote.")
                 self._cancel_maker_order_side(order_key, reason="ttl")
-
-        if abs(self.inventory_delta_shares) > self.maker_max_inventory_shares:
-            self._activate_maker_kill_switch(
-                f"Inventory {self.inventory_delta_shares} exceeds max {self.maker_max_inventory_shares}"
-            )
-            return None
 
         # This is diagnostic-only cycle state.  Quote economics receive the
         # correct per-instrument value in ``_evaluate_quote_targets``.
@@ -261,6 +357,35 @@ class QuoteRuntimeMixin:
         diag_context_by_inst: Dict[str, Dict[str, Any]],
     ) -> None:
         submitted_attempts = 0
+
+        # Final cycle-level authority check. Desired quotes are mutable as they
+        # pass through sizing and confirmation helpers, so a closed entry
+        # session must be re-applied immediately before reconcile/submission.
+        decision_fn = getattr(
+            self,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        entry_session = decision_fn(time.time())
+        if not entry_session.allowed and not self._is_dry_run_mode():
+            blocked_live_buy = False
+            for desired in desired_quotes.values():
+                if str(desired.get("side", "") or "").lower() != "buy":
+                    continue
+                blocked_live_buy = blocked_live_buy or bool(desired.get("should_quote", False))
+                desired["should_quote"] = False
+                desired["force_cancel_existing"] = True
+                desired["diag_reason"] = f"entry_session_blocked_{entry_session.reason}"
+            if blocked_live_buy:
+                self._db_strategy_event(
+                    "ENTRY_SESSION_BUY_BLOCKED",
+                    {
+                        "reason": entry_session.reason,
+                        "local_time": entry_session.local_time.isoformat(),
+                        "boundary": "maker_pre_submit_cycle",
+                        "sell_authority_preserved": True,
+                    },
+                )
 
         # Fair-edge research candidates must never influence the live order
         # book. In particular, they cannot cause an existing live quote to be
@@ -321,6 +446,20 @@ class QuoteRuntimeMixin:
             )
 
             current = self.active_maker_orders.get(order_key)
+            if current and side == "buy":
+                try:
+                    desired_qty = Decimal(str(desired.get("planned_quantity") or "0"))
+                    current_qty = Decimal(str(current.get("quantity") or "0"))
+                except Exception:
+                    desired_qty, current_qty = Decimal("0"), Decimal("0")
+                # A depth/risk reduction is safety-critical: an older, larger
+                # resting BUY may not outlive the new cap.  Do not scale up an
+                # existing order merely because visible depth later improves.
+                if desired_qty > 0 and desired_qty + Decimal("0.000001") < current_qty:
+                    created_ts = float(current.get("created_ts", 0.0) or 0.0)
+                    if created_ts <= 0 or now_ts - created_ts >= float(self.maker_requote_min_age_sec):
+                        self._cancel_maker_order_side(order_key, reason="depth_risk_size_reduce")
+                    continue
             if desired.get("fair_edge_bucket_shadow"):
                 # A real open order retains ownership of the order key. The
                 # counterfactual is only submit-time observable when it would
@@ -364,6 +503,25 @@ class QuoteRuntimeMixin:
                 continue
             if current:
                 continue
+
+            if side == "buy" and not desired.get("fair_edge_bucket_shadow"):
+                snapshotter = getattr(self, "prediction_research_snapshotter", None)
+                if snapshotter is not None:
+                    try:
+                        try:
+                            intended_side = str(getattr(self._side_for_instrument_id(inst_id), "value", "") or "")
+                        except Exception:
+                            intended_side = str(self.active_side.value)
+                        snapshotter.capture(
+                            self, now_ts=time.time(), trigger=("dry_run_order_submit"
+                                                               if self._is_dry_run_mode() else "order_submit"),
+                            force=True,
+                            entry_context={"entry_side": intended_side,
+                                           "entry_price": limit_price,
+                                           "entry_candidate_id": desired.get("research_candidate_id")},
+                        )
+                    except Exception:
+                        pass
 
             await self._submit_maker_quote(
                 inst_id,

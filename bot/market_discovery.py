@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -11,6 +10,7 @@ from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.market_data import fetch_gamma_market_by_slug
+from bot.protocol_v2 import UnsupportedMarketProtocol, register_market_assets, select_market_assets
 
 
 def build_btc_15m_slug_candidates(lookback: int = 1, lookahead: int = 4) -> List[str]:
@@ -102,27 +102,6 @@ def select_primary_btc_15m_slug(slugs: List[str]) -> Optional[str]:
     return parsed[0][1]
 
 
-def _parse_json_list(value: Any) -> List[Any]:
-    if isinstance(value, list):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-        except Exception:
-            txt = value.strip()
-            if txt.startswith("[") and txt.endswith("]"):
-                txt = txt[1:-1]
-            return [p.strip().strip('"').strip("'") for p in txt.split(",") if p.strip()]
-    return []
-
-
-def _valid_token_id(value: Any) -> bool:
-    import re
-    return bool(re.fullmatch(r"\d{20,}", str(value or "").strip()))
-
-
 async def hydrate_gamma_market_details(market: Dict[str, Any]) -> Dict[str, Any]:
     api_base = os.getenv("POLYMARKET_GAMMA_API", "https://gamma-api.polymarket.com").rstrip("/")
     timeout = 8.0
@@ -145,27 +124,22 @@ async def hydrate_gamma_market_details(market: Dict[str, Any]) -> Dict[str, Any]
 
 
 def extract_instrument_ids_from_gamma_market(market: Dict[str, Any]) -> List[InstrumentId]:
-    condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
-    if not condition_id:
+    """Instrument ids for the market's protocol: clobTokenIds (v1) or positionIds (v2).
+
+    The ids are chosen by Gamma's ``version`` field, never by which id field is
+    present; unknown or inconsistent markets yield no instruments (not traded).
+    Each asset's protocol is registered for signing, balances, fees and redeem.
+    """
+    try:
+        assets = select_market_assets(market)
+    except UnsupportedMarketProtocol as exc:
+        logger.warning(f"Market not tradable by this bot: slug={market.get('slug')} reason={exc}")
         return []
-    token_ids = _parse_json_list(market.get("clobTokenIds") or market.get("clob_token_ids"))
-    if len(token_ids) < 2:
-        token_ids = _parse_json_list(market.get("clobTokenIDs"))
-    if len(token_ids) < 2:
-        tokens = market.get("tokens")
-        if isinstance(tokens, list):
-            token_ids = []
-            for token in tokens:
-                if not isinstance(token, dict):
-                    continue
-                token_id = token.get("token_id") or token.get("tokenId")
-                if _valid_token_id(token_id):
-                    token_ids.append(str(token_id))
-    token_ids = [str(token_id).strip() for token_id in token_ids if _valid_token_id(token_id)]
+    register_market_assets(assets)
     result: List[InstrumentId] = []
-    for token_id in token_ids:
+    for asset_id in assets.asset_ids:
         try:
-            result.append(InstrumentId.from_str(f"{condition_id}-{token_id}.POLYMARKET"))
+            result.append(InstrumentId.from_str(f"{assets.condition_id}-{asset_id}.POLYMARKET"))
         except Exception:
             continue
     return result

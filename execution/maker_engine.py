@@ -137,43 +137,73 @@ class MakerEngine:
         observed_window_avg: Optional[float] = None,
         observed_window_sec: float = 0.0,
     ) -> Decimal:
-        """Approximate probability that the final rolling TWAP clears strike.
+        """Compatibility wrapper for the shared TWAP settlement diagnostics."""
+        return MakerEngine.twap_settlement_diagnostics(
+            spot=spot, strike=strike, sigma_annual=sigma_annual,
+            time_left_sec=time_left_sec, twap_window_sec=twap_window_sec,
+            observed_window_avg=observed_window_avg,
+            observed_window_sec=observed_window_sec,
+        )["p_up"]
 
-        For a Brownian price path, the average of a future window has lower
-        conditional variance than a terminal snapshot.  Before the final
-        window, the equivalent variance horizon is ``T - 2W/3``.  During the
-        final window the exact observed partial integral is not yet available
-        from RTDS, so retain the conservative terminal horizon instead of
-        fabricating it.  Raw Chainlink ticks are now retained for the next
-        stage, where that integral can be computed directly.
+    @staticmethod
+    def twap_settlement_diagnostics(
+        spot: Optional[float],
+        strike: float,
+        sigma_annual: float,
+        time_left_sec: float,
+        twap_window_sec: int = 60,
+        observed_window_avg: Optional[float] = None,
+        observed_window_sec: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Return the existing TWAP probability and explainable path inputs.
+
+        This is the single implementation of the settlement probability math;
+        callers needing diagnostics must not reproduce its required-average
+        calculation independently.
         """
         window = max(1.0, float(twap_window_sec))
         horizon = float(time_left_sec)
         observed_sec = max(0.0, min(window, float(observed_window_sec)))
-        if observed_window_avg is not None and observed_sec > 0:
-            remaining_sec = max(0.0, window - observed_sec)
+        observed_avg = float(observed_window_avg) if observed_window_avg is not None else None
+        remaining_sec = max(0.0, window - observed_sec)
+        required_avg = None
+        mode = "PRE_FINAL_WINDOW_APPROX"
+        effective_horizon = horizon
+        p_up = None
+        if observed_avg is not None and observed_sec > 0:
+            mode = "FINAL_WINDOW_PARTIAL_INTEGRAL"
             if remaining_sec <= 0:
-                return Decimal("1") if float(observed_window_avg) >= strike else Decimal("0")
-            # The remaining segment must average at least this level for the
-            # complete 60-second settlement average to clear the strike.
-            required_remaining_avg = (
-                window * float(strike) - observed_sec * float(observed_window_avg)
-            ) / remaining_sec
-            return MakerEngine.digital_up_probability(
-                spot=spot,
-                strike=required_remaining_avg,
-                sigma_annual=sigma_annual,
-                # Average a future residual path rather than a terminal tick.
-                time_left_sec=max(1.0, remaining_sec / 3.0),
-            )
-        if horizon > window:
-            horizon = max(1.0, horizon - (2.0 * window / 3.0))
-        return MakerEngine.digital_up_probability(
-            spot=spot,
-            strike=strike,
-            sigma_annual=sigma_annual,
-            time_left_sec=horizon,
-        )
+                p_up = Decimal("1") if observed_avg >= strike else Decimal("0")
+                effective_horizon = 0.0
+            else:
+                required_avg = (window * float(strike) - observed_sec * observed_avg) / remaining_sec
+                effective_horizon = max(1.0, remaining_sec / 3.0)
+                if spot is not None:
+                    p_up = MakerEngine.digital_up_probability(
+                        spot=spot, strike=required_avg, sigma_annual=sigma_annual,
+                        time_left_sec=effective_horizon,
+                    )
+        else:
+            if horizon > window:
+                effective_horizon = max(1.0, horizon - (2.0 * window / 3.0))
+            if spot is not None:
+                p_up = MakerEngine.digital_up_probability(
+                    spot=spot, strike=strike, sigma_annual=sigma_annual,
+                    time_left_sec=effective_horizon,
+                )
+        return {
+            "p_up": p_up,
+            "mode": mode,
+            "observed_window_avg": observed_avg,
+            "observed_window_sec": observed_sec,
+            "remaining_window_sec": remaining_sec,
+            "remaining_avg_decision_boundary": required_avg,
+            "required_remaining_avg_for_up": required_avg,
+            "required_remaining_avg_for_down": required_avg,
+            "effective_probability_horizon_sec": effective_horizon,
+            "current_spot": float(spot) if spot is not None else None,
+            "strike": float(strike),
+        }
 
     @staticmethod
     def implied_sigma_from_market_mid(
@@ -343,12 +373,12 @@ class MakerEngine:
         ask_levels: Optional[List[Tuple[Decimal, Decimal]]],
         recent_vol: Optional[Decimal],
     ) -> dict[str, Decimal]:
-        """Return the sole entry-cost model for a passive maker BUY.
+        """Return the observed 10-second maker BUY markout for shadow telemetry.
 
-        A 10-second adverse markout is observed after actual maker fills. It
-        subsumes the old hypothetical VWAP liquidation, depth impact, spread,
-        non-atomic volatility, fixed floor, and taker-leakage proxies. A SELL
-        is an inventory-management action and has no entry-cost gate here.
+        This empirical quantity is retained for post-fill calibration and
+        analysis, but does not gate live quote eligibility while maker fills
+        are being accumulated. A SELL is an inventory-management action and
+        has no entry-cost estimate here.
         """
         empirical_markout_penalty: Optional[Decimal] = None
         if side == "buy" and self.config.maker_execution_empirical_adverse_markout_per_share is not None:
@@ -546,10 +576,13 @@ class MakerEngine:
             side_plan["buy"] = (
                 quote_bid,
                 bid_econ,
-                (
-                    bid_exec_components["cost_model_available"] > 0
-                    and robust_bid_net >= self.config.maker_min_expected_net_usdc
-                ),
+                # Empirical markout is shadow telemetry until local maker BUY
+                # fills provide a representative calibration. Requiring a
+                # calibration here would prevent the fills needed to produce
+                # one; deducting a portable snapshot can likewise make the
+                # live gate permanently unreachable. Keep the adjusted value
+                # below for audit, but gate on executable quote economics only.
+                bid_econ.expected_net_usdc >= self.config.maker_min_expected_net_usdc,
                 robust_bid_net,
                 bid_exec_penalty,
                 bid_directional_edge_ps,

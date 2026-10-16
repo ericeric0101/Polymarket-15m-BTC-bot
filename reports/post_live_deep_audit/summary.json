@@ -1,0 +1,266 @@
+{
+ "run": {
+  "process_instance_id": "process_1791585579_54482_04a0880d",
+  "cycles": [
+   "run_1791585596_c07cfcd9",
+   "run_1791589295_6eae032b"
+  ],
+  "most_recent_run_id": "run_1791589295_6eae032b",
+  "start_utc": "2026-10-09T22:40:30Z",
+  "end_utc": "2026-10-10T00:16:12Z",
+  "start_taipei": "2026-10-10T06:40:30+08:00",
+  "end_taipei": "2026-10-10T08:16:12+08:00",
+  "head": "f1a134e999edd3f2e03fff80f22a67b8a13242ec",
+  "dirty_diff_hash": "b8ae4cdf8818bd782f20b9dd034a009c01210f7328077568921bb0fe59937be5",
+  "dirty_diff": "bot/entry_session_policy.py weekend BUY unlock (uncommitted)",
+  "complete_markets": 5,
+  "partial_markets": 3
+ },
+ "positions": [
+  {
+   "slug": "btc-updown-15m-1791586800",
+   "side": "DOWN",
+   "entry": 0.69,
+   "qty": 10.0,
+   "pnl": 2.8003,
+   "runtime_outcome": "DOWN",
+   "margin_bps": -1.0897
+  },
+  {
+   "slug": "btc-updown-15m-1791587700",
+   "side": "UP",
+   "entry": 0.82,
+   "qty": 5.5,
+   "pnl": -3.1549,
+   "runtime_outcome": "DOWN",
+   "margin_bps": -0.9452
+  },
+  {
+   "slug": "btc-updown-15m-1791589500",
+   "side": "UP",
+   "entry": 0.74,
+   "qty": 5.5,
+   "pnl": -3.1454,
+   "runtime_outcome": "DOWN",
+   "margin_bps": -0.4089
+  }
+ ],
+ "total_realized_pnl_usdc": -3.5,
+ "counterfactuals": {
+  "btc-updown-15m-1791586800": {
+   "slug": "btc-updown-15m-1791586800",
+   "side": "DOWN",
+   "avg_entry": 0.6899999999999998,
+   "qty": 10.0,
+   "actual_pnl": 2.8003,
+   "runtime_outcome": "DOWN",
+   "hold_to_settlement_pnl_runtime_outcome": 3.1000000000000014,
+   "t_exit": 1791587665.296899,
+   "policies": {
+    "A_current_actual": {
+     "pnl": 2.8003
+    },
+    "B_immediate_cross": {
+     "triggered": true,
+     "trigger_t": 1791587628.237816,
+     "tte": 70.67361903190613,
+     "bid": 0.84,
+     "bid_lag_s": 1.09,
+     "pnl": 1.5,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.8990162108384833
+    },
+    "C_cross_5s": {
+     "triggered": true,
+     "trigger_t": 1791587633.237816,
+     "tte": 66.9059009552002,
+     "bid": 0.83,
+     "bid_lag_s": -0.14,
+     "pnl": 1.4,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.2963234311011102
+    },
+    "D_cross_15s": {
+     "triggered": true,
+     "trigger_t": 1791587643.237816,
+     "tte": 56.95656609535217,
+     "bid": 0.86,
+     "bid_lag_s": -0.19,
+     "pnl": 1.7,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": null
+    },
+    "E_cross_30s": {
+     "triggered": true,
+     "trigger_t": 1791587658.237816,
+     "tte": 41.72868895530701,
+     "bid": 0.92,
+     "bid_lag_s": 0.03,
+     "pnl": 2.3,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.546449408970317
+    },
+    "F_cross_sig0.5_tte120": {
+     "triggered": true,
+     "trigger_t": 1791587629.326381,
+     "tte": 70.67361903190613,
+     "bid": 0.84,
+     "bid_lag_s": 0.0,
+     "pnl": 1.5,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.8990162108384833
+    },
+    "G_cross_sig1_tte60": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": 2.8003,
+     "trigger_t": 1791587675.003034,
+     "note": "censored by actual exit -> equals actual"
+    }
+   }
+  },
+  "btc-updown-15m-1791587700": {
+   "slug": "btc-updown-15m-1791587700",
+   "side": "UP",
+   "avg_entry": 0.82,
+   "qty": 5.5,
+   "actual_pnl": -3.1549189374999997,
+   "runtime_outcome": "DOWN",
+   "hold_to_settlement_pnl_runtime_outcome": -4.51,
+   "t_exit": 1791588504.063118,
+   "policies": {
+    "A_current_actual": {
+     "pnl": -3.1549189374999997
+    },
+    "B_immediate_cross": {
+     "triggered": true,
+     "trigger_t": 1791588454.011831,
+     "tte": 145.59251880645752,
+     "bid": 0.19,
+     "bid_lag_s": 0.4,
+     "pnl": -3.465,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.3792172742865446
+    },
+    "C_cross_5s": {
+     "triggered": true,
+     "trigger_t": 1791588459.011831,
+     "tte": 139.7660310268402,
+     "bid": 0.28,
+     "bid_lag_s": 1.22,
+     "pnl": -2.97,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.3978281062191415
+    },
+    "D_cross_15s": {
+     "triggered": true,
+     "trigger_t": 1791588469.011831,
+     "tte": 129.46222496032715,
+     "bid": 0.21,
+     "bid_lag_s": 1.53,
+     "pnl": -3.355,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.41739831578729353
+    },
+    "E_cross_30s": {
+     "triggered": true,
+     "trigger_t": 1791588484.011831,
+     "tte": 115.93095302581787,
+     "bid": 0.23,
+     "bid_lag_s": 0.06,
+     "pnl": -3.245,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.417466390583064
+    },
+    "F_cross_sig0.5_tte120": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": -3.1549189374999997,
+     "trigger_t": 1791588534.505494,
+     "note": "censored by actual exit -> equals actual"
+    },
+    "G_cross_sig1_tte60": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": -3.1549189374999997,
+     "trigger_t": 1791588573.535813,
+     "note": "censored by actual exit -> equals actual"
+    }
+   }
+  },
+  "btc-updown-15m-1791589500": {
+   "slug": "btc-updown-15m-1791589500",
+   "side": "UP",
+   "avg_entry": 0.7400000000000001,
+   "qty": 5.5,
+   "actual_pnl": -3.145424353148,
+   "runtime_outcome": "DOWN",
+   "hold_to_settlement_pnl_runtime_outcome": -4.07,
+   "t_exit": 1791590282.774905,
+   "policies": {
+    "A_current_actual": {
+     "pnl": -3.145424353148
+    },
+    "B_immediate_cross": {
+     "triggered": true,
+     "trigger_t": 1791590269.048436,
+     "tte": 129.7450611591339,
+     "bid": 0.17,
+     "bid_lag_s": 1.21,
+     "pnl": -3.135,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.4456120201025692
+    },
+    "C_cross_5s": {
+     "triggered": true,
+     "trigger_t": 1791590274.048436,
+     "tte": 125.81164216995239,
+     "bid": 0.17,
+     "bid_lag_s": 0.14,
+     "pnl": -3.135,
+     "pnl_basis": "gross at recorded top-of-book bid, depth unverified, fees excluded",
+     "sigma": 0.45233555711472323
+    },
+    "D_cross_15s": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": -3.145424353148,
+     "trigger_t": 1791590284.048436,
+     "note": "censored by actual exit -> equals actual"
+    },
+    "E_cross_30s": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": -3.145424353148,
+     "trigger_t": 1791590299.048436,
+     "note": "censored by actual exit -> equals actual"
+    },
+    "F_cross_sig0.5_tte120": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": -3.145424353148,
+     "trigger_t": 1791590296.997683,
+     "note": "censored by actual exit -> equals actual"
+    },
+    "G_cross_sig1_tte60": {
+     "triggered": "AFTER_ACTUAL_EXIT",
+     "pnl": -3.145424353148,
+     "trigger_t": 1791590385.689034,
+     "note": "censored by actual exit -> equals actual"
+    }
+   }
+  }
+ },
+ "decisions": {
+  "WHY_DID_TODAY_LOSE_rank": [
+   "RANDOM_SMALL_SAMPLE+near-tie settlement (MEDIUM)",
+   "flip-reversal via small BTC move near strike, token repriced before TWAP (MEDIUM)",
+   "stop timing: breaker gated by trend/TTE, ~+1 USD per loser vs first threshold touch (LOW-MEDIUM; winner also touched threshold)",
+   "execution (one FOK reject, 24s; fill better than first limit) (LOW)",
+   "entry selection (LOW)",
+   "liquidity (LOW)",
+   "volatility (LOW; vol was LOW)"
+  ],
+  "TODAY_WEEKEND_VOLATILITY_VS_PRIOR_WEEKENDS": "LOWER (Binance proxy, same UTC window; Chainlink same-hour weekend comparison INSUFFICIENT)",
+  "TODAY_FLIP_BEHAVIOR_VS_PRIOR_WEEKENDS": "INSUFFICIENT",
+  "OLD_WEEKEND_ANALYSIS_VALIDITY": "WEAK",
+  "CROSS_PROVIDED_EARLIER_WARNING_THAN_LOSS_THRESHOLD": "NO (n=2 losers; cross 52-63s AFTER threshold; winner cross was false alarm)",
+  "ABSOLUTE_BREAKER_TOO_LATE": "MIXED",
+  "SIGMA_ADDED_USEFUL_INFORMATION": "INSUFFICIENT",
+  "IS_FLIP_STOP_V1_NOW_JUSTIFIED": "NO"
+ }
+}

@@ -12,11 +12,32 @@ from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
 from bot.inventory import InventoryLedger
+from bot.market_data import fetch_gamma_market_by_slug_sync
+from bot.protocol_v2 import PROTOCOL_V2, UnsupportedMarketProtocol, select_market_assets
 from bot.wallet_ops import (
     ensure_balance_clob_client,
     fetch_conditional_balance,
     refresh_collateral_balance,
 )
+
+
+def _startup_onchain_inventory_qty(strategy: Any, instrument_id: Any) -> Decimal:
+    from bot.execution_safety import real_order_submission_allowed
+
+    # Dry-run shares the wallet but must never adopt its real holdings.
+    if not real_order_submission_allowed(strategy):
+        return Decimal("0")
+    try:
+        token_id = strategy._extract_token_id_from_instrument(strategy._instrument_key(instrument_id))
+        balance = strategy._get_conditional_balance_for_token(token_id=token_id, force_refresh=True)
+    except Exception as exc:
+        logger.warning(f"Startup on-chain inventory lookup failed for {instrument_id}: {exc}")
+        return Decimal("0")
+    # Sub-share fee dust is not tradable inventory (same 1-share bar as
+    # the ghost-inventory reconciliation).
+    if balance is None or Decimal(str(balance)) < Decimal("1"):
+        return Decimal("0")
+    return Decimal(str(balance))
 
 
 class StrategyRecoveryMixin:
@@ -27,6 +48,100 @@ class StrategyRecoveryMixin:
     decision logic. Keeping them out of `run_bot.py` reduces blast radius for
     future changes and makes restart / recovery behavior easier to reason about.
     """
+
+    @staticmethod
+    def _resolved_gamma_winner_token_id(market: object) -> tuple[str, str] | None:
+        """Return (winner side, asset id) only for an unambiguous Gamma result.
+
+        The asset ids come from the market's protocol (clobTokenIds for v1,
+        positionIds for v2).  A V2 market must also report
+        ``resolutionStatus == "resolved"``; ``closed`` alone is not settlement
+        evidence there.  Unknown versions are never treated as settled.
+        """
+        if not isinstance(market, dict) or not bool(market.get("closed")):
+            return None
+        try:
+            assets = select_market_assets(market)
+        except UnsupportedMarketProtocol:
+            return None
+        if assets.protocol == PROTOCOL_V2 and str(market.get("resolutionStatus") or "").lower() != "resolved":
+            return None
+        try:
+            prices = market.get("outcomePrices", [])
+            if isinstance(prices, str):
+                prices = json.loads(prices)
+            values = {
+                str(side).strip().upper(): (float(price), str(token))
+                for side, price, token in zip(assets.outcomes, prices, assets.asset_ids)
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        for winner, loser in (("UP", "DOWN"), ("DOWN", "UP")):
+            winner_value = values.get(winner)
+            loser_value = values.get(loser)
+            if (
+                winner_value is not None
+                and loser_value is not None
+                and winner_value[0] >= 0.99
+                and loser_value[0] <= 0.01
+                and winner_value[1]
+            ):
+                return winner, winner_value[1]
+        return None
+
+    def _reconcile_unsettled_session_cycles_on_startup(self) -> int:
+        """Apply verified, previously-missed settlement PnL exactly once.
+
+        Only already-expired current-Taipei-day markets with a Gamma-confirmed
+        winning token are eligible.  Any unavailable/ambiguous external result
+        remains unreconciled rather than being guessed as a loss.
+        """
+        db = getattr(self, "trade_db", None)
+        if db is None:
+            return 0
+        date = self._taipei_session_date()
+        finder = getattr(db, "find_unsettled_expired_session_slugs", None)
+        reconcile = getattr(db, "reconcile_startup_resolved_cycle", None)
+        if not callable(finder) or not callable(reconcile):
+            return 0
+        applied = 0
+        for slug in finder(date):
+            market = fetch_gamma_market_by_slug_sync(slug)
+            winner = self._resolved_gamma_winner_token_id(market)
+            if winner is None:
+                logger.warning(
+                    "Startup settlement reconciliation deferred: Gamma outcome is unavailable "
+                    f"or ambiguous for slug={slug}"
+                )
+                continue
+            outcome, token_id = winner
+            result = reconcile(
+                slug=slug,
+                winning_token_id=token_id,
+                settlement_source="gamma_closed_decisive_outcome",
+            )
+            if result is None:
+                continue
+            settlement_pnl = Decimal(str(result.get("settlement_pnl_usdc", 0)))
+            recorder = getattr(self, "_record_session_realized_pnl", None)
+            if callable(recorder) and settlement_pnl != 0:
+                recorder(settlement_pnl, source="startup_settlement_reconciliation")
+            self._db_strategy_event(
+                "STARTUP_SETTLEMENT_RECONCILED",
+                {
+                    "slug": slug,
+                    "outcome": outcome,
+                    "settlement_pnl_usdc": float(settlement_pnl),
+                    "cycle_combined_pnl_usdc": float(result.get("cycle_combined_pnl_usdc", 0)),
+                    "source": "gamma_closed_decisive_outcome",
+                },
+            )
+            logger.warning(
+                "Startup settlement reconciliation applied: "
+                f"slug={slug} outcome={outcome} settlement_pnl={float(settlement_pnl):+.4f}"
+            )
+            applied += 1
+        return applied
 
     def _rebuild_inventory_state_from_db(
         self,
@@ -72,6 +187,7 @@ class StrategyRecoveryMixin:
             fill_qty = Decimal(str(row["qty"] or 0))
             fee_usdc = Decimal(str(row["commission_usdc"] or 0))
             fee_shares = Decimal("0")
+            payload = {}
             try:
                 payload = json.loads(str(row["payload_json"] or "{}"))
                 if isinstance(payload, dict):
@@ -95,6 +211,16 @@ class StrategyRecoveryMixin:
                 fee_shares=fee_shares,
                 now_ts=first_fill_ts or time.time(),
             )
+
+            # Restore only persisted research identity; never infer it from
+            # the newest scale-in or use it for execution/cost-basis authority.
+            restored = ledger.get(inst_key, {})
+            if Decimal(str(restored.get("qty", 0))) <= 0:
+                restored.pop("position_lifecycle_id", None)
+                restored.pop("entry_client_order_id", None)
+            elif isinstance(payload, dict) and payload.get("position_lifecycle_id"):
+                restored["position_lifecycle_id"] = payload["position_lifecycle_id"]
+                restored["entry_client_order_id"] = payload.get("entry_client_order_id")
 
         state = ledger.get(inst_key)
         if not state:
@@ -138,7 +264,10 @@ class StrategyRecoveryMixin:
                 """
                 SELECT ts, price, qty, payload_json
                 FROM order_events
-                WHERE event_type='ORDER_SUBMIT'
+                WHERE event_type IN (
+                    'ORDER_SUBMIT', 'ORDER_MAKER_INTENT',
+                    'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT'
+                )
                   AND UPPER(COALESCE(side, ''))='BUY'
                   AND ts >= ?
                   AND (
@@ -183,6 +312,60 @@ class StrategyRecoveryMixin:
             }
         return None
 
+    def _cancel_orphan_venue_orders_on_startup(self) -> int:
+        """Cancel resting BTC 15-min orders that no strategy state owns.
+
+        The live process lock makes this bot the only writer for the wallet, so
+        an open order on a BTC 15-min market at startup can only be a leftover
+        from a crashed or killed process. Venue reconciliation re-creates such
+        orders with framework-generated ids, so ownership is decided by market,
+        not by client-order-id prefix. Dry-run never sends a cancel.
+        """
+        from bot.execution_safety import real_order_submission_allowed
+
+        if not real_order_submission_allowed(self):
+            return 0
+        try:
+            open_orders = list(self.cache.orders_open() or [])
+        except Exception as exc:
+            logger.error(f"Startup orphan-order scan failed; blocking new BUYs: {exc}")
+            block = getattr(self, "_block_new_buys_for_trade_db", None)
+            if callable(block):
+                block("startup_orphan_order_scan_failed")
+            return 0
+        tracked = {
+            str(getattr(state.get("order"), "client_order_id", "") or "")
+            for state in getattr(self, "active_maker_orders", {}).values()
+        }
+        cancelled = 0
+        for order in open_orders:
+            coid = str(getattr(order, "client_order_id", "") or "")
+            if coid in tracked:
+                continue
+            instrument = self.cache.instrument(order.instrument_id)
+            slug = self._extract_market_slug_from_instrument(instrument) if instrument is not None else ""
+            if not slug.startswith("btc-updown-15m-"):
+                continue
+            try:
+                self.cancel_order(order)
+                cancelled += 1
+            except Exception as exc:
+                logger.error(f"Startup orphan-order cancel failed for {coid}: {exc}")
+                continue
+            logger.warning(
+                f"Cancelled orphan venue order on startup: coid={coid} slug={slug} "
+                f"side={getattr(order, 'side', '')} qty={getattr(order, 'quantity', '')}"
+            )
+            self._db_order_event(
+                event_type="ORDER_ORPHAN_CANCEL_ON_START",
+                client_order_id=coid,
+                side=str(getattr(getattr(order, "side", None), "name", "") or ""),
+                status="PENDING_CANCEL",
+                reason="untracked_open_order_at_startup",
+                payload={"slug": slug, "instrument_id": str(order.instrument_id)},
+            )
+        return cancelled
+
     def _rehydrate_inventory_state_on_startup(self) -> None:
         if self.live_inventory_cost or self.inventory_delta_shares > 0:
             return
@@ -203,6 +386,14 @@ class StrategyRecoveryMixin:
         restored_items: List[Dict[str, Any]] = []
         for inst in restore_targets:
             open_qty = self._get_sellable_qty_for_current_instrument(instrument_id=inst)
+            qty_source = "cache_position"
+            if open_qty <= 0:
+                # The framework cache has no positions yet at on_start, so a
+                # mid-market restart used to drop held inventory entirely and
+                # settlement booked the cycle as flat.  The wallet's
+                # conditional-token balance is the authority for what we hold.
+                open_qty = _startup_onchain_inventory_qty(self, inst)
+                qty_source = "onchain_balance"
             if open_qty <= 0:
                 continue
             state = self._rebuild_inventory_state_from_db(inst, target_qty=open_qty)
@@ -212,6 +403,7 @@ class StrategyRecoveryMixin:
                     "avg_entry_price": Decimal("0"),
                     "entry_fee_remaining": Decimal("0"),
                     "opened_ts": time.time(),
+                    "cost_basis_status": "unknown",
                 }
                 logger.warning(
                     f"Inventory rehydrate fallback: restored qty without cost basis "
@@ -224,6 +416,8 @@ class StrategyRecoveryMixin:
                     "instrument_id": self._instrument_key(inst),
                     "qty": float(Decimal(str(state.get("qty", "0")))),
                     "avg_entry_price": float(Decimal(str(state.get("avg_entry_price", "0")))),
+                    "cost_basis_status": str(state.get("cost_basis_status") or "recovered"),
+                    "qty_source": qty_source,
                 }
             )
 

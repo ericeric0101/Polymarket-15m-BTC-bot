@@ -1,39 +1,398 @@
 from __future__ import annotations
 
+import re
+import json
+import sqlite3
+
 import time
+import threading
 from decimal import Decimal
 from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from loguru import logger
+from bot.execution_penalty_snapshot import load_execution_penalty_snapshot
+from bot.session_pnl_guard import SessionPnlGuard, SessionPnlGuardConfig, SessionPnlState, SessionBuyGuardDecision
+
+
+def _record_sync_journal_write_duration(
+    strategy: Any,
+    event_type: str,
+    duration_ms: float,
+    *,
+    now_ts: Optional[float] = None,
+) -> Optional[dict[str, Any]]:
+    """Aggregate synchronous journal I/O cost without adding more DB writes."""
+    lock = getattr(strategy, "_journal_write_timing_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        strategy._journal_write_timing_lock = lock
+    now = time.monotonic() if now_ts is None else float(now_ts)
+    with lock:
+        state = getattr(strategy, "_journal_write_timing_state", None)
+        if state is None:
+            state = {
+                "started": now,
+                "count": 0,
+                "total_ms": 0.0,
+                "max_ms": 0.0,
+                "over_50ms": 0,
+                "over_250ms": 0,
+                "event_counts": {},
+            }
+            strategy._journal_write_timing_state = state
+        elapsed_ms = max(0.0, float(duration_ms))
+        state["count"] += 1
+        state["total_ms"] += elapsed_ms
+        state["max_ms"] = max(float(state["max_ms"]), elapsed_ms)
+        state["over_50ms"] += int(elapsed_ms > 50.0)
+        state["over_250ms"] += int(elapsed_ms > 250.0)
+        event_counts = state["event_counts"]
+        event_counts[str(event_type)] = int(event_counts.get(str(event_type), 0)) + 1
+        if now - float(state["started"]) < 10.0:
+            return None
+        report = {
+            "window_sec": max(0.0, now - float(state["started"])),
+            "count": int(state["count"]),
+            "total_ms": round(float(state["total_ms"]), 3),
+            "avg_ms": round(float(state["total_ms"]) / max(1, int(state["count"])), 3),
+            "max_ms": round(float(state["max_ms"]), 3),
+            "over_50ms": int(state["over_50ms"]),
+            "over_250ms": int(state["over_250ms"]),
+            "event_counts": dict(event_counts),
+        }
+        strategy._journal_write_last_report = report
+        strategy._journal_write_timing_state = {
+            "started": now,
+            "count": 0,
+            "total_ms": 0.0,
+            "max_ms": 0.0,
+            "over_50ms": 0,
+            "over_250ms": 0,
+            "event_counts": {},
+        }
+        return report
+
+
+def take_sync_journal_write_report(strategy: Any) -> Optional[dict[str, Any]]:
+    """Take the most recently completed journal-write window, if any."""
+    lock = getattr(strategy, "_journal_write_timing_lock", None)
+    if lock is None:
+        return None
+    with lock:
+        report = getattr(strategy, "_journal_write_last_report", None)
+        strategy._journal_write_last_report = None
+        return report
+
+
+_TOKEN_IN_INSTRUMENT = re.compile(r"-([0-9]+)\.POLYMARKET$")
+
+
+def order_event_token_id(strategy: Any, instrument_id: Optional[str]) -> Optional[str]:
+    """Token of the row's own instrument; the current active side only as a fallback."""
+    match = _TOKEN_IN_INSTRUMENT.search(str(instrument_id or ""))
+    if match:
+        return match.group(1)
+    return getattr(strategy, "current_token_id", None)
 
 
 class StrategyDBRuntimeMixin:
+    @staticmethod
+    def _taipei_session_date(now_ts: Optional[float] = None) -> str:
+        local = datetime.fromtimestamp(
+            time.time() if now_ts is None else float(now_ts), ZoneInfo("Asia/Taipei")
+        )
+        minute_of_day = local.hour * 60 + local.minute
+        if minute_of_day >= 19 * 60 + 30:
+            # Night session starts at 19:30 and is keyed by its start date.
+            return local.date().isoformat()
+        if minute_of_day < 7 * 60 + 30:
+            # After midnight, retain the previous evening's session key.
+            return (local.date() - timedelta(days=1)).isoformat()
+        # If the bot is unexpectedly run during the day, isolate that PnL from
+        # the overnight session rather than mixing it into the next night.
+        return f"{local.date().isoformat()}-day"
+
+    def _session_guard_payload(self, decision: SessionBuyGuardDecision) -> Dict[str, Any]:
+        return {
+            "session_date_taipei": decision.session_date_taipei,
+            "realized_pnl_usdc": float(decision.realized_pnl_usdc),
+            "realized_high_water_usdc": float(decision.realized_high_water_usdc),
+            "drawdown_from_high_usdc": float(decision.drawdown_from_high_usdc),
+            "profit_guard_armed": decision.armed,
+            "buy_lock_reason": decision.reason if not decision.allowed else "",
+            "mode": decision.mode,
+            "state": decision.state,
+            "target_protection_active": decision.target_protection_active,
+            "normalized_target_usdc": float(decision.normalized_target_usdc or 0),
+            "current_allowed_drawdown_usdc": float(decision.current_allowed_drawdown_usdc or 0),
+            "shadow_would_block": decision.shadow_would_block,
+        }
+
+    def _cache_monthly_pnl_status(
+        self, monthly: Optional[Decimal], target: Optional[Decimal], now_ts: Optional[float] = None,
+    ) -> None:
+        """Cache canonical monthly reconstruction for read-only STATUS display."""
+        progress = monthly / target * Decimal("100") if monthly is not None and target else None
+        self._monthly_pnl_status = {
+            "realized_pnl_usdc": monthly, "target_usdc": target,
+            "progress_pct": progress, "updated_ts": time.time() if now_ts is None else float(now_ts),
+        }
+
+    def _initialize_session_pnl_guard(self, now_ts: Optional[float] = None) -> None:
+        config = SessionPnlGuardConfig(
+            mode=str(getattr(self, "session_pnl_guard_mode", "legacy") or "legacy"),
+            enabled=bool(getattr(self, "session_pnl_guard_enabled", True)),
+            profit_arm_usdc=Decimal(str(getattr(self, "session_profit_arm_usdc", "8"))),
+            profit_drawdown_usdc=Decimal(str(getattr(self, "session_profit_drawdown_usdc", "4"))),
+            hard_profit_lock_enabled=bool(getattr(self, "session_hard_profit_lock_enabled", False)),
+            hard_profit_lock_usdc=Decimal(str(getattr(self, "session_hard_profit_lock_usdc", "10"))),
+            max_loss_enabled=bool(getattr(self, "session_max_loss_enabled", True)),
+            max_loss_usdc=Decimal(str(getattr(self, "session_max_loss_usdc", "8"))),
+            monthly_net_target_usdc=(
+                Decimal(str(getattr(self, "monthly_net_target_usdc")))
+                if getattr(self, "monthly_net_target_usdc", None) is not None else None
+            ),
+            per_trade_risk_usdc=(
+                Decimal(str(getattr(self, "session_guard_per_trade_risk_usdc")))
+                if getattr(self, "session_guard_per_trade_risk_usdc", None) is not None else None
+            ),
+        )
+        # Do not silently turn a malformed V2 risk boundary into an arbitrary
+        # legacy threshold.  Settings validates this for normal startup; this
+        # additional guard protects reduced test/legacy hosts too.
+        if config.is_target_scaled_v2:
+            config.target_scaled_thresholds()
+        date = self._taipei_session_date(now_ts)
+        loaded = self.trade_db.load_session_pnl_state(date) if getattr(self, "trade_db", None) else None
+        mode_changed = bool(loaded and str(loaded.get("guard_mode") or "legacy") != config.mode)
+        if loaded:
+            state = SessionPnlState.from_mapping(loaded)
+            if mode_changed:
+                # Accounting survives policy changes, including active-cycle
+                # SELL deltas absent from completed-cycle reconstruction.
+                state.profit_guard_armed = False
+                state.buy_lock_active = False
+                state.buy_lock_reason = ""
+                state.guard_mode = config.mode
+        else:
+            reconstructed = self.trade_db.reconstruct_session_pnl_state(date) if getattr(self, "trade_db", None) else {"session_date_taipei": date}
+            state = SessionPnlState.from_mapping(reconstructed)
+        self._session_pnl_guard = SessionPnlGuard(config, session_date=date, state=state)
+        self._session_pnl_guard_created_ts = time.time() if now_ts is None else float(now_ts)
+        decision = self._session_pnl_guard.decision()
+        if config.is_target_scaled_v2:
+            self._update_monthly_pnl_cache(now_ts)
+            monthly = self.monthly_realized_pnl_usdc(now_ts)
+            progress = (
+                monthly / decision.monthly_target_usdc * Decimal("100")
+                if monthly is not None and decision.monthly_target_usdc else None
+            )
+            self._cache_monthly_pnl_status(monthly, decision.monthly_target_usdc, now_ts)
+            logger.info(
+                "[SESSION PNL GUARD V2] "
+                f"mode={config.mode.upper()} monthly_target=${decision.monthly_target_usdc:.2f} "
+                f"normalized_target=${decision.normalized_target_usdc:.2f} "
+                f"R=${config.per_trade_risk_usdc:.2f} arm=${config.target_scaled_thresholds()['profit_arm_usdc']:.2f} "
+                f"normal_trail=${config.target_scaled_thresholds()['normal_profit_drawdown_usdc']:.2f} "
+                f"target_trail=${config.target_scaled_thresholds()['target_profit_drawdown_usdc']:.2f} "
+                f"hard_lock=${config.target_scaled_thresholds()['hard_profit_lock_usdc']:.2f} "
+                f"max_loss=-${config.target_scaled_thresholds()['max_loss_usdc']:.2f} "
+                f"month={'MONTHLY_PNL_NOT_RECONSTRUCTABLE' if monthly is None else f'{monthly:+.2f}'} "
+                f"month_progress={'n/a' if progress is None else f'{progress:.1f}%'} "
+                f"session={decision.realized_pnl_usdc:+.2f} hwm={decision.realized_high_water_usdc:+.2f} "
+                f"state={decision.state} BUY={'ALLOWED' if decision.allowed else 'BLOCKED'}"
+            )
+        if getattr(self, "trade_db", None) and not loaded:
+            self._persist_session_pnl_guard(event_type="SESSION_DAY_RESET")
+        elif loaded:
+            # ``SessionPnlGuard`` derives sticky arm/lock authority from the
+            # persisted PnL/high-water on construction.  Persist those derived
+            # flags immediately when an older row omitted them, so dashboards,
+            # restart diagnostics, and the live BUY boundary describe the same
+            # state.
+            loaded_armed = bool(loaded.get("profit_guard_armed", False))
+            loaded_locked = bool(loaded.get("buy_lock_active", False))
+            loaded_reason = str(loaded.get("buy_lock_reason") or "")
+            current = self._session_pnl_guard.state
+            if (
+                mode_changed or current.profit_guard_armed != loaded_armed
+                or current.buy_lock_active != loaded_locked
+                or current.buy_lock_reason != loaded_reason
+            ):
+                self._persist_session_pnl_guard(event_type="SESSION_GUARD_STATE_RECONCILED")
+
+    def _persist_session_pnl_guard(self, *, event_type: str = "SESSION_PNL_UPDATE") -> bool:
+        guard = getattr(self, "_session_pnl_guard", None)
+        if guard is None:
+            return False
+        state = guard.state
+        stored = {
+            "session_date_taipei": state.session_date_taipei,
+            "realized_pnl_usdc": state.realized_pnl_usdc,
+            "realized_high_water_usdc": state.realized_high_water_usdc,
+            "profit_guard_armed": state.profit_guard_armed,
+            "buy_lock_active": state.buy_lock_active,
+            "buy_lock_reason": state.buy_lock_reason,
+            "guard_mode": guard.config.mode,
+            "created_ts": getattr(self, "_session_pnl_guard_created_ts", time.time()),
+        }
+        if not self.trade_db or not self.trade_db.save_session_pnl_state(stored):
+            self._block_new_buys_for_trade_db("session_pnl_guard_persist_failed")
+            return False
+        self._db_strategy_event(event_type, self._session_guard_payload(guard.decision()))
+        return True
+
+    def session_buy_guard_decision(self, now_ts: Optional[float] = None) -> SessionBuyGuardDecision:
+        date = self._taipei_session_date(now_ts)
+        guard = getattr(self, "_session_pnl_guard", None)
+        if guard is None or guard.state.session_date_taipei != date:
+            self._initialize_session_pnl_guard(now_ts)
+            guard = self._session_pnl_guard
+        decision = guard.decision()
+        self._update_monthly_pnl_cache(now_ts)
+        return decision
+
+    def _update_monthly_pnl_cache(self, now_ts: Optional[float] = None) -> None:
+        target = getattr(self, "monthly_net_target_usdc", None)
+        db = getattr(self, "trade_db", None)
+        request = getattr(db, "request_monthly_pnl_refresh", None)
+        cached = getattr(db, "cached_monthly_pnl", None)
+        if target is None or not callable(request) or not callable(cached):
+            return
+        local = datetime.fromtimestamp(time.time() if now_ts is None else float(now_ts), ZoneInfo("Asia/Taipei"))
+        month = local.strftime("%Y-%m")
+        try:
+            request(month, only_if_new_month=True)
+            status = cached(month)
+            self._cache_monthly_pnl_status(status["realized_pnl_usdc"], Decimal(str(target)), status["updated_ts"])
+        except Exception as exc:
+            logger.warning(f"Monthly reporting cache unavailable: {type(exc).__name__}")
+            self._cache_monthly_pnl_status(None, Decimal(str(target)), now_ts)
+
+    def monthly_realized_pnl_usdc(self, now_ts: Optional[float] = None) -> Optional[Decimal]:
+        """Read reporting cache only; never query the journal on a fill path."""
+        status = getattr(self, "_monthly_pnl_status", None)
+        return status.get("realized_pnl_usdc") if isinstance(status, dict) else None
+
+    def _record_session_realized_pnl(self, delta_usdc: Decimal | float | str, *, source: str) -> bool:
+        guard = getattr(self, "_session_pnl_guard", None)
+        if guard is None:
+            self._initialize_session_pnl_guard()
+            guard = self._session_pnl_guard
+        before_armed, before_locked = guard.state.profit_guard_armed, guard.state.buy_lock_active
+        before_target = guard.decision().target_protection_active
+        guard.apply_realized_delta(delta_usdc)
+        if not self._persist_session_pnl_guard():
+            return False
+        decision = guard.decision()
+        monthly = self.monthly_realized_pnl_usdc()
+        amount = Decimal(str(delta_usdc))
+        target = decision.normalized_target_usdc
+        session_progress = (decision.realized_pnl_usdc / target * Decimal("100")) if target else None
+        month_progress = (
+            monthly / decision.monthly_target_usdc * Decimal("100")
+            if monthly is not None and decision.monthly_target_usdc else None
+        )
+        logger.info(
+            "[PNL] "
+            f"{'WIN' if amount >= 0 else 'LOSS'} {amount:+.2f} | "
+            f"Session {decision.realized_pnl_usdc:+.2f}"
+            + (f"/{target:.2f} ({session_progress:.1f}%)" if target and session_progress is not None else "")
+            + (f" | Month {monthly:+.2f}/{decision.monthly_target_usdc:.2f} ({month_progress:.1f}%)" if month_progress is not None else "")
+            + f" | HWM {decision.realized_high_water_usdc:+.2f} | Guard {decision.state} | BUY {'ALLOWED' if decision.allowed else 'BLOCKED'}"
+        )
+        if decision.armed and not before_armed:
+            self._db_strategy_event("SESSION_PROFIT_GUARD_ARMED", {**self._session_guard_payload(decision), "source": source})
+            logger.info(
+                "SESSION PROFIT GUARD ARMED: "
+                f"HWM={decision.realized_high_water_usdc:+.2f} "
+                f"allowed_drawdown={decision.current_allowed_drawdown_usdc:.2f} BUY=ALLOWED"
+            )
+        if decision.target_protection_active and not before_target:
+            logger.info(
+                "TARGET PROTECTION ACTIVE: "
+                f"HWM={decision.realized_high_water_usdc:+.2f} "
+                f"allowed_drawdown={decision.current_allowed_drawdown_usdc:.2f} BUY=ALLOWED"
+            )
+        if not decision.allowed and not before_locked:
+            self._db_strategy_event("SESSION_BUY_LOCKED", {**self._session_guard_payload(decision), "source": source})
+            logger.warning(
+                "SESSION PNL BUY LOCK ACTIVE: "
+                f"reason={decision.reason} session={decision.realized_pnl_usdc:+.2f} "
+                "SELL/STOP/REDEEM=ENABLED"
+            )
+        return True
+    def _run_startup_execution_calibration(self) -> None:
+        """Expose the synchronous startup calibration phase and its duration."""
+        started = time.perf_counter()
+        logger.info("Startup execution calibration started")
+        try:
+            self._apply_empirical_execution_penalty_calibration()
+        finally:
+            logger.info(
+                "Startup execution calibration finished: "
+                f"elapsed_sec={max(0.0, time.perf_counter() - started):.3f}"
+            )
+
+    def _block_new_buys_for_trade_db(self, reason: str) -> None:
+        self.trade_db_buy_ready = False
+        self.trade_db_health_reason = str(reason)
+        logger.error(f"Trade journal is not safe for restart recovery; blocking new BUYs: reason={reason}")
+
+
     def _apply_empirical_execution_penalty_calibration(self) -> None:
         """Replace synthetic entry stress with observed maker BUY adverse markouts."""
         engine = getattr(self, "maker_engine", None)
         config = getattr(engine, "config", None)
         if not config:
             return
-        config.maker_execution_empirical_adverse_markout_per_share = None
-        if not self.trade_db:
-            return
-
-        lookback_hours = float(self.maker_execution_empirical_markout_lookback_hours)
-        horizon_sec = 10
-        min_samples = int(self.maker_execution_empirical_markout_min_samples)
-        calibrations = self.trade_db.load_maker_buy_markout_calibrations(
-            lookback_hours=lookback_hours,
-            horizon_sec=horizon_sec,
-            min_samples=min_samples,
+        configured_lookback_hours = float(
+            self.maker_execution_empirical_markout_lookback_hours
         )
-        calibration = calibrations.get("global")
-        self.maker_buy_markout_calibrations = calibrations
-        if not calibration:
-            logger.info(
-                "Execution-cost calibration unavailable; new BUY entries remain blocked: "
-                f"horizon={horizon_sec}s lookback={lookback_hours:.0f}h min_samples={min_samples}"
+        # D.4 has explicitly rejected 48h: it has only 29 OOS targets and
+        # underestimates adverse markout more than the selected 168h policy.
+        # Keep selection in code, rather than letting an operator profile
+        # silently change the risk model at restart.
+        lookback_hours = 168.0
+        horizon_sec = 10
+        min_samples = max(30, int(self.maker_execution_empirical_markout_min_samples))
+        if configured_lookback_hours != lookback_hours:
+            logger.warning(
+                "Ignoring unsupported execution-cost lookback override: "
+                f"configured={configured_lookback_hours:.0f}h selected={lookback_hours:.0f}h"
             )
-            return
+        config.maker_execution_empirical_adverse_markout_per_share = None
+        calibrations: Dict[str, Dict[str, Any]] = {}
+        if self.trade_db:
+            calibrations = self.trade_db.load_maker_buy_markout_calibrations(
+                lookback_hours=lookback_hours,
+                horizon_sec=horizon_sec,
+                min_samples=min_samples,
+                taipei_weeknight_schema_v2_only=True,
+            )
+        calibration = calibrations.get("global")
+        if not calibration:
+            calibration = load_execution_penalty_snapshot()
+            if not calibration:
+                logger.warning(
+                    "Execution-cost calibration unavailable and portable D.4 snapshot is missing, "
+                    "invalid, or expired; new BUY entries remain blocked."
+                )
+                self.maker_buy_markout_calibrations = {}
+                return
+            calibrations = {"global": calibration}
+            event_type = "EXECUTION_PENALTY_FALLBACK_APPLIED"
+            logger.warning(
+                "Execution-cost calibration unavailable from current journal; "
+                "applying portable D.4 conservative 168h snapshot: "
+                f"snapshot={calibration['snapshot_id']} "
+                f"adverse_markout=${float(calibration['adverse_markout_per_share']):.5f}/share"
+            )
+        else:
+            event_type = "EXECUTION_PENALTY_CALIBRATED"
+        self.maker_buy_markout_calibrations = calibrations
 
         adverse_markout_ps = Decimal(str(calibration["adverse_markout_per_share"]))
         if adverse_markout_ps <= 0:
@@ -44,24 +403,35 @@ class StrategyDBRuntimeMixin:
             "sample_count": int(calibration["sample_count"]),
             "horizon_sec": horizon_sec,
             "lookback_hours": lookback_hours,
+            "configured_lookback_hours": configured_lookback_hours,
+            "minimum_independent_samples": min_samples,
             "adverse_markout_per_share": float(adverse_markout_ps),
             "raw_mean_adverse_markout_per_share": float(
                 calibration["raw_mean_adverse_markout_per_share"]
             ),
-            "winsor_cap_per_share": float(calibration["winsor_cap_per_share"]),
+            "winsor_cap_per_share": (
+                float(calibration["winsor_cap_per_share"])
+                if calibration.get("winsor_cap_per_share") is not None
+                else None
+            ),
             "method": str(calibration["method"]),
+            "fallback_applied": event_type == "EXECUTION_PENALTY_FALLBACK_APPLIED",
+            "snapshot_id": str(calibration.get("snapshot_id") or ""),
+            "snapshot_expires_at": str(calibration.get("expires_at") or ""),
+            "fallback_reason": str(calibration.get("fallback_reason") or ""),
+            "d4_evidence": calibration.get("evidence"),
             "regime_calibrations": calibrations,
             "risk_cap_at_fixed_shares_usdc": float(
                 adverse_markout_ps * Decimal(str(getattr(self, "maker_fixed_shares", 0)))
             ),
         }
         logger.info(
-            "Execution penalty calibrated from maker BUY fills: "
+            "Execution penalty loaded for maker BUY entries: "
             f"samples={payload['sample_count']} horizon={horizon_sec}s method={payload['method']} "
             f"adverse_markout=${float(adverse_markout_ps):.6f}/share "
             f"raw_mean=${payload['raw_mean_adverse_markout_per_share']:.6f}/share"
         )
-        self._db_strategy_event("EXECUTION_PENALTY_CALIBRATED", payload)
+        self._db_strategy_event(event_type, payload)
 
         # The only live exception to midpoint spread-capture economics is a
         # separately measured, high-score regime. Each distance bucket needs
@@ -72,7 +442,7 @@ class StrategyDBRuntimeMixin:
             lookback_hours=lookback_hours,
             min_score_abs=0.35,
             min_samples=30,
-        )
+        ) if self.trade_db else {}
         if not regimes:
             logger.info("Strong directional regime calibrations unavailable; midpoint economics remains canonical.")
             return
@@ -88,8 +458,15 @@ class StrategyDBRuntimeMixin:
     def _restore_market_risk_guards_from_trade_db_on_startup(self) -> None:
         if not self.trade_db or not self.current_market_slug:
             return
+        health = getattr(self.trade_db, "startup_health", lambda: {"ready": True})()
+        if not health.get("ready", False):
+            self._block_new_buys_for_trade_db(str(health.get("reason") or "startup_healthcheck_failed"))
+            return
         slug = str(self.current_market_slug)
         counts = self.trade_db.load_market_guard_counts(slug)
+        if counts is None:
+            self._block_new_buys_for_trade_db("risk_guard_query_failed")
+            return
         buy_count = int(counts.get("buy_count", 0))
         protective_exit_count = int(counts.get("protective_exit_count", 0))
         if buy_count <= 0 and protective_exit_count <= 0:
@@ -155,9 +532,79 @@ class StrategyDBRuntimeMixin:
                 **reconciled,
             },
         )
-    def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    def _apply_settlement_evidence_session_corrections(self) -> Dict[str, Any]:
+        """Idempotent per-market session-guard delta from settlement evidence (open session only).
+
+        For every market whose MARKET_CYCLE_PNL lies in the guard's current
+        session and whose effective PnL (monitoring.pnl_attribution) is final,
+        the guard should carry ``effective - journal estimate``. The increment
+        not yet applied is journaled first (SESSION_PNL_EVIDENCE_CORRECTION,
+        cumulative per market) and then applied once. Closed sessions are never
+        rewritten. Never touches orders or MARKET_CYCLE_PNL.
+        """
+        from monitoring.pnl_attribution import load_effective_market_pnl
+        from monitoring.trade_journal_db import SESSION_CORRECTION_EVENT, session_window_local
+
+        stats: Dict[str, Any] = {"applied": 0, "applied_usdc": 0.0, "skipped": {}}
+        guard = getattr(self, "_session_pnl_guard", None)
+        trade_db = getattr(self, "trade_db", None)
+        if guard is None or trade_db is None:
+            return stats
+        session_key = str(guard.state.session_date_taipei)
+        start_local, end_local = session_window_local(session_key)
+        conn = sqlite3.connect(f"file:{trade_db.db_path}?mode=ro", uri=True, timeout=30)
+        try:
+            cycles: Dict[str, Decimal] = {}
+            for ts, raw in conn.execute(
+                "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id"
+            ):
+                try:
+                    when = datetime.fromisoformat(str(ts))
+                    when = (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).astimezone(start_local.tzinfo)
+                    payload = json.loads(raw or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if start_local <= when < end_local and payload.get("slug"):
+                    cycles[str(payload["slug"])] = Decimal(str(payload.get("cycle_combined_pnl_usdc") or 0))
+            applied: Dict[str, Decimal] = {}
+            for slug, delta in conn.execute(
+                """SELECT json_extract(payload_json, '$.slug'), json_extract(payload_json, '$.delta_usdc')
+                   FROM strategy_events WHERE event_type=? AND json_extract(payload_json, '$.session_date_taipei')=?""",
+                (SESSION_CORRECTION_EVENT, session_key),
+            ):
+                applied[str(slug)] = applied.get(str(slug), Decimal("0")) + Decimal(str(delta or 0))
+        finally:
+            conn.close()
+        if not cycles:
+            return stats
+        effective = load_effective_market_pnl(trade_db.db_path, slugs=set(cycles))
+        for slug, journal_cycle in cycles.items():
+            row = effective.get(slug)
+            if row is None or not row["is_final"] or row["effective_pnl_usdc"] is None:
+                stats["skipped"][slug] = row["pnl_basis"] if row else "no_projection"
+                continue
+            target = Decimal(str(row["effective_pnl_usdc"])) - journal_cycle
+            increment = (target - applied.get(slug, Decimal("0"))).quantize(Decimal("0.000001"))
+            if abs(increment) < Decimal("0.01"):
+                continue
+            payload = {
+                "slug": slug, "session_date_taipei": session_key, "delta_usdc": float(increment),
+                "cumulative_delta_usdc": float(target), "pnl_basis": row["pnl_basis"],
+                "effective_pnl_usdc": row["effective_pnl_usdc"], "journal_cycle_pnl_usdc": float(journal_cycle),
+            }
+            if not self._db_strategy_event(SESSION_CORRECTION_EVENT, payload):
+                stats["skipped"][slug] = "journal_write_failed"
+                continue
+            if self._record_session_realized_pnl(increment, source="settlement_evidence_correction"):
+                stats["applied"] += 1
+                stats["applied_usdc"] += float(increment)
+            else:
+                stats["skipped"][slug] = "guard_persist_failed"
+        return stats
+
+    def _db_strategy_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> bool:
         if not self.trade_db:
-            return
+            return False
         payload_out: Dict[str, Any] = dict(payload or {})
         if self.current_market_slug and "slug" not in payload_out:
             payload_out["slug"] = self.current_market_slug
@@ -170,11 +617,37 @@ class StrategyDBRuntimeMixin:
             and (not payload_slug or payload_slug == str(self.current_market_slug or ""))
         ):
             payload_out["instrument_id"] = str(self.instrument_id)
-        self.trade_db.log_strategy_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            payload=payload_out,
-        )
+        try:
+            from bot.research.evidence import STRATEGY_TRACE_EVENTS
+            if event_type in STRATEGY_TRACE_EVENTS:
+                from bot.research.evidence import annotate_decision
+                payload_out = annotate_decision(self, payload_out,
+                    kind="ENTRY_DECISION" if event_type == "ENTRY_DECISION_TRACE" else "SESSION_GUARD_DECISION",
+                    decision=payload_out.get("should_quote") if event_type == "ENTRY_DECISION_TRACE" else not bool(payload_out.get("buy_lock_reason")),
+                    side=payload_out.get("side"), reason_code=payload_out.get("reason") or payload_out.get("buy_lock_reason"),
+                    now_ts=payload_out.get("observed_ts"), source_event_type=event_type)
+        except Exception:
+            pass
+        if event_type == "QUOTE_TRANSPORT_TELEMETRY":
+            # Optional observation only: reuse the bounded journal worker.
+            try:
+                payload_out.update(getattr(self, "collection_identity", {}))
+                return bool(self.trade_db.enqueue_strategy_event(self.run_id, event_type, payload_out))
+            except Exception:
+                return False
+        started = time.perf_counter()
+        try:
+            return bool(self.trade_db.log_strategy_event(
+                run_id=self.run_id,
+                event_type=event_type,
+                payload=payload_out,
+            ))
+        finally:
+            _record_sync_journal_write_duration(
+                self,
+                event_type,
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     def _db_order_event(
         self,
@@ -189,39 +662,60 @@ class StrategyDBRuntimeMixin:
         commission_usdc: Optional[float] = None,
         expected_net_usdc: Optional[float] = None,
         payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        instrument_id: Optional[str] = None,
+    ) -> bool:
         if not self.trade_db:
-            return
+            return False
         payload_out: Dict[str, Any] = dict(payload or {})
         if self.current_market_slug and "slug" not in payload_out:
             payload_out["slug"] = self.current_market_slug
         if self.current_market_slug and "market_slug" not in payload_out:
             payload_out["market_slug"] = self.current_market_slug
-        if self.instrument_id and "instrument_id" not in payload_out:
-            payload_out["instrument_id"] = str(self.instrument_id)
+        event_instrument_id = str(instrument_id or self.instrument_id or "")
+        if event_instrument_id and "instrument_id" not in payload_out:
+            payload_out["instrument_id"] = event_instrument_id
 
         side_out = side
         if side_out:
             side_norm = self._normalize_side_text(side_out)
             if side_norm:
                 side_out = side_norm.upper()
-        self.trade_db.log_order_event(
-            run_id=self.run_id,
-            event_type=event_type,
-            client_order_id=client_order_id,
-            venue_order_id=venue_order_id,
-            side=side_out,
-            price=price,
-            qty=qty,
-            status=status,
-            reason=reason,
-            instrument_id=str(self.instrument_id) if self.instrument_id else None,
-            token_id=self.current_token_id,
-            fee_rate_bps=self.last_observed_fee_rate_bps,
-            expected_net_usdc=expected_net_usdc,
-            commission_usdc=commission_usdc,
-            payload=payload_out,
-        )
+        try:
+            from bot.research.evidence import order_trace_expected
+            if order_trace_expected(event_type):
+                from bot.research.evidence import annotate_decision
+                payload_out = annotate_decision(self, payload_out, kind="EXECUTION_DECISION",
+                    decision=status, side=side_out, reason_code=reason, instrument_id=instrument_id or payload_out.get("submitted_instrument_id") or payload_out.get("instrument_id") or self.instrument_id,
+                    source_event_type=event_type, client_order_id=client_order_id)
+        except Exception:
+            pass
+        started = time.perf_counter()
+        try:
+            return bool(self.trade_db.log_order_event(
+                run_id=self.run_id,
+                event_type=event_type,
+                client_order_id=client_order_id,
+                venue_order_id=venue_order_id,
+                side=side_out,
+                price=price,
+                qty=qty,
+                status=status,
+                reason=reason,
+                instrument_id=event_instrument_id or None,
+                # The row's own instrument, not the current active side (which
+                # flips to the paired token after an invalidation).
+                token_id=order_event_token_id(self, instrument_id),
+                fee_rate_bps=self.last_observed_fee_rate_bps,
+                expected_net_usdc=expected_net_usdc,
+                commission_usdc=commission_usdc,
+                payload=payload_out,
+            ))
+        finally:
+            _record_sync_journal_write_duration(
+                self,
+                event_type,
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     def _db_buy_path_diagnostic(
         self,
@@ -273,12 +767,20 @@ class StrategyDBRuntimeMixin:
         strike_source = str(recovered.get("strike_source") or "trade_db_recovered")
         self.market_strike_cache_by_slug[slug] = strike
         self.market_strike_source_by_slug[slug] = strike_source
-        # A pre-D.3 journal lock did not retain both source candidates. It is
-        # useful for diagnostics only; a fresh market-scoped provenance check
-        # must verify it before any new BUY can rely on it.
+        # A legacy lock without an explicit verified status remains diagnostic
+        # only.  Newer locks persist both authoritative source and verification
+        # status, so a process restart must not downgrade a proven same-market
+        # opening strike and disable every entry until the next rollover.
         if not hasattr(self, "market_strike_status_by_slug"):
             self.market_strike_status_by_slug = {}
-        self.market_strike_status_by_slug[slug] = "recovered_unverified"
+        recovered_verified = bool(
+            recovered.get("authoritative", False)
+            and self._is_authoritative_strike_source(strike_source)
+            and recovered.get("strike_status") == "verified"
+        )
+        self.market_strike_status_by_slug[slug] = (
+            "verified" if recovered_verified else "recovered_unverified"
+        )
         self.market_strike_provisional_by_slug.pop(slug, None)
         self.market_strike_provisional_source_by_slug.pop(slug, None)
         if self.current_market_open_spot is None or Decimal(str(self.current_market_open_spot or "0")) <= 0:
@@ -296,6 +798,7 @@ class StrategyDBRuntimeMixin:
                 "strike": float(strike),
                 "strike_source": strike_source,
                 "authoritative": bool(recovered.get("authoritative", False)),
+                "strike_status": self.market_strike_status_by_slug[slug],
                 "recovered_from_ts": recovered.get("ts"),
                 "sample_dt_sec": sample_dt_sec,
             },

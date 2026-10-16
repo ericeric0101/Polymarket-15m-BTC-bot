@@ -3,54 +3,86 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
 from bot.adapter_overrides import (
+    batch_order_book_deltas,
     build_transport_heartbeat_quote,
+    build_polymarket_websocket_config,
     coalesce_price_changes_by_asset,
+    enqueue_shutdown_sentinels,
     install_runtime_compatibility_overrides,
+    is_polymarket_pong,
     position_fetch_retry_delay_sec,
     record_quote_data_engine_queue_depth,
+    record_quote_data_engine_publish_ts,
     quote_provenance_for_tick,
     record_quote_provenance,
     retain_latest_quote,
+    record_data_engine_queue_telemetry,
     should_emit_quote_heartbeat,
     should_publish_order_book_deltas,
     should_emit_transport_heartbeat,
+    should_publish_l2_snapshot,
 )
+import bot.launcher as launcher
 from bot.app_config import AppConfig
+from bot.db_runtime import _record_sync_journal_write_duration, take_sync_journal_write_report
 from bot.entry_quality import evaluate_entry_quality_adjustment
 from bot.execution_events import is_benign_cancel_reject_reason, reconcile_benign_cancel_reject
 from bot.edge_observation import build_quote_age_telemetry
 from bot.enums import ActiveSide, MarketPhase
+from bot.entry_session_policy import EntrySessionDecision, TAIPEI
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.fill_ledger import FillLedgerMixin, classify_fill_liquidity
 from bot.lifecycle_runtime import StrategyLifecycleMixin
-from bot.lead_lag_observation import LeadLagObservationMixin
 from bot.lifecycle import resolve_bi_side_market_selection
 from bot.market_runtime import (
+    find_btc_instrument,
     handle_quote_tick,
+    _record_quote_callback_duration,
+    quote_delivery_is_fresh,
     quote_event_is_fresh,
     quote_tick_adapter_timestamp,
     quote_transport_is_fresh,
+    promote_prewarm_quotes_to_current_market,
+    next_market_pair_instruments,
     refresh_quote_tick_subscriptions,
+    replace_market_subscriptions,
 )
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.process_lock import ProcessLock
-from bot.ops import should_attempt_quote_watchdog_recovery, should_run_quote_watchdog
+from bot.ops import (
+    quote_age_status_reason,
+    should_attempt_quote_watchdog_recovery,
+    should_run_quote_watchdog,
+)
 from bot.launcher import (
     MarketDiscoveryUnavailable,
     _MARKET_DISCOVERY_RETRY_SEC,
+    _live_exec_engine_config,
+    node_engines_disconnected,
+    threadsafe_node_stop_callback,
     _strategy_requested_rollover,
     _strategy_rollover_exposure_reasons,
+    rollover_restart_label,
+    wait_for_node_engines_disconnected,
+    wait_for_client_disconnect_tasks,
+    dispose_node_and_wait_for_engines_disconnected,
+    unrequested_clean_node_return_requires_stop,
 )
 from bot.pricing_runtime import PricingRuntimeMixin
+from bot.quote_runtime import QuoteRuntimeMixin
 from bot.models import DecisionPhase, DecisionRegime, ExitDecisionType, MarketSnapshot, PositionState, QuoteMode, SignalDecision
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.price_streams import (
     build_polymarket_chainlink_subscribe_payload,
+    chainlink_observation_ts,
     extract_polymarket_chainlink_tick,
+    rtds_application_heartbeat_due,
 )
 from bot.quoting import apply_quote_plan_guards
 from bot.quote_service import (
@@ -58,6 +90,7 @@ from bot.quote_service import (
     apply_entry_quality_quote_placement,
     apply_shadow_entry_veto,
     apply_high_entry_price_size_adjustment,
+    apply_share_entry_sizing,
     apply_weak_pfair_size_adjustment,
     build_desired_quote_entry,
     compute_loss_sell_policy,
@@ -95,11 +128,146 @@ class DummyOrder:
         self.client_order_id = client_order_id
 
 
+
+
+
+
+
+
+
+
 def test_gamma_publication_gap_is_classified_as_retryable_market_availability():
     error = MarketDiscoveryUnavailable("instrument IDs not published")
 
     assert isinstance(error, RuntimeError)
     assert _MARKET_DISCOVERY_RETRY_SEC == 15.0
+
+
+def test_preflight_returns_verified_auth_for_node_build_without_redis(monkeypatch):
+    auth = {
+        "private_key": "key", "api_key": "api", "api_secret": "secret",
+        "passphrase": "pass", "funder": "wallet", "signature_type": "0",
+    }
+    for name in ("POLYMARKET_PK", "POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_PASSPHRASE"):
+        monkeypatch.setenv(name, "configured")
+    monkeypatch.setattr(launcher, "resolve_polymarket_auth", lambda: auth)
+    monkeypatch.setattr(launcher, "probe_polymarket_auth", lambda _auth: (launcher.AUTH_OK, "test"))
+    monkeypatch.setattr(launcher, "resolve_btc_15m_market_slugs", lambda: ["slug"])
+    monkeypatch.setattr(
+        launcher, "resolve_best_btc_15m_market",
+        lambda _slugs: ("slug", [SimpleNamespace(value="up"), SimpleNamespace(value="down")]),
+    )
+
+    assert launcher.run_preflight_checks(simulation=False) == auth
+    assert not hasattr(launcher, "init_redis")
+
+
+def test_live_exec_engine_accepts_venue_reported_overfills_for_reconciliation():
+    assert _live_exec_engine_config().allow_overfills is True
+
+
+def test_verified_inventory_overage_is_sell_only_and_preserves_sell_orders():
+    class Host(QuoteRuntimeMixin):
+        def __init__(self):
+            self.inventory_delta_shares = Decimal("10.508475")
+            self.maker_max_inventory_shares = Decimal("10")
+            self._inventory_overage_sell_only = False
+            self.cancel_calls = []
+            self.events = []
+
+        def _cancel_maker_order_side(self, side, *, reason="risk", instrument_id=None):
+            self.cancel_calls.append((side, reason, instrument_id))
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    host = Host()
+    assert host._inventory_overage_requires_sell_only() is True
+    assert host.cancel_calls == [("buy", "inventory_overage", None)]
+    assert host.events[0][0] == "INVENTORY_OVERAGE_SELL_ONLY"
+
+    host.inventory_delta_shares = Decimal("10")
+    assert host._inventory_overage_requires_sell_only() is False
+    assert host.events[-1][0] == "INVENTORY_OVERAGE_CLEARED"
+
+
+def test_runtime_journal_failure_does_not_disable_normal_maker_cycle_or_protective_exits():
+    exits = []
+
+    class Host(QuoteRuntimeMixin):
+        def __init__(self):
+            self.maker_kill_switch = False
+            self.quote_pause_until_ts = 0.0
+            self.bi_side_enabled = False
+            self.inventory_delta_shares = Decimal("5")
+            self.regime_guard_enabled = False
+            self._startup_rehydrated_inventory_force_sell_only = False
+            self.trade_db_buy_ready = True
+            self.trade_db_health_reason = "ready"
+            self.trade_db = SimpleNamespace(runtime_health=lambda: {"ready": False, "reason": "write_failed"})
+            self._last_trade_db_warn_ts = 0.0
+            self.last_quote_update_ts = 0.0
+            self.quote_refresh_sec = 0.0
+            self.active_maker_orders = {}
+            self.maker_order_ttl_sec = 30.0
+            self.maker_loss_sell_reprice_min_interval_sec = 30.0
+            self.instrument_id = "UP.INST"
+            # A real held position with a fresh book: the protective-exit path
+            # evaluates only held inventory whose inputs are fresh.
+            self.live_inventory_cost = {"UP.INST": {"qty": Decimal("5"), "opened_ts": 0.0}}
+            self.last_quote_update_ts_by_inst = {"UP.INST": time.time()}
+            self.latest_external_spot_source_ts = time.time()
+            self.quote_stale_sec = 30
+            self.maker_exchange_min_shares = Decimal("5")
+            self.maker_vol_warmup_quotes = 0
+            self.requote_bucket_last_refill = 0.0
+            self.requote_bucket_tokens = 0.0
+            self.maker_requote_max_per_sec = 1.0
+            self.current_market_end_timestamp = None
+            self._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
+                allowed=True,
+                reason="test_weekday_entry_session",
+                local_time=datetime.fromtimestamp(float(now_ts), tz=TAIPEI),
+            )
+
+        def _update_market_phase(self):
+            return MarketPhase.ACTIVE
+
+        async def _maybe_finalize_side_decision(self, *_args):
+            return None
+
+        def _inventory_overage_requires_sell_only(self):
+            return False
+
+        def _is_dry_run_mode(self):
+            return True
+
+        async def _maybe_taker_exit_positions(self, *_args, **_kwargs):
+            exits.append("taker")
+
+        async def _maybe_maker_urgent_exit(self, *_args, **_kwargs):
+            exits.append("urgent")
+
+        def _maybe_auto_tune(self, *_args):
+            return None
+
+        def _cleanup_stale_pending_cancels(self, *_args):
+            return None
+
+        def _compute_recent_volatility(self, *_args):
+            return Decimal("0")
+
+        def _momentum_history_for_instrument(self, *_args):
+            return []
+
+        def _maker_quote_instruments(self):
+            return ["UP.INST"]
+
+    context = asyncio.run(Host()._prepare_quote_cycle())
+
+    assert context is not None
+    assert context["forced_sell_only"] is False
+    assert exits == ["taker", "urgent"]
 
 
 def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
@@ -109,7 +277,6 @@ def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
         SimpleNamespace(asset_id="up", price="0.51"),
         SimpleNamespace(asset_id="down", price="0.48"),
     ]
-
     groups = coalesce_price_changes_by_asset(changes)
 
     assert [[change.price for change in group] for group in groups] == [
@@ -117,6 +284,489 @@ def test_coalesce_price_changes_keeps_asset_order_and_all_book_updates():
         ["0.49", "0.48"],
     ]
 
+
+def test_batched_order_book_deltas_mark_only_the_final_delta_as_last():
+    from enum import IntFlag
+
+    class Flags(IntFlag):
+        F_LAST = 128
+        F_TOB = 64
+
+    class Delta:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Deltas:
+        def __init__(self, instrument_id, deltas):
+            self.instrument_id = instrument_id
+            self.deltas = deltas
+
+    data_mod = SimpleNamespace(RecordFlag=Flags, OrderBookDelta=Delta, OrderBookDeltas=Deltas)
+    source = [
+        Delta(instrument_id="up", action="UPDATE", order=1, flags=Flags.F_LAST | Flags.F_TOB,
+              sequence=0, ts_event=10, ts_init=11),
+        Delta(instrument_id="up", action="DELETE", order=2, flags=Flags.F_LAST,
+              sequence=0, ts_event=12, ts_init=13),
+    ]
+
+    batch = batch_order_book_deltas(data_mod, "up", source)
+
+    assert batch.instrument_id == "up"
+    assert len(batch.deltas) == 2
+    assert not batch.deltas[0].flags & Flags.F_LAST
+    assert batch.deltas[0].flags & Flags.F_TOB
+    assert batch.deltas[1].flags & Flags.F_LAST
+
+
+def test_l2_data_engine_snapshots_are_rate_limited_but_remain_fresh():
+    assert should_publish_l2_snapshot(
+        has_delta_subscription=True, now_monotonic=10.0, last_publish_monotonic=0.0,
+    )
+    assert not should_publish_l2_snapshot(
+        has_delta_subscription=True, now_monotonic=10.05, last_publish_monotonic=10.0,
+    )
+    assert should_publish_l2_snapshot(
+        has_delta_subscription=True, now_monotonic=10.25, last_publish_monotonic=10.0,
+    )
+    assert not should_publish_l2_snapshot(
+        has_delta_subscription=False, now_monotonic=11.0, last_publish_monotonic=0.0,
+    )
+
+    last_publish = 0.0
+    published = 0
+    for index in range(3500):
+        now = 20.0 + index / 350.0
+        if should_publish_l2_snapshot(
+            has_delta_subscription=True,
+            now_monotonic=now,
+            last_publish_monotonic=last_publish,
+        ):
+            published += 1
+            last_publish = now
+    assert published <= 41
+
+
+def test_market_subscription_replacement_unsubscribes_old_pair_and_avoids_duplicate_subscribe():
+    class Strategy:
+        def __init__(self):
+            self.calls = []
+
+        def unsubscribe_quote_ticks(self, inst): self.calls.append(("unsub_quote", inst))
+        def unsubscribe_order_book_deltas(self, inst): self.calls.append(("unsub_l2", inst))
+        def subscribe_quote_ticks(self, inst): self.calls.append(("sub_quote", inst))
+        def subscribe_order_book_deltas(self, inst): self.calls.append(("sub_l2", inst))
+
+    strategy = Strategy()
+    replace_market_subscriptions(strategy, ["old-up", "old-down"], ["new-up", "new-down"])
+    replace_market_subscriptions(strategy, ["new-up", "new-down"], ["new-up", "new-down"])
+
+    assert strategy.calls == [
+        ("unsub_quote", "old-down"), ("unsub_l2", "old-down"),
+        ("unsub_quote", "old-up"), ("unsub_l2", "old-up"),
+        ("sub_quote", "new-up"), ("sub_l2", "new-up"),
+        ("sub_quote", "new-down"), ("sub_l2", "new-down"),
+    ]
+
+
+def test_market_subscription_replacement_keeps_one_future_pair_prewarmed():
+    class Strategy:
+        def __init__(self): self.calls = []
+        def unsubscribe_quote_ticks(self, inst): self.calls.append(("unsub_quote", inst))
+        def unsubscribe_order_book_deltas(self, inst): self.calls.append(("unsub_l2", inst))
+        def subscribe_quote_ticks(self, inst): self.calls.append(("sub_quote", inst))
+        def subscribe_order_book_deltas(self, inst): self.calls.append(("sub_l2", inst))
+
+    strategy = Strategy()
+    replace_market_subscriptions(strategy, [], ["current-up", "current-down"],
+                                 prewarm_instrument_ids=["next-up", "next-down"])
+    replace_market_subscriptions(strategy, ["current-up", "current-down"], ["next-up", "next-down"],
+                                 prewarm_instrument_ids=["after-up", "after-down"])
+    # The next pair was already subscribed before it became active: rollover
+    # removes only the old pair and adds the following prewarm pair.
+    assert ("unsub_quote", "current-up") in strategy.calls
+    assert ("unsub_quote", "next-up") not in strategy.calls
+    assert strategy.calls.count(("sub_quote", "next-up")) == 1
+    assert strategy.calls.count(("sub_quote", "after-up")) == 1
+    assert strategy.calls.count(("sub_l2", "next-up")) == 1
+    assert ("sub_l2", "after-up") not in strategy.calls
+
+
+def test_future_pair_prewarm_subscribes_quotes_without_optional_l2():
+    calls = []
+    strategy = SimpleNamespace(
+        subscribe_quote_ticks=lambda inst: calls.append(("quote", inst)),
+        subscribe_order_book_deltas=lambda inst: calls.append(("l2", inst)),
+        unsubscribe_quote_ticks=lambda inst: calls.append(("unsub_quote", inst)),
+        unsubscribe_order_book_deltas=lambda inst: calls.append(("unsub_l2", inst)),
+    )
+
+    assert replace_market_subscriptions(
+        strategy, [], ["current-up", "current-down"],
+        prewarm_instrument_ids=["next-up", "next-down"],
+    )
+
+    assert ("quote", "next-up") in calls
+    assert ("quote", "next-down") in calls
+    assert ("l2", "next-up") not in calls
+    assert ("l2", "next-down") not in calls
+    assert ("l2", "current-up") in calls
+    assert ("l2", "current-down") in calls
+
+
+def test_replaced_future_prewarm_unsubscribes_with_original_instrument_object():
+    class Instrument:
+        def __init__(self, name): self.name = name
+        def __str__(self): return self.name
+
+    current = Instrument("current")
+    old_future = Instrument("old-future")
+    new_future = Instrument("new-future")
+    calls = []
+    strategy = SimpleNamespace(
+        subscribe_quote_ticks=lambda inst: calls.append(("sub_quote", inst)),
+        subscribe_order_book_deltas=lambda inst: calls.append(("sub_l2", inst)),
+        unsubscribe_quote_ticks=lambda inst: calls.append(("unsub_quote", inst)),
+        unsubscribe_order_book_deltas=lambda inst: calls.append(("unsub_l2", inst)),
+    )
+
+    assert replace_market_subscriptions(strategy, [], [current], prewarm_instrument_ids=[old_future])
+    assert replace_market_subscriptions(strategy, [current], [current], prewarm_instrument_ids=[new_future])
+
+    assert ("unsub_quote", old_future) in calls
+    assert ("unsub_quote", "old-future") not in calls
+    assert "old-future" not in strategy._managed_market_quote_subscription_ids
+
+
+def test_next_market_pair_selects_only_immediate_future_up_down_tokens():
+    def instrument(token, outcome):
+        return SimpleNamespace(id=token, info={"outcome": outcome})
+    rows = [
+        {"slug": "current", "market_timestamp": 100, "instrument": instrument("current-up", "up")},
+        {"slug": "next", "market_timestamp": 1000, "instrument": instrument("next-down", "down")},
+        {"slug": "next", "market_timestamp": 1000, "instrument": instrument("next-up", "up")},
+        {"slug": "later", "market_timestamp": 1900, "instrument": instrument("later-up", "up")},
+    ]
+    selected = next_market_pair_instruments(rows, current_slug="current", current_start_ts=100,
+                                             extract_outcome=lambda item: item.info["outcome"])
+    assert selected == ["next-up", "next-down"]
+
+
+def test_prewarm_quote_acknowledges_next_pair_without_touching_current_market_state():
+    strategy = SimpleNamespace(
+        _stopping=False,
+        instrument_id="current-up",
+        current_market_instruments=["current-up", "current-down"],
+        quote_prewarm_instruments={"next-up", "next-down"},
+        quote_stale_sec=30.0,
+        quote_max_delivery_delay_sec=2.0,
+        quote_event_clock_skew_tolerance_sec=Decimal("0.25"),
+        stale_quote_synth_max_age_sec=10.0,
+    )
+    now_ts = time.time()
+    class Price:
+        def __init__(self, value): self.value = Decimal(value)
+        def as_decimal(self): return self.value
+    tick = SimpleNamespace(
+        instrument_id="next-up", bid_price=Price("0.50"), ask_price=Price("0.51"),
+        bid_size=Price("12"), ask_size=Price("13"),
+        ts_event=int(now_ts * 1_000_000_000), ts_init=int(now_ts * 1_000_000_000),
+    )
+    handle_quote_tick(strategy, tick)
+    assert "next-up" in strategy.quote_prewarm_first_quote_ts_by_inst
+    assert strategy.quote_prewarm_latest_by_inst["next-up"]["bid"] == Decimal("0.50")
+    assert strategy.quote_prewarm_latest_by_inst["next-up"]["ask"] == Decimal("0.51")
+    assert not hasattr(strategy, "latest_quote_by_inst")
+
+
+def test_promotion_uses_only_fresh_prewarm_quotes_and_leaves_missing_leg_pending():
+    now_ts = 200.0
+    strategy = SimpleNamespace(
+        current_market_slug="next-market",
+        current_market_instruments=["next-up", "next-down"],
+        instrument_id="next-up",
+        active_side=ActiveSide.UP,
+        quote_stale_sec=30.0,
+        quote_recovery_started_ts=190.0,
+        quote_recovery_attempts=0,
+        quote_recovery_pending_instruments={"next-up", "next-down"},
+        quote_prewarm_latest_by_inst={
+            "next-up": {
+                "bid": Decimal("0.50"), "ask": Decimal("0.51"),
+                "bid_size": Decimal("12"), "ask_size": Decimal("13"),
+                "received_ts": 195.0, "source_ts": 194.9, "adapter_emitted_ts": 195.0,
+            },
+            "next-down": {
+                "bid": Decimal("0.48"), "ask": Decimal("0.49"),
+                "bid_size": Decimal("10"), "ask_size": Decimal("11"),
+                "received_ts": 150.0, "source_ts": 149.9, "adapter_emitted_ts": 150.0,
+            },
+        },
+        latest_quote_by_inst={}, latest_quote_depth_by_inst={},
+        last_quote_update_ts_by_inst={}, last_quote_source_ts_by_inst={},
+        last_quote_received_ts_by_inst={},
+        latest_market_bid=None, latest_market_ask=None,
+        latest_market_bid_ts=0.0, latest_market_ask_ts=0.0,
+        last_valid_quote_ts=0.0,
+    )
+
+    promote_prewarm_quotes_to_current_market(strategy, now_ts=now_ts)
+
+    assert strategy.latest_quote_by_inst == {"next-up": (Decimal("0.50"), Decimal("0.51"))}
+    assert strategy.latest_quote_depth_by_inst["next-up"] == (Decimal("12"), Decimal("13"))
+    assert strategy.quote_recovery_pending_instruments == {"next-down"}
+    assert strategy.last_valid_quote_ts == 195.0
+
+
+def test_market_selection_calls_are_serialized(monkeypatch):
+    import bot.market_runtime as runtime
+    import threading
+    import time as time_module
+
+    active = 0
+    maximum_active = 0
+    counter_lock = threading.Lock()
+
+    def fake_select(_strategy):
+        nonlocal active, maximum_active
+        with counter_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time_module.sleep(0.02)
+        with counter_lock:
+            active -= 1
+        return True
+
+    monkeypatch.setattr(runtime, "_find_btc_instrument_unlocked", fake_select)
+    strategy = SimpleNamespace()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: runtime.find_btc_instrument(strategy), range(2)))
+
+    assert results == [True, True]
+    assert maximum_active == 1
+
+
+def test_native_quote_delivery_lag_is_bounded_independently_from_feed_watchdog():
+    assert quote_delivery_is_fresh(
+        received_ts=100.0,
+        adapter_emitted_ts=98.1,
+        max_delivery_delay_sec=2.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+    assert not quote_delivery_is_fresh(
+        received_ts=100.0,
+        adapter_emitted_ts=97.9,
+        max_delivery_delay_sec=2.0,
+        clock_skew_tolerance_sec=Decimal("0.25"),
+    )
+
+
+def test_handle_quote_tick_rejects_locally_delayed_native_book():
+    class Price:
+        def __init__(self, value): self.value = Decimal(value)
+        def as_decimal(self): return self.value
+
+    class Strategy:
+        _stopping = False
+        instrument_id = "up-token"
+        current_market_instruments = ["up-token"]
+        stale_quote_synth_max_age_sec = 10.0
+        latest_market_bid_ts = 0.0
+        latest_market_ask_ts = 0.0
+        latest_market_bid = None
+        latest_market_ask = None
+        active_side = ActiveSide.UP
+        quote_stale_sec = 30.0
+        quote_max_delivery_delay_sec = 2.0
+        quote_event_clock_skew_tolerance_sec = Decimal("0.25")
+        last_valid_quote_ts = 0.0
+        consecutive_invalid_quote_ticks = 0
+
+        def __init__(self):
+            self.last_quote_received_ts_by_inst = {}
+            self.latest_quote_by_inst = {}
+            self.latest_quote_depth_by_inst = {}
+            self.events = []
+
+        def _instrument_for_side(self, _side): return "up-token"
+        def _primary_instrument_for_market(self): return "up-token"
+        def _maybe_run_quote_watchdog(self, _trigger): pass
+        def _db_strategy_event(self, event_type, payload): self.events.append((event_type, payload))
+
+    now_ns = time.time_ns()
+    tick = SimpleNamespace(
+        instrument_id="up-token",
+        bid_price=Price("0.60"),
+        ask_price=Price("0.61"),
+        bid_size=Price("10"),
+        ask_size=Price("10"),
+        ts_event=now_ns - 1_000_000_000,
+        ts_init=now_ns - 3_000_000_000,
+    )
+    record_quote_provenance(tick, source="ws_snapshot")
+    strategy = Strategy()
+
+    handle_quote_tick(strategy, tick)
+
+    assert strategy.latest_quote_by_inst == {}
+    assert strategy.events[-1][1]["quote_is_fresh"] is False
+    assert strategy.events[-1][1]["adapter_to_strategy_delay_sec"] >= 2.0
+
+
+def test_shutdown_sentinel_waits_for_capacity_instead_of_raising_queue_full():
+    async def scenario():
+        class Engine:
+            def __init__(self):
+                self._sentinel = object()
+                self._cmd_queue = asyncio.Queue(maxsize=1)
+                self._req_queue = asyncio.Queue(maxsize=1)
+                self._res_queue = asyncio.Queue(maxsize=1)
+                self._data_queue = asyncio.Queue(maxsize=1)
+
+        engine = Engine()
+        engine._data_queue.put_nowait("backlog")
+        task = asyncio.create_task(enqueue_shutdown_sentinels(engine))
+        await asyncio.sleep(0)
+        assert await engine._data_queue.get() == "backlog"
+        await asyncio.wait_for(task, timeout=1.0)
+        assert engine._data_queue.get_nowait() is engine._sentinel
+        assert engine._cmd_queue.get_nowait() is engine._sentinel
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_discards_pending_quotes_without_delaying_data_sentinel():
+    async def scenario():
+        class Engine:
+            def __init__(self):
+                self._sentinel = object()
+                self._cmd_queue = asyncio.Queue(maxsize=1)
+                self._req_queue = asyncio.Queue(maxsize=1)
+                self._res_queue = asyncio.Queue(maxsize=1)
+                self._data_queue = asyncio.Queue(maxsize=1)
+                self._btc15m_backpressure = {"quotes": {"up": "latest-quote"}}
+
+        engine = Engine()
+        engine._data_queue.put_nowait("backlog")
+        task = asyncio.create_task(enqueue_shutdown_sentinels(engine, timeout_sec=1.0))
+        assert await engine._data_queue.get() == "backlog"
+        await asyncio.sleep(0)
+        await asyncio.wait_for(task, timeout=1.0)
+        assert await engine._data_queue.get() is engine._sentinel
+        assert engine._btc15m_backpressure["quotes"] == {}
+        assert engine._btc15m_disposing is True
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_sentinel_cancels_wedged_consumers_after_bounded_wait():
+    async def scenario():
+        class Engine:
+            def __init__(self):
+                self._sentinel = object()
+                self._cmd_queue = asyncio.Queue(maxsize=1)
+                self._req_queue = asyncio.Queue(maxsize=1)
+                self._res_queue = asyncio.Queue(maxsize=1)
+                self._data_queue = asyncio.Queue(maxsize=1)
+                self._data_queue.put_nowait("backlog")
+                self._data_queue_task = asyncio.create_task(asyncio.Event().wait())
+
+        engine = Engine()
+        await enqueue_shutdown_sentinels(engine, timeout_sec=0.1)
+        try:
+            await engine._data_queue_task
+        except asyncio.CancelledError:
+            pass
+        assert engine._data_queue_task.cancelled()
+
+    asyncio.run(scenario())
+
+
+def test_data_engine_queue_telemetry_reports_all_data_types_and_per_type_high_water():
+    class QuoteTick:
+        pass
+
+    class OrderBookDeltas:
+        pass
+
+    engine = SimpleNamespace(_btc15m_backpressure={
+        "l2_suppressed_window": 3, "l2_suppressed_total": 11,
+        "quote_coalesced_window": 2, "quote_coalesced_total": 5,
+    })
+    assert record_data_engine_queue_telemetry(engine, QuoteTick(), 5, now_ts=100.0) is None
+    engine._btc15m_queue_telemetry_state["quote_latency_samples"] = [0.001, 0.005, 0.010]
+    assert record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 19, now_ts=105.0, phase="process") is None
+
+    report = record_data_engine_queue_telemetry(engine, OrderBookDeltas(), 8, now_ts=110.1)
+
+    assert report["counts"] == {"QuoteTick": 1, "OrderBookDeltas": 1}
+    assert report["high_water"] == {"QuoteTick": 5, "OrderBookDeltas": 19}
+    assert report["queue_depth"] == 8
+    assert report["window_start_depth"] == 5
+    assert report["window_end_depth"] == 8
+    assert report["depth_delta"] == 3
+    assert report["throughput_delta"] == report["enqueued"] - report["processed"] == 1
+    assert report["enqueue_rate"] == report["enqueued"] / report["window_sec"]
+    assert report["process_rate"] == report["processed"] / report["window_sec"]
+    assert report["l2_suppressed_window"] == 3
+    assert report["l2_suppressed_total"] == 11
+    assert report["quote_coalesced_window"] == 2
+    assert report["quote_coalesced_total"] == 5
+    assert report["quote_latency_p50_ms"] == 5.0
+    assert report["quote_latency_max_ms"] == 10.0
+    assert engine._btc15m_backpressure["l2_suppressed_window"] == 0
+    assert engine._btc15m_backpressure["l2_suppressed_total"] == 11
+
+
+def test_quote_provenance_records_data_engine_publish_and_queue_window():
+    tick = SimpleNamespace(instrument_id="up-token", ts_event=1, ts_init=2)
+    record_quote_provenance(tick, source="ws_price_change", raw_ws_received_ts=10.0)
+
+    record_quote_data_engine_publish_ts(tick, 10.4)
+    record_quote_data_engine_queue_depth(
+        tick, 37,
+        queue_window={
+            "window_sec": 10.1,
+            "counts": {"QuoteTick": 12, "OrderBookDeltas": 50},
+            "high_water": {"QuoteTick": 88, "OrderBookDeltas": 120},
+            "queue_depth": 37,
+        },
+    )
+
+    provenance = quote_provenance_for_tick(tick)
+    assert provenance["data_engine_published_ts"] == 10.4
+    assert provenance["data_engine_queue_depth"] == 37
+    assert provenance["data_engine_queue_window"]["counts"]["OrderBookDeltas"] == 50
+
+
+def test_quote_callback_duration_aggregates_window_count_and_slow_callbacks():
+    strategy = SimpleNamespace()
+    assert _record_quote_callback_duration(strategy, 0.02, now_ts=100.0) is None
+    assert _record_quote_callback_duration(strategy, 0.08, now_ts=105.0) is None
+
+    report = _record_quote_callback_duration(strategy, 0.3, now_ts=110.1)
+
+    assert report["count"] == 3
+    assert report["total_ms"] == 400.0
+    assert report["max_ms"] == 300.0
+    assert report["over_50ms"] == 2
+    assert report["over_250ms"] == 1
+
+
+def test_sync_journal_write_duration_is_aggregated_and_taken_once():
+    strategy = SimpleNamespace()
+    assert _record_sync_journal_write_duration(strategy, "QUOTE", 12, now_ts=100.0) is None
+    assert _record_sync_journal_write_duration(strategy, "ORDER_SUBMIT", 80, now_ts=105.0) is None
+
+    report = _record_sync_journal_write_duration(strategy, "FILL", 300, now_ts=110.1)
+
+    assert report["count"] == 3
+    assert report["total_ms"] == 392.0
+    assert report["max_ms"] == 300.0
+    assert report["over_50ms"] == 2
+    assert report["over_250ms"] == 1
+    assert report["event_counts"] == {"QUOTE": 1, "ORDER_SUBMIT": 1, "FILL": 1}
+    assert take_sync_journal_write_report(strategy) == report
+    assert take_sync_journal_write_report(strategy) is None
 
 def test_retain_latest_quote_replaces_undelivered_tick_per_instrument():
     pending: dict[str, object] = {}
@@ -663,6 +1313,12 @@ class DummyTrendSubmitStrategy:
         self.consecutive_denied_orders = 0
         self.recovery_exit_stage_by_inst = {}
         self.tail_exit_calls = []
+        self.available_usdc = Decimal("1000")
+        self._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
+            allowed=True,
+            reason="test_weekday_entry_session",
+            local_time=datetime.fromtimestamp(float(now_ts), tz=TAIPEI),
+        )
 
     @property
     def cache(self):
@@ -682,6 +1338,9 @@ class DummyTrendSubmitStrategy:
 
     def _compute_maker_order_qty(self, _limit_price, _precision):
         return Decimal("5.4")
+
+    def _refresh_balance_cache(self):
+        return self.available_usdc
 
     def _instrument_key(self, instrument_id):
         return str(instrument_id)
@@ -798,13 +1457,15 @@ class DummyRejectRecoveryStrategy:
     def _db_order_event(self, **kwargs):
         self.order_events.append(kwargs)
 
-    def _activate_maker_kill_switch(self, reason):
+    def _activate_maker_kill_switch(self, reason, *, reason_code="unspecified"):
         self.maker_kill_switch = True
         self.kill_switch_reason = reason
+        self.kill_switch_reason_code = reason_code
 
 
 class DummyUrgentExitStrategy(TakerExitMixin):
     def __init__(self) -> None:
+        self.test_mode = False
         self.maker_urgent_exit_enabled = True
         self._maker_urgent_exit_last_ts = 0.0
         self.maker_urgent_exit_cooldown_sec = 0
@@ -1185,6 +1846,19 @@ def test_startup_rehydrate_restores_inventory_and_forces_sell_only():
     assert strategy.strategy_events[0][0] == "STARTUP_INVENTORY_REHYDRATED"
 
 
+def test_startup_rehydrate_without_journal_cost_basis_marks_cost_unknown_and_sell_only():
+    strategy = DummyStrategyForRehydrate()
+    strategy._rebuild_inventory_state_from_db = lambda *_args, **_kwargs: None
+
+    IntegratedBTCStrategy._rehydrate_inventory_state_on_startup(strategy)
+
+    state = strategy.live_inventory_cost["inst-up"]
+    assert strategy._startup_rehydrated_inventory_force_sell_only is True
+    assert state["avg_entry_price"] == Decimal("0")
+    assert state["cost_basis_status"] == "unknown"
+    assert strategy.strategy_events[0][1]["legs"][0]["cost_basis_status"] == "unknown"
+
+
 def test_startup_rehydrate_recovers_cost_basis_from_recent_buy_submit(tmp_path):
     class SubmitFallbackStrategy(StrategyRecoveryMixin):
         def __init__(self) -> None:
@@ -1212,6 +1886,65 @@ def test_startup_rehydrate_recovers_cost_basis_from_recent_buy_submit(tmp_path):
     assert state is not None
     assert state["qty"] == Decimal("10.8")
     assert state["avg_entry_price"] == Decimal("0.64")
+
+
+def test_startup_rehydrate_uses_fast_follow_intent_only_for_confirmed_external_inventory(tmp_path):
+    class IntentFallbackStrategy(StrategyRecoveryMixin):
+        def __init__(self, confirmed_qty):
+            self.trade_db = TradeJournalDB(str(tmp_path / f"journal-{confirmed_qty}.db"))
+            self.live_inventory_cost = {}
+            self._inventory_delta_shares = Decimal("0")
+            self.current_market_instruments = ["fast-follow-inst"]
+            self.instrument_id = "fast-follow-inst"
+            self.current_market_slug = "btc-updown-15m-test"
+            self._startup_rehydrated_inventory_force_sell_only = False
+            self.confirmed_qty = Decimal(str(confirmed_qty))
+            self.events = []
+
+        @property
+        def inventory_delta_shares(self):
+            return self._inventory_delta_shares
+
+        @inventory_delta_shares.setter
+        def inventory_delta_shares(self, value):
+            self._inventory_delta_shares = Decimal(str(value))
+
+        def _normalize_instrument_id(self, instrument_id):
+            return instrument_id
+
+        def _instrument_key(self, instrument_id):
+            return str(instrument_id)
+
+        def _normalize_side_text(self, side):
+            return str(side or "").upper()
+
+        def _get_sellable_qty_for_current_instrument(self, instrument_id=None):
+            return self.confirmed_qty
+
+        def _db_strategy_event(self, event_type, payload):
+            self.events.append((event_type, payload))
+
+    confirmed = IntentFallbackStrategy("5")
+    confirmed.trade_db.log_order_event(
+        run_id="test", event_type="ORDER_FAST_FOLLOW_INTENT", side="BUY",
+        price=0.61, qty=10, status="INTENT", instrument_id="fast-follow-inst",
+        payload={"instrument_id": "fast-follow-inst", "night_key": "2026-09-08"},
+    )
+    confirmed._rehydrate_inventory_state_on_startup()
+    state = confirmed.live_inventory_cost["fast-follow-inst"]
+    assert state["qty"] == Decimal("5")
+    assert state["avg_entry_price"] == Decimal("0.61")
+    assert state.get("cost_basis_status") != "unknown"
+
+    no_inventory = IntentFallbackStrategy("0")
+    no_inventory.trade_db.log_order_event(
+        run_id="test", event_type="ORDER_FAST_FOLLOW_INTENT", side="BUY",
+        price=0.61, qty=10, status="INTENT", instrument_id="fast-follow-inst",
+        payload={"instrument_id": "fast-follow-inst"},
+    )
+    no_inventory._rehydrate_inventory_state_on_startup()
+    assert no_inventory.live_inventory_cost == {}
+    assert no_inventory.inventory_delta_shares == Decimal("0")
 
 
 def test_market_selection_honors_preferred_current_slug_even_if_cache_closed_flag_is_stale():
@@ -1410,10 +2143,11 @@ def test_geoblock_rejection_stops_maker_quoting_without_retrying():
 
     assert strategy.maker_kill_switch is True
     assert "trading restricted" in strategy.kill_switch_reason.lower()
+    assert strategy.kill_switch_reason_code == "region_restricted"  # classified UNRESOLVED
     assert strategy.order_events[-1]["event_type"] == "ORDER_REJECTED"
 
 
-def test_taker_buy_fill_updates_inventory_delta_with_net_shares():
+def test_taker_buy_fill_receives_full_shares_and_books_fee_in_usdc():
     strategy = DummyStrategyForFill()
 
     fill = SimpleNamespace(
@@ -1429,7 +2163,9 @@ def test_taker_buy_fill_updates_inventory_delta_with_net_shares():
 
     IntegratedBTCStrategy.on_order_filled(strategy, fill)
 
-    assert strategy.inventory_delta_shares == Decimal("5.10699904")
+    # The venue charges the taker BUY fee in USDC and delivers the full size
+    # (reports/pnl_reconciliation/, 42 of 42 bot taker BUYs).
+    assert strategy.inventory_delta_shares == Decimal("5.2")
 
 
 def test_urgent_exit_does_not_replace_recent_urgent_sell_too_quickly():
@@ -2005,7 +2741,7 @@ def test_exit_policy_holds_position_when_signal_is_none():
     assert decision.metadata["signal_is_none"] == "1"
 
 
-def test_exit_policy_treats_none_signal_as_thesis_weakening_when_losing():
+def test_exit_policy_does_not_treat_none_signal_alone_as_adverse_trend():
     engine = ExitPolicyEngine(
         ExitEngineConfig(
             min_hold_sec=0,
@@ -2057,9 +2793,9 @@ def test_exit_policy_treats_none_signal_as_thesis_weakening_when_losing():
 
     decision = engine.evaluate(snapshot, position, signal)
 
-    assert decision.decision_type == ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION
+    assert decision.decision_type != ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION
     assert decision.metadata["signal_is_none"] == "1"
-    assert decision.metadata["thesis_weakened"] == "1"
+    assert decision.metadata["thesis_weakened"] == "0"
 
 
 def test_exit_policy_holds_in_band_when_roi_is_below_release_threshold():
@@ -2903,8 +3639,8 @@ def test_app_config_reads_extended_env(monkeypatch):
     monkeypatch.setenv("REGIME_GUARD_N_MARKETS", "6")
     monkeypatch.setenv("POLYMARKET_CHAINLINK_TWAP_WINDOW_SEC", "60")
     monkeypatch.setenv("TAKER_EXIT_ONLY_AFTER_INVALIDATION", "1")
-    monkeypatch.setenv("TAKER_EXIT_MAX_TIME_LEFT_SEC", "720")
-    monkeypatch.setenv("TAKER_EXIT_MIN_HOLD_SEC", "120")
+    monkeypatch.setenv("RECOVERY_EXIT_MAX_TIME_LEFT_SEC", "720")
+    monkeypatch.setenv("RECOVERY_EXIT_MIN_HOLD_SEC", "120")
     monkeypatch.setenv("TAKER_EXIT_MIN_RECOVERY_RATIO", "0.50")
     monkeypatch.setenv("QUOTE_EVENT_CLOCK_SKEW_TOLERANCE_SEC", "0.25")
     monkeypatch.setenv("SHADOW_SIMULATION_FILL_TIMEOUT_SEC", "75")
@@ -3027,6 +3763,52 @@ def test_extract_polymarket_chainlink_twap_tick_prefers_full_accuracy_e18():
     assert tick.updated_at_ms == 1785178800000
     assert tick.window_seconds == 60
     assert tick.source == "polymarket_chainlink_twap_60s_ws"
+    assert chainlink_observation_ts(tick) == 1785178800.0
+
+
+def test_rtds_application_heartbeat_is_due_immediately_then_every_five_seconds():
+    assert rtds_application_heartbeat_due(now_monotonic=100.0, last_sent_monotonic=0.0)
+    assert not rtds_application_heartbeat_due(now_monotonic=104.9, last_sent_monotonic=100.0)
+    assert rtds_application_heartbeat_due(now_monotonic=105.0, last_sent_monotonic=100.0)
+
+
+def test_polymarket_market_websocket_uses_text_ping_not_control_ping():
+    captured = {}
+
+    def config_factory(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    build_polymarket_websocket_config(
+        config_factory,
+        url="wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        headers=[],
+    )
+
+    assert captured["heartbeat"] == 10
+    assert captured["heartbeat_msg"] == "PING"
+
+
+def test_polymarket_user_websocket_does_not_receive_market_ping_override():
+    captured = {}
+
+    def config_factory(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    build_polymarket_websocket_config(
+        config_factory,
+        url="wss://ws-subscriptions-clob.polymarket.com/ws/user",
+        headers=[],
+    )
+
+    assert "heartbeat_msg" not in captured
+
+
+def test_polymarket_text_pong_is_identified_for_market_stream():
+    assert is_polymarket_pong(b"PONG")
+    assert is_polymarket_pong(" PONG\n")
+    assert not is_polymarket_pong(b'{"event_type":"book"}')
 
 
 def test_runtime_compatibility_overrides_install():
@@ -3034,10 +3816,12 @@ def test_runtime_compatibility_overrides_install():
 
     from nautilus_trader.adapters.polymarket.data import PolymarketDataClient
     from nautilus_trader.adapters.polymarket.execution import PolymarketExecutionClient
+    from nautilus_trader.adapters.polymarket.websocket.client import PolymarketWebSocketClient
     import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
 
     assert getattr(PolymarketDataClient, "_btc15m_runtime_compat_patched", False) is True
     assert getattr(PolymarketExecutionClient, "_btc15m_runtime_compat_patched", False) is True
+    assert getattr(PolymarketWebSocketClient, "_btc15m_market_text_heartbeat_patched", False) is True
     assert getattr(pyclob_helpers, "_btc15m_runtime_compat_patched", False) is True
 
 
@@ -3077,6 +3861,10 @@ def test_no_inventory_settlement_records_outcome_for_journal_replay():
             self.recent_market_combined_pnls = []
             self.active_side = ActiveSide.UP
             self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
+            # Canonical official-TWAP tick: the settlement authority.
+            self._polymarket_chainlink_twap_price = 65100.0
+            self._polymarket_chainlink_twap_observation_ts = time.time()
+            self._polymarket_chainlink_twap_window_sec = 60
             self._cycle_total_trades = 0
             self._cycle_total_wins = 0
             self.terminal_dashboard = None
@@ -3100,6 +3888,7 @@ def test_no_inventory_settlement_records_outcome_for_journal_replay():
     settlement = next(payload for event_type, payload in host.events if event_type == "MARKET_SETTLEMENT")
     assert settlement["outcome"] == "UP"
     assert settlement["outcome_only"] is True
+    assert settlement["outcome_source"] == "canonical_twap"
     assert settlement["reference_source"] == "polymarket_chainlink_twap_60s_ws"
 
 
@@ -3295,6 +4084,30 @@ def test_reconcile_unwanted_quotes_cancels_existing_sell_immediately_for_hold_re
     ]
 
 
+def test_weekend_entry_session_gate_marks_resting_maker_buy_for_immediate_cancel():
+    desired = build_desired_quote_entry(
+        order_key="buy:inst-up", side="buy", inst_id="inst-up",
+        quote_data=(Decimal("0.60"), SimpleNamespace(expected_net_usdc=Decimal("0")), False,
+                    Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0.60"),
+                    Decimal("0"), Decimal("0"), {"cost_model_available": Decimal("1")}),
+        side_disable_reason_by_side={
+            "buy": "entry_session_blocked_taipei_weekend_observation_only",
+        },
+        reduce_only_reason=None, reduce_only_tail_sell_block=False,
+        reduce_only_no_new_sell_last_sec=30, forced_sell_only=False,
+        min_expected_net_usdc=Decimal("0.001"), now_ts=1787968800.0,
+        sell_pause_until=0.0, is_dry_run_mode=False, sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5"), avg_entry=Decimal("0"),
+        emergency_window=False, high_cost_exit_cooldown_enabled=False,
+        high_cost_exit_cooldown_sec=0.0, high_cost_exit_cooldown_until=0.0,
+        maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+    )
+
+    assert desired["should_quote"] is False
+    assert desired["force_cancel_existing"] is True
+
+
 def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
     desired_entry = build_desired_quote_entry(
         order_key="buy:inst-up",
@@ -3350,8 +4163,84 @@ def test_standard_buy_submit_qty_has_no_hidden_mode_multiplier():
 
     assert strategy.submitted_orders, "expected submit_order to be called"
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
-    assert submitted_qty == Decimal("5.400000")
+    # share_v1: a BUY without an explicit target uses the canonical share
+    # target for the final limit price (0.64 <= 0.70 -> 10 shares).
+    assert submitted_qty == Decimal("10.000000")
+    assert any(event["event_type"] == "ORDER_MAKER_INTENT" for event in strategy.order_events)
     assert strategy.order_events[-1]["payload"]["entry_mode"] == "value"
+
+
+def test_normal_maker_buy_can_be_explicitly_disabled_without_disabling_sells():
+    strategy = DummyTrendSubmitStrategy()
+    strategy.normal_maker_buy_enabled = False
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=SimpleNamespace(expected_net_usdc=Decimal("0.38")),
+    )
+
+    assert strategy.submitted_orders == []
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_NORMAL_MAKER_BUY_DISABLED"
+    assert strategy.order_events[-1]["reason"] == "normal_maker_buy_disabled"
+
+
+def test_weekend_session_is_rechecked_at_maker_venue_submission_boundary():
+    strategy = DummyTrendSubmitStrategy()
+    strategy._new_buy_session_decision_fn = lambda now_ts: EntrySessionDecision(
+        allowed=False,
+        reason="taipei_weekend_observation_only",
+        local_time=datetime.fromtimestamp(float(now_ts), tz=TAIPEI),
+    )
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.64"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.38"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0.38"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+    )
+
+    assert strategy.submitted_orders == []
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_ENTRY_SESSION"
+    assert strategy.order_events[-1]["reason"] == "taipei_weekend_observation_only"
+    assert strategy.order_events[-1]["payload"]["submission_boundary"] == "maker_pre_intent"
+
+
+def test_maker_buy_does_not_reach_venue_when_durable_intent_fails():
+    desired_entry = build_desired_quote_entry(
+        order_key="buy:inst-up", side="buy", inst_id="inst-up",
+        quote_data=(Decimal("0.64"), SimpleNamespace(
+            expected_net_usdc=Decimal("0.007"), expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"), fee_equivalent_usdc=Decimal("0"),
+        ), True, Decimal("0.007"), Decimal("0.030"), Decimal("0.010"), Decimal("0.054"),
+        Decimal("0.6244"), Decimal("0"), Decimal("0")),
+        side_disable_reason_by_side={"buy": "econ_gate"}, reduce_only_reason=None,
+        reduce_only_tail_sell_block=False, reduce_only_no_new_sell_last_sec=30,
+        forced_sell_only=False, min_expected_net_usdc=Decimal("0.001"), now_ts=0.0,
+        sell_pause_until=0.0, is_dry_run_mode=False, sellable_qty=None,
+        maker_exchange_min_shares=Decimal("5.0"), avg_entry=Decimal("0"), emergency_window=False,
+        high_cost_exit_cooldown_enabled=False, high_cost_exit_cooldown_sec=0.0,
+        high_cost_exit_cooldown_until=0.0, maker_sell_cost_protect_enabled=False,
+        maker_sell_cost_protect_fee_buffer_ps=Decimal("0"),
+    )
+    strategy = DummyTrendSubmitStrategy()
+    original_event = strategy._db_order_event
+    strategy._db_order_event = lambda **payload: False if payload["event_type"] == "ORDER_MAKER_INTENT" else original_event(**payload)
+
+    submit_maker_quote(
+        strategy, instrument_id="inst-up", side="buy", limit_price=Decimal("0.64"),
+        econ=desired_entry["econ"], directional_snapshot=build_directional_snapshot(desired_entry),
+    )
+
+    assert strategy.submitted_orders == []
 
 
 def test_crossing_tail_protect_tp_uses_bounded_taker_exit_not_post_only_maker_order():
@@ -3461,11 +4350,12 @@ def test_value_entry_size_multiplier_flows_into_submit_qty():
 
     assert strategy.submitted_orders, "expected submit_order to be called"
     submitted_qty = strategy.submitted_orders[0].quantity.as_decimal()
-    assert submitted_qty == Decimal("3.240000")
+    # 10-share target x 0.60 multiplier = 6 shares (>= MIN_ENTRY_SHARES).
+    assert submitted_qty == Decimal("6.000000")
     assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.6
 
 
-def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchange_minimum():
+def test_high_entry_price_sets_canonical_share_target_and_submits_exactly_5_5():
     desired_entry = {
         "should_quote": True,
         "price": Decimal("0.71"),
@@ -3473,13 +4363,7 @@ def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchang
         "diag_reason": "eligible",
     }
 
-    adjusted = apply_high_entry_price_size_adjustment(
-        desired_entry=desired_entry,
-        side="buy",
-        enabled=True,
-        threshold=Decimal("0.70"),
-        multiplier=Decimal("0.5"),
-    )
+    adjusted = apply_high_entry_price_size_adjustment(desired_entry=desired_entry, side="buy")
     snapshot = build_directional_snapshot(adjusted)
     strategy = DummyTrendSubmitStrategy()
 
@@ -3495,16 +4379,38 @@ def test_high_entry_price_size_adjustment_applies_when_reduced_qty_meets_exchang
             fee_equivalent_usdc=Decimal("0"),
         ),
         directional_snapshot=snapshot,
+        target_qty_override=adjusted["base_target_shares"],
+    )
+
+    assert adjusted["base_target_shares"] == Decimal("5.5")
+    assert adjusted["size_multiplier"] == Decimal("1")
+    assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
+    assert strategy.submitted_orders[0].quantity.as_decimal() == Decimal("5.500000")
+
+
+def test_high_entry_price_quantity_above_share_target_is_skipped():
+    strategy = DummyTrendSubmitStrategy()
+
+    submit_maker_quote(
+        strategy,
+        instrument_id="inst-up",
+        side="buy",
+        limit_price=Decimal("0.71"),
+        econ=SimpleNamespace(
+            expected_net_usdc=Decimal("0.01"),
+            expected_rebate_usdc=Decimal("0"),
+            expected_spread_capture_usdc=Decimal("0"),
+            fee_equivalent_usdc=Decimal("0"),
+        ),
+        directional_snapshot={"size_multiplier": Decimal("1")},
         target_qty_override=Decimal("6.0"),
     )
 
     assert not strategy.submitted_orders
-    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
-    assert strategy.order_events[-1]["payload"]["size_multiplier"] == 0.5
-    assert adjusted["high_entry_price_size_adjustment"]["threshold"] == Decimal("0.70")
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_ABOVE_SHARE_TARGET"
 
 
-def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum():
+def test_risk_size_down_below_min_entry_shares_is_skipped_not_rounded_up():
     strategy = DummyTrendSubmitStrategy()
     strategy.maker_min_shares = Decimal("5.4")
     strategy.maker_exchange_min_shares = Decimal("5.0")
@@ -3525,7 +4431,8 @@ def test_high_entry_price_size_adjustment_does_not_round_up_to_exchange_minimum(
     )
 
     assert not strategy.submitted_orders
-    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN"
+    assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_SIZE_BELOW_MIN_ENTRY_SHARES"
+    assert strategy.order_events[-1]["payload"]["final_normalized_shares"] == 3.0
 
 
 def test_buy_is_not_submitted_above_the_evaluated_economics_quantity():
@@ -3602,7 +4509,7 @@ def test_buy_is_skipped_when_remaining_market_capacity_is_below_exchange_minimum
 
     assert not strategy.submitted_orders
     assert strategy.order_events[-1]["event_type"] == "ORDER_SKIP_INVENTORY_CAP"
-    assert strategy.order_events[-1]["reason"] == "remaining_inventory_capacity_below_exchange_min"
+    assert strategy.order_events[-1]["reason"] == "remaining_inventory_capacity_below_min_entry_shares"
 
 
 def test_projected_buy_inventory_counts_pending_opposite_outcome_order():
@@ -3651,7 +4558,7 @@ def test_entry_quality_quote_placement_caps_high_decay_risk_to_best_bid():
     assert "entry_quality_quote_placement join_bid 0.7400->0.7000" in out["diag_reason"]
 
 
-def test_weak_and_high_price_risk_caps_produce_half_size_not_quarter_size():
+def test_weak_and_high_price_risk_caps_do_not_compound_and_half_size_skips():
     desired = {
         "should_quote": True,
         "p_fair": Decimal("0.50"),
@@ -3666,17 +4573,21 @@ def test_weak_and_high_price_risk_caps_produce_half_size_not_quarter_size():
         upper=Decimal("0.53"),
         multiplier=Decimal("0.5"),
     )
-    desired = apply_high_entry_price_size_adjustment(
-        desired_entry=desired,
-        side="buy",
-        enabled=True,
-        threshold=Decimal("0.70"),
-        multiplier=Decimal("0.5"),
+    desired = apply_high_entry_price_size_adjustment(desired_entry=desired, side="buy")
+    # Seam audit S2 (2026-10-09): the multiplier applies to the share target
+    # before the (multiplier-free) $10 L2/risk cap, so 5.5 x 0.5 = 2.75 < 5.5
+    # is SKIPPED, never clamped back up to the minimum.
+    desired, decision = apply_share_entry_sizing(
+        desired_entry=desired, side="buy", cap_quantity=Decimal("10") / Decimal("0.75"),
     )
 
+    # Risk reductions are caps (min), not compounding multipliers: 0.5, not 0.25.
     assert desired["size_multiplier"] == Decimal("0.5")
     assert desired["weak_pfair_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
-    assert desired["high_entry_price_size_adjustment"]["adjusted_size_multiplier"] == Decimal("0.5")
+    assert desired["high_entry_price_size_adjustment"]["target_shares"] == Decimal("5.5")
+    assert decision.final_quantity == Decimal("2.75")
+    assert decision.skipped and desired["should_quote"] is False
+    assert desired["target_qty_override"] is None
 
 
 def test_negative_robust_net_cannot_be_recovered_by_entry_mode():
@@ -4375,43 +5286,6 @@ def test_forecast_snapshot_telemetry_preserves_shadow_payload_and_serializes_dec
     assert payload["forecast_strike_lock_state"] == "authoritative"
 
 
-def test_external_lead_lag_observation_records_each_horizon_once():
-    class Harness(LeadLagObservationMixin):
-        def __init__(self):
-            self.trade_db = object()
-            self.current_market_slug = "btc-updown-15m-test"
-            self.current_market_end_timestamp = 1_000.0
-            self.current_up_instrument_id = "up-token"
-            self.latest_quote_by_inst = {"up-token": (Decimal("0.49"), Decimal("0.51"))}
-            self._binance_ws_price = Decimal("100.0")
-            self._binance_ws_price_ts = 100.0
-            self._polymarket_chainlink_twap_price = Decimal("99.0")
-            self._polymarket_chainlink_twap_price_ts = 100.0
-            self.latest_external_spot = Decimal("99.0")
-            self.latest_external_spot_source = "polymarket_chainlink_twap_60s_ws"
-            self.latest_external_spot_source_ts = 100.0
-            self.events = []
-
-        def _db_strategy_event(self, event_type, payload):
-            self.events.append((event_type, payload))
-
-    strategy = Harness()
-    strategy._lead_lag_observation_on_quote(100.0)
-    strategy.latest_quote_by_inst["up-token"] = (Decimal("0.54"), Decimal("0.56"))
-    strategy._binance_ws_price = Decimal("101.0")
-    strategy._polymarket_chainlink_twap_price = Decimal("99.5")
-    for timestamp in (105.0, 115.0, 130.0, 160.0):
-        strategy._lead_lag_observation_on_quote(timestamp)
-
-    snapshots = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_SNAPSHOT"]
-    outcomes = [payload for event, payload in strategy.events if event == "EXTERNAL_LEAD_LAG_OUTCOME"]
-    first_id = snapshots[0]["observation_id"]
-    first_outcomes = [payload for payload in outcomes if payload["observation_id"] == first_id]
-    assert len(snapshots) == 4
-    assert [payload["horizon_target_sec"] for payload in first_outcomes] == [5, 15, 30, 60]
-    assert all(payload["elapsed_sec"] >= payload["horizon_target_sec"] for payload in first_outcomes)
-    assert all(math.isclose(payload["up_mid_change_ps"], 0.05) for payload in first_outcomes)
-    assert all(math.isclose(payload["binance_return_bps"], 100.0) for payload in first_outcomes)
 
 
 def test_entry_regime_observation_payload_tags_mid_late_signed_spot_intersection():
@@ -4501,6 +5375,7 @@ def test_capture_market_open_spot_prefers_fresh_twap_over_snapshot_chainlink():
     dummy = SimpleNamespace(
         _polymarket_chainlink_twap_price=Decimal("101.50"),
         _polymarket_chainlink_twap_price_ts=999.6,
+        _polymarket_chainlink_twap_observation_ts=999.6,
         _polymarket_chainlink_twap_window_sec=60,
         polymarket_chainlink_twap_window_sec=60,
         _polymarket_chainlink_price=Decimal("101.25"),
@@ -4544,6 +5419,79 @@ def test_first_entry_gate_is_stricter_than_general_directional_entry_gate():
     assert out.skip is True
     assert out.event_type == "ORDER_SKIP_DIRECTIONAL_FIRST_ENTRY_GATE"
     assert out.reason == "directional_first_entry_gate"
+
+
+def test_first_entry_window_allows_candidates_only_after_five_minute_warmup():
+    kwargs = dict(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        latest_observation_supports_locked_side=True,
+        side_score=Decimal("0.40"),
+        directional_entry_min_score_abs_new=Decimal("0.18"),
+        directional_first_entry_min_score_abs_new=Decimal("0.25"),
+        locked_side_score_abs=Decimal("0.40"),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        current_inst_inventory_qty=Decimal("0"),
+        current_slug="btc-updown-15m-test",
+        inst_id="inst-up",
+        market_buy_count=0,
+        time_left_sec=601.0,
+        best_bid=Decimal("0.80"),
+        fair=Decimal("0.85"),
+    )
+
+    blocked_before_warmup = evaluate_buy_entry_controls(
+        first_entry_max_time_left_sec=600, **kwargs
+    )
+    allowed_after_warmup = evaluate_buy_entry_controls(
+        first_entry_max_time_left_sec=600, time_left_sec=600.0,
+        **{key: value for key, value in kwargs.items() if key != "time_left_sec"},
+    )
+
+    assert blocked_before_warmup.event_type == "ORDER_SKIP_FIRST_ENTRY_TIME_WINDOW"
+    assert allowed_after_warmup.skip is False
+
+
+def test_entry_quality_can_reduce_maker_size_without_changing_entry_allowance():
+    kwargs = dict(
+        side="buy",
+        bi_side_enabled=True,
+        active_side_locked=True,
+        active_side_value="UP",
+        latest_observation_supports_locked_side=True,
+        side_score=Decimal("0.72"),
+        directional_entry_min_score_abs_new=Decimal("0.18"),
+        directional_first_entry_min_score_abs_new=Decimal("0.25"),
+        locked_side_score_abs=Decimal("0.72"),
+        maker_min_expected_net_usdc=Decimal("0.001"),
+        current_inst_inventory_qty=Decimal("0"),
+        current_slug="btc-updown-15m-test",
+        inst_id="inst-up",
+        market_buy_count=0,
+        time_left_sec=600.0,
+        best_bid=Decimal("0.84"),
+        fair=Decimal("0.87"),
+        candidate_entry_price=Decimal("0.84"),
+        robust_net_usdc=Decimal("0.03"),
+        spot_minus_strike_avg=Decimal("12"),
+        shadow_payload={
+            "spot_minus_strike": 8.0,
+            "ret_30_bps": 6.2,
+            "breakout_persistence_60s": 0.15,
+        },
+    )
+
+    full_size = evaluate_buy_entry_controls(
+        entry_quality_allow_size_down=False, **kwargs
+    )
+    risk_adjusted = evaluate_buy_entry_controls(
+        entry_quality_allow_size_down=True, **kwargs
+    )
+
+    assert full_size.skip is False and risk_adjusted.skip is False
+    assert risk_adjusted.size_multiplier < full_size.size_multiplier
 
 def test_continuation_entry_cannot_open_first_position_in_market():
     desired_entry = {
@@ -4610,6 +5558,7 @@ def test_quote_watchdog_refresh_clears_stale_cache_and_replaces_subscriptions():
             self.latest_quote_by_inst = {"up-token": (Decimal("0.60"), Decimal("0.61"))}
             self.latest_quote_depth_by_inst = {"up-token": (Decimal("1"), Decimal("1"))}
             self.last_quote_update_ts_by_inst = {"up-token": 1.0}
+            self.last_quote_source_ts_by_inst = {"up-token": 1.0}
             self.last_quote_received_ts_by_inst = {"up-token": 1.0}
             self.unsubscribed = []
             self.subscribed = []
@@ -4627,6 +5576,7 @@ def test_quote_watchdog_refresh_clears_stale_cache_and_replaces_subscriptions():
     assert strategy.subscribed == ["up-token", "down-token"]
     assert strategy.latest_quote_by_inst == {}
     assert strategy.last_quote_update_ts_by_inst == {}
+    assert strategy.last_quote_source_ts_by_inst == {}
     assert strategy.quote_recovery_pending_instruments == {"up-token", "down-token"}
     assert strategy.quote_recovery_attempts == 0
 
@@ -4756,7 +5706,10 @@ def test_stale_transport_heartbeat_updates_liveness_without_updating_quote_state
     handle_quote_tick(strategy, tick)
 
     assert strategy.last_quote_received_ts_by_inst["up-token"] > 0
-    assert strategy.last_valid_quote_ts > 0
+    # Receipt proves the transport delivered a tick, but this exchange-stale
+    # heartbeat is not a valid executable quote and must not reset the
+    # quote-freshness watchdog.
+    assert strategy.last_valid_quote_ts == 0.0
     assert strategy.latest_quote_by_inst == {}
     assert strategy.watchdog_triggers == []
 
@@ -4809,6 +5762,17 @@ def test_quote_transport_telemetry_records_adapter_source_and_stale_age():
         ts_event=1,
     )
     record_quote_provenance(tick, source="transport_heartbeat")
+    record_quote_data_engine_publish_ts(tick, time.time() - 0.1)
+    record_quote_data_engine_queue_depth(
+        tick,
+        37,
+        queue_window={
+            "window_sec": 10.0,
+            "counts": {"QuoteTick": 8, "OrderBookDeltas": 40},
+            "high_water": {"QuoteTick": 90, "OrderBookDeltas": 6000},
+            "queue_depth": 37,
+        },
+    )
 
     assert quote_provenance_for_tick(tick)["source"] == "transport_heartbeat"
     handle_quote_tick(strategy, tick)
@@ -4820,6 +5784,9 @@ def test_quote_transport_telemetry_records_adapter_source_and_stale_age():
     assert payload["quote_is_fresh"] is False
     assert payload["quote_age_raw_sec"] > 30
     assert payload["raw_ws_received_ts"] is None
+    assert 0 <= payload["data_engine_delivery_delay_sec"] < 1
+    assert payload["data_engine_queue_depth"] == 37
+    assert payload["data_engine_queue_window"]["high_water"]["OrderBookDeltas"] == 6000
 
 
 def test_quote_provenance_retains_raw_websocket_ingress_timestamp():
@@ -4904,7 +5871,7 @@ def test_quote_adapter_timestamp_uses_nautilus_ts_init_not_exchange_event_time()
     assert abs(quote_tick_adapter_timestamp(tick, 0.0) - now_ts) < 0.01
 
 
-def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_fresh():
+def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_fresh(monkeypatch):
     class Price:
         def __init__(self, value):
             self.value = Decimal(value)
@@ -4932,6 +5899,7 @@ def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_
         def __init__(self):
             self.last_quote_received_ts_by_inst = {}
             self.last_quote_update_ts_by_inst = {}
+            self.last_quote_source_ts_by_inst = {}
             self.latest_quote_by_inst = {}
             self.latest_quote_depth_by_inst = {}
             self.price_history = []
@@ -4961,12 +5929,28 @@ def test_native_quote_with_old_exchange_timestamp_is_executable_when_ts_init_is_
     )
     record_quote_provenance(tick, source="ws_snapshot")
 
+    shadow_calls = []
+    monkeypatch.setattr(
+        "bot.market_runtime.record_strategy_quote",
+        lambda strategy, **kwargs: shadow_calls.append((strategy, kwargs)),
+    )
     strategy = Strategy()
     handle_quote_tick(strategy, tick)
 
     assert strategy.latest_quote_by_inst["up-token"] == (Decimal("0.60"), Decimal("0.61"))
     assert abs(strategy.last_quote_update_ts_by_inst["up-token"] - now_ts) < 0.01
+    assert abs(strategy.last_quote_source_ts_by_inst["up-token"] - (now_ts - 90.0)) < 0.01
     assert strategy.events[-1][1]["quote_is_fresh"] is True
+    assert len(shadow_calls) == 1
+    called_strategy, shadow_kwargs = shadow_calls[0]
+    assert called_strategy is strategy
+    assert shadow_kwargs["instrument_id"] == "up-token"
+    assert shadow_kwargs["bid"] == Decimal("0.60")
+    assert shadow_kwargs["ask"] == Decimal("0.61")
+    assert shadow_kwargs["bid_size"] == Decimal("10")
+    assert shadow_kwargs["ask_size"] == Decimal("10")
+    assert abs(shadow_kwargs["now_ts"] - now_ts) < 0.01
+    assert abs(shadow_kwargs["quote_source_ts"] - now_ts) < 0.01
 
 
 def test_quote_recovery_waits_for_both_binary_outcomes_before_clearing_pending_set():
@@ -5039,6 +6023,7 @@ def test_quote_recovery_waits_for_both_binary_outcomes_before_clearing_pending_s
     assert strategy.quote_recovery_pending_instruments == set()
     assert strategy.quote_recovery_started_ts == 0.0
     assert strategy.quote_recovery_attempts == 0
+    assert strategy.last_valid_quote_ts > 0.0
 
 
 def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():
@@ -5066,14 +6051,239 @@ def test_rollover_flag_is_captured_before_node_dispose_clears_strategies():
     assert _strategy_requested_rollover(node) is False
 
 
+def test_rollover_rebuild_requires_data_and_execution_engines_to_disconnect():
+    class Engine:
+        def __init__(self, disconnected):
+            self.disconnected = disconnected
+
+        def check_disconnected(self):
+            return self.disconnected
+
+    node = SimpleNamespace(
+        data_engine=Engine(False),
+        exec_engine=Engine(True),
+    )
+
+    clean, pending = node_engines_disconnected(node)
+
+    assert clean is False
+    assert pending == ["DataEngine"]
+
+
+def test_rollover_rebuild_checks_engines_exposed_through_nautilus_kernel():
+    class Engine:
+        def __init__(self, disconnected):
+            self.disconnected = disconnected
+
+        def check_disconnected(self):
+            return self.disconnected
+
+    node = SimpleNamespace(kernel=SimpleNamespace(
+        data_engine=Engine(True),
+        exec_engine=Engine(False),
+    ))
+
+    clean, pending = node_engines_disconnected(node)
+
+    assert clean is False
+    assert pending == ["ExecEngine"]
+
+
+def test_rollover_rebuild_waits_for_engine_disconnect_before_declaring_clean():
+    class Engine:
+        def __init__(self):
+            self.calls = 0
+
+        def check_disconnected(self):
+            self.calls += 1
+            return self.calls >= 2
+
+    engine = Engine()
+    node = SimpleNamespace(data_engine=engine)
+    ticks = iter((0.0, 0.0, 0.1, 0.1))
+
+    clean, pending = wait_for_node_engines_disconnected(
+        node,
+        timeout_sec=1.0,
+        sleep_fn=lambda _delay: None,
+        monotonic_fn=lambda: next(ticks),
+    )
+
+    assert clean is True
+    assert pending == []
+    assert engine.calls == 2
+
+
+def test_clean_node_return_without_rollover_does_not_restart_bot():
+    assert unrequested_clean_node_return_requires_stop(
+        node_run_returned=True, rollover_requested=False
+    )
+    assert not unrequested_clean_node_return_requires_stop(
+        node_run_returned=True, rollover_requested=True
+    )
+    assert not unrequested_clean_node_return_requires_stop(
+        node_run_returned=False, rollover_requested=False
+    )
+
+
+def test_rollover_restart_label_distinguishes_watchdog_from_scheduled_rollover():
+    assert rollover_restart_label("quote_watchdog_recovery") == "quote watchdog recovery"
+    assert rollover_restart_label("scheduled_auto_rollover") == "scheduled auto node rollover"
+    assert rollover_restart_label(None) == "requested node rollover"
+
+
+def test_rollover_drains_client_disconnect_task_before_disposing_node():
+    class Engine:
+        disconnected = False
+
+        def check_disconnected(self):
+            return self.disconnected
+
+    engine = Engine()
+    loop = asyncio.new_event_loop()
+
+    class LiveMarketDataClient:
+        def disconnect(self):
+            async def _disconnect_with_cleanup():
+                await asyncio.sleep(0.01)
+                engine.disconnected = True
+
+            return loop.create_task(_disconnect_with_cleanup())
+
+    task = LiveMarketDataClient().disconnect()
+    node = SimpleNamespace(data_engine=engine, kernel=SimpleNamespace(loop=loop))
+
+    def dispose():
+        assert task.done()
+        assert engine.disconnected
+        loop.close()
+
+    node.dispose = dispose
+    clean, pending = dispose_node_and_wait_for_engines_disconnected(
+        node,
+        timeout_sec=0.0,
+    )
+
+    assert clean is True
+    assert pending == []
+
+
+def test_wait_for_client_disconnect_tasks_runs_stopped_node_loop_until_cleanup_finishes():
+    class Node:
+        pass
+
+    loop = asyncio.new_event_loop()
+
+    class LiveMarketDataClient:
+        def disconnect(self):
+            async def _disconnect_with_cleanup():
+                await asyncio.sleep(0.01)
+
+            return loop.create_task(_disconnect_with_cleanup())
+
+    task = LiveMarketDataClient().disconnect()
+    node = Node()
+    node.kernel = SimpleNamespace(loop=loop)
+
+    clean, pending = wait_for_client_disconnect_tasks(node, timeout_sec=1.0)
+
+    assert clean is True
+    assert pending == []
+    assert task.done()
+    loop.close()
+
+
+def test_quote_age_status_marks_stale_status_not_tradable():
+    assert quote_age_status_reason(
+        now_ts=1759188939.0,
+        last_valid_quote_ts=1759188864.0,
+        stale_after_sec=30.0,
+    ) == "quote_stale_75s"
+
+
+def test_quote_age_status_does_not_mark_fresh_quote_stale():
+    assert quote_age_status_reason(
+        now_ts=100.0,
+        last_valid_quote_ts=80.0,
+        stale_after_sec=30.0,
+    ) is None
+
+
+def test_watchdog_node_stop_is_scheduled_on_the_node_event_loop_thread():
+    scheduled = []
+    stops = []
+
+    class Loop:
+        def is_running(self):
+            return True
+
+        def is_closed(self):
+            return False
+
+        def call_soon_threadsafe(self, callback):
+            scheduled.append(callback)
+
+    node = SimpleNamespace(
+        kernel=SimpleNamespace(loop=Loop()),
+        stop=lambda: stops.append("stop"),
+    )
+
+    request_stop = threadsafe_node_stop_callback(node)
+
+    assert request_stop() is True
+    assert stops == []
+    assert len(scheduled) == 1
+
+    scheduled.pop()()
+
+    assert stops == ["stop"]
+    assert request_stop() is False
+
+
+def test_node_stop_fences_market_data_before_async_disconnect_starts():
+    scheduled = []
+    class Loop:
+        def is_running(self): return True
+        def is_closed(self): return False
+        def call_soon_threadsafe(self, callback): scheduled.append(callback)
+
+    order = []
+    client = SimpleNamespace(
+        _btc15m_disconnecting=False,
+        _quote_transport_heartbeat_task=None,
+        _quote_delivery_task=None,
+        _quote_delivery_pending={"up": object()},
+    )
+    engine = SimpleNamespace(
+        _btc15m_backpressure={"quotes": {"up": object()}},
+        _clients={"POLYMARKET": client},
+    )
+    node = SimpleNamespace(
+        kernel=SimpleNamespace(loop=Loop(), data_engine=engine),
+        stop=lambda: order.append((
+            "stop", engine._btc15m_disposing, client._btc15m_disconnecting,
+            dict(client._quote_delivery_pending),
+        )),
+    )
+    request_stop = threadsafe_node_stop_callback(node)
+
+    assert request_stop() is True
+    scheduled.pop()()
+
+    assert order == [("stop", True, True, {})]
+    assert engine._btc15m_backpressure["quotes"] == {}
+
+
 def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
     class Order:
         status = "ACCEPTED"
 
     class Strategy:
-        def __init__(self, inventory, active_orders):
+        def __init__(self, inventory, active_orders, maker_exchange_min_shares=None):
             self.inventory_delta_shares = inventory
             self.active_maker_orders = active_orders
+            if maker_exchange_min_shares is not None:
+                self.maker_exchange_min_shares = maker_exchange_min_shares
 
     class Trader:
         def __init__(self, strategies):
@@ -5102,6 +6312,16 @@ def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
         "strategy[0]:inventory=0.010000"
     ]
 
+    # Production's default exchange minimum is 5 shares.  A 0.01-share
+    # residual cannot form a SELL, so it must not keep a stale node alive.
+    configured_dust = Node([Strategy(Decimal("0.01"), {}, Decimal("5"))])
+    assert _strategy_rollover_exposure_reasons(configured_dust) == []
+
+    configured_min_sellable = Node([Strategy(Decimal("5"), {}, Decimal("5"))])
+    assert _strategy_rollover_exposure_reasons(configured_min_sellable) == [
+        "strategy[0]:inventory=5.000000"
+    ]
+
     sell_only = Node([Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": Order()}})])
     assert _strategy_rollover_exposure_reasons(sell_only) == [
         "strategy[0]:active_sell=sell:up-token"
@@ -5111,6 +6331,122 @@ def test_automatic_rollover_is_deferred_for_inventory_or_live_protective_sell():
         Strategy(Decimal("0"), {"sell:up-token": {"side": "sell", "order": SimpleNamespace(status="CANCELED")}})
     ])
     assert _strategy_rollover_exposure_reasons(terminal_sell) == []
+
+
+def test_rollover_does_not_wedge_on_orphaned_prior_market_sell():
+    class Order:
+        status = "ACCEPTED"
+
+    class Strategy:
+        inventory_delta_shares = Decimal("0")
+        maker_exchange_min_shares = Decimal("5")
+        current_market_instruments = ["new-market-up", "new-market-down"]
+        active_maker_orders = {
+            "sell:old-market-up": {
+                "side": "sell",
+                "instrument_id": "old-market-up",
+                "pending_cancel": True,
+                "order": Order(),
+            }
+        }
+
+        @staticmethod
+        def _get_confirmed_inventory_qty_for_instrument(instrument_id):
+            raise RuntimeError("old market is no longer selected")
+
+    class Trader:
+        @staticmethod
+        def strategies():
+            return [Strategy()]
+
+    class Node:
+        trader = Trader()
+
+    assert _strategy_rollover_exposure_reasons(Node()) == []
+
+
+def test_scheduled_rollover_fails_closed_when_strategy_exposure_cannot_be_read():
+    class Trader:
+        @staticmethod
+        def strategies():
+            raise RuntimeError("trader is stopping")
+
+    class Node:
+        trader = Trader()
+
+    reasons = _strategy_rollover_exposure_reasons(Node())
+
+    assert reasons
+    assert "unknown" in reasons[0].lower() or "unavailable" in reasons[0].lower()
+
+
+def test_scheduled_rollover_fails_closed_when_exposure_fields_are_malformed():
+    class Strategy:
+        inventory_delta_shares = "not-a-number"
+        active_maker_orders = None
+
+    class Trader:
+        @staticmethod
+        def strategies():
+            return [Strategy()]
+
+    class Node:
+        trader = Trader()
+
+    reasons = _strategy_rollover_exposure_reasons(Node())
+
+    assert len(reasons) >= 2
+    assert all("unknown" in reason.lower() or "unavailable" in reason.lower() for reason in reasons)
+
+
+def test_rollover_still_defers_for_current_market_pending_sell_and_inventory():
+    class Order:
+        status = "ACCEPTED"
+
+    class Strategy:
+        inventory_delta_shares = Decimal("0")
+        maker_exchange_min_shares = Decimal("5")
+        current_market_instruments = ["new-market-up", "new-market-down"]
+
+        def __init__(self, instrument_id):
+            self.active_maker_orders = {
+                f"sell:{instrument_id}": {
+                    "side": "sell",
+                    "instrument_id": instrument_id,
+                    "pending_cancel": True,
+                    "order": Order(),
+                }
+            }
+
+    class Trader:
+        def __init__(self, strategy):
+            self.strategy = strategy
+
+        def strategies(self):
+            return [self.strategy]
+
+    class Node:
+        def __init__(self, strategy):
+            self.trader = Trader(strategy)
+
+    current_market = _strategy_rollover_exposure_reasons(Node(Strategy("new-market-up")))
+    assert current_market == ["strategy[0]:active_sell=sell:new-market-up"]
+
+    Strategy.inventory_delta_shares = Decimal("5")
+    current_inventory = _strategy_rollover_exposure_reasons(Node(Strategy("old-market-up")))
+    assert current_inventory == ["strategy[0]:inventory=5.000000"]
+
+
+def test_empty_instrument_cache_is_treated_as_startup_wait_not_error(monkeypatch):
+    errors = []
+    monkeypatch.setattr("bot.market_runtime.logger.error", errors.append)
+    strategy = SimpleNamespace(
+        cache=SimpleNamespace(instruments=lambda: []),
+        startup_verbose=False,
+    )
+
+    assert find_btc_instrument(strategy) is False
+    assert errors == []
 
 
 def test_unchanged_top_of_book_emits_bounded_heartbeat():
@@ -5129,6 +6465,7 @@ def test_stale_twap_degrades_to_fresh_binance_instead_of_stopping_pipeline():
     strategy.external_spot_source_delta_abs_max_usd = Decimal("0")
     strategy._polymarket_chainlink_twap_price = Decimal("65000")
     strategy._polymarket_chainlink_twap_price_ts = now_ts - 11.0
+    strategy._polymarket_chainlink_twap_observation_ts = now_ts - 11.0
     strategy._polymarket_chainlink_twap_window_sec = 60
     strategy._polymarket_chainlink_price = Decimal("65001")
     strategy._polymarket_chainlink_price_ts = now_ts
@@ -5153,3 +6490,23 @@ def test_stale_twap_degrades_to_fresh_binance_instead_of_stopping_pipeline():
         last_emit_ns=1_000_000_000,
         heartbeat_sec=5.0,
     )
+
+
+def test_delayed_twap_receipt_is_not_fresh_when_chainlink_observation_is_old():
+    strategy = DummySpotPricerStrategy()
+    now_ts = time.time()
+    strategy.require_twap_reference_spot = True
+    strategy.external_spot_source_delta_abs_max_usd = Decimal("0")
+    strategy._polymarket_chainlink_twap_price = Decimal("65000")
+    strategy._polymarket_chainlink_twap_price_ts = now_ts
+    strategy._polymarket_chainlink_twap_observation_ts = now_ts - 11.0
+    strategy._polymarket_chainlink_twap_window_sec = 60
+    strategy._binance_ws_price = Decimal("64999")
+    strategy._binance_ws_price_ts = now_ts
+    strategy.strategy_events = []
+
+    price = asyncio.run(strategy._fetch_external_spot_price())
+
+    assert price == Decimal("64999")
+    assert strategy.latest_external_spot_source == "binance_ws"
+    assert strategy.strategy_events[-1][0] == "TWAP_REFERENCE_DEGRADED"

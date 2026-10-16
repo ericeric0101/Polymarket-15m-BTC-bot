@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from bot.smart_money import _norm_direction  # noqa: E402
+from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_next_cursor, v2_rows  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -79,7 +80,7 @@ class WalletStats:
     def observe_trade(self, trade: dict[str, Any]) -> None:
         side = str(trade.get("side") or "").upper()
         direction = _norm_direction(trade.get("outcome"))
-        condition_id = str(trade.get("conditionId") or "")
+        condition_id = str(trade.get("condition_id") or "")
         price = _as_float(trade.get("price"))
         size = _as_float(trade.get("size"))
         cash = max(0.0, price * size)
@@ -217,23 +218,27 @@ def fetch_recent_trades(
     min_cash: float,
 ) -> list[dict[str, Any]]:
     all_trades: list[dict[str, Any]] = []
-    page_limit = max(1, min(10000, int(limit)))
-    for page in range(max(1, int(pages))):
+    page_limit = max(1, min(1000, int(limit)))
+    cursor: str | None = None
+    for _page in range(max(1, int(pages))):
         params: dict[str, Any] = {
-            "takerOnly": "false",
+            "taker_only": "false",
             "limit": page_limit,
-            "offset": page * page_limit,
         }
+        if cursor:
+            params["cursor"] = cursor
         if min_cash > 0:
-            params["filterType"] = "CASH"
-            params["filterAmount"] = min_cash
+            params["filter_type"] = "CASH"
+            params["filter_amount"] = min_cash
         response = client.get(f"{data_base.rstrip('/')}/trades", params=params)
         response.raise_for_status()
         payload = response.json()
-        if not isinstance(payload, list) or not payload:
+        page_rows = v2_rows(payload)
+        if not page_rows:
             break
-        all_trades.extend(item for item in payload if isinstance(item, dict))
-        if len(payload) < page_limit:
+        all_trades.extend(page_rows)
+        cursor = v2_next_cursor(payload)
+        if not cursor:
             break
     return all_trades
 
@@ -262,7 +267,7 @@ def discover_market_refs_from_data_trades(
     )
     for trade in trades:
         slug = str(trade.get("slug") or "").strip()
-        condition_id = str(trade.get("conditionId") or "").strip()
+        condition_id = str(trade.get("condition_id") or "").strip()
         if not slug.startswith("btc-updown-15m-") or not condition_id:
             continue
         try:
@@ -326,17 +331,16 @@ def fetch_trades(
     limit: int,
 ) -> list[dict[str, Any]]:
     params: dict[str, Any] = {
-        "market": condition_id,
-        "takerOnly": "false",
-        "limit": max(1, min(10000, int(limit))),
+        "condition": condition_id,
+        "taker_only": "false",
+        "limit": max(1, min(1000, int(limit))),
     }
     if min_cash > 0:
-        params["filterType"] = "CASH"
-        params["filterAmount"] = min_cash
+        params["filter_type"] = "CASH"
+        params["filter_amount"] = min_cash
     response = client.get(f"{data_base.rstrip('/')}/trades", params=params)
     response.raise_for_status()
-    payload = response.json()
-    return payload if isinstance(payload, list) else []
+    return v2_rows(response.json())
 
 
 def fetch_position_hedgers(
@@ -348,40 +352,28 @@ def fetch_position_hedgers(
     hedge_ratio: float,
 ) -> tuple[set[str], dict[str, float]]:
     response = client.get(
-        f"{data_base.rstrip('/')}/v1/market-positions",
+        f"{data_base.rstrip('/')}/positions",
         params={
-            "market": condition_id,
-            "status": "ALL",
-            "sortBy": "TOTAL_PNL",
-            "sortDirection": "DESC",
-            "limit": max(1, min(500, int(limit))),
+            "condition": condition_id,
+            "status": "OPEN",
+            "limit": max(1, min(1000, int(limit))),
         },
     )
     response.raise_for_status()
-    payload = response.json()
+    payload = v2_rows(response.json())
     exposure_by_wallet: dict[str, dict[str, float]] = defaultdict(lambda: {"UP": 0.0, "DOWN": 0.0})
     pnl_by_wallet: dict[str, float] = defaultdict(float)
-    if not isinstance(payload, list):
-        return set(), {}
-    for token_group in payload:
-        if not isinstance(token_group, dict):
+    for pos in payload:
+        wallet = str(pos.get("proxy_wallet") or "").lower()
+        direction = _norm_direction(pos.get("outcome"))
+        if not wallet or direction not in {"UP", "DOWN"}:
             continue
-        positions = token_group.get("positions")
-        if not isinstance(positions, list):
-            continue
-        for pos in positions:
-            if not isinstance(pos, dict):
-                continue
-            wallet = str(pos.get("proxyWallet") or "").lower()
-            direction = _norm_direction(pos.get("outcome"))
-            if not wallet or direction not in {"UP", "DOWN"}:
-                continue
-            current_value = _as_float(pos.get("currentValue"))
-            size = _as_float(pos.get("size"))
-            curr_price = _as_float(pos.get("currPrice"))
-            exposure = current_value if current_value > 0 else size * curr_price
-            exposure_by_wallet[wallet][direction] += max(0.0, exposure)
-            pnl_by_wallet[wallet] += _as_float(pos.get("totalPnl"))
+        current_value = _as_float(pos.get("current_value"))
+        size = _as_float(pos.get("current_size"))
+        avg_price = _as_float(pos.get("avg_price"))
+        exposure = current_value if current_value > 0 else size * avg_price
+        exposure_by_wallet[wallet][direction] += max(0.0, exposure)
+        pnl_by_wallet[wallet] += _as_float(pos.get("realized_pnl")) + _as_float(pos.get("unrealized_pnl"))
     hedgers: set[str] = set()
     for wallet, sides in exposure_by_wallet.items():
         total = sides["UP"] + sides["DOWN"]
@@ -574,7 +566,7 @@ def build(args: argparse.Namespace) -> int:
             for trade in trades:
                 if not isinstance(trade, dict):
                     continue
-                wallet = str(trade.get("proxyWallet") or "").lower()
+                wallet = str(trade.get("proxy_wallet") or "").lower()
                 if not wallet:
                     continue
                 stats = wallet_stats.setdefault(wallet, WalletStats(proxy_wallet=wallet))
@@ -623,7 +615,7 @@ def build(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Build offline smart-money wallet labels for BTC 15m markets")
     ap.add_argument("--db", default="./logs/smart_money_wallets.db")
-    ap.add_argument("--data-api-base", default="https://data-api.polymarket.com")
+    ap.add_argument("--data-api-base", default=DATA_API_V2_BASE_URL)
     ap.add_argument("--gamma-api-base", default="https://gamma-api.polymarket.com")
     ap.add_argument(
         "--market-source",

@@ -1,0 +1,5 @@
+group,n_markets,n_days,win_rate,win_wilson95,avg_price,edge_win_minus_price,pnl_total,pnl_per_market
+HELD_TO_SETTLEMENT,30,8,0.4333,"[0.2738, 0.608]",0.709,-0.2757,-77.844,-2.5948
+MAKER_SELL,72,11,0.9444,"[0.8657, 0.9782]",0.7835,0.161,94.109,1.3071
+STOP,5,4,0.0,"[0.0, 0.4345]",0.782,-0.782,-17.874,-3.5748
+TAKER_OTHER,1,1,0.0,"[0.0, 0.7935]",0.68,-0.68,-3.492,-3.4918

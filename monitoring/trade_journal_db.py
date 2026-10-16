@@ -4,14 +4,30 @@ SQLite trade journal for run_bot live/simulation diagnostics and analytics.
 from __future__ import annotations
 
 import json
+import re
 import math
+import queue
+import shutil
+from contextlib import closing
+import os
 import sqlite3
-from datetime import datetime, timezone
+import threading
+import time
+import uuid
+from datetime import date as calendar_date, datetime, time as datetime_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from bot.entry_session_policy import MARKOUT_CALIBRATION_START_UTC, is_taipei_weeknight_entry_session
+
 from loguru import logger
+from monitoring.diagnostic_budget import SUMMARY_EVENT, DiagnosticBudget, diagnostic_bucket
+from monitoring.storage_retention import StoragePolicy, maintenance_lock, record_completed_backup
+from bot.research.storage import StorageSummary
+
+DEFAULT_BACKUP_INTERVAL_SEC = 3 * 60 * 60
 
 
 def _utc_now_iso() -> str:
@@ -59,6 +75,25 @@ def _summarize_adverse_markouts(
     }
 
 
+SESSION_CORRECTION_EVENT = "SESSION_PNL_EVIDENCE_CORRECTION"
+
+
+def session_window_local(session_date_taipei: str) -> tuple:
+    """[start, end) of a guard session in Asia/Taipei (night 19:30-07:30, '-day' 07:30-19:30)."""
+    is_day_session = str(session_date_taipei).endswith("-day")
+    raw_date = str(session_date_taipei)[:-4] if is_day_session else str(session_date_taipei)
+    session_day = calendar_date.fromisoformat(raw_date)
+    local_zone = ZoneInfo("Asia/Taipei")
+    if is_day_session:
+        return (datetime.combine(session_day, datetime_time(7, 30), tzinfo=local_zone),
+                datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone))
+    return (datetime.combine(session_day, datetime_time(19, 30), tzinfo=local_zone),
+            datetime.combine(session_day + timedelta(days=1), datetime_time(7, 30), tzinfo=local_zone))
+
+
+_TOKEN_IN_INSTRUMENT = re.compile(r"-([0-9]+)\.POLYMARKET$")
+
+
 class TradeJournalDB:
     """
     Lightweight SQLite writer.
@@ -66,16 +101,424 @@ class TradeJournalDB:
     - Never raises to strategy path; logs and continues
     """
 
-    def __init__(self, db_path: str = "./logs/trade_journal.db") -> None:
+    SCHEMA_VERSION = 3
+    _REQUIRED_COLUMNS = {
+        "strategy_runs": {"run_id", "started_at", "mode", "test_mode", "maker_mode"},
+        "order_events": {
+            "id", "ts", "run_id", "event_type", "client_order_id", "venue_order_id", "side",
+            "price", "qty", "status", "reason", "instrument_id", "token_id", "fee_rate_bps",
+            "expected_net_usdc", "commission_usdc", "payload_json",
+        },
+        "strategy_events": {"id", "ts", "run_id", "event_type", "payload_json"},
+        "session_pnl_state": {
+            "session_date_taipei", "realized_pnl_usdc", "realized_high_water_usdc",
+            "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "created_ts", "updated_ts",
+            "guard_mode",
+        },
+    }
+    # These writes are required to reconstruct live exposure or prevent a
+    # duplicate entry after a restart.  Diagnostic/shadow writes must not turn
+    # a healthy primary journal into a permanent BUY circuit-breaker.
+    _CRITICAL_ORDER_EVENTS = {
+        # These are the only order writes that create or confirm exposure.
+        # A terminal status is useful evidence, but a prior intent/submit plus
+        # external inventory recovery remains conservative if it cannot persist.
+        "ORDER_SUBMIT", "ORDER_MAKER_INTENT", "ORDER_FAST_FOLLOW_INTENT", "ORDER_FILLED",
+    }
+    _CRITICAL_STRATEGY_EVENTS = {
+        "FAST_FOLLOW_RISK_STATE", "MARKET_BUY_COUNT_UPDATED",
+        "MARKET_STOP_LOSS_COUNT_UPDATED",
+        "SESSION_PNL_UPDATE", "SESSION_PROFIT_GUARD_ARMED", "SESSION_BUY_LOCKED", "SESSION_DAY_RESET",
+    }
+
+    def __init__(self, db_path: str = "./data/trading/trade_journal.db", backup_path: Optional[str] = None,
+                 backup_interval_sec: float = DEFAULT_BACKUP_INTERVAL_SEC, legacy_db_path: Optional[str | Path] = None,
+                 journal_meta_path: Optional[str | Path] = None) -> None:
         self.db_path = str(Path(db_path))
+        target = Path(self.db_path)
+        self.journal_meta_path = Path(journal_meta_path) if journal_meta_path is not None else target.parent / "journal_meta.json"
+        self._marker_present = self._valid_marker_exists()
+        self._migration_error: Optional[str] = None
+        self._startup_origin = "existing" if target.is_file() else "fresh"
+        self._unexpectedly_missing = False
+        if not target.is_file():
+            legacy = Path(legacy_db_path) if legacy_db_path is not None else self._default_legacy_path(target)
+            if legacy is not None and legacy.is_file() and legacy.resolve() != target.resolve():
+                try:
+                    self._migrate_legacy_journal(legacy, target)
+                    self._startup_origin = "migrated"
+                    logger.warning(f"Migrated historical trade journal: source={legacy} target={target}")
+                except Exception as exc:
+                    self._migration_error = str(exc)
+                    self._startup_origin = "migration_failed"
+                    logger.error(f"Trade journal migration failed: source={legacy} target={target} error={exc}")
+            elif self._marker_present:
+                # This host has previously had a primary journal. Do not turn
+                # its disappearance into a brand-new installation and reset a
+                # same-market successful-BUY budget.
+                self._startup_origin = "unexpectedly_missing"
+                self._unexpectedly_missing = True
+        default_backup = Path(self.db_path).parent.parent / "backups" / Path(self.db_path).name
+        self.backup_path = str(Path(backup_path)) if backup_path else str(default_backup)
+        self._existed_at_startup = Path(self.db_path).is_file()
+        self._schema_init_error: Optional[str] = None
+        self._runtime_health: Dict[str, Any] = {
+            "ready": True, "state": "HEALTHY", "reason": "ready", "consecutive_failures": 0,
+        }
+        self._health_lock = threading.Lock()
+        self._monthly_report_lock = threading.Lock()
+        self._monthly_report_wakeup = threading.Event()
+        self._monthly_report_stop = threading.Event()
+        self._monthly_report_thread = None
+        self._monthly_report_month = None
+        self._monthly_report_cache = {}
+        self._last_health_probe_monotonic = 0.0
+        self._backup_interval_sec = max(1.0, float(backup_interval_sec))
+        self._storage_policy = StoragePolicy.from_env()
+        self._storage_summary = StorageSummary()
+        self._last_storage_state = None
+        self._storage_root = next((parent for parent in target.resolve().parents
+                                   if (parent / "monitoring/trade_journal_db.py").is_file()), None)
+        self._telemetry_queue = queue.Queue(maxsize=256)
+        self._diagnostic_budget = DiagnosticBudget.from_env()
+        self._backup_dirty = False
+        self._backup_retry_after_monotonic = 0.0
+        self._backup_health: Dict[str, Any] = {"state": "NOT_ATTEMPTED", "failures_total": 0}
+        # Coalesce the initial burst of startup telemetry too; a caller can
+        # still force a synchronous snapshot via stop()/flush_backup().
+        self._last_backup_monotonic = time.monotonic()
+        self._backup_lock = threading.Lock()
+        self._backup_flush_lock = threading.Lock()
+        self._backup_wakeup = threading.Event()
+        self._backup_stop = threading.Event()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        if not self._unexpectedly_missing:
+            self._init_schema()
+        self._startup_health = self._assess_startup_health()
+        if self._startup_health.get("ready") and not self._marker_present:
+            try:
+                self._write_installation_marker()
+                self._marker_present = True
+            except Exception as exc:
+                self._startup_health = {
+                    "ready": False, "reason": "journal_marker_write_failed", "error": str(exc),
+                }
+        self._backup_thread = threading.Thread(target=self._backup_worker, daemon=True, name="trade-journal-backup")
+        self._backup_thread.start()
+
+    @staticmethod
+    def _default_legacy_path(target: Path) -> Optional[Path]:
+        """Find the pre-migration journal only for the standard data/trading layout."""
+        if target.parent.name == "trading" and target.parent.parent.name == "data":
+            return target.parent.parent.parent / "logs" / "trade_journal.db"
+        return None
+
+    def _valid_marker_exists(self) -> bool:
+        try:
+            with self.journal_meta_path.open("r", encoding="utf-8") as handle:
+                marker = json.load(handle)
+            return bool(marker.get("journal_initialized") is True and marker.get("installation_id"))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+
+    def _write_installation_marker(self) -> None:
+        self.journal_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "format_version": 1,
+            "installation_id": str(uuid.uuid4()),
+            "journal_initialized": True,
+        }
+        temporary = self.journal_meta_path.with_name(f".{self.journal_meta_path.name}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(marker, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.journal_meta_path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _migrate_legacy_journal(source: Path, target: Path) -> None:
+        """Copy an SQLite journal through its backup API and atomically publish it."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.migrating")
+        try:
+            with sqlite3.connect(str(source)) as source_conn, sqlite3.connect(str(temporary)) as destination_conn:
+                source_conn.backup(destination_conn)
+            os.replace(temporary, target)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def startup_health(self) -> Dict[str, Any]:
+        """Return the immutable-at-startup journal gate used for new BUYs."""
+        return dict(self._startup_health)
+
+    def runtime_health_snapshot(self) -> Dict[str, Any]:
+        """Read cached authority state without recovery probes or database I/O."""
+        with self._health_lock:
+            return dict(self._runtime_health)
+
+    def runtime_health(self) -> Dict[str, Any]:
+        with self._health_lock:
+            state = str(self._runtime_health.get("state") or "HEALTHY")
+        if state in {"DEGRADED", "FAILED"}:
+            self._probe_runtime_health()
+        with self._health_lock:
+            return dict(self._runtime_health)
+
+    def _mark_runtime_failure(self, reason: str, error: Exception, *, event_type: str = "") -> None:
+        error_text = str(error)
+        lowered = error_text.lower()
+        unrecoverable = any(token in lowered for token in (
+            "malformed", "not a database", "database disk image is malformed", "schema", "readonly",
+        ))
+        with self._health_lock:
+            failures = int(self._runtime_health.get("consecutive_failures", 0)) + 1
+            state = "FAILED" if unrecoverable or failures >= 3 else "DEGRADED"
+            self._runtime_health = {
+                "ready": False,
+                "state": state,
+                "reason": "journal_unrecoverable" if unrecoverable else reason,
+                "error": error_text,
+                "event_type": str(event_type),
+                "consecutive_failures": failures,
+            }
+        logger.error(
+            "Trade journal critical runtime failure; new BUYs must be blocked: "
+            f"event_type={event_type} error={error}"
+        )
+
+    def _probe_runtime_health(self) -> None:
+        """Recover automatically only after an actual SQLite read succeeds."""
+        now = time.monotonic()
+        with self._health_lock:
+            if now - self._last_health_probe_monotonic < 0.05:
+                return
+            self._last_health_probe_monotonic = now
+        try:
+            conn = self._connect()
+            try:
+                conn.execute("SELECT 1").fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return
+        with self._health_lock:
+            self._runtime_health = {
+                "ready": True, "state": "HEALTHY", "reason": "recovered", "consecutive_failures": 0,
+            }
+        logger.warning("Trade journal runtime health recovered after a successful probe")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
+
+    def backup_health_snapshot(self) -> Dict[str, Any]:
+        """Cached backup diagnostics only; never changes primary journal readiness."""
+        with self._backup_lock:
+            return dict(self._backup_health)
+
+    def _backup_after_write(self) -> bool:
+        try:
+            with maintenance_lock(Path(self.backup_path).parent):
+                return self._publish_backup()
+        except (OSError, ValueError) as exc:
+            logger.error(f"TradeJournalDB backup ownership unavailable: {exc}")
+            with self._backup_lock:
+                self._backup_health.update(state="FAILED", failure_stage=("ownership_lock" if Path(self.backup_path).parent.is_dir() else "directory"), error=str(exc),
+                                           failures_total=self._backup_health["failures_total"] + 1)
+            return False
+
+    def _publish_backup(self) -> bool:
+        """Bounded SQLite backup with a read-only source and atomic publication.
+
+        Keep one published target plus one temporary target. Require room for
+        the new image, any rollback of an existing temporary image, and another
+        image-sized reserve for primary writes. This is a size-derived backup
+        budget, not a change to the research/BTC storage guard thresholds.
+        """
+        backup = Path(self.backup_path)
+        temporary = backup.with_name(f".{backup.name}.tmp")
+        stage = "directory"
+        temporary_opened = False
+        details: Dict[str, Any] = {"destination": str(backup), "free_bytes": None,
+                                   "required_free_bytes": None, "image_bytes": None,
+                                   "temporary_rollback_bytes": None}
+        try:
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            stage = "source_open"
+            uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=10)) as source:
+                stage = "space_check"
+                image_bytes = source.execute("PRAGMA page_count").fetchone()[0] * source.execute("PRAGMA page_size").fetchone()[0]
+                rollback_bytes = temporary.stat().st_size if temporary.is_file() else 0
+                required_bytes = self._storage_policy.backup_required_bytes(image_bytes, rollback_bytes)
+                free_bytes = shutil.disk_usage(backup.parent).free
+                details.update(free_bytes=free_bytes, required_free_bytes=required_bytes,
+                               image_bytes=image_bytes, temporary_rollback_bytes=rollback_bytes)
+                if free_bytes < required_bytes:
+                    raise OSError(f"backup free space insufficient: free={free_bytes} required={required_bytes}")
+                stage = "destination_open"
+                temporary_opened = True
+                with closing(sqlite3.connect(str(temporary))) as destination:
+                    stage = "sqlite_backup"
+                    source.backup(destination)
+            stage = "publish"
+            os.replace(temporary, backup)
+            try:
+                record_completed_backup(backup, Path(self.db_path))
+            except (OSError, ValueError, TypeError) as exc:
+                # Publication remains successful; missing metadata prevents
+                # pruning, never downgrades primary/exposure authority.
+                logger.warning(f"Backup retention metadata unavailable; preserve backups: {exc}")
+            with self._backup_lock:
+                self._backup_health.update(details, state="HEALTHY", last_success_ts=time.time(),
+                                           failure_stage=None, error=None, sqlite_errorname=None,
+                                           sqlite_errorcode=None, exception_class=None)
+            return True
+        except Exception as exc:
+            # A low-space preflight must not delete a previously existing file.
+            if temporary_opened:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            with self._backup_lock:
+                self._backup_health.update(details, state="FAILED", last_failure_ts=time.time(),
+                    failure_stage=stage, error=str(exc), exception_class=type(exc).__name__,
+                    sqlite_errorname=getattr(exc, "sqlite_errorname", None),
+                    sqlite_errorcode=getattr(exc, "sqlite_errorcode", None),
+                    failures_total=self._backup_health["failures_total"] + 1)
+            logger.error(f"TradeJournalDB backup failed: destination={backup} stage={stage} "
+                         f"exception={type(exc).__name__} sqlite_errorname={getattr(exc, 'sqlite_errorname', None)} "
+                         f"free_bytes={details.get('free_bytes')} required_free_bytes={details.get('required_free_bytes')} "
+                         f"error={exc}")
+            return False
+
+    def _schedule_backup(self) -> None:
+        """Coalesce snapshots off the order/fill callback hot path."""
+        with self._backup_lock:
+            self._backup_dirty = True
+        self._backup_wakeup.set()
+
+    def flush_backup(self, *, force: bool = True) -> bool:
+        """Publish a snapshot; explicit shutdown/manual flush may bypass cooldown.
+
+        The worker passes force=False, so telemetry wakeups cannot retry a
+        failed backup until the existing backup interval has elapsed.
+        """
+        # A caller at shutdown must not observe a clean dirty flag while the
+        # background worker is still publishing the same snapshot.
+        with self._backup_flush_lock:
+            with self._backup_lock:
+                if not self._backup_dirty and not force:
+                    self._backup_health.update(last_skip_reason="BACKUP_SKIPPED_UNCHANGED",
+                                               last_skip_ts=time.time())
+                    return True
+                if not force and time.monotonic() < self._backup_retry_after_monotonic:
+                    return False
+                self._backup_dirty = False
+            success = self._backup_after_write()
+            if not success:
+                with self._backup_lock:
+                    self._backup_dirty = True
+                    self._backup_retry_after_monotonic = time.monotonic() + self._backup_interval_sec
+                return False
+            self._backup_retry_after_monotonic = 0.0
+            self._last_backup_monotonic = time.monotonic()
+            health = self.backup_health_snapshot()
+            logger.info("TradeJournal backup completed: reason={} interval_sec={} image_bytes={} free_bytes_before={} last_success_ts={}",
+                        "forced_boundary" if force else "periodic", self._backup_interval_sec,
+                        health.get("image_bytes"), health.get("free_bytes"), health.get("last_success_ts"))
+            return True
+
+    def _periodic_backup(self) -> None:
+        """One scheduler for full images; committed writes set the dirty flag.
+
+        No mtime/page-count heuristic: updates to existing risk/session rows
+        also schedule a backup. Writes racing publication leave dirty set for
+        the next image. Explicit boundary flushes bypass this interval.
+        """
+        if time.monotonic() - self._last_backup_monotonic < self._backup_interval_sec:
+            return
+        with self._backup_lock:
+            dirty = self._backup_dirty
+        if not dirty:
+            self._last_backup_monotonic = time.monotonic()
+            with self._backup_lock:
+                self._backup_health.update(last_skip_reason="BACKUP_SKIPPED_UNCHANGED",
+                                           last_skip_ts=time.time())
+            logger.info("TradeJournal BACKUP_SKIPPED_UNCHANGED interval_sec={}", self._backup_interval_sec)
+            return
+        self.flush_backup(force=False)
+
+    def enqueue_strategy_event(self, run_id: str, event_type: str, payload: Dict[str, Any]) -> bool:
+        """Optional telemetry uses the existing journal worker, never caller SQLite I/O."""
+        if not self._backup_lock.acquire(blocking=False):
+            return False
+        try:
+            if self._backup_stop.is_set():
+                return False
+            try:
+                self._telemetry_queue.put_nowait((run_id, event_type, dict(payload), _utc_now_iso()))
+                self._backup_wakeup.set()
+                return True
+            except queue.Full:
+                return False
+        finally:
+            self._backup_lock.release()
+
+    def _drain_telemetry(self) -> None:
+        while True:
+            try:
+                args = self._telemetry_queue.get_nowait()
+            except queue.Empty:
+                return
+            self.log_strategy_event(*args[:3], event_ts=args[3])
+
+    def _emit_storage_telemetry(self) -> None:
+        if self._storage_root is None:
+            return
+        try:
+            result = self._storage_summary.measure_runtime(
+                root=self._storage_root, journal=Path(self.db_path), backup=Path(self.backup_path),
+                policy=self._storage_policy, backup_health=self.backup_health_snapshot())
+            if result.get("cached"):
+                return
+            state = result["storage_state"]
+            if state != self._last_storage_state:
+                logger.warning(f"STORAGE {self._last_storage_state or 'UNKNOWN'} -> {state}")
+                self._last_storage_state = state
+            logger.info(f"storage_health: {json.dumps(result, sort_keys=True)}")
+        except Exception as exc:
+            logger.warning(f"Storage measurement unavailable: {type(exc).__name__}: {exc}")
+
+    def _backup_worker(self) -> None:
+        while not self._backup_stop.is_set():
+            self._backup_wakeup.wait(timeout=1.0)
+            self._backup_wakeup.clear()
+            self._drain_telemetry()
+            self._emit_storage_telemetry()
+            self._periodic_backup()
+        self._drain_telemetry()
+
+    def stop(self) -> None:
+        self._monthly_report_stop.set()
+        self._monthly_report_wakeup.set()
+        if self._monthly_report_thread is not None:
+            self._monthly_report_thread.join(timeout=2.0)
+            if self._monthly_report_thread.is_alive():
+                logger.warning("Monthly reporting worker has not terminated; no execution authority")
+        with self._backup_lock:
+            self._backup_stop.set()
+        self._backup_wakeup.set()
+        self._backup_thread.join(timeout=2.0)
+        self.flush_backup()
 
     def _init_schema(self) -> None:
         ddl = """
@@ -113,6 +556,13 @@ class TradeJournalDB:
 
         CREATE INDEX IF NOT EXISTS idx_order_events_run_ts ON order_events(run_id, ts);
         CREATE INDEX IF NOT EXISTS idx_order_events_client ON order_events(client_order_id);
+        -- Startup maker/Outcome markout calibration always filters these rows
+        -- by event_type and BUY side, then orders by timestamp. Without this
+        -- compact partial index every node restart parses the full journal's
+        -- large payload_json column to find a small calibration sample.
+        CREATE INDEX IF NOT EXISTS idx_order_events_fill_markout_buy_ts_id
+            ON order_events(ts, id)
+            WHERE event_type='FILL_MARKOUT' AND side='BUY';
 
         CREATE TABLE IF NOT EXISTS strategy_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,13 +573,85 @@ class TradeJournalDB:
         );
 
         CREATE INDEX IF NOT EXISTS idx_strategy_events_run_ts ON strategy_events(run_id, ts);
+        CREATE INDEX IF NOT EXISTS idx_strategy_events_type_id ON strategy_events(event_type, id);
+
+        CREATE TABLE IF NOT EXISTS journal_schema (
+            version INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS session_pnl_state (
+            session_date_taipei TEXT PRIMARY KEY,
+            realized_pnl_usdc REAL NOT NULL,
+            realized_high_water_usdc REAL NOT NULL,
+            profit_guard_armed INTEGER NOT NULL,
+            buy_lock_active INTEGER NOT NULL,
+            buy_lock_reason TEXT NOT NULL,
+            guard_mode TEXT NOT NULL DEFAULT 'legacy',
+            created_ts TEXT NOT NULL,
+            updated_ts TEXT NOT NULL
+        );
         """
         try:
             with self._connect() as conn:
                 conn.executescript(ddl)
+                session_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(session_pnl_state)").fetchall()
+                }
+                if "guard_mode" not in session_columns:
+                    conn.execute("ALTER TABLE session_pnl_state ADD COLUMN guard_mode TEXT NOT NULL DEFAULT 'legacy'")
+                version = conn.execute("SELECT version FROM journal_schema LIMIT 1").fetchone()
+                if version is None:
+                    conn.execute("INSERT INTO journal_schema(version) VALUES (?)", (self.SCHEMA_VERSION,))
+                elif int(version[0]) < self.SCHEMA_VERSION:
+                    conn.execute("UPDATE journal_schema SET version=?", (self.SCHEMA_VERSION,))
                 conn.commit()
+            self._schedule_backup()
         except Exception as e:
+            self._schema_init_error = str(e)
             logger.warning(f"TradeJournalDB schema init failed: {e}")
+
+    def _assess_startup_health(self) -> Dict[str, Any]:
+        """Fail closed when a restart cannot safely restore trading risk state."""
+        if self._unexpectedly_missing:
+            return {"ready": False, "reason": "journal_unexpectedly_missing"}
+        if self._migration_error:
+            return {"ready": False, "reason": "legacy_migration_failed", "error": self._migration_error}
+        if self._schema_init_error:
+            return {"ready": False, "reason": "schema_init_failed", "error": self._schema_init_error}
+        try:
+            with self._connect() as conn:
+                tables = {
+                    row[0] for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                for table, required in self._REQUIRED_COLUMNS.items():
+                    if table not in tables:
+                        return {"ready": False, "reason": "schema_invalid", "table": table}
+                    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                    if not required.issubset(columns):
+                        return {"ready": False, "reason": "schema_invalid", "table": table}
+                row = conn.execute("SELECT version FROM journal_schema LIMIT 1").fetchone()
+                if row is None or int(row[0]) != self.SCHEMA_VERSION:
+                    return {"ready": False, "reason": "schema_invalid", "table": "journal_schema"}
+                event_count = sum(
+                    int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    for table in self._REQUIRED_COLUMNS
+                )
+                if event_count <= 0:
+                    # An empty journal is safe only as an absence of *journal*
+                    # evidence. Startup inventory recovery remains authoritative
+                    # and will force SELL-only if the venue reports exposure.
+                    reason = (
+                        "fresh_initialized" if self._startup_origin == "fresh"
+                        else "empty_journal_no_recovery_evidence"
+                    )
+                    return {"ready": True, "reason": reason, "event_count": 0}
+        except Exception as e:
+            logger.error(f"Trade journal startup healthcheck failed; BUYs blocked: {e}")
+            return {"ready": False, "reason": "read_failed", "error": str(e)}
+        reason = "migrated_legacy_journal" if self._startup_origin == "migrated" else "ready"
+        return {"ready": True, "reason": reason, "event_count": event_count}
 
     def log_run_start(
         self,
@@ -162,6 +684,7 @@ class TradeJournalDB:
                     ),
                 )
                 conn.commit()
+            self._schedule_backup()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_start failed: {e}")
 
@@ -185,10 +708,65 @@ class TradeJournalDB:
                     (_utc_now_iso(), _json_dumps(merged_notes), run_id),
                 )
                 conn.commit()
+            self._schedule_backup()
         except Exception as e:
             logger.debug(f"TradeJournalDB log_run_stop failed: {e}")
 
-    def load_market_guard_counts(self, slug: str) -> Dict[str, int]:
+    def load_breaker_v2_authority_decision(self, slug: str, instrument_id: str) -> Optional[Dict[str, Any]]:
+        """Latest persisted Breaker V2 authority decision for (market, instrument).
+
+        Returns ``{"decision_record", "sell_qty_after_decision", "prior_absolute_submit"}``
+        or ``None`` when the lookup itself fails (the caller then fails safe to the
+        legacy breaker).  Read-only.
+        """
+        slug, instrument_id = str(slug or ""), str(instrument_id or "")
+        if not slug or not instrument_id:
+            return None
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT ts, payload_json FROM strategy_events
+                    WHERE event_type='BREAKER_V2_AUTHORITY_DECISION'
+                      AND json_extract(payload_json, '$.slug')=?
+                      AND json_extract(payload_json, '$.instrument_id')=?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (slug, instrument_id),
+                ).fetchone()
+                record = None
+                sell_qty_after = 0.0
+                if row is not None:
+                    record = json.loads(row[1])
+                    record["journal_ts"] = row[0]
+                    sold = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(qty), 0) FROM order_events
+                        WHERE event_type='ORDER_FILLED' AND UPPER(COALESCE(side, ''))='SELL'
+                          AND COALESCE(json_extract(payload_json, '$.instrument_id'), instrument_id)=?
+                          AND ts > ?
+                        """,
+                        (instrument_id, row[0]),
+                    ).fetchone()
+                    sell_qty_after = float(sold[0] or 0.0)
+                prior_submit = conn.execute(
+                    """
+                    SELECT 1 FROM order_events
+                    WHERE event_type='ORDER_TAKER_EXIT_SUBMIT'
+                      AND COALESCE(json_extract(payload_json, '$.instrument_id'), instrument_id)=?
+                      AND json_extract(payload_json, '$.slug')=?
+                      AND json_extract(payload_json, '$.decision_reason')='absolute_max_loss_breaker'
+                    LIMIT 1
+                    """,
+                    (instrument_id, slug),
+                ).fetchone()
+            return {"decision_record": record, "sell_qty_after_decision": sell_qty_after,
+                    "prior_absolute_submit": prior_submit is not None}
+        except Exception as e:
+            logger.warning(f"TradeJournalDB breaker V2 decision lookup failed: {e}")
+            return None
+
+    def load_market_guard_counts(self, slug: str) -> Optional[Dict[str, int]]:
         """Recover per-market risk limits after a process or node restart."""
         slug = str(slug or "")
         if not slug:
@@ -202,6 +780,27 @@ class TradeJournalDB:
                     WHERE event_type='ORDER_FILLED'
                       AND side='BUY'
                       AND json_extract(payload_json, '$.slug')=?
+                    """,
+                    (slug,),
+                ).fetchone()
+                # A durable BUY intent with no terminal lifecycle event may still
+                # rest (or fill) at the venue after a crash; it consumes the
+                # market's BUY budget exactly like a fill until it is resolved.
+                unresolved_row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT intent.client_order_id)
+                    FROM order_events AS intent
+                    WHERE intent.event_type='ORDER_MAKER_INTENT'
+                      AND intent.side='BUY'
+                      AND json_extract(intent.payload_json, '$.slug')=?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM order_events AS done
+                          WHERE done.client_order_id=intent.client_order_id
+                            AND done.event_type IN (
+                                'ORDER_FILLED', 'ORDER_CANCELED', 'ORDER_REJECTED', 'ORDER_DENIED',
+                                'ORDER_EXPIRED', 'ORDER_CANCEL_RECONCILED'
+                            )
+                      )
                     """,
                     (slug,),
                 ).fetchone()
@@ -220,12 +819,13 @@ class TradeJournalDB:
                     (slug,),
                 ).fetchone()
             return {
-                "buy_count": int(buy_row[0] or 0),
+                "buy_count": int(buy_row[0] or 0) + int(unresolved_row[0] or 0),
+                "unresolved_buy_intent_count": int(unresolved_row[0] or 0),
                 "protective_exit_count": int(exit_row[0] or 0),
             }
         except Exception as e:
-            logger.debug(f"TradeJournalDB load_market_guard_counts failed: {e}")
-            return {"buy_count": 0, "protective_exit_count": 0}
+            logger.error(f"TradeJournalDB load_market_guard_counts failed; BUYs must remain blocked: {e}")
+            return None
 
     def load_maker_buy_markout_calibration(
         self,
@@ -281,6 +881,7 @@ class TradeJournalDB:
         lookback_hours: float,
         horizon_sec: int,
         min_samples: int,
+        taipei_weeknight_schema_v2_only: bool = False,
     ) -> Dict[str, Dict[str, float | int | str]]:
         """Return global fallback plus independently measured entry regimes."""
         try:
@@ -294,19 +895,44 @@ class TradeJournalDB:
                       END AS adverse_markout_per_share,
                       json_extract(payload_json, '$.entry_regime_bucket') AS entry_regime_bucket,
                       CAST(json_extract(payload_json, '$.entry_side_score') AS REAL) AS entry_side_score,
-                      CAST(json_extract(payload_json, '$.entry_time_left_sec') AS REAL) AS entry_time_left_sec
+                      CAST(json_extract(payload_json, '$.entry_time_left_sec') AS REAL) AS entry_time_left_sec,
+                      ts,
+                      json_extract(payload_json, '$.slug') AS slug,
+                      CAST(json_extract(payload_json, '$.markout_context_schema_version') AS INTEGER)
+                        AS markout_context_schema_version
                     FROM order_events
                     WHERE event_type='FILL_MARKOUT'
                       AND side='BUY'
                       AND json_extract(payload_json, '$.liquidity_class')='maker'
                       AND CAST(json_extract(payload_json, '$.horizon_sec') AS INTEGER)=?
                       AND julianday(ts) >= julianday('now', ?)
+                    ORDER BY ts ASC, id ASC
                     """,
                     (int(horizon_sec), f"-{float(lookback_hours):g} hours"),
                 ).fetchall()
         except Exception as e:
             logger.debug(f"TradeJournalDB load markout calibrations failed: {e}")
             return {}
+        if taipei_weeknight_schema_v2_only:
+            selected_rows = []
+            seen_markets: set[str] = set()
+            for row in rows:
+                try:
+                    observed_at = datetime.fromisoformat(str(row[4]).replace("Z", "+00:00"))
+                    slug = str(row[5] or "")
+                    if (
+                        observed_at < MARKOUT_CALIBRATION_START_UTC
+                        or int(row[6] or 0) != 2
+                        or not slug
+                        or slug in seen_markets
+                        or not is_taipei_weeknight_entry_session(observed_at)
+                    ):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                seen_markets.add(slug)
+                selected_rows.append(row)
+            rows = selected_rows
         global_values = [float(row[0] or 0.0) for row in rows]
         global_calibration = _summarize_adverse_markouts(
             global_values,
@@ -317,7 +943,14 @@ class TradeJournalDB:
         if not global_calibration:
             return {}
         calibrations: Dict[str, Dict[str, float | int | str]] = {
-            "global": {**global_calibration, "source": "global_fallback"},
+            "global": {
+                **global_calibration,
+                "source": (
+                    "taipei_weeknight_schema_v2_first_market"
+                    if taipei_weeknight_schema_v2_only
+                    else "global_fallback"
+                ),
+            },
         }
         for bucket in ("10_30", "30_60", "60_plus"):
             calibration = _summarize_adverse_markouts(
@@ -556,6 +1189,8 @@ class TradeJournalDB:
                         (_json_dumps(cycle_payload), int(row[0])),
                     )
                 conn.commit()
+            self._schedule_backup()
+            self._request_current_monthly_report_refresh()
             return {**reconciliation, "wrote_cycle_pnl": wrote_cycle_pnl}
         except Exception as e:
             logger.debug(f"TradeJournalDB reconcile_redeem_cycle failed: {e}")
@@ -572,7 +1207,8 @@ class TradeJournalDB:
                     """
                     SELECT payload_json
                     FROM order_events
-                    WHERE event_type IN (
+                    WHERE client_order_id IN (?, ?)
+                      AND event_type IN (
                       'SHADOW_SIM_ENTRY_CANDIDATE',
                       'SHADOW_SIM_ENTRY_REQUOTED',
                       'SHADOW_SIM_ENTRY_CANCELLED',
@@ -580,11 +1216,10 @@ class TradeJournalDB:
                       'SHADOW_SIM_ENTRY_EXPIRED',
                       'SHADOW_SIM_SETTLED'
                     )
-                      AND json_extract(payload_json, '$.slug')=?
                     ORDER BY id DESC
                     LIMIT 1
                     """,
-                    (slug,),
+                    (f"shadow-sim:{slug}:up", f"shadow-sim:{slug}:down"),
                 ).fetchone()
             if not row or not row[0]:
                 return None
@@ -600,21 +1235,22 @@ class TradeJournalDB:
         if not slug:
             return []
         try:
+            client_prefix = f"fair-edge-shadow:{slug}:"
             with self._connect() as conn:
                 rows = conn.execute(
                     """
                     SELECT payload_json
                     FROM order_events
-                    WHERE event_type IN (
+                    WHERE client_order_id >= ? AND client_order_id < ?
+                      AND event_type IN (
                       'FAIR_EDGE_BUCKET_SHADOW_CANDIDATE',
                       'FAIR_EDGE_BUCKET_SHADOW_FILLED',
                       'FAIR_EDGE_BUCKET_SHADOW_EXPIRED',
                       'FAIR_EDGE_BUCKET_SHADOW_SETTLED'
                     )
-                      AND json_extract(payload_json, '$.slug')=?
                     ORDER BY id ASC
                     """,
-                    (slug,),
+                    (client_prefix, client_prefix + "\uffff"),
                 ).fetchall()
             states: Dict[str, Dict[str, Any]] = {}
             for (raw_payload,) in rows:
@@ -629,22 +1265,441 @@ class TradeJournalDB:
             logger.debug(f"TradeJournalDB load_fair_edge_bucket_shadow_simulations failed: {e}")
             return []
 
-    def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    def _diagnostic_allowed(self, run_id: str, table: str, event_type: str, payload_json: str) -> bool:
+        bucket = diagnostic_bucket(table, event_type)
+        budget = getattr(self, "_diagnostic_budget", None)
+        if bucket is None or budget is None:
+            return True
+        allowed = budget.allow(bucket, len(payload_json))
+        summary = budget.take_summary()
+        if summary is not None:
+            # Never budgeted itself; at most one row per summary interval.
+            self.log_strategy_event(run_id, SUMMARY_EVENT, summary)
+        return allowed
+
+    def log_strategy_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None,
+                           *, event_ts: Optional[str] = None) -> bool:
         sql = "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)"
+        payload_json = _json_dumps(payload or {})
+        if not self._diagnostic_allowed(run_id, "strategy", event_type, payload_json):
+            return True  # sampled out by the diagnostic byte budget, not a failure
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = self._connect()
+            conn.execute(
+                sql,
+                (
+                    event_ts or _utc_now_iso(),
+                    run_id,
+                    event_type,
+                    payload_json,
+                ),
+            )
+            conn.commit()
+            self._schedule_backup()
+            if event_type == "MARKET_CYCLE_PNL":
+                self._request_current_monthly_report_refresh()
+            return True
+        except Exception as e:
+            if event_type in self._CRITICAL_STRATEGY_EVENTS:
+                self._mark_runtime_failure("write_failed", e, event_type=event_type)
+            logger.debug(f"TradeJournalDB log_strategy_event failed: {e}")
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def load_session_pnl_state(self, session_date_taipei: str) -> Optional[Dict[str, Any]]:
+        """Load the durable BUY-guard state; read failures are explicit as None."""
         try:
             with self._connect() as conn:
-                conn.execute(
-                    sql,
-                    (
-                        _utc_now_iso(),
-                        run_id,
-                        event_type,
-                        _json_dumps(payload or {}),
-                    ),
+                row = conn.execute(
+                    """SELECT session_date_taipei, realized_pnl_usdc, realized_high_water_usdc,
+                              profit_guard_armed, buy_lock_active, buy_lock_reason, guard_mode,
+                              created_ts, updated_ts
+                       FROM session_pnl_state WHERE session_date_taipei=?""",
+                    (str(session_date_taipei),),
+                ).fetchone()
+            if row is None:
+                return None
+            keys = ("session_date_taipei", "realized_pnl_usdc", "realized_high_water_usdc",
+                    "profit_guard_armed", "buy_lock_active", "buy_lock_reason", "guard_mode", "created_ts", "updated_ts")
+            return dict(zip(keys, row))
+        except Exception as exc:
+            self._mark_runtime_failure("session_pnl_state_read_failed", exc, event_type="SESSION_PNL_UPDATE")
+            return None
+
+    def save_session_pnl_state(self, state: Dict[str, Any]) -> bool:
+        """Atomically persist guard authority separate from append-only telemetry."""
+        now = _utc_now_iso()
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = self._connect()
+            conn.execute(
+                """INSERT INTO session_pnl_state(
+                       session_date_taipei, realized_pnl_usdc, realized_high_water_usdc,
+                       profit_guard_armed, buy_lock_active, buy_lock_reason, guard_mode, created_ts, updated_ts
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_date_taipei) DO UPDATE SET
+                       realized_pnl_usdc=excluded.realized_pnl_usdc,
+                       realized_high_water_usdc=excluded.realized_high_water_usdc,
+                       profit_guard_armed=excluded.profit_guard_armed,
+                       buy_lock_active=excluded.buy_lock_active,
+                       buy_lock_reason=excluded.buy_lock_reason,
+                       guard_mode=excluded.guard_mode,
+                       updated_ts=excluded.updated_ts""",
+                (
+                    str(state["session_date_taipei"]), float(state["realized_pnl_usdc"]),
+                    float(state["realized_high_water_usdc"]), int(bool(state["profit_guard_armed"])),
+                    int(bool(state["buy_lock_active"])), str(state.get("buy_lock_reason") or ""),
+                    str(state.get("guard_mode") or "legacy"),
+                    str(state.get("created_ts") or now), now,
+                ),
+            )
+            conn.commit()
+            self._schedule_backup()
+            return True
+        except Exception as exc:
+            self._mark_runtime_failure("session_pnl_state_write_failed", exc, event_type="SESSION_PNL_UPDATE")
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def reconstruct_session_pnl_state(self, session_date_taipei: str) -> Dict[str, Any]:
+        """Rebuild a missing guard session from final cycle PnL.
+
+        Only `MARKET_CYCLE_PNL` is used: it is the established canonical event
+        that combines already-realized fills with final settlement.  This
+        avoids double-counting individual SELL fills during restart recovery.
+        ISO dates identify the 19:30–07:30 Taipei overnight session beginning
+        on that date; a `-day` suffix identifies the separate 07:30–19:30
+        daytime session used only if the bot is unexpectedly active then.
+        """
+        total = Decimal("0")
+        high = Decimal("0")
+        try:
+            start_local, end_local = session_window_local(session_date_taipei)
+            local_zone = start_local.tzinfo
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' ORDER BY id"
+                ).fetchall()
+                # Evidence corrections applied to this session's live guard
+                # (bot.db_runtime) must survive a reconstruction too.
+                corrections = conn.execute(
+                    """SELECT json_extract(payload_json, '$.delta_usdc') FROM strategy_events
+                       WHERE event_type=? AND json_extract(payload_json, '$.session_date_taipei')=? ORDER BY id""",
+                    (SESSION_CORRECTION_EVENT, str(session_date_taipei)),
+                ).fetchall()
+            for (delta,) in corrections:
+                try:
+                    total += Decimal(str(delta or 0))
+                    high = max(high, total)
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
+            for ts, raw in rows:
+                try:
+                    event_time = datetime.fromisoformat(str(ts))
+                    if event_time.tzinfo is None:
+                        event_time = event_time.replace(tzinfo=timezone.utc)
+                    event_time = event_time.astimezone(local_zone)
+                    if not (start_local <= event_time < end_local):
+                        continue
+                    payload = json.loads(raw or "{}")
+                    total += Decimal(str(payload.get("cycle_combined_pnl_usdc", 0)))
+                    high = max(high, total)
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
+        except Exception as exc:
+            self._mark_runtime_failure("session_pnl_reconstruct_failed", exc, event_type="SESSION_PNL_UPDATE")
+        return {
+            "session_date_taipei": str(session_date_taipei),
+            "realized_pnl_usdc": total,
+            "realized_high_water_usdc": high,
+            "profit_guard_armed": False,
+            "buy_lock_active": False,
+            "buy_lock_reason": "",
+            "guard_mode": "legacy",
+        }
+
+    def reconstruct_monthly_realized_pnl(self, month_taipei: str) -> Optional[Decimal]:
+        """Return durable completed-cycle PnL for a Taipei calendar month.
+
+        `MARKET_CYCLE_PNL` is intentionally the same canonical completed-cycle
+        source used by session reconstruction.  Individual SELL fills are not
+        added here because their amount is already included in the final cycle
+        event; doing otherwise would double-count a partially exited market.
+        ``None`` reports unavailable or malformed reporting data, independently
+        of execution-journal health.
+        """
+        try:
+            year, month = (int(part) for part in str(month_taipei).split("-", 1))
+            if not 1 <= month <= 12:
+                return None
+            local_zone = ZoneInfo("Asia/Taipei")
+            start = datetime(year, month, 1, tzinfo=local_zone)
+            end = datetime(year + (month == 12), 1 if month == 12 else month + 1, 1, tzinfo=local_zone)
+            total = Decimal("0")
+            with sqlite3.connect(Path(self.db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.5) as conn:
+                rows = conn.execute(
+                    "SELECT ts, payload_json FROM strategy_events WHERE event_type='MARKET_CYCLE_PNL' "
+                    "AND julianday(ts) >= julianday(?) AND julianday(ts) < julianday(?) ORDER BY id",
+                    (start.isoformat(), end.isoformat()),
+                ).fetchall()
+            for ts, raw in rows:
+                event_time = datetime.fromisoformat(str(ts))
+                if event_time.tzinfo is None:
+                    event_time = event_time.replace(tzinfo=timezone.utc)
+                if not (start <= event_time.astimezone(local_zone) < end):
+                    continue
+                payload = json.loads(raw or "{}")
+                amount = Decimal(str(payload["cycle_combined_pnl_usdc"]))
+                if not amount.is_finite():
+                    raise ValueError("non-finite completed-cycle PnL")
+                total += amount
+            return total
+        except Exception as exc:
+            # Reporting availability is not execution-journal health authority.
+            logger.warning(f"Monthly PnL report unavailable: {type(exc).__name__}")
+            return None
+
+    def request_monthly_pnl_refresh(self, month: str, *, only_if_new_month: bool = False) -> None:
+        """Coalesce reporting requests; all reconstruction runs off the live path."""
+        with self._monthly_report_lock:
+            if self._monthly_report_stop.is_set():
+                return
+            if only_if_new_month and self._monthly_report_month == month:
+                return
+            self._monthly_report_month = month
+            if self._monthly_report_thread is None:
+                self._monthly_report_thread = threading.Thread(
+                    target=self._monthly_report_worker, name="monthly-pnl-report", daemon=True,
                 )
-                conn.commit()
-        except Exception as e:
-            logger.debug(f"TradeJournalDB log_strategy_event failed: {e}")
+                try:
+                    self._monthly_report_thread.start()
+                except Exception as exc:
+                    self._monthly_report_thread = None
+                    self._monthly_report_month = None
+                    self._monthly_report_cache[month] = {"realized_pnl_usdc": None, "updated_ts": time.time()}
+                    logger.warning(f"Monthly reporting worker unavailable: {type(exc).__name__}")
+                    return
+            self._monthly_report_wakeup.set()
+
+    def _request_current_monthly_report_refresh(self) -> None:
+        with self._monthly_report_lock:
+            month = self._monthly_report_month
+        if month is not None:
+            self.request_monthly_pnl_refresh(month)
+
+    def cached_monthly_pnl(self, month: str) -> Dict[str, Any]:
+        with self._monthly_report_lock:
+            return dict(self._monthly_report_cache.get(month, {
+                "realized_pnl_usdc": None, "updated_ts": 0.0,
+            }))
+
+    def _monthly_report_worker(self) -> None:
+        while not self._monthly_report_stop.is_set():
+            self._monthly_report_wakeup.wait(timeout=300.0)
+            self._monthly_report_wakeup.clear()
+            if self._monthly_report_stop.is_set():
+                break
+            with self._monthly_report_lock:
+                month = self._monthly_report_month
+            try:
+                value = self.reconstruct_monthly_realized_pnl(month)
+            except Exception as exc:
+                logger.warning(f"Monthly PnL report unavailable: {type(exc).__name__}")
+                value = None
+            with self._monthly_report_lock:
+                self._monthly_report_cache[month] = {"realized_pnl_usdc": value, "updated_ts": time.time()}
+
+    def reconcile_startup_resolved_cycle(
+        self,
+        *,
+        slug: str,
+        winning_token_id: str,
+        settlement_source: str,
+    ) -> Optional[Dict[str, float | str | bool]]:
+        """Close one previously-unsettled market using a verified winner token.
+
+        This is deliberately limited to an expired market whose public resolver
+        supplied an exact winning token ID.  It never infers a loss from a zero
+        wallet balance, and a pre-existing cycle event makes the operation a
+        no-op so restart retries cannot double count the same cash flow.
+        """
+        slug = str(slug or "")
+        winning_token_id = str(winning_token_id or "")
+        if not slug or not winning_token_id:
+            return None
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = self._connect()
+            existing = conn.execute(
+                """SELECT 1 FROM strategy_events
+                   WHERE event_type='MARKET_CYCLE_PNL'
+                     AND json_extract(payload_json, '$.slug')=?
+                   LIMIT 1""",
+                (slug,),
+            ).fetchone()
+            if existing is not None:
+                return None
+            rows = conn.execute(
+                """SELECT run_id, side, price, qty, token_id, commission_usdc, payload_json, client_order_id
+                   FROM order_events
+                   WHERE event_type='ORDER_FILLED'
+                     AND json_extract(payload_json, '$.slug')=?
+                   ORDER BY id""",
+                (slug,),
+            ).fetchall()
+            submit_tokens = {
+                str(coid): str(tok) for coid, tok in conn.execute(
+                    f"""SELECT client_order_id, token_id FROM order_events
+                        WHERE event_type IN ('ORDER_SUBMIT', 'ORDER_TAKER_EXIT_SUBMIT', 'ORDER_MAKER_INTENT')
+                          AND client_order_id IN ({','.join('?' * len(rows))})
+                          AND token_id IS NOT NULL AND token_id <> ''
+                        ORDER BY id DESC""",
+                    [str(r[7] or "") for r in rows],
+                )
+            } if rows else {}
+            if not rows:
+                return None
+
+            # Average-cost replay matches the live inventory ledger's cost
+            # semantics.  ``sell_realized`` was already applied to the session
+            # guard at each live SELL fill; startup returns only the remaining
+            # settlement component for the caller to add once.
+            lots: Dict[str, Dict[str, Decimal]] = {}
+            sell_realized = Decimal("0")
+            run_id = str(rows[-1][0] or "startup_recovery")
+            for _run_id, raw_side, raw_price, raw_qty, raw_token, raw_commission, raw_payload, raw_coid in rows:
+                side = str(raw_side or "").upper()
+                token_id = str(raw_token or "")
+                try:
+                    price = Decimal(str(raw_price or 0))
+                    qty = Decimal(str(raw_qty or 0))
+                    payload = json.loads(raw_payload or "{}")
+                    # The token_id column held the current active side, not the
+                    # filled token (and before cc1cd49 so did the payload). The
+                    # order's own submit row wins, then the fill's instrument.
+                    match = _TOKEN_IN_INSTRUMENT.search(str(
+                        (payload.get("instrument_id") if isinstance(payload, dict) else "") or ""))
+                    token_id = submit_tokens.get(str(raw_coid or "")) or (match.group(1) if match else token_id)
+                    fee = Decimal(str(
+                        (payload.get("effective_fee_usdc") if isinstance(payload, dict) else None)
+                        or raw_commission
+                        or 0
+                    ))
+                except (ValueError, TypeError, ArithmeticError, json.JSONDecodeError):
+                    continue
+                if not token_id or price < 0 or qty <= 0:
+                    continue
+                state = lots.setdefault(token_id, {"qty": Decimal("0"), "cost": Decimal("0")})
+                if side == "BUY":
+                    state["qty"] += qty
+                    state["cost"] += price * qty + fee
+                elif side == "SELL" and state["qty"] > 0:
+                    sold = min(qty, state["qty"])
+                    cost_sold = state["cost"] * sold / state["qty"]
+                    state["qty"] -= sold
+                    state["cost"] -= cost_sold
+                    sell_realized += price * sold - fee - cost_sold
+
+            if not lots:
+                return None
+            winner = lots.get(winning_token_id, {"qty": Decimal("0"), "cost": Decimal("0")})
+            payout = max(Decimal("0"), winner["qty"])
+            remaining_cost = sum((state["cost"] for state in lots.values()), Decimal("0"))
+            settlement_pnl = payout - remaining_cost
+            cycle_combined = sell_realized + settlement_pnl
+            payload = {
+                "slug": slug,
+                "outcome_token_id": winning_token_id,
+                "settlement_source": str(settlement_source or "startup_resolved"),
+                "startup_reconciliation": True,
+                "remaining_inventory_cost_usdc": float(remaining_cost),
+                "redeem_value_usdc": float(payout),
+                "settlement_pnl_usdc": float(settlement_pnl),
+                "cycle_fill_realized_usdc": float(sell_realized),
+                "cycle_settlement_pnl_usdc": float(settlement_pnl),
+                "cycle_combined_pnl_usdc": float(cycle_combined),
+            }
+            now = _utc_now_iso()
+            conn.execute(
+                "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)",
+                (now, run_id, "MARKET_SETTLEMENT", _json_dumps(payload)),
+            )
+            conn.execute(
+                "INSERT INTO strategy_events (ts, run_id, event_type, payload_json) VALUES (?, ?, ?, ?)",
+                (now, run_id, "MARKET_CYCLE_PNL", _json_dumps(payload)),
+            )
+            conn.commit()
+            self._schedule_backup()
+            return {
+                "settlement_pnl_usdc": float(settlement_pnl),
+                "cycle_combined_pnl_usdc": float(cycle_combined),
+                "new_cycle_pnl": True,
+            }
+        except Exception as exc:
+            self._mark_runtime_failure("startup_cycle_reconcile_failed", exc, event_type="MARKET_CYCLE_PNL")
+            logger.error(f"TradeJournalDB startup resolved-cycle reconciliation failed: {exc}")
+            return None
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def find_unsettled_expired_session_slugs(
+        self,
+        session_date_taipei: str,
+        *,
+        now_ts: Optional[float] = None,
+        limit: int = 12,
+    ) -> list[str]:
+        """Return bounded, expired filled-BUY markets lacking a cycle PnL."""
+        now = time.time() if now_ts is None else float(now_ts)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """SELECT MIN(ts), json_extract(payload_json, '$.slug')
+                       FROM order_events
+                       WHERE event_type='ORDER_FILLED'
+                         AND UPPER(COALESCE(side, ''))='BUY'
+                         AND json_extract(payload_json, '$.slug') IS NOT NULL
+                       GROUP BY json_extract(payload_json, '$.slug')
+                       ORDER BY MIN(id) DESC"""
+                ).fetchall()
+                finalized = {
+                    str(row[0]) for row in conn.execute(
+                        """SELECT DISTINCT json_extract(payload_json, '$.slug')
+                           FROM strategy_events
+                           WHERE event_type='MARKET_CYCLE_PNL'
+                             AND json_extract(payload_json, '$.slug') IS NOT NULL"""
+                    ).fetchall()
+                }
+            candidates: list[str] = []
+            for raw_ts, raw_slug in rows:
+                slug = str(raw_slug or "")
+                if not slug or slug in finalized:
+                    continue
+                try:
+                    local_day = datetime.fromisoformat(str(raw_ts)).astimezone(
+                        ZoneInfo("Asia/Taipei")
+                    ).date().isoformat()
+                    start_ts = int(slug.rsplit("-", 1)[-1])
+                except (ValueError, TypeError):
+                    continue
+                # BTC 15m slugs encode their opening epoch.  Never reconcile
+                # an active window merely because the process restarted.
+                if local_day != str(session_date_taipei) or start_ts + 900 > now:
+                    continue
+                candidates.append(slug)
+                if len(candidates) >= max(1, int(limit)):
+                    break
+            return candidates
+        except Exception as exc:
+            self._mark_runtime_failure("startup_unsettled_cycle_scan_failed", exc, event_type="MARKET_CYCLE_PNL")
+            logger.error(f"TradeJournalDB startup unsettled-cycle scan failed: {exc}")
+            return []
 
     def log_order_event(
         self,
@@ -663,39 +1718,51 @@ class TradeJournalDB:
         expected_net_usdc: Optional[float] = None,
         commission_usdc: Optional[float] = None,
         payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         sql = """
         INSERT INTO order_events (
             ts, run_id, event_type, client_order_id, venue_order_id, side, price, qty, status, reason,
             instrument_id, token_id, fee_rate_bps, expected_net_usdc, commission_usdc, payload_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+        payload_json = _json_dumps(payload or {})
+        if not self._diagnostic_allowed(run_id, "order", event_type, payload_json):
+            return True  # sampled out by the diagnostic byte budget, not a failure
+        conn: Optional[sqlite3.Connection] = None
         try:
-            with self._connect() as conn:
-                conn.execute(
-                    sql,
-                    (
-                        _utc_now_iso(),
-                        run_id,
-                        event_type,
-                        client_order_id,
-                        venue_order_id,
-                        side,
-                        price,
-                        qty,
-                        status,
-                        reason,
-                        instrument_id,
-                        token_id,
-                        fee_rate_bps,
-                        expected_net_usdc,
-                        commission_usdc,
-                        _json_dumps(payload or {}),
-                    ),
-                )
-                conn.commit()
+            conn = self._connect()
+            conn.execute(
+                sql,
+                (
+                    _utc_now_iso(),
+                    run_id,
+                    event_type,
+                    client_order_id,
+                    venue_order_id,
+                    side,
+                    price,
+                    qty,
+                    status,
+                    reason,
+                    instrument_id,
+                    token_id,
+                    fee_rate_bps,
+                    expected_net_usdc,
+                    commission_usdc,
+                    payload_json,
+                ),
+            )
+            conn.commit()
+            self._schedule_backup()
+            return True
         except Exception as e:
+            if event_type in self._CRITICAL_ORDER_EVENTS:
+                self._mark_runtime_failure("write_failed", e, event_type=event_type)
             logger.debug(f"TradeJournalDB log_order_event failed: {e}")
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def load_recent_buy_submits(self, instrument_id: str, limit: int = 20) -> list[Dict[str, Any]]:
         if not instrument_id:
@@ -703,7 +1770,10 @@ class TradeJournalDB:
         sql = """
         SELECT ts, client_order_id, price, qty, payload_json
         FROM order_events
-        WHERE event_type = 'ORDER_SUBMIT'
+        WHERE event_type IN (
+            'ORDER_SUBMIT', 'ORDER_MAKER_INTENT',
+            'ORDER_FAST_FOLLOW_INTENT', 'ORDER_FAST_FOLLOW_SUBMIT'
+        )
           AND UPPER(COALESCE(side, '')) = 'BUY'
           AND (
               instrument_id = ?
@@ -779,6 +1849,7 @@ class TradeJournalDB:
                     "strike": strike_dec,
                     "strike_source": source,
                     "authoritative": bool(payload.get("authoritative", False)),
+                    "strike_status": str(payload.get("strike_status") or ""),
                     "sample_dt_sec": payload.get("sample_dt_sec"),
                 }
         except Exception as e:

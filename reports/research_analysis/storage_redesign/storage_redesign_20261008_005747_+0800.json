@@ -1,0 +1,1349 @@
+{
+  "summary": {
+    "HEAD_BEFORE": "33896ce9ba123708999c896bd7c2fd4023412d5f",
+    "HEAD_AFTER": "9352e6939bf7d2978e0e6747c1ceba148a5c8579",
+    "TRADE_JOURNAL_PERIODIC_BACKUP_OLD_SEC": 900,
+    "TRADE_JOURNAL_PERIODIC_BACKUP_NEW_SEC": 10800,
+    "ROLLOVER_FORCED_BACKUP_RETAINED": "YES",
+    "SHUTDOWN_FORCED_BACKUP_RETAINED": "YES",
+    "LOW_DISK_GUARD_RETAINED": "YES",
+    "ATOMIC_PUBLISH_RETAINED": "YES",
+    "EXACT_UNCHANGED_FORCED_SKIP_IMPLEMENTED": "NO",
+    "FORCED_SKIP_PROOF_AUTHORITY": "NONE (boolean dirty is not exact generation identity)",
+    "TWAP_DB_GIB": 1.1609268188476562,
+    "TWAP_CURRENT_GROWTH_GIB_PER_DAY": 1.0688598874780773,
+    "TWAP_NEW_PROJECTED_GROWTH_GIB_PER_DAY": 0.5626616100925094,
+    "TWAP_GROWTH_REDUCTION_PERCENT": 47.35871214887837,
+    "TWAP_EVENT_TYPES_AUDITED": 36,
+    "MUST_KEEP_RAW": 30,
+    "KEEP_DOWNSAMPLED": 2,
+    "KEEP_AGGREGATED": 3,
+    "DROP_NEW_EMISSION": 1,
+    "FLIP_HAZARD_REQUIRED_EVIDENCE_PRESERVED": "YES",
+    "STOP_RESEARCH_EVIDENCE_PRESERVED": "YES",
+    "PREDICTION_RESEARCH_EVIDENCE_PRESERVED": "YES",
+    "SETTLEMENT_RECONSTRUCTION_PRESERVED": "YES",
+    "TWAP_GUARD_OLD_SEMANTICS": "sticky total-cap blanket veto except summary; direct shared writers bypassed",
+    "TWAP_GUARD_NEW_SEMANTICS": "required evidence attempted; optional cap DEGRADED; low space or persistence error/drop CRITICAL",
+    "CANONICAL_EVENTS_BLOCKED_BY_NEW_GUARD": "NO",
+    "OPTIONAL_TELEMETRY_BOUNDED": "YES (trajectory cadence; not total historical size)",
+    "MAKER_CHANGED": "NO",
+    "L2_CHANGED": "NO",
+    "STOP_CHANGED": "NO",
+    "PREDICTION_SEMANTICS_CHANGED": "NO",
+    "OUTCOME_REINTRODUCED": "NO",
+    "FOCUSED_TESTS": "132 passed",
+    "FULL_TESTS": "1099 passed, 1 known websockets deprecation warning",
+    "DIFF_CHECK": "PASS",
+    "SAFE_FOR_CLEAN_POST_PHASE_B_COLLECTION_VALIDATION": "YES (controlled validation only; no runtime start or indefinite storage guarantee)",
+    "BOT_RESTARTED": "NO",
+    "COMMIT": "9352e6939bf7d2978e0e6747c1ceba148a5c8579",
+    "PUSHED": "NO",
+    "SHORT_TTL_RAW": 0,
+    "UNKNOWN": 0
+  },
+  "inventory": [
+    {
+      "event": "DECISION_POINT_L2",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/research/evidence.py",
+      "purpose": "decision-specific execution depth / freshness, bounded top N",
+      "historical_rows": 26696,
+      "historical_payload_share_pct": 2.607218062546451,
+      "recent_rows": 406,
+      "recent_avg_bytes": 1038.576354679803,
+      "recent_rows_hour": 782.6197799485825,
+      "recent_bytes_hour": 812810.3981593084,
+      "recent_share_pct": 2.0826300263288506,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": false,
+        "freshness": true,
+        "architecture": true,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "FORWARD_SHADOW_CAPTURE_HEALTH",
+      "table": "lead_lag_decisions",
+      "classification": "KEEP_AGGREGATED",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 2,
+      "historical_payload_share_pct": 0.00013841779893230947,
+      "recent_rows": 2,
+      "recent_avg_bytes": 731.0,
+      "recent_rows_hour": 3.8552698519634605,
+      "recent_bytes_hour": 2818.2022617852895,
+      "recent_share_pct": 0.007220961572284863,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": true,
+        "diagnostics": true
+      }
+    },
+    {
+      "event": "MARKET_OPENING_TWAP_SAMPLE",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "official TWAP path / crossing / checkpoints / canonical settlement",
+      "historical_rows": 4312,
+      "historical_payload_share_pct": 0.9310286962952219,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": true,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "MARKET_TWAP_SUMMARY",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "official TWAP path / crossing / checkpoints / canonical settlement",
+      "historical_rows": 463,
+      "historical_payload_share_pct": 0.07587207857235041,
+      "recent_rows": 2,
+      "recent_avg_bytes": 1841.0,
+      "recent_rows_hour": 3.8552698519634605,
+      "recent_bytes_hour": 7097.551797464731,
+      "recent_share_pct": 0.0181857595821839,
+      "required_uses": {
+        "flip": true,
+        "maker": false,
+        "stop": true,
+        "settlement": true,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "POSITION_LIFECYCLE_ENTRY",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/order_events.py",
+      "purpose": "actual entry lifecycle",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "POST_ENTRY_SMART_MONEY_SNAPSHOT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "run_bot.py",
+      "purpose": "held-position context, current existing 5s cadence",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "PREDICTION_RESEARCH_HEALTH",
+      "table": "lead_lag_decisions",
+      "classification": "KEEP_AGGREGATED",
+      "producer": "bot/prediction_research_snapshot.py",
+      "purpose": "canonical synchronized model/freshness series; health aggregate",
+      "historical_rows": 2529,
+      "historical_payload_share_pct": 0.20636626327043014,
+      "recent_rows": 31,
+      "recent_avg_bytes": 918.1612903225806,
+      "recent_rows_hour": 59.75668270543364,
+      "recent_bytes_hour": 54866.27289821799,
+      "recent_share_pct": 0.14058155214223259,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": true,
+        "architecture": true,
+        "diagnostics": true
+      }
+    },
+    {
+      "event": "PREDICTION_RESEARCH_SNAPSHOT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/prediction_research_snapshot.py",
+      "purpose": "canonical synchronized model/freshness series; health aggregate",
+      "historical_rows": 238709,
+      "historical_payload_share_pct": 87.88825598502231,
+      "recent_rows": 1695,
+      "recent_avg_bytes": 4311.946902654868,
+      "recent_rows_hour": 3267.341199539033,
+      "recent_bytes_hour": 14088601.765268972,
+      "recent_share_pct": 36.09863398867099,
+      "required_uses": {
+        "flip": true,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": true,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "RESEARCH_STORAGE_GUARD_TRIGGERED",
+      "table": "lead_lag_decisions",
+      "classification": "KEEP_AGGREGATED",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "state-transition diagnostic",
+      "historical_rows": 98,
+      "historical_payload_share_pct": 0.0032821681501958772,
+      "recent_rows": 1,
+      "recent_avg_bytes": 372.0,
+      "recent_rows_hour": 1.9276349259817303,
+      "recent_bytes_hour": 717.0801924652037,
+      "recent_share_pct": 0.0018373445313884878,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": true,
+        "diagnostics": true
+      }
+    },
+    {
+      "event": "SETTLEMENT_PATH_THRESHOLD_CROSS",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "official TWAP path / crossing / checkpoints / canonical settlement",
+      "historical_rows": 12433,
+      "historical_payload_share_pct": 4.720466268100283,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": true,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_BBO_MATERIAL_CHANGE",
+      "table": "lead_lag_decisions",
+      "classification": "DROP_NEW_EMISSION",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 3075,
+      "historical_payload_share_pct": 0.16276967448865648,
+      "recent_rows": 3075,
+      "recent_avg_bytes": 559.0926829268293,
+      "recent_rows_hour": 5927.477397393821,
+      "recent_bytes_hour": 3314009.2410970507,
+      "recent_share_pct": 8.491347020990327,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_BBO_SNAPSHOT",
+      "table": "lead_lag_decisions",
+      "classification": "KEEP_DOWNSAMPLED",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 1211,
+      "historical_payload_share_pct": 0.11629263214004523,
+      "recent_rows": 1211,
+      "recent_avg_bytes": 1014.2931461601981,
+      "recent_rows_hour": 2334.3658953638756,
+      "recent_bytes_hour": 2367731.3282976933,
+      "recent_share_pct": 6.0667387742076935,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_ENTRY_CANDIDATE",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 9,
+      "historical_payload_share_pct": 0.002865683952177253,
+      "recent_rows": 9,
+      "recent_avg_bytes": 3363.1111111111113,
+      "recent_rows_hour": 17.348714333835574,
+      "recent_bytes_hour": 58345.65393961501,
+      "recent_share_pct": 0.14949662439802888,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_EXIT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 50,
+      "historical_payload_share_pct": 0.003830253401918955,
+      "recent_rows": 50,
+      "recent_avg_bytes": 809.12,
+      "recent_rows_hour": 96.38174629908652,
+      "recent_bytes_hour": 77984.39856551688,
+      "recent_share_pct": 0.19981615688670068,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_LOSS_WARNING",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 10,
+      "historical_payload_share_pct": 0.0005051965629978135,
+      "recent_rows": 10,
+      "recent_avg_bytes": 533.6,
+      "recent_rows_hour": 19.2763492598173,
+      "recent_bytes_hour": 10285.859965038513,
+      "recent_share_pct": 0.02635502800937895,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_POSITION_MARK",
+      "table": "lead_lag_decisions",
+      "classification": "KEEP_DOWNSAMPLED",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 5784,
+      "historical_payload_share_pct": 0.8875930584424393,
+      "recent_rows": 5784,
+      "recent_avg_bytes": 1620.8433609958506,
+      "recent_rows_hour": 11149.440411878328,
+      "recent_bytes_hour": 18071496.47041183,
+      "recent_share_pct": 46.303838207786974,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_SETTLEMENT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 36,
+      "historical_payload_share_pct": 0.003784997787767352,
+      "recent_rows": 36,
+      "recent_avg_bytes": 1110.5,
+      "recent_rows_hour": 69.3948573353423,
+      "recent_bytes_hour": 77062.98907089762,
+      "recent_share_pct": 0.19745526794583054,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": true,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "SHADOW_SIGNAL_REVERSAL",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/forward_shadow.py",
+      "purpose": "counterfactual maker entry/exit trajectories; BBO sampled, extrema computed every quote",
+      "historical_rows": 10,
+      "historical_payload_share_pct": 0.00037208067702050357,
+      "recent_rows": 10,
+      "recent_avg_bytes": 393.0,
+      "recent_rows_hour": 19.2763492598173,
+      "recent_bytes_hour": 7575.6052591082,
+      "recent_share_pct": 0.019410655936442894,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_ACTUAL_STOP",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_ADAPTIVE",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_ADVERSE_EPISODE_CLEARED",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_ADVERSE_EPISODE_STARTED",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_CANDIDATE",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_CHECKPOINT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_EVENT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_P",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_POST_STOP_CHECKPOINT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "STOP_SHADOW_POST_STOP_SETTLEMENT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/stop_forensics_shadow.py::_emit",
+      "purpose": "stop / invalidation / actual stop vs hold",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": true,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "TMINUS_CHECKPOINT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "official TWAP path / crossing / checkpoints / canonical settlement",
+      "historical_rows": 1683,
+      "historical_payload_share_pct": 0.5318782505898146,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": true,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "TREND_ENTRY_SHADOW_CANDIDATE",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/trend_entry_shadow.py",
+      "purpose": "entry candidate / horizon markout / settlement",
+      "historical_rows": 24,
+      "historical_payload_share_pct": 0.003166094127288209,
+      "recent_rows": 24,
+      "recent_avg_bytes": 1393.375,
+      "recent_rows_hour": 46.26323822356153,
+      "recent_bytes_hour": 64462.039559755045,
+      "recent_share_pct": 0.16516838299506026,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "TREND_ENTRY_SHADOW_MARKOUT",
+      "table": "lead_lag_markouts",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/trend_entry_shadow.py",
+      "purpose": "entry candidate / horizon markout / settlement",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "TREND_ENTRY_SHADOW_SETTLEMENT",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/trend_entry_shadow.py",
+      "purpose": "entry candidate / horizon markout / settlement",
+      "historical_rows": 12,
+      "historical_payload_share_pct": 0.0005996842260172696,
+      "recent_rows": 12,
+      "recent_avg_bytes": 527.8333333333334,
+      "recent_rows_hour": 23.131619111780765,
+      "recent_bytes_hour": 12209.63962116828,
+      "recent_share_pct": 0.031284248015630865,
+      "required_uses": {
+        "flip": false,
+        "maker": true,
+        "stop": false,
+        "settlement": true,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "TWAP_PROJECTED_SIDE_CHANGE",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "official TWAP path / crossing / checkpoints / canonical settlement",
+      "historical_rows": 5494,
+      "historical_payload_share_pct": 1.7266100850681898,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": true,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "TWAP_STRIKE_CROSS",
+      "table": "lead_lag_decisions",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/twap_forward_shadow.py",
+      "purpose": "official TWAP path / crossing / checkpoints / canonical settlement",
+      "historical_rows": 381,
+      "historical_payload_share_pct": 0.12710436877949394,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": true,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": false,
+        "diagnostics": false
+      }
+    },
+    {
+      "event": "cancel_request_to_ack",
+      "table": "latency_spans",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/order_submission.py or bot/order_events.py",
+      "purpose": "submit/ack latency, event driven",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": true,
+        "diagnostics": true
+      }
+    },
+    {
+      "event": "order_handoff",
+      "table": "latency_spans",
+      "classification": "MUST_KEEP_RAW",
+      "producer": "bot/order_submission.py or bot/order_events.py",
+      "purpose": "submit/ack latency, event driven",
+      "historical_rows": 0,
+      "historical_payload_share_pct": 0.0,
+      "recent_rows": 0,
+      "recent_avg_bytes": null,
+      "recent_rows_hour": 0.0,
+      "recent_bytes_hour": 0.0,
+      "recent_share_pct": 0.0,
+      "required_uses": {
+        "flip": false,
+        "maker": false,
+        "stop": false,
+        "settlement": false,
+        "freshness": false,
+        "architecture": true,
+        "diagnostics": true
+      }
+    }
+  ],
+  "measured_inventory": {
+    "size": 1246535680,
+    "page_size": 4096,
+    "page_count": 304330,
+    "tables": [
+      {
+        "name": "snapshots",
+        "rows": 0
+      },
+      {
+        "name": "sqlite_sequence",
+        "rows": 2
+      },
+      {
+        "name": "reference_1s",
+        "rows": 0
+      },
+      {
+        "name": "lead_lag_decisions",
+        "rows": 303021
+      },
+      {
+        "name": "lead_lag_markouts",
+        "rows": 78
+      },
+      {
+        "name": "latency_spans",
+        "rows": 0
+      }
+    ],
+    "objects": [
+      {
+        "name": "lead_lag_decisions",
+        "bytes": 1240547328,
+        "pages": 302868
+      },
+      {
+        "name": "idx_lead_lag_decision_time",
+        "bytes": 5877760,
+        "pages": 1435
+      },
+      {
+        "name": "lead_lag_markouts",
+        "bytes": 57344,
+        "pages": 14
+      },
+      {
+        "name": "sqlite_autoindex_lead_lag_markouts_1",
+        "bytes": 12288,
+        "pages": 3
+      },
+      {
+        "name": "sqlite_sequence",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "sqlite_schema",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "sqlite_autoindex_reference_1s_1",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "snapshots",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "reference_1s",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "latency_spans",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "idx_lead_lag_scope_time",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "idx_lead_lag_markout_horizon_time",
+        "bytes": 4096,
+        "pages": 1
+      },
+      {
+        "name": "idx_lead_lag_latency_name",
+        "bytes": 4096,
+        "pages": 1
+      }
+    ],
+    "latest_ns": 1791386863245716992,
+    "all": [
+      {
+        "event": "PREDICTION_RESEARCH_SNAPSHOT",
+        "rows": 238709,
+        "payload_bytes": 928295575,
+        "avg_bytes": 3888.816822993687,
+        "first_ns": 1790956234474001920,
+        "last_ns": 1791386863245716992
+      },
+      {
+        "event": "SETTLEMENT_PATH_THRESHOLD_CROSS",
+        "rows": 12433,
+        "payload_bytes": 49858629,
+        "avg_bytes": 4010.1849111236224,
+        "first_ns": 1790782241347908096,
+        "last_ns": 1791138344344918016
+      },
+      {
+        "event": "DECISION_POINT_L2",
+        "rows": 26696,
+        "payload_bytes": 27538025,
+        "avg_bytes": 1031.541242133653,
+        "first_ns": 1791205313246380032,
+        "last_ns": 1791386862009737984
+      },
+      {
+        "event": "TWAP_PROJECTED_SIDE_CHANGE",
+        "rows": 5494,
+        "payload_bytes": 18236845,
+        "avg_bytes": 3319.411175828176,
+        "first_ns": 1790595133900966912,
+        "last_ns": 1791138318053927936
+      },
+      {
+        "event": "MARKET_OPENING_TWAP_SAMPLE",
+        "rows": 4312,
+        "payload_bytes": 9833735,
+        "avg_bytes": 2280.550788497217,
+        "first_ns": 1790820001666742016,
+        "last_ns": 1791137721209873920
+      },
+      {
+        "event": "SHADOW_POSITION_MARK",
+        "rows": 5784,
+        "payload_bytes": 9374958,
+        "avg_bytes": 1620.8433609958506,
+        "first_ns": 1791385320039728896,
+        "last_ns": 1791386863245197056
+      },
+      {
+        "event": "TMINUS_CHECKPOINT",
+        "rows": 1683,
+        "payload_bytes": 5617818,
+        "avg_bytes": 3337.9786096256685,
+        "first_ns": 1790595780167106048,
+        "last_ns": 1791137695711224064
+      },
+      {
+        "event": "PREDICTION_RESEARCH_HEALTH",
+        "rows": 2529,
+        "payload_bytes": 2179687,
+        "avg_bytes": 861.8770264926849,
+        "first_ns": 1791205282613900032,
+        "last_ns": 1791386808386535936
+      },
+      {
+        "event": "SHADOW_BBO_MATERIAL_CHANGE",
+        "rows": 3075,
+        "payload_bytes": 1719210,
+        "avg_bytes": 559.0926829268293,
+        "first_ns": 1791385320436238080,
+        "last_ns": 1791386862531166976
+      },
+      {
+        "event": "TWAP_STRIKE_CROSS",
+        "rows": 381,
+        "payload_bytes": 1342505,
+        "avg_bytes": 3523.6351706036744,
+        "first_ns": 1790595322968589056,
+        "last_ns": 1791137315561724928
+      },
+      {
+        "event": "SHADOW_BBO_SNAPSHOT",
+        "rows": 1211,
+        "payload_bytes": 1228309,
+        "avg_bytes": 1014.2931461601981,
+        "first_ns": 1791385320039728896,
+        "last_ns": 1791386863245197056
+      },
+      {
+        "event": "MARKET_TWAP_SUMMARY",
+        "rows": 463,
+        "payload_bytes": 801378,
+        "avg_bytes": 1730.8380129589632,
+        "first_ns": 1790595900151046912,
+        "last_ns": 1791386100134745088
+      },
+      {
+        "event": "SHADOW_EXIT",
+        "rows": 50,
+        "payload_bytes": 40456,
+        "avg_bytes": 809.12,
+        "first_ns": 1791385495303986944,
+        "last_ns": 1791386274554471936
+      },
+      {
+        "event": "SHADOW_SETTLEMENT",
+        "rows": 36,
+        "payload_bytes": 39978,
+        "avg_bytes": 1110.5,
+        "first_ns": 1791386100134745088,
+        "last_ns": 1791386100134745088
+      },
+      {
+        "event": "RESEARCH_STORAGE_GUARD_TRIGGERED",
+        "rows": 98,
+        "payload_bytes": 34667,
+        "avg_bytes": 353.7448979591837,
+        "first_ns": 1790695633274030080,
+        "last_ns": 1791384995672167936
+      },
+      {
+        "event": "TREND_ENTRY_SHADOW_CANDIDATE",
+        "rows": 24,
+        "payload_bytes": 33441,
+        "avg_bytes": 1393.375,
+        "first_ns": 1791385013154452992,
+        "last_ns": 1791386280270916096
+      },
+      {
+        "event": "SHADOW_ENTRY_CANDIDATE",
+        "rows": 9,
+        "payload_bytes": 30268,
+        "avg_bytes": 3363.1111111111113,
+        "first_ns": 1791385001571751936,
+        "last_ns": 1791386220281296896
+      },
+      {
+        "event": "TREND_ENTRY_SHADOW_SETTLEMENT",
+        "rows": 12,
+        "payload_bytes": 6334,
+        "avg_bytes": 527.8333333333334,
+        "first_ns": 1791385200095216128,
+        "last_ns": 1791386100134777088
+      },
+      {
+        "event": "SHADOW_LOSS_WARNING",
+        "rows": 10,
+        "payload_bytes": 5336,
+        "avg_bytes": 533.6,
+        "first_ns": 1791385340424578048,
+        "last_ns": 1791386237921832960
+      },
+      {
+        "event": "SHADOW_SIGNAL_REVERSAL",
+        "rows": 10,
+        "payload_bytes": 3930,
+        "avg_bytes": 393.0,
+        "first_ns": 1791385893509291008,
+        "last_ns": 1791386220281296896
+      },
+      {
+        "event": "FORWARD_SHADOW_CAPTURE_HEALTH",
+        "rows": 2,
+        "payload_bytes": 1462,
+        "avg_bytes": 731.0,
+        "first_ns": 1791385001571751936,
+        "last_ns": 1791385200086406912
+      }
+    ],
+    "recent_prephaseb": [
+      {
+        "event": "PREDICTION_RESEARCH_SNAPSHOT",
+        "rows": 51573,
+        "payload_bytes": 219813201,
+        "avg_bytes": 4262.175964167297,
+        "first_ns": 1791300463855303936,
+        "last_ns": 1791383384295909120
+      },
+      {
+        "event": "DECISION_POINT_L2",
+        "rows": 11463,
+        "payload_bytes": 11829186,
+        "avg_bytes": 1031.945040565297,
+        "first_ns": 1791300471183640064,
+        "last_ns": 1791383384305453056
+      },
+      {
+        "event": "PREDICTION_RESEARCH_HEALTH",
+        "rows": 1077,
+        "payload_bytes": 1014159,
+        "avg_bytes": 941.6518105849582,
+        "first_ns": 1791300471145910016,
+        "last_ns": 1791383339817857024
+      },
+      {
+        "event": "MARKET_TWAP_SUMMARY",
+        "rows": 71,
+        "payload_bytes": 135231,
+        "avg_bytes": 1904.661971830986,
+        "first_ns": 1791300600136314880,
+        "last_ns": 1791382500008660992
+      },
+      {
+        "event": "RESEARCH_STORAGE_GUARD_TRIGGERED",
+        "rows": 7,
+        "payload_bytes": 2637,
+        "avg_bytes": 376.7142857142857,
+        "first_ns": 1791304252670714880,
+        "last_ns": 1791379598559553024
+      }
+    ],
+    "post_phase_b": [
+      {
+        "event": "SHADOW_POSITION_MARK",
+        "rows": 5784,
+        "payload_bytes": 9374958,
+        "avg_bytes": 1620.8433609958506,
+        "first_ns": 1791385320039728896,
+        "last_ns": 1791386863245197056
+      },
+      {
+        "event": "PREDICTION_RESEARCH_SNAPSHOT",
+        "rows": 1695,
+        "payload_bytes": 7308750,
+        "avg_bytes": 4311.946902654868,
+        "first_ns": 1791385001577812992,
+        "last_ns": 1791386863245716992
+      },
+      {
+        "event": "SHADOW_BBO_MATERIAL_CHANGE",
+        "rows": 3075,
+        "payload_bytes": 1719210,
+        "avg_bytes": 559.0926829268293,
+        "first_ns": 1791385320436238080,
+        "last_ns": 1791386862531166976
+      },
+      {
+        "event": "SHADOW_BBO_SNAPSHOT",
+        "rows": 1211,
+        "payload_bytes": 1228309,
+        "avg_bytes": 1014.2931461601981,
+        "first_ns": 1791385320039728896,
+        "last_ns": 1791386863245197056
+      },
+      {
+        "event": "DECISION_POINT_L2",
+        "rows": 406,
+        "payload_bytes": 421662,
+        "avg_bytes": 1038.576354679803,
+        "first_ns": 1791385013927540992,
+        "last_ns": 1791386862009737984
+      },
+      {
+        "event": "SHADOW_EXIT",
+        "rows": 50,
+        "payload_bytes": 40456,
+        "avg_bytes": 809.12,
+        "first_ns": 1791385495303986944,
+        "last_ns": 1791386274554471936
+      },
+      {
+        "event": "SHADOW_SETTLEMENT",
+        "rows": 36,
+        "payload_bytes": 39978,
+        "avg_bytes": 1110.5,
+        "first_ns": 1791386100134745088,
+        "last_ns": 1791386100134745088
+      },
+      {
+        "event": "TREND_ENTRY_SHADOW_CANDIDATE",
+        "rows": 24,
+        "payload_bytes": 33441,
+        "avg_bytes": 1393.375,
+        "first_ns": 1791385013154452992,
+        "last_ns": 1791386280270916096
+      },
+      {
+        "event": "SHADOW_ENTRY_CANDIDATE",
+        "rows": 9,
+        "payload_bytes": 30268,
+        "avg_bytes": 3363.1111111111113,
+        "first_ns": 1791385001571751936,
+        "last_ns": 1791386220281296896
+      },
+      {
+        "event": "PREDICTION_RESEARCH_HEALTH",
+        "rows": 31,
+        "payload_bytes": 28463,
+        "avg_bytes": 918.1612903225806,
+        "first_ns": 1791385001577812992,
+        "last_ns": 1791386808386535936
+      },
+      {
+        "event": "TREND_ENTRY_SHADOW_SETTLEMENT",
+        "rows": 12,
+        "payload_bytes": 6334,
+        "avg_bytes": 527.8333333333334,
+        "first_ns": 1791385200095216128,
+        "last_ns": 1791386100134777088
+      },
+      {
+        "event": "SHADOW_LOSS_WARNING",
+        "rows": 10,
+        "payload_bytes": 5336,
+        "avg_bytes": 533.6,
+        "first_ns": 1791385340424578048,
+        "last_ns": 1791386237921832960
+      },
+      {
+        "event": "SHADOW_SIGNAL_REVERSAL",
+        "rows": 10,
+        "payload_bytes": 3930,
+        "avg_bytes": 393.0,
+        "first_ns": 1791385893509291008,
+        "last_ns": 1791386220281296896
+      },
+      {
+        "event": "MARKET_TWAP_SUMMARY",
+        "rows": 2,
+        "payload_bytes": 3682,
+        "avg_bytes": 1841.0,
+        "first_ns": 1791385200095176960,
+        "last_ns": 1791386100134745088
+      },
+      {
+        "event": "FORWARD_SHADOW_CAPTURE_HEALTH",
+        "rows": 2,
+        "payload_bytes": 1462,
+        "avg_bytes": 731.0,
+        "first_ns": 1791385001571751936,
+        "last_ns": 1791385200086406912
+      },
+      {
+        "event": "RESEARCH_STORAGE_GUARD_TRIGGERED",
+        "rows": 1,
+        "payload_bytes": 372,
+        "avg_bytes": 372.0,
+        "first_ns": 1791384995672167936,
+        "last_ns": 1791384995672167936
+      }
+    ]
+  },
+  "replay": {
+    "run_id": "run_1791384905_563432fa",
+    "span_sec": 1867.573549056,
+    "old_payload_bytes": 20246611,
+    "sampled_payload_bytes": 10531466,
+    "restored_canonical_bytes_per_historical_hour": {
+      "SETTLEMENT_PATH_THRESHOLD_CROSS": 579854,
+      "TMINUS_CHECKPOINT": 84878,
+      "TWAP_PROJECTED_SIDE_CHANGE": 199491,
+      "TWAP_STRIKE_CROSS": 19768,
+      "MARKET_TWAP_SUMMARY": 5594,
+      "MARKET_OPENING_TWAP_SAMPLE": 139456
+    },
+    "restored_canonical_gib_day": 0.02300085872411728,
+    "historical_allocation_to_payload_multiplier": 1.180178920361732,
+    "projection_is_short_window_descriptive_not_guarantee": true,
+    "old_payload_gib_day": 0.8723454437337641,
+    "new_payload_gib_day": 0.47675958313172556,
+    "payload_reduction_pct": 45.34738657072296
+  },
+  "report_path": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/reports/research_analysis/storage_redesign/storage_redesign_20261008_005747_+0800.md",
+  "projection_additional": {
+    "journal_actual_short_window_gib_day": 0.5373795398410823,
+    "research_actual_short_window_allocated_image_growth_gib_day": 1.0688598874780773,
+    "sample_start": "2026-10-07T22:57:31.122358+08:00",
+    "sample_end": "2026-10-07T23:27:18.973073+08:00",
+    "new_combined_journal_research_page_proxy_gib_day": 1.1000411499335918
+  },
+  "markouts": {
+    "rows": 78,
+    "payload_bytes": 41973,
+    "avg_bytes": 538.1153846153846
+  }
+}

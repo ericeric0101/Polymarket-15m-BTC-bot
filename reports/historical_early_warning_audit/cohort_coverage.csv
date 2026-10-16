@@ -1,0 +1,32 @@
+SOURCE,DATE_RANGE,MARKETS,POSITIONS,INDEPENDENT_DAYS,RESOLUTION,TIMESTAMP_SEMANTICS,KNOWN_GAPS,DATA_QUALITY
+A LIVE positions (journal fills),2026-09-10..09-30 + 2026-10-10,128,128,14,event,journal host wall clock (ORDER_FILLED ts),14 taker-exit SELL fills carry paired-token instrument_id (identity bug; included by market); journal MARKET_CYCLE_PNL double-counts settlement on TP-exited positions (not used),VERIFIED (fills); PnL recomputed fills+official
+B DRY/shadow positions,-,-,-,-,-,-,not used (sensitivity skipped for scope),SKIPPED
+C Binance spot,Sep: cold reference_1s; Oct: research snapshots,128,128,14,~1 s (median gap 1.0 s; logs changes),local receipt (received_epoch_ns / snapshot_ts),cold DB extracts in /private/tmp (hash-verified by prior audit); Oct via snapshot btc_spot,VERIFIED
+D Chainlink spot / official 60s TWAP,Sep: reference_1s polymarket_spot/twap; Oct: snapshot official_twap,128,125,14,~1 s,local receipt,Oct Chainlink spot not in snapshots; Sep freshness not native-v2 proven,"VERIFIED (values), freshness PARTIAL"
+E token executable bid / engine net,journal EXIT_POLICY_DECISION/EXIT_AUDIT/STOP_TIMING/taker submit; Oct + snapshot bids,128,116,13,Sep ~21.3 s grid; Oct snapshot 1 s (bid only),journal host wall clock,12/128 positions have no engine bid rows; reference_1s polymarket_bbo and up_mid are midpoint/ambiguous-token -> UNUSABLE,VERIFIED (sparse)
+F entry score / candidate policy,FILL_MARKOUT entry_side_score; CANDIDATE_POLICY_SHADOW only 2026-10-09+,128,128,14,entry only,-,CANDIDATE_POLICY_SHADOW absent for Sep LIVE,score VERIFIED; candidate policy INSUFFICIENT
+G sigma / diffusion-z,snapshots/telemetry 2026-10-09+ only,3,3,1,1 s (Oct),local,no required_move_sigma/z recorded during Sep LIVE holds,INSUFFICIENT
+H markout,FILL_MARKOUT 1/3/5/10/30 s,128,128,14,fixed horizons,fill-relative,-,VERIFIED
+I settlement / official resolution,Gamma cache 2026-10-09 + fetch of 3 missing (2026-10-10),128,128,14,market,-,OFFICIAL_VERIFIED=128 RUNTIME_ONLY=0 UNKNOWN=0,VERIFIED
+J breaker / exit events,ORDER_TAKER_EXIT_SUBMIT decision_reason=absolute_max_loss_breaker,20,20,5,submit time,journal clock,eligibility components not recorded in Sep (submit != first eligible); versions changed 09-25/09-27/09-29,VERIFIED (submits only)
+K prospective stop-timing telemetry,run 2026-10-10,3,3,1,~5 s eval grid + transitions,host wall + monotonic,separate PROSPECTIVE cohort,VERIFIED
+
+COHORT,DAYS,POSITIONS,LOSERS,WINNERS,BREAKER_POSITIONS,NOTES
+DEV (09-10..09-25),9,56,12,44,2,
+HOLDOUT (09-27..09-30),4,69,23,46,16,
+PROSPECTIVE (10-10),1,3,2,1,2,
+
+BOUNDARY,COMMIT,DATE,HANDLING
+fast-follow live entries,df1594d->3b50637,09-08..10-07,11 FF entries pooled for timing; flagged
+L2 depth cap sizing (~$5.5 notional >0.70),b80f80d,09-07,PnL normalized per share / notional
+breaker trend confirmation,832ebbd,09-25 22:08,breaker timing pooled across versions (labeled)
+breaker preserved through recovery gate,901eef2,09-27 10:58,same
+persistent thesis confirmation,f5a0f66,09-29 21:46,same
+stop-loss exits disabled by default,622e97e,09-29 22:55,same
+weekend lock,c94275b/b84f249/a5f5c28,09-25..09-27,weekend LIVE positions only before lock
+freshness v2,9f60f63,10-07,Sep paths not native-v2
+settlement authority,bbbdc09,10-09,official outcomes used throughout
+share_v1,7640a44,10-09,PROSPECTIVE only
+protective-exit pause fix,14ec69f,10-09,PROSPECTIVE only
+telemetry,6b4d829,10-10,PROSPECTIVE only
+weekend unlock (dirty),b8ae4cdf,10-10,PROSPECTIVE only

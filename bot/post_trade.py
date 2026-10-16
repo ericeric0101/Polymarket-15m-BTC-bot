@@ -40,6 +40,8 @@ def build_fill_order_event_payload(
     realized_net_usdc: Decimal | None,
 ) -> dict[str, Any]:
     return {
+        "entry_source": filled_directional_snapshot.get("entry_source"),
+        "research_candidate_id": filled_directional_snapshot.get("research_candidate_id"),
         "liquidity_side": str(liquidity_side_raw),
         "inventory_delta_shares": float(inventory_delta_shares),
         "raw_commission": float(raw_commission_dec),
@@ -165,15 +167,18 @@ def apply_fill_followup(
 
 
 def compute_settlement_summary(
-    spot: float,
-    strike: float,
+    *,
+    outcome: str,
     inventory_shares: float,
     live_inventory_cost: dict[str, dict[str, Any]],
     market_cycle_realized_net_usdc: Decimal,
     active_side: str = "UP",
     inventory_side: str | None = None,
 ) -> SettlementSummary:
-    outcome = "UP" if spot >= strike else "DOWN"
+    """Settlement PnL for a known canonical outcome (the caller owns the authority)."""
+    outcome = str(outcome or "").upper()
+    if outcome not in ("UP", "DOWN"):
+        raise ValueError(f"settlement outcome must be UP or DOWN, got {outcome!r}")
     side_txt = str(active_side or "UP").strip().upper()
     # Use the actual token side the inventory belongs to (if provided),
     # rather than active_side which may have flipped mid-market.
@@ -185,7 +190,9 @@ def compute_settlement_summary(
         qty = float(state.get("qty", 0))
         avg_entry = float(state.get("avg_entry_price", 0))
         if qty > 0 and avg_entry > 0:
-            inventory_cost += qty * avg_entry
+            # Unallocated BUY fees paid in collateral (Protocol V2) belong to the
+            # held shares' cost; CTF BUY fees reduce shares instead, so this is 0 there.
+            inventory_cost += qty * avg_entry + float(state.get("entry_fee_remaining", 0) or 0)
     settlement_pnl = redeem_value - inventory_cost
     cycle_fill_realized = float(market_cycle_realized_net_usdc)
     cycle_combined_pnl = cycle_fill_realized + settlement_pnl

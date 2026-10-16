@@ -1,0 +1,5 @@
+instrument,status,reason
+position lifecycle,PARTIAL / NOT COMPARABLE,Run schema versions absent.
+decision trace,PARTIAL / NOT COMPARABLE,Run schema versions absent.
+sparse L2,NOT ESTABLISHED,No cohort-level L2 availability evidence.
+stop lifecycle,NOT ESTABLISHED,No cohort-level stop lifecycle evidence.

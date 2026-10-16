@@ -1,0 +1,20 @@
+Unit = market; tiers reported separately; no cross-tier pooling.
+
+=== TIER 1 ===
+T-300: flips=13/57 rate=0.228 wilson95=(0.138, 0.352) N_days=2 per_day={'2026-10-06': (2, 7), '2026-10-07': (11, 50)}
+T-180: flips=7/56 rate=0.125 wilson95=(0.062, 0.236) N_days=2 per_day={'2026-10-06': (1, 7), '2026-10-07': (6, 49)}
+T-120: flips=6/57 rate=0.105 wilson95=(0.049, 0.211) N_days=2 per_day={'2026-10-06': (1, 7), '2026-10-07': (5, 50)}
+T- 60: flips=5/57 rate=0.088 wilson95=(0.038, 0.189) N_days=2 per_day={'2026-10-06': (1, 7), '2026-10-07': (4, 50)}
+T- 30: flips=4/56 rate=0.071 wilson95=(0.028, 0.17) N_days=2 per_day={'2026-10-06': (1, 7), '2026-10-07': (3, 49)}
+
+=== TIER 2 ===
+T-300: flips=10/95 rate=0.105 wilson95=(0.058, 0.183) N_days=4 per_day={'2026-10-03': (0, 29), '2026-10-04': (0, 17), '2026-10-05': (6, 18), '2026-10-06': (4, 31)}
+        weekend 0/46=0.000 (0.0, 0.077) N_days=2 | weekday 10/49=0.204 (0.115, 0.336) N_days=2 | diff(wd-we)=0.204 day-bootstrap95=(0.129, 0.333) perm_p_one_sided=0.167 distinct_perms=6 min_attainable_p=0.167
+T-180: flips=8/95 rate=0.084 wilson95=(0.043, 0.157) N_days=4 per_day={'2026-10-03': (0, 29), '2026-10-04': (1, 17), '2026-10-05': (5, 18), '2026-10-06': (2, 31)}
+        weekend 1/46=0.022 (0.004, 0.113) N_days=2 | weekday 7/49=0.143 (0.071, 0.267) N_days=2 | diff(wd-we)=0.121 day-bootstrap95=(0.006, 0.278) perm_p_one_sided=0.333 distinct_perms=6 min_attainable_p=0.167
+T-120: flips=7/94 rate=0.074 wilson95=(0.037, 0.146) N_days=4 per_day={'2026-10-03': (0, 29), '2026-10-04': (0, 17), '2026-10-05': (4, 17), '2026-10-06': (3, 31)}
+        weekend 0/46=0.000 (0.0, 0.077) N_days=2 | weekday 7/48=0.146 (0.072, 0.272) N_days=2 | diff(wd-we)=0.146 day-bootstrap95=(0.097, 0.235) perm_p_one_sided=0.167 distinct_perms=6 min_attainable_p=0.167
+T- 60: flips=3/94 rate=0.032 wilson95=(0.011, 0.09) N_days=4 per_day={'2026-10-03': (0, 29), '2026-10-04': (0, 17), '2026-10-05': (2, 17), '2026-10-06': (1, 31)}
+        weekend 0/46=0.000 (0.0, 0.077) N_days=2 | weekday 3/48=0.062 (0.021, 0.168) N_days=2 | diff(wd-we)=0.062 day-bootstrap95=(0.032, 0.118) perm_p_one_sided=0.167 distinct_perms=6 min_attainable_p=0.167
+T- 30: flips=2/89 rate=0.022 wilson95=(0.006, 0.078) N_days=4 per_day={'2026-10-03': (0, 26), '2026-10-04': (0, 17), '2026-10-05': (1, 17), '2026-10-06': (1, 29)}
+        weekend 0/43=0.000 (0.0, 0.082) N_days=2 | weekday 2/46=0.043 (0.012, 0.145) N_days=2 | diff(wd-we)=0.043 day-bootstrap95=(0.034, 0.059) perm_p_one_sided=0.167 distinct_perms=6 min_attainable_p=0.167

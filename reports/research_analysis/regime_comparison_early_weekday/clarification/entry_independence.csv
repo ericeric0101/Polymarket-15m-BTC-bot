@@ -1,0 +1,3 @@
+scope,regime,entry_rows,unique_markets,entries_per_market_distribution,markets_with_multiple_entries,wins,losses,win_rate,gross_pnl,avg_pnl_per_entry,canonical_one_entry_rule
+ENTRY_LEVEL_ALL,WEEKDAY,14,14,"{""1"": 14}",0,11,3,0.7857142857142857,6.659788324173137,0.4756991660123669,Not needed: at most one SHADOW_SIM_SETTLED entry per market; repo dedup is simulation_id
+ENTRY_LEVEL_ALL,WEEKEND,41,41,"{""1"": 41}",0,35,6,0.8536585365853658,7.322052041943047,0.17858663516934262,Not needed: at most one SHADOW_SIM_SETTLED entry per market; repo dedup is simulation_id

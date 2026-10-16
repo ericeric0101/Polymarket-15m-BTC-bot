@@ -1,0 +1,2 @@
+# Optional dependency for scripts/record_polymarket_l2.py Parquet output.
+pyarrow>=14

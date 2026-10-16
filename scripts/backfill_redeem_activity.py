@@ -5,6 +5,8 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,15 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DATA_API = "https://data-api.polymarket.com"
+from bot.journal_path import MaintenanceLockError, require_bot_stopped, resolve_trade_db_path
+from bot.polymarket_data_api import DATA_API_V2_BASE_URL, v2_rows
+
+
+DATA_API = DATA_API_V2_BASE_URL
 
 
 def _json_loads(raw: str | None) -> dict[str, Any]:
@@ -40,31 +49,30 @@ def _fetch_redeem_activity(user: str, *, limit: int) -> list[dict[str, Any]]:
         "user": user,
         "limit": min(max(limit, 1), 500),
         "type": "REDEEM",
-        "sortBy": "TIMESTAMP",
-        "sortDirection": "DESC",
+        "sort_by": "TIMESTAMP",
+        "sort_direction": "DESC",
     }
     response = requests.get(f"{DATA_API}/activity", params=params, timeout=20)
     response.raise_for_status()
-    data = response.json()
-    return data if isinstance(data, list) else []
+    return v2_rows(response.json())
 
 
 def _activity_indexes(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str], dict[str, Any]]]:
     by_tx: dict[str, dict[str, Any]] = {}
     by_slug_condition: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        tx = _norm_tx(row.get("transactionHash"))
+        tx = _norm_tx(row.get("transaction_hash"))
         if tx:
             by_tx[tx] = row
         slug = str(row.get("slug") or row.get("eventSlug") or "")
-        condition_id = str(row.get("conditionId") or "").lower()
+        condition_id = str(row.get("condition_id") or "").lower()
         if slug and condition_id:
             by_slug_condition[(slug, condition_id)] = row
     return by_tx, by_slug_condition
 
 
 def _activity_amount(row: dict[str, Any]) -> float:
-    value = row.get("usdcSize")
+    value = row.get("usdc_size")
     if value is None:
         value = row.get("size")
     try:
@@ -168,10 +176,10 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
             payload["redeem_activity_timestamp"] = activity.get("timestamp")
             payload["redeem_activity_source"] = "polymarket_data_api_activity"
             payload["redeem_activity_reconciled_at"] = reconciled_at
-            if activity.get("transactionHash"):
-                payload["redeem_activity_tx_hash"] = activity.get("transactionHash")
-            if activity.get("conditionId"):
-                payload["redeem_activity_condition_id"] = activity.get("conditionId")
+            if activity.get("transaction_hash"):
+                payload["redeem_activity_tx_hash"] = activity.get("transaction_hash")
+            if activity.get("condition_id"):
+                payload["redeem_activity_condition_id"] = activity.get("condition_id")
             if activity.get("slug"):
                 payload["slug"] = activity.get("slug")
                 payload["market_slug"] = activity.get("slug")
@@ -200,13 +208,22 @@ def backfill(db_path: Path, user: str, *, limit: int, dry_run: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Backfill actual redeem amounts from Polymarket Data API activity.")
-    parser.add_argument("--db", default=os.getenv("TRADE_DB_PATH", "./logs/trade_journal.db"))
+    # Superseded by scripts/pnl_evidence_backfill.py (append-only evidence, all
+    # redeems incl. those outside the bot, full pagination, venue cash). This
+    # tool rewrites MARKET_SETTLEMENT / MARKET_CYCLE_PNL in place and reuses the
+    # settlement-time inventory cost, so a real run now needs --legacy-in-place.
+    parser = argparse.ArgumentParser(description="DEPRECATED: use scripts/pnl_evidence_backfill.py.")
+    parser.add_argument("--db", default=None, help="Trade-journal SQLite path (default: canonical TRADE_DB_PATH)")
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--user", default="")
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--legacy-in-place", action="store_true",
+                        help="explicitly allow the deprecated in-place rewrite (not recommended)")
     args = parser.parse_args()
+    if not args.dry_run and not args.legacy_in_place:
+        raise SystemExit("DEPRECATED: in-place rewrite disabled. Use scripts/pnl_evidence_backfill.py "
+                         "(append-only), or pass --dry-run / --legacy-in-place explicitly.")
 
     load_dotenv(args.env_file, override=False)
     user = args.user or os.getenv("POLYMARKET_WALLET_ADDRESS") or os.getenv("WALLET_ADDRESS") or ""
@@ -214,13 +231,16 @@ def main() -> int:
     if not user:
         raise SystemExit("missing user address; set POLYMARKET_WALLET_ADDRESS or pass --user")
 
-    db_path = Path(args.db).expanduser()
-    if not db_path.is_absolute():
-        db_path = Path.cwd() / db_path
+    db_path = resolve_trade_db_path(args.db)
     if not db_path.exists():
         raise SystemExit(f"db not found: {db_path}")
 
-    backfill(db_path, user, limit=args.limit, dry_run=args.dry_run)
+    try:
+        # A real backfill writes the live journal: the bot must be stopped.
+        with nullcontext() if args.dry_run else require_bot_stopped(journal_path=db_path):
+            backfill(db_path, user, limit=args.limit, dry_run=args.dry_run)
+    except MaintenanceLockError as exc:
+        raise SystemExit(f"REFUSED: {exc}. Stop the bot or use --dry-run.")
     return 0
 
 

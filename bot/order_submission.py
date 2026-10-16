@@ -9,6 +9,18 @@ from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.order_ids import new_client_order_id
+from bot.entry_sizing import (
+    BALANCE_BUFFER_MULTIPLIER,
+    CANONICAL_ENTRY_SIZING_RULE,
+    DEFAULT_PRICE_TICK,
+    MIN_ENTRY_SHARES,
+    SIZING_RULE_VERSION,
+    SKIP_BELOW_MIN_ENTRY_SHARES,
+    round_down_to_venue_size,
+    target_entry_shares,
+)
+from bot.entry_session_policy import new_buy_session_decision
 from bot.quote_service import (
     apply_sellable_inventory_guard,
     build_active_maker_order_state,
@@ -17,6 +29,34 @@ from bot.quote_service import (
     violates_final_crossing_guard,
 )
 from bot.recovery_exit_ladder import recovery_exit_owns_sell_reservation
+
+
+def _instrument_price_tick(instrument: Any) -> Decimal:
+    increment = getattr(instrument, "price_increment", None)
+    try:
+        if increment is None:
+            tick = DEFAULT_PRICE_TICK
+        elif hasattr(increment, "as_decimal"):
+            tick = Decimal(str(increment.as_decimal()))
+        else:
+            tick = Decimal(str(increment))
+    except Exception:
+        tick = DEFAULT_PRICE_TICK
+    return tick if tick > 0 else DEFAULT_PRICE_TICK
+
+
+def _log_submit_skip_once(strategy: Any, reason: str, message: str) -> None:
+    logged = getattr(strategy, "_entry_sizing_skip_logged", None)
+    if not isinstance(logged, set):
+        logged = set()
+        setattr(strategy, "_entry_sizing_skip_logged", logged)
+    key = (str(getattr(strategy, "current_market_slug", "") or ""), f"submit:{reason}")
+    if key in logged:
+        return
+    if len(logged) >= 512:
+        logged.clear()
+    logged.add(key)
+    logger.info(message)
 
 
 def submit_maker_quote(
@@ -35,6 +75,58 @@ def submit_maker_quote(
 ) -> None:
     instrument_id = strategy._normalize_instrument_id(instrument_id)
     inst_key = strategy._instrument_key(instrument_id)
+    # This operator switch controls only new normal maker BUY submissions.
+    # Existing inventory retains normal and protective SELL authority.
+    if side == "buy" and not bool(getattr(strategy, "normal_maker_buy_enabled", True)):
+        strategy._db_order_event(
+            event_type="ORDER_SKIP_NORMAL_MAKER_BUY_DISABLED",
+            side="BUY",
+            price=float(limit_price),
+            status="SKIPPED",
+            reason="normal_maker_buy_disabled",
+            payload={"instrument_id": str(instrument_id)},
+        )
+        logger.info("Skip normal maker BUY: NORMAL_MAKER_BUY_ENABLED is false")
+        return
+    is_dry_run = bool(strategy._is_dry_run_mode())
+    if side == "buy" and not is_dry_run:
+        decision_fn = getattr(
+            strategy,
+            "_new_buy_session_decision_fn",
+            new_buy_session_decision,
+        )
+        entry_session = decision_fn(time.time())
+        if not entry_session.allowed:
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_ENTRY_SESSION",
+                side="BUY",
+                price=float(limit_price),
+                status="SKIPPED",
+                reason=entry_session.reason,
+                payload={
+                    "instrument_id": str(instrument_id),
+                    "local_time": entry_session.local_time.isoformat(),
+                    "submission_boundary": "maker_pre_intent",
+                },
+            )
+            logger.warning(
+                "Skip maker BUY at final submission boundary: "
+                f"reason={entry_session.reason} local_time={entry_session.local_time.isoformat()}"
+            )
+            return
+        pnl_guard = getattr(strategy, "session_buy_guard_decision", None)
+        guard = pnl_guard(time.time()) if callable(pnl_guard) else None
+        if guard is not None and not guard.allowed:
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_SESSION_PNL_GUARD", side="BUY", price=float(limit_price),
+                status="SKIPPED", reason=guard.reason,
+                payload={"instrument_id": str(instrument_id), "session_date_taipei": guard.session_date_taipei,
+                         "realized_pnl_usdc": float(guard.realized_pnl_usdc),
+                         "high_water_usdc": float(guard.realized_high_water_usdc),
+                         "submission_boundary": "maker_pre_intent"},
+            )
+            logger.warning(f"Skip maker BUY due to session PnL guard: reason={guard.reason}")
+            return
     recovery_stage = getattr(strategy, "recovery_exit_stage_by_inst", {}).get(inst_key)
     if side == "sell" and recovery_exit_owns_sell_reservation(recovery_stage):
         strategy._db_order_event(
@@ -65,6 +157,20 @@ def submit_maker_quote(
         return
 
     quote_now = strategy._get_quote_for_instrument(instrument_id)
+    synthesis_fn = getattr(strategy, "_quote_synthesis_reason", None)
+    synthesis_reason = synthesis_fn(instrument_id) if side == "buy" and callable(synthesis_fn) else None
+    if side == "buy" and quote_now is not None and synthesis_reason:
+        # Fail closed: a BUY is never priced from a one-sided or crossed book
+        # that _get_quote_for_instrument had to repair.
+        strategy._db_order_event(
+            event_type="ORDER_SKIP_UNREAL_QUOTE",
+            side="BUY",
+            price=float(limit_price),
+            status="SKIPPED",
+            reason=str(synthesis_reason),
+            payload={"instrument_id": str(instrument_id)},
+        )
+        return
     if quote_now is not None and side == "buy":
         if strategy._should_skip_buy_submit_for_quote_drift(
             instrument_id=instrument_id,
@@ -85,8 +191,12 @@ def submit_maker_quote(
             return
 
     precision = int(getattr(instrument, "size_precision", 6)) if instrument is not None else 6
+    entry_sizing_rule = getattr(strategy, "entry_sizing_rule", CANONICAL_ENTRY_SIZING_RULE)
+    price_tick = _instrument_price_tick(instrument)
     if target_qty_override is not None:
         qty_dec = Decimal(str(target_qty_override))
+    elif side == "buy":
+        qty_dec = target_entry_shares(limit_price, tick=price_tick, rule=entry_sizing_rule)
     else:
         qty_dec = strategy._compute_maker_order_qty(limit_price, precision)
     if side == "buy":
@@ -103,47 +213,47 @@ def submit_maker_quote(
                 )
             )
         )
-        adjusted_qty = qty_dec * size_multiplier
-        exchange_min_qty = max(
-            strategy.maker_exchange_min_shares,
-            Decimal(str(10 ** (-precision))),
-        )
-        # A risk size-down that falls below the venue minimum must be skipped,
-        # not rounded back up. Rounding turned a configured 50% high-price
-        # reduction into nearly full exposure.
-        if size_multiplier < Decimal("1") and adjusted_qty + Decimal("0.000001") < exchange_min_qty:
+        # Remove Decimal division residue from target/multiplier round trips,
+        # then apply the venue's 2-decimal round-down. Never round up.
+        adjusted_qty = (qty_dec * size_multiplier).quantize(Decimal("0.000001"))
+        final_qty = round_down_to_venue_size(adjusted_qty)
+        # The bucket is checked again on the FINAL tick-aligned limit price.
+        # A crossing retreat only lowers a BUY price, so the target can only rise
+        # and the already-sized quantity remains within it.
+        share_target = target_entry_shares(limit_price, tick=price_tick, rule=entry_sizing_rule)
+        skip_reason = ""
+        if final_qty < MIN_ENTRY_SHARES:
+            skip_reason = SKIP_BELOW_MIN_ENTRY_SHARES
+        elif final_qty > share_target:
+            skip_reason = "entry_qty_exceeds_share_target"
+        if skip_reason:
             strategy._db_order_event(
-                event_type="ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN",
+                event_type=(
+                    "ORDER_SKIP_SIZE_BELOW_MIN_ENTRY_SHARES"
+                    if skip_reason == SKIP_BELOW_MIN_ENTRY_SHARES
+                    else "ORDER_SKIP_SIZE_ABOVE_SHARE_TARGET"
+                ),
                 side="BUY",
                 price=float(limit_price),
-                qty=float(adjusted_qty),
+                qty=float(final_qty),
                 status="SKIPPED",
-                reason="risk_adjusted_size_below_exchange_min",
+                reason=skip_reason,
                 payload={
+                    "sizing_version": SIZING_RULE_VERSION,
                     "unadjusted_qty": float(qty_dec),
-                    "adjusted_qty": float(adjusted_qty),
                     "size_multiplier": float(size_multiplier),
-                    "exchange_min_qty": float(exchange_min_qty),
+                    "final_normalized_shares": float(final_qty),
+                    "share_target": float(share_target),
+                    "min_entry_shares": float(MIN_ENTRY_SHARES),
                 },
             )
-            logger.info(
-                "Skip maker BUY quote: risk-adjusted quantity below exchange minimum "
-                f"({float(adjusted_qty):.4f} < {float(exchange_min_qty):.4f})"
-            )
+            _log_submit_skip_once(strategy, skip_reason, (
+                f"Skip maker BUY ({skip_reason}): price={float(limit_price):.4f} "
+                f"final={float(final_qty):.2f} target={float(share_target):.2f} "
+                f"min_entry={float(MIN_ENTRY_SHARES):.2f}"
+            ))
             return
-        if target_qty_override is not None and adjusted_qty + Decimal("0.000001") < exchange_min_qty:
-            strategy._db_order_event(
-                event_type="ORDER_SKIP_SIZE_BELOW_EXCHANGE_MIN",
-                side="BUY",
-                price=float(limit_price),
-                qty=float(adjusted_qty),
-                status="SKIPPED",
-                reason="target_quantity_below_exchange_min",
-                payload={"exchange_min_qty": float(exchange_min_qty)},
-            )
-            return
-        min_buy_qty = exchange_min_qty if size_multiplier < Decimal("1") else max(strategy.maker_min_shares, exchange_min_qty)
-        qty_dec = max(adjusted_qty, min_buy_qty)
+        qty_dec = final_qty
         planned_quantity = (directional_snapshot or {}).get("planned_quantity")
         if planned_quantity is not None:
             try:
@@ -270,14 +380,12 @@ def submit_maker_quote(
     if side == "buy" and projected_inventory > strategy.maker_max_inventory_shares:
         requested_qty = qty_dec
         excess_qty = projected_inventory - strategy.maker_max_inventory_shares
-        capped_qty = qty_dec - excess_qty
-        exchange_min_qty = max(
-            strategy.maker_exchange_min_shares,
-            Decimal(str(10 ** (-precision))),
-        )
-        if capped_qty + Decimal("0.000001") < exchange_min_qty:
+        capped_qty = round_down_to_venue_size(qty_dec - excess_qty)
+        # A capacity clip is subject to the same share_v1 entry minimum.
+        exchange_min_qty = MIN_ENTRY_SHARES
+        if capped_qty < exchange_min_qty:
             logger.warning(
-                "Skip maker BUY quote: remaining market inventory capacity is below exchange minimum "
+                "Skip maker BUY quote: remaining market inventory capacity is below the minimum entry size "
                 f"(requested={float(requested_qty):.6f}, remaining={float(capped_qty):.6f}, "
                 f"min={float(exchange_min_qty):.6f}, max={float(strategy.maker_max_inventory_shares):.6f})"
             )
@@ -287,7 +395,7 @@ def submit_maker_quote(
                 price=float(limit_price),
                 qty=float(requested_qty),
                 status="SKIPPED",
-                reason="remaining_inventory_capacity_below_exchange_min",
+                reason="remaining_inventory_capacity_below_min_entry_shares",
                 payload={
                     "current_inventory": float(strategy.inventory_delta_shares),
                     "requested_qty": float(requested_qty),
@@ -353,6 +461,36 @@ def submit_maker_quote(
             )
         return
 
+    if side == "buy" and not is_dry_run:
+        # Collateral for the exact order: final quantity x tick-aligned limit
+        # price x 1.1. Insufficient or unknown balance skips the entry; the
+        # quantity is never shrunk to fit.
+        required_usdc = qty_dec * Decimal(str(limit_price)) * BALANCE_BUFFER_MULTIPLIER
+        refresh_balance = getattr(strategy, "_refresh_balance_cache", None)
+        balance = refresh_balance() if callable(refresh_balance) else None
+        if balance is None or Decimal(str(balance)) < required_usdc:
+            reason = "balance_unavailable" if balance is None else "insufficient_balance_for_entry"
+            strategy._db_order_event(
+                event_type="ORDER_SKIP_INSUFFICIENT_BALANCE",
+                side="BUY",
+                price=float(limit_price),
+                qty=float(qty_dec),
+                status="SKIPPED",
+                reason=reason,
+                payload={
+                    "required_usdc": float(required_usdc),
+                    "available_usdc": float(balance) if balance is not None else None,
+                    "buffer_multiplier": float(BALANCE_BUFFER_MULTIPLIER),
+                    "sizing_version": SIZING_RULE_VERSION,
+                },
+            )
+            _log_submit_skip_once(strategy, reason, (
+                f"Skip maker BUY ({reason}): qty={float(qty_dec):.2f} px={float(limit_price):.4f} "
+                f"required={float(required_usdc):.4f} available="
+                f"{'unknown' if balance is None else f'{float(balance):.2f}'}"
+            ))
+            return
+
     quote = strategy._get_quote_for_instrument(instrument_id)
     if (
         tail_protect_tp
@@ -398,7 +536,7 @@ def submit_maker_quote(
     token_qty = float(qty_dec)
     order_key = strategy._order_key_for(side, instrument_id)
     created_ts = time.time()
-    if strategy._is_dry_run_mode():
+    if is_dry_run:
         if side != "buy" or not hasattr(strategy, "_record_shadow_simulated_entry"):
             strategy._db_order_event(
                 event_type="ORDER_DRY_RUN_SKIP",
@@ -471,7 +609,7 @@ def submit_maker_quote(
     order_side = OrderSide.BUY if side == "buy" else OrderSide.SELL
     price_precision = int(getattr(instrument, "price_precision", 3))
     price = Price.from_str(f"{float(limit_price):.{price_precision}f}")
-    order_id = ClientOrderId(f"BTC-15M-MAKER-{side.upper()}-{int(time.time() * 1000)}")
+    order_id = new_client_order_id(f"MAKER-{side.upper()}")
 
     order_kwargs = dict(
         instrument_id=instrument_id,
@@ -493,7 +631,39 @@ def submit_maker_quote(
     if order is None:
         return
 
+    # The normal maker path needs the same bounded crash evidence as FOK:
+    # persist intent before a venue request, but never treat intent as a fill.
+    # A transient journal failure rejects only this BUY; the journal health
+    # probe can restore later opportunities without touching SELL authority.
+    if side == "buy":
+        intent_persisted = strategy._db_order_event(
+            event_type="ORDER_MAKER_INTENT",
+            client_order_id=str(order_id),
+            side="BUY",
+            price=float(limit_price),
+            qty=token_qty,
+            status="INTENT",
+            reason="maker_quote_intent",
+            expected_net_usdc=float(econ.expected_net_usdc),
+            payload={
+                "maker": True,
+                "submitted_instrument_id": str(instrument_id),
+                "research_candidate_id": (directional_snapshot or {}).get("research_candidate_id"),
+            },
+        )
+        if intent_persisted is False:
+            logger.warning("Maker BUY blocked: durable journal intent could not be persisted")
+            return
+
+    submit_started_ns = time.perf_counter_ns()
     strategy.submit_order(order)
+    twap_research_db = getattr(strategy, "twap_research_db", None)
+    if twap_research_db is not None:
+        twap_research_db.enqueue_latency(
+            run_id=str(getattr(strategy, "run_id", "")), client_order_id=str(order.client_order_id),
+            name="order_handoff", started_monotonic_ns=submit_started_ns,
+            ended_monotonic_ns=time.perf_counter_ns(), created_epoch_ns=time.time_ns(),
+        )
     # Submission is not an acceptance. Resetting this counter here made every
     # asynchronous venue rejection appear as denial #1, preventing the failure
     # circuit breaker from ever reaching its configured threshold.
@@ -546,7 +716,13 @@ def submit_maker_quote(
         expected_net_usdc=float(econ.expected_net_usdc),
         payload={
             "maker": True,
+            "slug": str(getattr(strategy, "current_market_slug", "") or ""),
             "submitted_instrument_id": str(instrument_id),
+            "research_candidate_id": (
+                directional_snapshot.get("research_candidate_id")
+                if directional_snapshot
+                else None
+            ),
             "rebate_estimate_usdc": float(econ.expected_rebate_usdc),
             "spread_capture_estimate_usdc": float(econ.expected_spread_capture_usdc),
             "directional_edge_ps": (
@@ -657,6 +833,13 @@ def submit_maker_quote(
             "loss_sell_reason": loss_sell_reason if side == "sell" and loss_sell_reason else None,
         },
     )
+    if side == "buy":
+        complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
+        if callable(complete_research_candidate):
+            complete_research_candidate(
+                (directional_snapshot or {}).get("research_candidate_id"),
+                "candidate_submitted",
+            )
     strategy.rebate_reporter.record_quote(
         fee_equivalent=float(econ.fee_equivalent_usdc),
         rebate=float(econ.expected_rebate_usdc),

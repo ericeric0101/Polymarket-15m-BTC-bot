@@ -1,0 +1,17 @@
+section,market_or_point,role,status,n_snapshots,median_gap_s,first_tte,last_tte,binance_fresh_frac,token_quote_fresh_frac,twap_fresh_frac,sigma_coverage,z_coverage,gaps_gt10s
+market,btc-updown-15m-1791602100,STARTUP_PARTIAL,INVALID,179,1.17,223.5,0.01,1.0,0.966,0.994,0.922,0.922,{}
+market,btc-updown-15m-1791603000,WARMUP,VALID_WITH_GAPS,637,1.23,897.0,1.44,1.0,0.958,1.0,0.998,0.998,"{""token_quote_stale_gt10"": [[""03:44:15"", ""03:44:33"", 18.1]]}"
+market,btc-updown-15m-1791603900,MEASURED_1,VALID_WITH_GAPS,649,1.23,897.3,0.73,1.0,0.952,1.0,0.998,0.998,"{""token_quote_stale_gt10"": [[""03:59:46"", ""03:59:59"", 12.9]]}"
+market,btc-updown-15m-1791604800,MEASURED_2,VALID_WITH_GAPS,591,1.22,897.2,0.53,1.0,0.915,1.0,0.995,0.995,"{""token_quote_stale_gt10"": [[""04:12:45"", ""04:13:00"", 14.9], [""04:13:06"", ""04:14:12"", 65.6], [""04:14:19"", ""04:14:39"", 19.9], [""04:14:44"", ""04:14:59"", 14.7]]}"
+market,btc-updown-15m-1791605700,MEASURED_3,VALID_WITH_GAPS,641,1.24,897.4,0.01,1.0,0.941,0.988,0.983,0.983,"{""token_quote_stale_gt10"": [[""04:28:48"", ""04:28:59"", 10.8], [""04:29:11"", ""04:29:23"", 11.3]]}"
+market,btc-updown-15m-1791606600,MEASURED_4,VALID,695,1.2,897.1,0.96,1.0,0.976,1.0,0.997,0.997,{}
+
+storage,label,utc,journal,journal_wal,journal_shm,research,research_wal,free_gib,run_id,strategy_events,order_events,process
+storage,T0_prerun,2026-10-10T03:24:56Z,2417172480,0,32768,158466048,0,14.08,NA,0,0,not_started
+storage,T1,2026-10-10T03:45:43Z,2422386688,NA,NA,163586048,NA,13.636,run_1791602735_398a83d0,1152,688,alive
+storage,T2,2026-10-10T04:00:42Z,2424885248,NA,NA,168910848,NA,13.437,run_1791602735_398a83d0,1773,1067,alive
+storage,T3,2026-10-10T04:15:41Z,2427199488,NA,NA,173998080,NA,13.283,run_1791602735_398a83d0,2425,1267,alive
+storage,T4,2026-10-10T04:30:41Z,2430038016,NA,NA,179343360,NA,13.227,run_1791602735_398a83d0,3083,1636,alive
+storage,T5,2026-10-10T04:45:40Z,2432196608,NA,NA,183275520,NA,13.182,run_1791602735_398a83d0,3565,1876,alive
+storage,SIGINT_SENT 2026-10-10T04:46:00Z
+storage,T6_after_shutdown,2026-10-10T04:47:10Z,2432270336,NA,NA,183357440,NA,17.501,run_1791602735_398a83d0,3581,1876,exited

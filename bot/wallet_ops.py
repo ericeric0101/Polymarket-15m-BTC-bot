@@ -137,10 +137,12 @@ def fetch_conditional_balance(
         return current_client, (Decimal(str(cached_entry.get("balance"))) if cached_entry and cached_entry.get("balance") is not None else None), cached_entry
 
     try:
-        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams
+
+        from bot.protocol_v2 import conditional_asset_type
 
         params = BalanceAllowanceParams(
-            asset_type=AssetType.CONDITIONAL,
+            asset_type=conditional_asset_type(token),  # CONDITIONAL-V2 for Protocol V2 positions
             token_id=token,
             signature_type=int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
         )

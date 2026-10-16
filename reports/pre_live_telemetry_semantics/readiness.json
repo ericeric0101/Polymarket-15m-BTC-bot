@@ -1,0 +1,114 @@
+{
+ "HEAD_FOR_LIVE": "7a597551bd596e9e734cdcd8ef14a6b75d91e8c9",
+ "BASELINE_HEAD": "e921152af5760503730387425610c5308d36217e",
+ "BRANCH": "codex/db-resilience-and-stoploss-priority",
+ "COMMITS": [
+  "80a215a",
+  "c725df1",
+  "790c066",
+  "e7b9d8e",
+  "2a7822a",
+  "7a59755"
+ ],
+ "TESTS": {
+  "baseline": 1545,
+  "final": 1618,
+  "new": 73,
+  "failed": 0,
+  "diff_check": "OK"
+ },
+ "READINESS": {
+  "CHAINLINK_SPOT_SNAPSHOT": [
+   "READY",
+   "bot/prediction_research_snapshot.py:69; tests/test_snapshot_early_warning_fields.py::test_capture_records_chainlink_and_per_side_book_state"
+  ],
+  "BINANCE_RELATIVE_MOVE": [
+   "READY",
+   "bot/stop_timing_telemetry.py:217; research/early_warning_timeline.py:251; test_binance_relative_move_uses_binance_entry_baseline / test_binance_relative_move_thresholds_use_exact_bps"
+  ],
+  "CANONICAL_SPOT_CROSS": [
+   "READY",
+   "test_tie_settles_up_for_chainlink_cross_and_binance_is_not_a_strike_cross; test_chainlink_tie_settles_up_and_binance_never_crosses_the_strike"
+  ],
+  "HELD_SIDE_FRESHNESS": [
+   "READY",
+   "bot/prediction_research_snapshot.py:57; test_held_up_fresh_while_down_book_is_stale; test_held_side_stale_and_book_empty_are_distinct"
+  ],
+  "ENTRY_BID_BASELINE": [
+   "READY",
+   "bot/stop_timing_telemetry.py:112; bot/fill_ledger.py:197; test_unusable_entry_baseline_is_unknown_never_substituted; test_first_buy_fill_captures_baseline_inputs_once"
+  ],
+  "EXIT_SIZE_DEPTH": [
+   "READY",
+   "bot/stop_timing_telemetry.py exit_depth_metrics + :410 exit_l2_fresh; test_exit_depth_and_l2_freshness_are_explicit"
+  ],
+  "FIRST_DD": [
+   "READY",
+   "research/early_warning_timeline.py:112; test_first_recovery_second_deterioration_primary; test_exact_equality_triggers_without_float_error"
+  ],
+  "RECOVERY": [
+   "READY",
+   "test_first_recovery_second_deterioration_hysteresis; test_hysteresis_hold_is_broken_by_a_rebound_inside_the_band"
+  ],
+  "SECOND_DD": [
+   "READY",
+   "test_flapping_around_threshold_primary_vs_hysteresis"
+  ],
+  "TTE_CONTEXT": [
+   "READY",
+   "research/early_warning_timeline.py:282; test_schema_v1_rows_still_reconstruct_with_explicit_limits"
+  ],
+  "SIGMA_CONTEXT": [
+   "READY",
+   "same test (required_move_sigma, required_move_z_diffusion context)"
+  ],
+  "PROTECTIVE_EVAL_GAP": [
+   "READY",
+   "bot/protective_exit.py:67,273; tests/test_protective_eval_gap.py (5 new)"
+  ],
+  "LIVE_STOP_TIMING_FIELDS": [
+   "READY (harness)",
+   "test_live_path_would_emit_every_research_field_and_execution_is_identical; production confirmation needs the first LIVE market"
+  ],
+  "SCHEMA_COMPATIBILITY": [
+   "READY",
+   "test_existing_reader_accepts_mixed_v1_and_v2_rows; DRY-RUN v1 replay"
+  ],
+  "TELEMETRY_OVERHEAD": [
+   "READY",
+   "flat +4.3/+8.9 us p50/p99; held +12.7/+15.3 us; STOP_TIMING observe 43/54 us total"
+  ],
+  "STORAGE": [
+   "READY",
+   "BYTES_PER_SNAPSHOT_ADDED flat 309 / held 497; MIB_PER_HOUR_ADDED ~0.75 flat / ~1.20 held at 2540 rows/h"
+  ]
+ },
+ "BYTES_PER_SNAPSHOT_ADDED": {
+  "flat": 309,
+  "held": 497
+ },
+ "MIB_PER_HOUR_ADDED": {
+  "flat": 0.75,
+  "held": 1.2,
+  "rows_per_hour_basis": 2540
+ },
+ "OVERHEAD_US": {
+  "flat_p50": 4.3,
+  "flat_p99": 8.9,
+  "held_p50": 12.7,
+  "held_p99": 15.3
+ },
+ "EXECUTION_UNCHANGED": "VERIFIED (submissions identical with telemetry absent/failing/present; exploding inputs; no trading reader of new keys)",
+ "READY_FOR_MANUAL_1_PLUS_4_LIVE": "YES",
+ "LIVE_MANIFEST_FIELDS": [
+  "run_id",
+  "git_commit (=HEAD_FOR_LIVE)",
+  "git_dirty_tracked=false",
+  "schema_versions.snapshot_schema_version=2",
+  "config_hash"
+ ],
+ "BOT_STOPPED": true,
+ "NO_PUSH": true,
+ "LIVE_STARTED": false,
+ "DRY_RUN_STARTED": false
+}

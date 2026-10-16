@@ -1,0 +1,3 @@
+# TWAP forward research
+
+This is event-driven, shadow-only telemetry. Official current TWAP is Polymarket RTDS Chainlink 60s TWAP; the flat/trend settlement projections are estimates and have no live authority. Settlement-probability results use only canonical labels; all metrics are descriptive, not causal. Captured events: 2999; summaries: 42; canonical labels: 34; noncanonical proxy labels: 8; markets with opening-window observations: 7 markets with 146 durable opening samples; summary telemetry available for 5/42 markets; legacy summaries without opening-window fields: 37; opening-window observations: 104.

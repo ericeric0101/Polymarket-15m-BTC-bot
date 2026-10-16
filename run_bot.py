@@ -42,17 +42,22 @@ def _loaded_source_fingerprint(repo_root: Path) -> str:
     paths = (
         "run_bot.py",
         "bot/quote_service.py",
+        "bot/quote_runtime.py",
+        "bot/quoting.py",
+        "bot/entry_session_policy.py",
         "bot/pricing_runtime.py",
         "bot/spot_pricer.py",
+        "bot/prediction_research_snapshot.py",
         "bot/side_decision.py",
         "bot/forecast_state.py",
         "bot/strong_directional_regime.py",
         "bot/db_runtime.py",
+        "config/execution_penalty_snapshot.json",
         "bot/order_events.py",
         "bot/trade_telemetry.py",
         "monitoring/trade_journal_db.py",
-        "bot/lead_lag_observation.py",
         "bot/order_submission.py",
+        "bot/adapter_overrides.py",
         "bot/taker_exit.py",
         "bot/recovery_exit_ladder.py",
         "bot/db_runtime.py",
@@ -90,6 +95,14 @@ from bot.runtime_env import load_runtime_env
 from bot.edge_state import build_edge_state
 from bot.edge_observation import build_quote_age_telemetry
 from bot.entry_decision import EntryDecision
+from bot.live_entry_research import (
+    ResearchCandidateLifecycle,
+    StrikeCrossingTracker,
+    build_safety_sigma,
+    build_shadow_labels,
+    classify_time_et,
+    edge_semantics,
+)
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.position_manager import PositionManager, PositionManagerConfig
 from bot.enums import ActiveSide, MarketPhase
@@ -98,7 +111,7 @@ from bot.spot_pricer import SpotPricerMixin
 from bot.taker_exit import TakerExitMixin
 from bot.fill_ledger import FillLedgerMixin
 from bot.db_runtime import StrategyDBRuntimeMixin
-from bot.order_runtime import OrderRuntimeMixin
+from bot.order_runtime import OrderRuntimeMixin, classify_rollover_sell_orders
 from bot.order_events import (
     handle_order_canceled,
     handle_order_cancel_rejected,
@@ -110,6 +123,7 @@ from bot.market_runtime import (
     align_price_to_tick,
     find_btc_instrument,
     handle_generic_event,
+    handle_order_book_deltas,
     handle_quote_tick,
     handle_stop,
     maker_quote_sync,
@@ -120,7 +134,15 @@ from bot.pricing_runtime import PricingRuntimeMixin
 from bot.quote_runtime import QuoteRuntimeMixin
 from bot.recovery import StrategyRecoveryMixin
 from bot.shadow_simulation import ShadowSimulationMixin
-from bot.lead_lag_observation import LeadLagObservationMixin
+from bot.depth_risk_shadow import DepthRiskShadowMixin
+from bot.depth_risk import cap_buy_quantity
+from bot.kill_switch import effective_kill_class, rollover_reset_allowed
+from bot.settlement_confirmation import SettlementConfirmationWorker, resolve_wallet_address
+from bot.entry_sizing import (
+    CANONICAL_ENTRY_SIZING_RULE,
+    log_entry_sizing_skip_once,
+    target_entry_shares,
+)
 from bot.lifecycle_runtime import StrategyLifecycleMixin
 from bot.lifecycle import (
     evaluate_market_phase,
@@ -132,6 +154,7 @@ from bot.ops import (
     handle_quote_watchdog_recovery,
     log_strategy_run_start,
     run_auto_redeem_script,
+    quote_age_status_reason,
     start_background_thread,
     should_attempt_quote_watchdog_recovery,
     should_run_quote_watchdog,
@@ -148,6 +171,8 @@ from bot.market_data import (
     resolve_opening_strike_from_history,
 )
 from bot.models import DecisionPhase, ExitDecisionType, MarketSnapshot, PositionState, QuoteIntentState, QuoteMode, SignalDecision
+from bot import entry_session_policy as entry_session_policy_module
+from bot.entry_session_policy import new_buy_session_decision
 from bot.quoting import (
     apply_quote_plan_guards,
 )
@@ -158,6 +183,7 @@ from bot.quote_service import (
     apply_forced_exit_sell_pricing,
     apply_fractional_kelly_sizing,
     apply_high_entry_price_size_adjustment,
+    apply_share_entry_sizing,
     apply_locked_side_recycle_sell_pricing,
     apply_shadow_entry_veto,
     apply_weak_pfair_size_adjustment,
@@ -246,7 +272,22 @@ class LockedSideRuntimeState:
     entry_block_reason: str = ""
 
 
+from bot.execution_safety import ExecutionSafetyMixin
+
+
+def depth_risk_cap_kwargs(*, size_multiplier: Decimal) -> Dict[str, Decimal]:
+    """Depth/risk/inventory caps are pure caps (share_v1 sizing).
+
+    The strategy ``size_multiplier`` is applied exactly once, to the share
+    target, by ``bot.entry_sizing.size_entry``; scaling the cap too would make
+    the multiplier's effect depend on whether DEPTH_RISK sizing is enabled.
+    """
+    del size_multiplier  # deliberately not applied to the cap
+    return {"size_multiplier": Decimal("1")}
+
+
 class IntegratedBTCStrategy(
+    ExecutionSafetyMixin,
     SideDecisionMixin,
     SpotPricerMixin,
     TakerExitMixin,
@@ -257,15 +298,210 @@ class IntegratedBTCStrategy(
     QuoteRuntimeMixin,
     StrategyRecoveryMixin,
     ShadowSimulationMixin,
-    LeadLagObservationMixin,
+    DepthRiskShadowMixin,
     StrategyLifecycleMixin,
     Strategy,
 ):
+    def _observe_live_strike_reference(self, *, spot, source: str, observed_ts: float) -> None:
+        """Update research-only crossing state from verified live reference ticks."""
+        slug = str(getattr(self, "current_market_slug", "") or "")
+        try:
+            eligible = bool(self._market_strike_is_entry_eligible(slug))
+            strike = getattr(self, "market_strike_cache_by_slug", {}).get(slug) if eligible else None
+            canonical_spot = spot if str(source).startswith("polymarket_chainlink_twap_") else None
+            tracker = getattr(self, "_live_strike_crossing_tracker", None)
+            if tracker is None:
+                tracker = StrikeCrossingTracker()
+                self._live_strike_crossing_tracker = tracker
+            tracker.observe(slug=slug, spot=float(canonical_spot) if canonical_spot is not None else None,
+                            strike=float(strike) if strike is not None else None,
+                            observed_ts=float(observed_ts), canonical=eligible and canonical_spot is not None)
+        except Exception:
+            # Research state must never propagate into the feed or quote path.
+            return
+
+    def _build_live_entry_research_snapshot(self, *, now_ts: float, inst_id: Any,
+                                            side: str, fair: Any, entry_price: Any,
+                                            robust_net_usdc: Any, candidate_context: dict[str, Any],
+                                            candidate_id: str) -> dict[str, Any]:
+        """Serialize observational context only; callers never consume verdicts."""
+        def number(value):
+            try:
+                if value is None:
+                    return None
+                result = float(value)
+                return result if math.isfinite(result) else None
+            except (TypeError, ValueError):
+                return None
+
+        slug = str(self.current_market_slug or "")
+        try:
+            start_ts = float(slug.rsplit("-", 1)[-1])
+        except (TypeError, ValueError):
+            start_ts = None
+        end_ts = number(getattr(self, "current_market_end_timestamp", None))
+        time_left = number(candidate_context.get("time_left_sec"))
+        market_age = max(0.0, now_ts - start_ts) if start_ts is not None else None
+        strike_map = getattr(self, "market_strike_cache_by_slug", {})
+        strike = strike_map.get(slug) if isinstance(strike_map, dict) else None
+        strike_status = getattr(self, "market_strike_status_by_slug", {}).get(slug, "pending")
+        strike_source = getattr(self, "market_strike_source_by_slug", {}).get(slug)
+        eligible_fn = getattr(self, "_market_strike_is_entry_eligible", None)
+        strike_valid = bool(callable(eligible_fn) and eligible_fn(slug))
+        strike_value = number(strike) if strike_valid else None
+        spot_source = str(getattr(self, "latest_external_spot_source", "") or "")
+        spot_source_ts = number(getattr(self, "latest_external_spot_source_ts", None))
+        spot_age = max(0.0, now_ts - spot_source_ts) if spot_source_ts is not None else None
+        # Only the already-approved Polymarket Chainlink TWAP is canonical here;
+        # Binance/Coinbase fallbacks are retained as unavailable for distance.
+        spot = number(getattr(self, "latest_external_spot", None)) if spot_source.startswith("polymarket_chainlink_twap_") and spot_age is not None and spot_age <= 10 else None
+        signed_usd = spot - strike_value if spot is not None and strike_value is not None else None
+        abs_usd = abs(signed_usd) if signed_usd is not None else None
+        signed_bps = signed_usd / strike_value * 10000 if signed_usd is not None and strike_value else None
+        abs_bps = abs(signed_bps) if signed_bps is not None else None
+        leader = "UP" if signed_usd is not None and signed_usd > 0 else "DOWN" if signed_usd is not None and signed_usd < 0 else "TIE" if signed_usd == 0 else None
+        strike_observed_ts_by_slug = getattr(self, "market_strike_observed_ts_by_slug", {})
+        strike_observed_ts = number(strike_observed_ts_by_slug.get(slug)) if isinstance(strike_observed_ts_by_slug, dict) else None
+        age_strike = max(0.0, now_ts - strike_observed_ts) if strike_value is not None and strike_observed_ts is not None else None
+        forecast = getattr(self, "last_forecast_state", None)
+        forecast_age = now_ts - number(getattr(forecast, "created_ts", None)) if forecast is not None and number(getattr(forecast, "created_ts", None)) is not None else None
+        sigma = number(getattr(forecast, "sigma_final", None)) if forecast_age is not None and 0 <= forecast_age <= 5 else None
+        sigma_payload = build_safety_sigma(spot=spot, strike=strike_value, sigma_annual=sigma,
+                                           time_left_sec=time_left, sigma_source="forecast_state_sigma_final_annualized" if sigma is not None else None)
+        tracker = getattr(self, "_live_strike_crossing_tracker", None)
+        crossings = tracker.snapshot(slug, now_ts) if tracker is not None and strike_valid and spot is not None else {
+            "crossing_observation_available": False,
+            "crossing_observation_reason": "canonical_spot_or_strike_unavailable" if not (strike_valid and spot is not None) else "tracker_unavailable",
+        }
+        quote_ctx = candidate_context.get("quote_context")
+        desired = candidate_context.get("desired_entry") or {}
+        quote_data = candidate_context.get("quote_data")
+        price = number(entry_price)
+        probability = number(fair)
+        quantity = number(desired.get("planned_quantity") if isinstance(desired, dict) else None)
+        if quantity is None and isinstance(quote_data, (tuple, list)) and len(quote_data) > 1:
+            econ = quote_data[1]
+            quantity = number(getattr(econ, "shares", None))
+        fee_ps = number(desired.get("fee_ps") if isinstance(desired, dict) else None)
+        exec_penalty = number(desired.get("exec_penalty") if isinstance(desired, dict) else None)
+        directional_edge_ps = number(desired.get("directional_edge_ps") if isinstance(desired, dict) else None)
+        expected_net = number(getattr(desired.get("econ"), "expected_net_usdc", None) if isinstance(desired, dict) else None)
+        if isinstance(quote_data, (tuple, list)):
+            if robust_net_usdc is None and len(quote_data) > 3:
+                robust_net_usdc = quote_data[3]
+            if exec_penalty is None and len(quote_data) > 4:
+                exec_penalty = number(quote_data[4])
+            if directional_edge_ps is None and len(quote_data) > 5:
+                directional_edge_ps = number(quote_data[5])
+            if fee_ps is None and len(quote_data) > 8:
+                fee_ps = number(quote_data[8])
+            if expected_net is None and len(quote_data) > 1:
+                expected_net = number(getattr(quote_data[1], "expected_net_usdc", None))
+        economics_components = quote_data[10] if isinstance(quote_data, (tuple, list)) and len(quote_data) > 10 and isinstance(quote_data[10], dict) else {}
+        regime_resolution_ev = number(economics_components.get("regime_resolution_ev_usdc"))
+        if regime_resolution_ev is not None:
+            resolution_ev = regime_resolution_ev
+        robust = number(robust_net_usdc)
+        bid = ask = bid_size = ask_size = None
+        bid_depth = ask_depth = None
+        if quote_ctx is not None:
+            quote = getattr(quote_ctx, "quote", None)
+            if quote:
+                bid, ask = number(quote[0]), number(quote[1])
+            bid_depth, ask_depth = number(getattr(quote_ctx, "bid_depth", None)), number(getattr(quote_ctx, "ask_depth", None))
+            for attribute, field in (("bid_levels", "bid"), ("ask_levels", "ask")):
+                levels = getattr(quote_ctx, attribute, None) or []
+                if levels:
+                    first = levels[0]
+                    try:
+                        size = getattr(first, "size", None)
+                        size = size() if callable(size) else (size if size is not None else first[1])
+                    except Exception:
+                        size = None
+                    if field == "bid": bid_size = number(size)
+                    else: ask_size = number(size)
+        fee_usdc = fee_ps * quantity if fee_ps is not None and quantity is not None else None
+        penalty_ps = exec_penalty / quantity if exec_penalty is not None and quantity else None
+        penalty_usdc = exec_penalty
+        if regime_resolution_ev is None:
+            resolution_ev = quantity * (probability - price) if quantity is not None and probability is not None and price is not None else None
+        weekday_weekend, hour_block = classify_time_et(now_ts)
+        side_for_inst = getattr(self, "_side_for_instrument_id", None)
+        try:
+            outcome_side = str(getattr(side_for_inst(inst_id), "value", "") or "").upper() or None if callable(side_for_inst) else None
+        except Exception:
+            outcome_side = None
+        top_depth = ask_size if ask_size is not None else ask_depth
+        depth_adequate = top_depth >= quantity if top_depth is not None and quantity is not None else None
+        entry_source = str(candidate_context.get("entry_source") or "normal_maker")
+        edge_method = "maker_quote_economics"
+        edge_data = edge_semantics(
+            probability=probability, entry_price=price, fee_per_share=fee_ps,
+            execution_penalty_per_share=penalty_ps, method=edge_method,
+        )
+        # Maker quote economics is not interchangeable with Outcome's taker
+        # fee/markout formula. Keep its own values descriptive and its
+        # directional net edge unavailable rather than assuming missing costs are zero.
+        if entry_source == "normal_maker":
+            edge_data["maker_gross_probability_edge_ps"] = edge_data["gross_probability_edge_ps"]
+            edge_data["maker_robust_net_usdc"] = robust
+            edge_data["maker_expected_net_usdc"] = expected_net
+        edge_for_shadow = edge_data["net_directional_edge_ps"]
+        labels = build_shadow_labels(edge_ps=edge_for_shadow, robust_net_usdc=robust,
+                                     fair=probability, entry_price=price, abs_distance_bps=abs_bps,
+                                     safety_sigma=sigma_payload["safety_sigma"],
+                                     crossings_last_120s=crossings.get("crossings_last_120s"),
+                                     weekend=weekday_weekend == "weekend", depth_adequate=depth_adequate,
+                                     gross_edge_ps=edge_data["gross_probability_edge_ps"],
+                                     edge_cost_complete=edge_data["edge_cost_complete"])
+        if hour_block == "06-12": labels["shadow_labels"].append("SHADOW_ET_06_12")
+        plan_notional = price * quantity if price is not None and quantity is not None else None
+        actual_multiplier = number(desired.get("size_multiplier")) if isinstance(desired, dict) else None
+        return {
+            "candidate_id": candidate_id, "event_semantics": "ENTRY_RESEARCH_SNAPSHOT",
+            "entry_source": str(candidate_context.get("entry_source") or "normal_maker"),
+            "event_ts": now_ts, "slug": slug, "instrument_id": str(inst_id), "side": str(side).upper(),
+            "outcome_side": outcome_side,
+            "market_start_ts": start_ts, "market_end_ts": end_ts, "time_left_sec": time_left,
+            "market_age_sec": market_age, "weekday_weekend": weekday_weekend, "hour_block_et": hour_block,
+            "official_strike": strike_value, "strike_source": strike_source if strike_valid else None,
+            "strike_status": strike_status, "strike_age_sec": age_strike,
+            "strike_age_unavailable_reason": None if age_strike is not None else "strike_source_observation_timestamp_unavailable",
+            "current_reference_spot": spot, "spot_source": spot_source or None, "spot_age_sec": spot_age,
+            "signed_distance_usd": signed_usd, "abs_distance_usd": abs_usd,
+            "signed_distance_bps": signed_bps, "abs_distance_bps": abs_bps, "current_leader": leader,
+            **sigma_payload, **crossings,
+            "signal_score": number(getattr(self, "side_decision_score", None)),
+            "estimated_probability": probability,
+            "probability_source": (
+                "settled_score_regime_calibration" if economics_components.get("regime_economics_applied")
+                else f"{str(getattr(self, 'maker_fair_pricer_mode', 'unknown'))}_fair_model"
+            ) if probability is not None else None,
+            "fair_probability": probability, "entry_price": price,
+            "entry_price_source": "maker_quote_plan" if price is not None else None,
+            "best_bid": bid, "best_ask": ask, "spread": ask - bid if ask is not None and bid is not None else None,
+            "top_ask_size": ask_size, "top_bid_size": bid_size,
+            "nearby_ask_depth": ask_depth, "nearby_bid_depth": bid_depth,
+            "fee_per_share": fee_ps, "fee_usdc": fee_usdc,
+            "execution_penalty_per_share": penalty_ps, "execution_penalty_usdc": penalty_usdc,
+            **edge_data,
+            "resolution_ev_usdc": resolution_ev,
+            "resolution_ev_basis": "strong_directional_regime_calibrated_after_fee" if regime_resolution_ev is not None else "qty_times_model_fair_minus_candidate_price_before_costs",
+            "robust_net_usdc": robust,
+            "directional_edge_ps": edge_for_shadow, "expected_net_usdc": expected_net,
+            "maker_robust_net_usdc": robust if entry_source == "normal_maker" else None,
+            "maker_expected_net_usdc": expected_net if entry_source == "normal_maker" else None,
+            "planned_quantity": quantity, "planned_notional": plan_notional,
+            "final_planned_quantity": quantity, "final_notional": plan_notional,
+            "actual_size_multiplier": actual_multiplier,
+            **labels,
+        }
+
+
     """
     Integrated BTC Strategy combining:
     - Nautilus trading framework
     - Our 7-phase system
-    - Redis simulation control
     - Paper trading tracking
     - Auto-reload instruments every 12 minutes
     - Pre-loaded price history for immediate trading
@@ -273,7 +509,6 @@ class IntegratedBTCStrategy(
     
     def __init__(
         self,
-        redis_client=None,
         test_mode=False,
         selected_slug: Optional[str] = None,
         enable_terminal_dashboard: bool = False,
@@ -285,7 +520,6 @@ class IntegratedBTCStrategy(
         
         # Nautilus
         self.instrument_id = None
-        self.redis_client = redis_client
         self.selected_slug = selected_slug
         self.dashboard_state = dashboard_state
         self.telegram_notifier = telegram_notifier
@@ -810,7 +1044,7 @@ class IntegratedBTCStrategy(
         )
         twap = _candidate(
             getattr(self, "_polymarket_chainlink_twap_price", None),
-            float(getattr(self, "_polymarket_chainlink_twap_price_ts", 0.0) or 0.0),
+            float(getattr(self, "_polymarket_chainlink_twap_observation_ts", 0.0) or 0.0),
             f"polymarket_chainlink_twap_{twap_window}s_ws",
         )
         binance = _candidate(
@@ -925,10 +1159,61 @@ class IntegratedBTCStrategy(
                 fair_invalidates = fair <= (Decimal("1") - flip_min)
             elif side == ActiveSide.DOWN:
                 fair_invalidates = fair <= (Decimal("1") - flip_min)
+        recorder = getattr(self, "stop_forensics_shadow", None)
+        entry_state = getattr(self, "live_inventory_cost", {}).get(str(instrument_id), {})
+        twap_shadow = getattr(self, "twap_forward_shadow", None)
+        twap_features = twap_shadow.latest(slug) if twap_shadow is not None else None
+        position_side = str(self._side_for_instrument_id(instrument_id).value).upper()
         invalidated = (not spot_supports) and fair_invalidates
-        if invalidated:
-            self._side_invalidation_hits_by_slug[slug] = int(self._side_invalidation_hits_by_slug.get(slug, 0)) + 1
-        else:
+        if recorder is not None and inventory_qty <= 0 and spot is not None:
+            try:
+                current_quote = self._get_quote_for_instrument(instrument_id)
+                book = self.cache.order_book(instrument_id) if getattr(self, "cache", None) is not None else None
+                recorder.observe_post_stop(
+                    now_ts=now_ts, slug=slug, instrument_id=str(instrument_id),
+                    best_bid=current_quote[0] if current_quote is not None else None,
+                    bid_levels=book.bids() if book is not None else None,
+                    time_left_sec=float(time_left_sec or 0.0),
+                )
+            except Exception as exc:
+                logger.debug(f"Stop continuation shadow observation failed: {exc}")
+        if recorder is not None and inventory_qty > 0 and spot is not None and strike is not None and fair is not None:
+            try:
+                current_quote = self._get_quote_for_instrument(instrument_id)
+                best_bid = current_quote[0] if current_quote is not None else None
+                book = self.cache.order_book(instrument_id) if getattr(self, "cache", None) is not None else None
+                bid_levels = book.bids() if book is not None else None
+                entry_price = Decimal(str(entry_state.get("avg_price", entry_state.get("avg_entry_price", "0"))))
+                if entry_price > 0:
+                    recorder.observe(
+                        raw_adverse=invalidated, now_ts=now_ts, slug=slug, instrument_id=str(instrument_id),
+                        position_side=position_side, entry_price=entry_price, qty=inventory_qty,
+                        signal_side=self.active_side.value, signal_score=Decimal(str(self.side_decision_score)),
+                        official_strike=strike, spot=spot, fair_probability=fair,
+                        fair_at_entry=(Decimal(str(entry_state["fair_at_entry"])) if entry_state.get("fair_at_entry") is not None else None),
+                        leader_side=("UP" if spot > strike else "DOWN" if spot < strike else "TIE"),
+                        best_bid=best_bid, best_bid_size=None, time_left_sec=float(time_left_sec or 0.0),
+                        twap_features=twap_features,
+                        bid_levels=bid_levels,
+                        position_lifecycle_id=entry_state.get("position_lifecycle_id"),
+                    )
+            except Exception as exc:
+                logger.debug(f"Stop forensics shadow observation failed: {exc}")
+        # now_ts is the shared receipt/wall timestamp passed to every token and
+        # BUY/SELL evaluation in one _evaluate_quote_targets invocation. Keep
+        # only the latest cycle identity, never a per-callback confirmation.
+        cycle = (slug, side.value, float(now_ts))
+        prior_cycle = getattr(self, "_side_invalidation_last_cycle", None)
+        if cycle != prior_cycle:
+            if prior_cycle is not None and prior_cycle[:2] != cycle[:2]:
+                self._side_invalidation_hits_by_slug[slug] = 0
+            self._side_invalidation_last_cycle = cycle
+            if invalidated and spot is not None and strike is not None:
+                self._side_invalidation_hits_by_slug[slug] = int(self._side_invalidation_hits_by_slug.get(slug, 0)) + 1
+            else:
+                self._side_invalidation_hits_by_slug[slug] = 0
+        elif not invalidated or spot is None or strike is None:
+            # Contradictory/missing sibling evidence may clear, never increment.
             self._side_invalidation_hits_by_slug[slug] = 0
         hits = int(self._side_invalidation_hits_by_slug.get(slug, 0))
         confirmed = hits >= int(getattr(self, "maker_side_invalidation_confirm_cycles", 2))
@@ -1024,6 +1309,19 @@ class IntegratedBTCStrategy(
             or active_inst_id is None
             or str(inst_id) != str(active_inst_id)
         ):
+            recorder = getattr(self, "stop_forensics_shadow", None)
+            if recorder is not None and inventory_qty <= 0:
+                try:
+                    quote = self._get_quote_for_instrument(inst_id)
+                    book = self.cache.order_book(inst_id) if getattr(self, "cache", None) is not None else None
+                    recorder.observe_post_stop(
+                        now_ts=now_ts, slug=slug, instrument_id=str(inst_id),
+                        best_bid=quote[0] if quote is not None else None,
+                        bid_levels=book.bids() if book is not None else None,
+                        time_left_sec=time_left_sec,
+                    )
+                except Exception as exc:
+                    logger.debug(f"Stop continuation shadow observation failed: {exc}")
             return LockedSideRuntimeState(
                 signal_invalidated=signal_invalidated,
                 entry_blocked=signal_invalidated,
@@ -1202,21 +1500,43 @@ class IntegratedBTCStrategy(
     # Side decision methods extracted to bot/side_decision.py (SideDecisionMixin)
 
     def _init_live_prom_metrics(self) -> None:
-        """Initialize Prometheus gauges/counters for live trading metrics."""
+        """Run-local position-close metrics; never canonical session/month PnL."""
+        if getattr(self, "_prom_live_metrics_ok", False):
+            return
         try:
-            from prometheus_client import Gauge, Counter
-            self._prom_live_pnl = Gauge('trading_live_realized_pnl', 'Cumulative realized PnL from live trades (USDC)')
-            self._prom_live_trades = Counter('trading_live_trades_total', 'Total live trades (position round-trips)')
-            self._prom_live_wins = Counter('trading_live_winning_trades', 'Live winning trades')
-            self._prom_live_losses = Counter('trading_live_losing_trades', 'Live losing trades')
-            self._prom_live_win_rate = Gauge('trading_live_win_rate', 'Live win rate percentage')
-            self._prom_live_open_pos = Gauge('trading_live_open_positions', 'Number of open positions')
-            self._prom_live_inventory = Gauge('trading_live_inventory_shares', 'Current inventory in shares')
+            from prometheus_client import Gauge, Counter, REGISTRY
+
+            def collector(name, factory):
+                existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+                if existing is not None:
+                    return existing
+                try:
+                    return factory()
+                except ValueError:
+                    # A simultaneous strategy initialization may win registration.
+                    existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+                    if existing is None:
+                        raise
+                    return existing
+
+            scope = str(getattr(self, "run_id", None) or f"instance-{id(self)}")
+            def metric(name, description, kind=Gauge):
+                return collector(name, lambda: kind(name, description, ["strategy_run_id", "strategy_instance"], registry=REGISTRY)).labels(scope, str(id(self)))
+
+            self._prom_live_pnl = metric("trading_position_close_realized_pnl_usdc", "Position-close PnL in this strategy run; excludes canonical settlement/session/month accounting")
+            self._prom_live_trades = metric("trading_position_close_trades", "Position closes in this strategy run", Counter)
+            self._prom_live_wins = metric("trading_position_close_wins", "Profitable position closes in this strategy run", Counter)
+            self._prom_live_losses = metric("trading_position_close_losses", "Non-profitable position closes in this strategy run", Counter)
+            self._prom_live_win_rate = metric("trading_position_close_win_rate", "Position-close win rate percentage in this strategy run")
+            self._prom_live_open_pos = metric("trading_live_open_positions", "Current open positions in this strategy run")
+            self._prom_live_inventory = metric("trading_live_inventory_shares", "Current inventory in this strategy run")
             self._live_cumulative_pnl = 0.0
             self._live_total_trades = 0
             self._live_total_wins = 0
+            self._prom_live_pnl.set(0)
+            self._prom_live_win_rate.set(0)
             self._prom_live_metrics_ok = True
-            logger.info("✓ Live Prometheus trading metrics initialized")
+            logger.info("Position-close Prometheus metrics initialized (strategy-run scope)")
         except Exception as e:
             logger.debug(f"Failed to init live prom metrics: {e}")
             self._prom_live_metrics_ok = False
@@ -1240,7 +1560,7 @@ class IntegratedBTCStrategy(
             self._prom_live_win_rate.set(win_rate)
 
             logger.info(
-                f"📊 Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
+                f"📊 Position-close Prometheus: trade #{self._live_total_trades} pnl={realized_pnl:+.4f} "
                 f"cum_pnl={self._live_cumulative_pnl:+.4f} win_rate={win_rate:.0f}%"
             )
             if self.dashboard_state is not None:
@@ -1486,9 +1806,9 @@ class IntegratedBTCStrategy(
         When the slug is unchanged (same-market rollover / side flip), preserve inventory
         tracking so SELL quotes are not incorrectly blocked.
         """
-        if prev_instrument_id == new_instrument_id:
-            return
         same_slug = bool(previous_slug and current_slug and previous_slug == current_slug)
+        if prev_instrument_id == new_instrument_id and (same_slug or not previous_slug or not current_slug):
+            return
         self._cancel_active_maker_orders()
         if same_slug:
             logger.info(
@@ -1500,12 +1820,32 @@ class IntegratedBTCStrategy(
             self.inventory_delta_shares = Decimal("0")
             self.live_inventory_cost.clear()
             self._startup_rehydrated_inventory_force_sell_only = False
+            self._inventory_overage_sell_only = False
             self.position_manager.clear_all()
+            # These globals back the STATUS line and watchdog; never let a
+            # previous market's prices/age look like current-market health.
+            self.latest_market_bid = None
+            self.latest_market_ask = None
+            self.latest_market_bid_ts = 0.0
+            self.latest_market_ask_ts = 0.0
+            self.last_valid_quote_ts = 0.0
+            prior_sell_audited = getattr(self, "_quote_watchdog_prior_sell_audited", None)
+            if isinstance(prior_sell_audited, set):
+                prior_sell_audited.clear()
         self.market_cycle_realized_net_usdc = Decimal("0")
         bind_market_cycle_state(self, MarketCycleState())
         if self.maker_kill_switch and self.maker_kill_switch_reset_on_rollover:
-            self.maker_kill_switch = False
-            logger.warning("Maker kill switch auto-reset on market rollover.")
+            kill_class = effective_kill_class(self)
+            if rollover_reset_allowed(kill_class, self.active_maker_orders):
+                self.maker_kill_switch = False
+                self.maker_kill_switch_class = None
+                logger.warning(f"Maker kill switch [{kill_class}] auto-reset on market rollover.")
+            else:
+                # Execution-integrity / unresolved: reconcile first, never resume blindly.
+                logger.error(
+                    f"Maker kill switch [{kill_class}] kept across rollover: "
+                    "order reconciliation is still pending."
+                )
         self.last_quote_update_ts = 0.0
         logger.info(f"Reset maker per-market state: {prev_instrument_id} -> {new_instrument_id} (same_slug={same_slug})")
 
@@ -1628,6 +1968,7 @@ class IntegratedBTCStrategy(
         fee_per_share: Any = None,
         planned_quantity: Any = None,
         time_left_sec: Optional[float] = None,
+        candidate_context: Optional[dict[str, Any]] = None,
     ) -> None:
         """Record the existing BUY decision path without changing its outcome."""
         if side != "buy" or not self.trade_db:
@@ -1659,32 +2000,154 @@ class IntegratedBTCStrategy(
             calibrated_probability=_as_float(fair),
             fee_per_share=_as_float(fee_per_share),
             planned_quantity=_as_float(planned_quantity),
+            observed_ts=float(now_ts),
         )
         payload = decision.to_payload()
         payload["decision_stage"] = "pre_submit"
-        signature = (
-            payload["slug"],
-            payload["state"],
-            payload["layer"],
-            payload["final_reason"],
-            payload["entry_mode"],
-            payload["entry_price"],
-            payload["fair"],
-            payload["robust_net_usdc"],
-            payload["settlement_ev_per_share"],
-            payload["planned_quantity"],
-        )
-        if not hasattr(self, "_last_entry_decision_trace_signature_by_inst"):
-            self._last_entry_decision_trace_signature_by_inst = {}
-            self._last_entry_decision_trace_ts_by_inst = {}
+        candidate_context = candidate_context if isinstance(candidate_context, dict) else {}
         inst_key = str(inst_id)
-        last_signature = self._last_entry_decision_trace_signature_by_inst.get(inst_key)
-        last_ts = float(self._last_entry_decision_trace_ts_by_inst.get(inst_key, 0.0))
-        if signature == last_signature and (now_ts - last_ts) < 1.0:
+        try:
+            side_value = getattr(self._side_for_instrument_id(inst_id), "value", "BUY")
+            intended_side = str(side_value or "BUY").upper()
+        except Exception:
+            intended_side = "BUY"
+        policy_shadow = getattr(self, "candidate_policy_shadow", None)
+        if policy_shadow is not None:
+            try:
+                # Research only: evaluated after the production decision; cannot alter it.
+                policy_shadow.observe(
+                    slug=str(self.current_market_slug or ""), intended_side=intended_side,
+                    current_pass=bool(should_quote), current_reason=str(reason or ""),
+                    score=_as_float(self.side_decision_score), entry_price=_as_float(entry_price),
+                    time_left_sec=_as_float(time_left_sec), now_ts=float(now_ts),
+                )
+            except Exception:
+                pass
+        lifecycle = getattr(self, "_live_entry_research_lifecycle", None)
+        if lifecycle is None:
+            lifecycle = ResearchCandidateLifecycle()
+            self._live_entry_research_lifecycle = lifecycle
+        candidate_id, episode, terminal_states = lifecycle.candidate(
+            slug=payload["slug"], instrument_id=inst_key,
+            intended_side=intended_side, now_ts=float(now_ts),
+        )
+        for terminal_id, terminal in terminal_states:
+            try:
+                self._db_strategy_event("ENTRY_RESEARCH_CANDIDATE_TERMINAL", {
+                    "research_candidate_id": terminal_id,
+                    "slug": terminal.get("slug"),
+                    "instrument_id": terminal.get("instrument_id"),
+                    "intended_side": terminal.get("intended_side"),
+                    "candidate_status": terminal["status"],
+                    "candidate_episode_start": terminal["episode_start_ts"],
+                    "candidate_episode_end": terminal["last_seen_ts"],
+                    "candidate_update_count": terminal["update_count"],
+                })
+            except Exception:
+                pass
+        desired = candidate_context.get("desired_entry")
+        if isinstance(desired, dict):
+            desired["research_candidate_id"] = candidate_id
+        try:
+            candidate_context.setdefault("entry_source", "normal_maker")
+            payload["research_snapshot"] = self._build_live_entry_research_snapshot(
+                now_ts=float(now_ts), inst_id=inst_id, side=side, fair=fair, entry_price=entry_price,
+                robust_net_usdc=robust_net_usdc, candidate_context=candidate_context,
+                candidate_id=candidate_id,
+            )
+        except Exception as exc:
+            # Research serialization must not interrupt a live quote cycle.
+            logger.debug(f"Live entry research snapshot unavailable: {type(exc).__name__}")
+            payload["research_snapshot"] = {
+                "candidate_id": candidate_id,
+                "event_semantics": "ENTRY_RESEARCH_SNAPSHOT",
+                "snapshot_unavailable_reason": type(exc).__name__,
+            }
+        snapshot = payload["research_snapshot"]
+        distance = _as_float(snapshot.get("abs_distance_bps"))
+        snapshot["strike_distance_bucket"] = (
+            "unavailable" if distance is None else "<1bps" if distance < 1 else
+            "1-2bps" if distance < 2 else "2-5bps" if distance < 5 else
+            "5-10bps" if distance < 10 else ">=10bps"
+        )
+        snapshot.update({
+            "candidate_episode_start": episode["episode_start_ts"],
+            "candidate_started": episode["update_count"] == 0,
+            "candidate_status": "candidate_eligible" if should_quote else episode["status"],
+            "candidate_first_eligible_ts": episode["first_eligible_ts"] or (float(now_ts) if should_quote else None),
+            "candidate_update_count": episode["update_count"],
+        })
+        if should_quote:
+            snapshotter = getattr(self, "prediction_research_snapshotter", None)
+            if snapshotter is not None:
+                try:
+                    try:
+                        entry_side = str(getattr(self._side_for_instrument_id(inst_id), "value", "") or "")
+                    except Exception:
+                        entry_side = str(self.active_side.value)
+                    snapshotter.capture(
+                        self, now_ts=float(now_ts), trigger="entry_decision", force=True,
+                        entry_context={"entry_side": entry_side,
+                                       "entry_price": entry_price,
+                                       "entry_candidate_id": candidate_id},
+                    )
+                except Exception:
+                    # Research capture is never allowed to affect BUY flow.
+                    pass
+        tick = candidate_context.get("quote_context")
+        tick = _as_float(getattr(tick, "tick", None)) if tick is not None else None
+        emit, current_episode = lifecycle.should_emit(
+            candidate_id, snapshot, now_ts=float(now_ts), should_quote=bool(should_quote), tick_size=tick,
+        )
+        if not emit:
+            summary = lifecycle.summary_due(float(now_ts))
+            if summary is not None:
+                try:
+                    self._db_strategy_event("ENTRY_RESEARCH_TELEMETRY_SUMMARY", summary)
+                except Exception:
+                    pass
             return
-        self._last_entry_decision_trace_signature_by_inst[inst_key] = signature
-        self._last_entry_decision_trace_ts_by_inst[inst_key] = now_ts
-        self._db_strategy_event("ENTRY_DECISION_TRACE", payload)
+        snapshot["candidate_update_count"] = current_episode.get("update_count", 0)
+        snapshot["candidate_status"] = current_episode.get("status", snapshot.get("candidate_status"))
+        snapshot["candidate_started"] = current_episode.get("update_count", 0) == 1
+        payload["research_candidate_id"] = candidate_id
+        try:
+            persisted = bool(self._db_strategy_event("ENTRY_DECISION_TRACE", payload))
+        except Exception as exc:
+            # Research persistence is best-effort and must not influence live authority.
+            logger.debug(f"Live entry research write failed: {type(exc).__name__}")
+            persisted = False
+        lifecycle.record_write_result(len(repr(payload).encode("utf-8")), success=persisted)
+        summary = lifecycle.summary_due(float(now_ts))
+        if summary is not None:
+            try:
+                self._db_strategy_event("ENTRY_RESEARCH_TELEMETRY_SUMMARY", summary)
+            except Exception:
+                pass
+        if current_episode.get("status") == "candidate_invalidated":
+            self._complete_live_entry_research_candidate(candidate_id, "candidate_invalidated")
+
+    def _complete_live_entry_research_candidate(self, candidate_id: str | None,
+                                                status: str = "candidate_submitted") -> None:
+        """Close a research episode after actual submit; no trading authority."""
+        if not candidate_id:
+            return
+        lifecycle = getattr(self, "_live_entry_research_lifecycle", None)
+        terminal = lifecycle.complete(str(candidate_id), status) if lifecycle is not None else None
+        if terminal is None:
+            return
+        try:
+            self._db_strategy_event("ENTRY_RESEARCH_CANDIDATE_TERMINAL", {
+                "research_candidate_id": str(candidate_id),
+                "slug": terminal["slug"], "instrument_id": terminal["instrument_id"],
+                "intended_side": terminal["intended_side"],
+                "candidate_status": status,
+                "candidate_episode_start": terminal["episode_start_ts"],
+                "candidate_episode_end": time.time(),
+                "candidate_update_count": terminal["update_count"],
+            })
+        except Exception as exc:
+            logger.debug(f"Research candidate completion write failed: {type(exc).__name__}")
 
     async def _evaluate_quote_targets(
         self,
@@ -1711,7 +2174,7 @@ class IntegratedBTCStrategy(
                 cache_instrument_fn=self.cache.instrument,
                 extract_token_id_fn=self._extract_token_id_from_instrument,
                 get_dynamic_fee_rate_fn=self._get_dynamic_fee_rate,
-                get_orderbook_levels_fn=self._get_orderbook_levels_for_token,
+                get_orderbook_levels_fn=self._get_orderbook_levels_for_instrument,
                 latest_quote_depth_by_inst=self.latest_quote_depth_by_inst,
                 latest_quote_ts_by_inst=getattr(self, "last_quote_update_ts_by_inst", {}),
                 maker_econ_fee_rate_decimal=self.maker_econ_fee_rate_decimal,
@@ -2265,6 +2728,12 @@ class IntegratedBTCStrategy(
                         fee_per_share=planned_fee_ps,
                         planned_quantity=(quote_plan.quantity if quote_plan is not None else None),
                         time_left_sec=time_left_sec_global,
+                        candidate_context={
+                            "quote_context": quote_ctx,
+                            "quote_data": quote_data,
+                            "time_left_sec": time_left_sec_global,
+                            "candidate_allowed": False,
+                        },
                     )
                     self._db_buy_path_diagnostic(
                         event_type=buy_entry_eval.event_type,
@@ -3038,6 +3507,32 @@ class IntegratedBTCStrategy(
                                 }
                             )
                             self._db_strategy_event("SMART_MONEY_OBSERVATION", smart_money_payload)
+                        # Research-only held-position trajectory. It deliberately
+                        # uses the cached/evaluated smart-money signal and a
+                        # bounded cadence, never a new API poll or live veto.
+                        if current_inst_inventory_qty > 0:
+                            inst_key = self._instrument_key(inst_id)
+                            last_by_inst = getattr(self, "_post_entry_smart_money_last_ts_by_inst", None)
+                            if not isinstance(last_by_inst, dict):
+                                last_by_inst = {}
+                                self._post_entry_smart_money_last_ts_by_inst = last_by_inst
+                            if now_ts - float(last_by_inst.get(inst_key, 0.0)) >= 5.0:
+                                last_by_inst[inst_key] = now_ts
+                                payload = smart_money_signal.as_payload()
+                                payload.update({
+                                    "event_type": "POST_ENTRY_SMART_MONEY_SNAPSHOT",
+                                    "slug": str(self.current_market_slug or ""), "instrument_id": str(inst_id),
+                                    "held_side": side.upper(), "held_qty": float(current_inst_inventory_qty),
+                                    "best_bid": float(quote_ctx.quote[0]), "best_ask": float(quote_ctx.quote[1]),
+                                    "time_left_sec": float(time_left_sec_global) if time_left_sec_global is not None else None,
+                                })
+                                try:
+                                    self.twap_research_db.enqueue_decision(
+                                        run_id=self.run_id, slug=str(self.current_market_slug or ""), market_id=None,
+                                        decision_epoch_ns=int(now_ts * 1_000_000_000), payload=payload,
+                                    )
+                                except Exception as exc:
+                                    logger.debug(f"Post-entry smart-money shadow persistence failed: {exc}")
                     desired_entry = apply_weak_pfair_size_adjustment(
                         desired_entry=desired_entry,
                         side=side,
@@ -3046,28 +3541,12 @@ class IntegratedBTCStrategy(
                         upper=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_upper", Decimal("0.53")))),
                         multiplier=Decimal(str(getattr(self, "maker_weak_pfair_size_adjust_multiplier", Decimal("0.5")))),
                     )
+                    entry_sizing_rule = getattr(self, "entry_sizing_rule", CANONICAL_ENTRY_SIZING_RULE)
                     desired_entry = apply_high_entry_price_size_adjustment(
                         desired_entry=desired_entry,
                         side=side,
-                        enabled=bool(getattr(self, "maker_high_entry_price_size_adjust_enabled", False)),
-                        threshold=Decimal(
-                            str(
-                                getattr(
-                                    self,
-                                    "maker_high_entry_price_size_adjust_threshold",
-                                    Decimal("0.70"),
-                                )
-                            )
-                        ),
-                        multiplier=Decimal(
-                            str(
-                                getattr(
-                                    self,
-                                    "maker_high_entry_price_size_adjust_multiplier",
-                                    Decimal("0.5"),
-                                )
-                            )
-                        ),
+                        rule=entry_sizing_rule,
+                        tick=quote_ctx.tick,
                     )
                     desired_entry = apply_fractional_kelly_sizing(
                         desired_entry=desired_entry,
@@ -3076,29 +3555,67 @@ class IntegratedBTCStrategy(
                         available_collateral_usdc=getattr(self, "_cached_usdc_balance", None),
                         fraction=Decimal(str(getattr(self, "kelly_sizing_fraction", Decimal("0.25")))),
                         max_collateral_fraction=Decimal(str(getattr(self, "kelly_sizing_max_collateral_fraction", Decimal("0.10")))),
-                        base_quantity=self._compute_maker_order_qty(
-                            Decimal(str(desired_entry.get("price", "0"))),
-                            int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
+                        base_quantity=target_entry_shares(
+                            desired_entry.get("price"), tick=quote_ctx.tick, rule=entry_sizing_rule,
                         ),
                     )
                     if side == "buy" and desired_entry.get("should_quote", False):
-                        requested_quantity = desired_entry.get("target_qty_override")
-                        if requested_quantity is None:
-                            base_quantity = self._compute_maker_order_qty(
-                                Decimal(str(desired_entry.get("price", "0") or "0")),
-                                int(getattr(quote_ctx.instrument, "size_precision", 6) or 6),
+                        cap_quantity = None
+                        limiting_factor = ""
+                        if bool(getattr(self, "depth_risk_sizing_enabled", True)):
+                            inventory_headroom = max(
+                                Decimal("0"),
+                                Decimal(str(self.maker_max_inventory_shares))
+                                - Decimal(str(current_inst_inventory_qty)),
                             )
-                            requested_quantity = (
-                                base_quantity
-                                * Decimal(str(desired_entry.get("size_multiplier", "1") or "1"))
+                            depth_decision = cap_buy_quantity(
+                                entry_price=Decimal(str(desired_entry.get("price", "0") or "0")),
+                                tick_size=quote_ctx.tick,
+                                asks=quote_ctx.ask_levels,
+                                max_entry_notional_usdc=Decimal(str(self.depth_risk_max_entry_notional_usdc)),
+                                max_loss_usdc=Decimal(str(self.depth_risk_max_loss_usdc)),
+                                depth_fraction=Decimal(str(self.depth_risk_depth_fraction)),
+                                boundary_ticks=int(self.depth_risk_price_boundary_ticks),
+                                inventory_headroom=inventory_headroom,
+                                **depth_risk_cap_kwargs(
+                                    size_multiplier=Decimal(str(desired_entry.get("size_multiplier", "1") or "1")),
+                                ),
                             )
-                        else:
-                            requested_quantity = Decimal(str(requested_quantity)) * Decimal(
-                                str(desired_entry.get("size_multiplier", "1") or "1")
+                            desired_entry["depth_risk_sizing"] = depth_decision.as_payload()
+                            cap_quantity = depth_decision.quantity
+                            limiting_factor = depth_decision.limiting_factor
+                        # share_v1: final = min(share target, L2/risk cap), skipped below
+                        # MIN_ENTRY_SHARES; identical for LIVE and DRY-RUN.
+                        desired_entry, entry_sizing = apply_share_entry_sizing(
+                            desired_entry=desired_entry,
+                            side=side,
+                            rule=entry_sizing_rule,
+                            tick=quote_ctx.tick,
+                            cap_quantity=cap_quantity,
+                        )
+                        requested_quantity = entry_sizing.final_quantity if entry_sizing is not None else None
+                        if entry_sizing is not None and entry_sizing.skipped:
+                            logged = getattr(self, "_entry_sizing_skip_logged", None)
+                            if not isinstance(logged, set):
+                                logged = set()
+                                self._entry_sizing_skip_logged = logged
+                            log_entry_sizing_skip_once(
+                                logged,
+                                market=str(self.current_market_slug or ""),
+                                decision=entry_sizing,
+                                limiting_factor=limiting_factor,
+                                log_fn=logger.info,
                             )
                         desired_entry = synchronize_desired_buy_economics_to_quantity(
                             desired_entry=desired_entry,
                             requested_quantity=requested_quantity,
+                        )
+                        self._record_depth_risk_shadow(
+                            instrument_id=inst_id,
+                            tick_size=quote_ctx.tick,
+                            asks=quote_ctx.ask_levels,
+                            bids=quote_ctx.bid_levels,
+                            now_ts=now_ts,
                         )
                     self._emit_buy_observe_diagnostic(
                         inst_id=inst_id,
@@ -3124,6 +3641,13 @@ class IntegratedBTCStrategy(
                         fee_per_share=desired_entry.get("fee_ps"),
                         planned_quantity=desired_entry.get("planned_quantity"),
                         time_left_sec=time_left_sec_global,
+                        candidate_context={
+                            "quote_context": quote_ctx,
+                            "quote_data": quote_data,
+                            "desired_entry": desired_entry,
+                            "time_left_sec": time_left_sec_global,
+                            "candidate_allowed": bool(desired_entry.get("should_quote", False)),
+                        },
                     )
                 desired_quotes[order_key] = desired_entry
 
@@ -3134,12 +3658,13 @@ class IntegratedBTCStrategy(
         Place symmetric maker quotes if expected net economics is positive.
         """
         self._telegram_cycle_tick()
-        if self.dashboard_state is not None and self.dashboard_state.bot_paused:
-            now_ts = time.time()
-            if now_ts - self._last_dashboard_pause_log_ts >= 30.0:
-                logger.info("Telegram pause active; skipping maker quote cycle.")
-                self._last_dashboard_pause_log_ts = now_ts
-            return
+        snapshotter = getattr(self, "prediction_research_snapshotter", None)
+        if snapshotter is not None:
+            # Sample before maker pause/kill-switch returns so locked periods
+            # still contribute research observations. Persistence is queued.
+            snapshotter.capture(self, now_ts=time.time(), trigger="periodic")
+        # Telegram pause blocks NEW BUYs inside _prepare_quote_cycle, after the
+        # protective-exit path for held inventory has run.
         cycle = await self._prepare_quote_cycle()
         if cycle is None:
             return
@@ -3202,12 +3727,39 @@ class IntegratedBTCStrategy(
         if not self._wait_for_btc_instrument(timeout_sec=60, poll_interval_sec=2):
             raise RuntimeError("Startup check failed: no BTC 15-min instrument loaded")
 
+        # A crash can leave resting venue orders that this new strategy instance
+        # does not track. Cancel them before any new BUY authority is used.
+        self._cancel_orphan_venue_orders_on_startup()
         # Recover local inventory tracking if the strategy restarted mid-market.
         self._rehydrate_inventory_state_on_startup()
+        # A process can be stopped after a filled BUY but before the expired
+        # market's lifecycle callback records settlement.  Reconcile only
+        # Gamma-confirmed prior windows before any new BUY authority is used.
+        self._reconcile_unsettled_session_cycles_on_startup()
         self._restore_market_risk_guards_from_trade_db_on_startup()
         self._recover_market_strike_from_trade_db_on_startup()
-        self._apply_empirical_execution_penalty_calibration()
+        self._run_startup_execution_calibration()
 
+        run_manifest = None
+        try:
+            from bot.research.provenance import build_run_manifest
+            run_manifest = build_run_manifest(
+                run_id=self.run_id,
+                config=getattr(self, "app_config", None),
+                mode="TEST_DRY_RUN" if self._is_dry_run_mode() else "LIVE",
+                test_mode=self.test_mode,
+                maker_mode=self.maker_mode,
+                trade_journal_schema_version=getattr(getattr(self, "trade_db", None), "SCHEMA_VERSION", None),
+            )
+        except Exception as exc:
+            # Reproducibility metadata is optional; it must never affect startup
+            # or the live authority boundary.
+            logger.warning(f"Run provenance manifest unavailable: {type(exc).__name__}")
+        if run_manifest is not None:
+            run_manifest.update(getattr(self, "collection_identity", {}))
+            run_manifest["outcome_subsystem_retired"] = True
+        from bot.ops import collection_lifecycle
+        collection_lifecycle(self, "new_strategy_started")
         log_strategy_run_start(
             trade_db=self.trade_db,
             run_id=self.run_id,
@@ -3218,7 +3770,9 @@ class IntegratedBTCStrategy(
             selected_slug=self.selected_slug,
             maker_quote_sides=self.maker_quote_sides,
             maker_quote_size_usdc=self.maker_quote_size_usdc,
+            run_manifest=run_manifest,
         )
+        entry_session = new_buy_session_decision(time.time())
         self._db_strategy_event(
             "STRATEGY_START",
             {
@@ -3229,6 +3783,10 @@ class IntegratedBTCStrategy(
                 "active_side": self.active_side.value,
                 "git_revision": self.runtime_git_revision,
                 "source_fingerprint": self.runtime_source_fingerprint,
+                "entry_session_allowed": entry_session.allowed,
+                "entry_session_reason": entry_session.reason,
+                "entry_session_local_time": entry_session.local_time.isoformat(),
+                "entry_session_policy_module": str(entry_session_policy_module.__file__),
                 "maker_fixed_shares": float(self.maker_fixed_shares),
                 "maker_max_order_usdc": float(self.maker_max_order_usdc),
                 "directional_entry_min_score_abs": float(self.directional_entry_min_score_abs),
@@ -3309,6 +3867,7 @@ class IntegratedBTCStrategy(
             self._schedule_auto_redeem(reason="startup")
         self._balance_stop_event.clear()
         self._balance_thread = start_background_thread(self._start_balance_refresh_timer, "balance-refresh")
+        self._start_settlement_confirmation()
         try:
             self._refresh_balance_cache_sync()
         except Exception as e:
@@ -3448,6 +4007,27 @@ class IntegratedBTCStrategy(
 
         threading.Thread(target=_runner, daemon=True).start()
 
+    def _start_settlement_confirmation(self) -> None:
+        """Evidence-only worker (official outcome, venue cash, redeem cash); see bot.settlement_confirmation."""
+        if not getattr(self, "settlement_confirmation_enabled", False) or getattr(self, "trade_db", None) is None:
+            return
+        try:
+            worker = SettlementConfirmationWorker(
+                journal_path=self.trade_db.db_path,
+                write_event=self._db_strategy_event,
+                user_address=resolve_wallet_address(os.environ),
+                interval_sec=float(self.settlement_confirmation_interval_sec),
+                lookback_sec=float(self.settlement_confirmation_lookback_hours) * 3600.0,
+                after_cycle=self._apply_settlement_evidence_session_corrections,
+            )
+        except Exception as e:
+            logger.warning(f"Settlement confirmation worker not started: {e}")
+            return
+        self._settlement_confirmation_stop_event.clear()
+        self._settlement_confirmation_thread = start_background_thread(
+            lambda: worker.run(self._settlement_confirmation_stop_event), "settlement-confirmation",
+        )
+
     def _start_auto_redeem_timer(self) -> None:
         """
         Periodic auto redeem timer (default every 15 minutes).
@@ -3486,23 +4066,97 @@ class IntegratedBTCStrategy(
             logger_warning_fn=logger.warning,
         )
 
-    def _request_quote_stream_node_rollover(self, trigger: str, now_ts: float) -> None:
+    def _request_quote_stream_node_rollover(self, trigger: str, now_ts: float) -> bool:
         """Escalate a failed resubscribe to a clean data-client rebuild by the launcher."""
         if self._stopping or getattr(self, "_quote_stream_rollover_requested", False):
-            return
+            return False
+        sell_exposure = classify_rollover_sell_orders(self)
+        protective_sell_keys = sell_exposure["blocking"]
+        ignored_prior = sell_exposure["ignored_prior"]
+        audited = getattr(self, "_quote_watchdog_prior_sell_audited", None)
+        if not isinstance(audited, set):
+            audited = set()
+            self._quote_watchdog_prior_sell_audited = audited
+        orders = getattr(self, "active_maker_orders", {})
+        current_instruments = [str(item) for item in (getattr(self, "current_market_instruments", []) or [])]
+        for order_key in ignored_prior:
+            state = orders.get(order_key, {}) if isinstance(orders, dict) else {}
+            order = state.get("order") if isinstance(state, dict) else None
+            signature = (str(getattr(self, "current_market_slug", "") or ""), order_key,
+                         str(state.get("instrument_id", "") or "") if isinstance(state, dict) else "")
+            if signature in audited:
+                continue
+            audited.add(signature)
+            self._db_strategy_event(
+                "QUOTE_WATCHDOG_PRIOR_MARKET_SELL_IGNORED",
+                {
+                    "order_key": order_key,
+                    "order_instrument": signature[2],
+                    "current_market_instruments": current_instruments,
+                    "pending_cancel": bool(state.get("pending_cancel")) if isinstance(state, dict) else None,
+                    "order_status": str(getattr(order, "status", "") or "UNKNOWN").upper(),
+                    "ts": now_ts,
+                },
+            )
+        if protective_sell_keys:
+            last_log_ts = float(getattr(self, "_last_protective_sell_rollover_deferred_ts", 0.0) or 0.0)
+            if now_ts - last_log_ts >= 60.0:
+                self._last_protective_sell_rollover_deferred_ts = now_ts
+                logger.error(
+                    "Quote stream rollover deferred to preserve live protective SELL order(s): "
+                    f"trigger={trigger} blocking_current_sells={protective_sell_keys} "
+                    f"ignored_prior_market_sells={ignored_prior}; "
+                    "watchdog will continue recovery attempts."
+                )
+                self._db_strategy_event(
+                    "QUOTE_WATCHDOG_ROLLOVER_DEFERRED_PROTECTIVE_SELL",
+                    {"trigger": trigger, "orders": protective_sell_keys,
+                     "blocking_current_sells": protective_sell_keys,
+                     "ignored_prior_market_sells": ignored_prior, "ts": now_ts},
+                )
+            return False
         self._quote_stream_rollover_requested = True
         self._rollover_requested_flag = True
         self._stopping = True
-        logger.error(f"Quote stream recovery exhausted; requesting node rollover: trigger={trigger}")
+        pending = sorted(str(item) for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set()))
+        prewarm_seen = getattr(self, "quote_prewarm_first_quote_ts_by_inst", {})
+        logger.error(
+            "Quote stream recovery exhausted; requesting node rollover: "
+            f"trigger={trigger} pending={pending} prewarm_seen={prewarm_seen}"
+        )
         self._db_strategy_event(
             "QUOTE_WATCHDOG_NODE_ROLLOVER",
-            {"trigger": trigger, "instrument": str(self.instrument_id) if self.instrument_id else None, "ts": now_ts},
+            {
+                "trigger": trigger, "instrument": str(self.instrument_id) if self.instrument_id else None,
+                "pending_instruments": pending, "prewarm_first_quote_ts_by_inst": prewarm_seen, "ts": now_ts,
+            },
         )
         try:
-            if hasattr(self, "_trader") and hasattr(self._trader, "node"):
-                self._trader.node.stop()
+            stop_node = getattr(self, "_request_node_stop_callback", None)
+            if not callable(stop_node):
+                raise RuntimeError("launcher node-stop callback is not configured")
+            self._collection_stop_context = {"stop_request_source": "quote_watchdog_recovery", "watchdog_trigger": trigger}
+            stop_node()
+            return True
         except Exception as exc:
+            self._stopping = False
+            self._rollover_requested_flag = False
+            self._quote_stream_rollover_requested = False
             logger.error(f"Quote stream node rollover stop failed: {exc}")
+            return False
+
+    def _live_protective_sell_order_keys(self) -> list[str]:
+        """List tracked non-terminal current-market SELLs that protect handoff."""
+        return classify_rollover_sell_orders(self)["blocking"]
+
+    def _cancel_maker_buys_for_quote_recovery(self) -> None:
+        """Withdraw stale entry bids without canceling venue-side exit protection."""
+        for order_key, state in list(getattr(self, "active_maker_orders", {}).items()):
+            if not isinstance(state, dict):
+                continue
+            side = str(state.get("side", "") or "").lower()
+            if side == "buy" or str(order_key).lower().startswith("buy:"):
+                self._cancel_maker_order_side(order_key, reason="quote_watchdog_recovery")
 
     def _quote_watchdog_recovery_is_needed(self) -> bool:
         """Only rebuild a quote stream when it can still affect risk or quoting."""
@@ -3517,10 +4171,133 @@ class IntegratedBTCStrategy(
             return True
         return bool(getattr(self, "active_maker_orders", {}))
 
+    def _has_fresh_quote_on_recovered_market_leg(self, now_ts: float) -> bool:
+        """Return whether any non-pending current outcome has a fresh post-recovery quote.
+
+        A binary outcome can remain quiet without indicating a dead WebSocket. Do
+        not tear down the whole node when the sibling outcome is actively
+        delivering current quotes; the pending outcome remains unavailable to
+        pricing/entry until its own valid quote arrives.
+        """
+        # Do not use a healthy sibling as sufficient recovery when there is
+        # open exposure or an order that may depend on the missing outcome.
+        try:
+            if Decimal(str(getattr(self, "inventory_delta_shares", "0") or "0")) > 0:
+                return False
+        except (ArithmeticError, TypeError, ValueError):
+            return False
+        if getattr(self, "active_maker_orders", {}):
+            return False
+        started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0) or 0.0)
+        stale_after = max(0.0, float(getattr(self, "quote_stale_sec", 0.0) or 0.0))
+        pending = {
+            str(item)
+            for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set())
+        }
+        current = {
+            str(item)
+            for item in (getattr(self, "current_market_instruments", []) or [])
+        }
+        last_update = getattr(self, "last_quote_update_ts_by_inst", {})
+        if not isinstance(last_update, dict):
+            return False
+        for instrument_id in current - pending:
+            try:
+                updated_ts = float(last_update.get(instrument_id, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if updated_ts < started_ts:
+                continue
+            if 0.0 <= float(now_ts) - updated_ts < stale_after:
+                return True
+        return False
+
+    def _quote_watchdog_select_market(self, now_ts: float) -> bool:
+        """Keep an already selected active market during same-market feed recovery."""
+        phase = getattr(self, "market_phase", None)
+        phase_value = str(getattr(phase, "value", phase) or "").upper()
+        end_ts = getattr(self, "current_market_end_timestamp", None)
+        if (
+            phase_value == "ACTIVE"
+            and getattr(self, "current_market_slug", None)
+            and getattr(self, "current_market_instruments", None)
+            and end_ts is not None
+            and float(now_ts) < float(end_ts)
+        ):
+            return True
+        return self._find_btc_instrument()
+
+    def _has_recent_quote_transport_activity(
+        self,
+        now_ts: float,
+        *,
+        since_ts: float = 0.0,
+    ) -> bool:
+        """Distinguish an idle/stale book from a silent or disconnected transport.
+
+        The adapter emits cached transport heartbeats only while the Polymarket
+        market WebSocket reports connected. These update receipt timestamps but
+        are rejected as pricing inputs in ``handle_quote_tick``. They therefore
+        prove transport activity without refreshing quote age or enabling BUYs.
+        """
+        instruments = {
+            str(item)
+            for item in (getattr(self, "current_market_instruments", []) or [])
+            if item is not None
+        }
+        received = getattr(self, "last_quote_received_ts_by_inst", {})
+        if not instruments or not isinstance(received, dict):
+            return False
+        max_age = max(0.0, float(getattr(self, "quote_stale_sec", 0.0) or 0.0))
+        since = float(since_ts or 0.0)
+        now = float(now_ts)
+        for instrument_id in instruments:
+            try:
+                received_ts = float(received.get(instrument_id, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            age = now - received_ts
+            if received_ts >= since and 0.0 <= age < max_age:
+                return True
+        return False
+
+    def _record_transport_alive_stale_quote(self, now_ts: float, *, recovery_timeout: bool) -> None:
+        """Keep a connected but price-stale node alive, with throttled diagnostics."""
+        last_notice = float(getattr(self, "_last_transport_alive_stale_notice_ts", 0.0) or 0.0)
+        if now_ts - last_notice < 60.0:
+            return
+        self._last_transport_alive_stale_notice_ts = now_ts
+        pending = sorted(
+            str(item)
+            for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set())
+        )
+        logger.warning(
+            "Quote data remains stale while market transport is active; "
+            f"keeping node alive and blocking stale-price decisions: recovery_timeout={recovery_timeout} "
+            f"pending={pending}"
+        )
+        self._db_strategy_event(
+            "QUOTE_WATCHDOG_TRANSPORT_ALIVE_DATA_STALE",
+            {
+                "recovery_timeout": bool(recovery_timeout),
+                "pending_instruments": pending,
+                "current_market_instruments": sorted(
+                    str(item)
+                    for item in (getattr(self, "current_market_instruments", []) or [])
+                ),
+                "last_valid_quote_ts": float(getattr(self, "last_valid_quote_ts", 0.0) or 0.0),
+                "transport_received_ts": dict(getattr(self, "last_quote_received_ts_by_inst", {}) or {}),
+                "ts": float(now_ts),
+            },
+        )
+
     def _trigger_quote_watchdog_reload(self, trigger: str, now_ts: float) -> None:
         """
         Recover quote stream when valid bid/ask updates disappear for too long.
         """
+        if self._stopping:
+            logger.debug(f"Quote watchdog recovery ignored during shutdown: trigger={trigger}")
+            return
         if not should_attempt_quote_watchdog_recovery(
             now_ts=now_ts,
             last_quote_watchdog_reload_ts=float(self.last_quote_watchdog_reload_ts),
@@ -3550,8 +4327,8 @@ class IntegratedBTCStrategy(
             last_valid_quote_ts=float(self.last_valid_quote_ts),
             consecutive_invalid_quote_ticks=int(self.consecutive_invalid_quote_ticks),
             db_strategy_event_fn=self._db_strategy_event,
-            cancel_active_maker_orders_fn=self._cancel_active_maker_orders,
-            find_btc_instrument_fn=self._find_btc_instrument,
+            cancel_active_buy_orders_fn=self._cancel_maker_buys_for_quote_recovery,
+            find_btc_instrument_fn=lambda: self._quote_watchdog_select_market(now_ts),
             logger_warning_fn=logger.warning,
             logger_error_fn=logger.error,
             trigger_count=trigger_counts[trigger_source],
@@ -3569,17 +4346,19 @@ class IntegratedBTCStrategy(
             # The call itself can take seconds, especially during rollover.
             self.quote_recovery_started_ts = time.time()
             logger.warning(
-                "Quote watchdog resubscribed; awaiting first fresh quote: "
-                f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s"
+                "Quote watchdog refresh_requested; awaiting task completion and fresh quote: "
+                f"{prev_instrument} -> {new_instrument} grace={self.quote_resubscribe_grace_sec}s "
+                f"pending={sorted(str(item) for item in (getattr(self, 'quote_recovery_pending_instruments', set()) or set()))}"
             )
             self._db_strategy_event(
-                "QUOTE_WATCHDOG_RESUBSCRIBED",
+                "QUOTE_WATCHDOG_REFRESH_REQUESTED",
                 {
                     "instrument_before": prev_instrument,
                     "instrument_after": new_instrument,
                     "grace_sec": self.quote_resubscribe_grace_sec,
                     "trigger": trigger,
                     "trigger_count": trigger_counts[trigger_source],
+                    "pending_instruments": sorted(str(item) for item in (getattr(self, "quote_recovery_pending_instruments", set()) or set())),
                 },
             )
             self.consecutive_invalid_quote_ticks = 0
@@ -3627,7 +4406,22 @@ class IntegratedBTCStrategy(
             if self._stopping:
                 return
             now_ts = time.time()
+            cleanup_pending_cancels = getattr(self, "_cleanup_stale_pending_cancels", None)
+            if callable(cleanup_pending_cancels):
+                try:
+                    # This is the sole cancel retry/reconciliation authority.
+                    # Running it on the watchdog lets eligible prior-market
+                    # state retire even while the quote callback is stalled.
+                    cleanup_pending_cancels(now_ts)
+                except Exception as cleanup_error:
+                    logger.exception(f"Watchdog pending-cancel reconciliation failed: {cleanup_error}")
             self._emit_strategy_status(now_ts)
+            try:
+                # Observability only: a full quote outage must surface as
+                # PROTECTIVE_EXIT_DEGRADED, never as a silently skipped stop.
+                self._report_protective_exit_availability(now_ts)
+            except Exception as availability_error:
+                logger.exception(f"Protective-exit availability report failed: {availability_error}")
             recovery_started_ts = float(getattr(self, "quote_recovery_started_ts", 0.0))
             pending_instruments = getattr(self, "quote_recovery_pending_instruments", set())
             if pending_instruments and recovery_started_ts > 0:
@@ -3638,12 +4432,75 @@ class IntegratedBTCStrategy(
                 recovery_age = now_ts - recovery_started_ts
                 if recovery_age >= float(self.quote_resubscribe_grace_sec):
                     if int(getattr(self, "quote_recovery_attempts", 0)) >= 1:
-                        self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts)
-                        return
+                        if self._has_fresh_quote_on_recovered_market_leg(now_ts):
+                            # Keep the healthy sibling's quote cache and live
+                            # connection. A quiet/missing outcome is not proof
+                            # that the entire quote stream has failed.
+                            self.quote_recovery_started_ts = now_ts
+                            last_notice_ts = float(
+                                getattr(self, "_last_partial_quote_recovery_notice_ts", 0.0) or 0.0
+                            )
+                            if now_ts - last_notice_ts >= 60.0:
+                                self._last_partial_quote_recovery_notice_ts = now_ts
+                                pending = sorted(str(item) for item in pending_instruments)
+                                logger.warning(
+                                    "Quote recovery degraded but market stream is active; "
+                                    f"keeping node alive pending={pending}"
+                                )
+                                self._db_strategy_event(
+                                    "QUOTE_WATCHDOG_PARTIAL_MARKET_DATA",
+                                    {
+                                        "pending_instruments": pending,
+                                        "current_market_instruments": sorted(
+                                            str(item)
+                                            for item in (getattr(self, "current_market_instruments", []) or [])
+                                        ),
+                                        "ts": now_ts,
+                                    },
+                                )
+                            continue
+                        if IntegratedBTCStrategy._has_recent_quote_transport_activity(
+                            self,
+                            now_ts, since_ts=recovery_started_ts,
+                        ):
+                            # A native quote can be quiet because the book has
+                            # not changed. The transport heartbeat proves the
+                            # socket is alive; stale prices remain unusable, but
+                            # destroying the node cannot make that book fresher.
+                            self.quote_recovery_started_ts = 0.0
+                            IntegratedBTCStrategy._record_transport_alive_stale_quote(
+                                self,
+                                now_ts, recovery_timeout=True,
+                            )
+                            continue
+                        if self._request_quote_stream_node_rollover("quote_resubscribe_timeout", now_ts):
+                            return
+                        # A protected SELL still lives at the venue. Keep the
+                        # watchdog alive and retry recovery after another grace
+                        # interval; do not let the timed-out feed stop monitoring.
+                        self.quote_recovery_started_ts = now_ts
                     self._trigger_quote_watchdog_reload("quote_subscription_timeout", now_ts)
                 continue
             stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else None
             if stale_for is None or stale_for < self.quote_stale_sec:
+                continue
+            if IntegratedBTCStrategy._has_recent_quote_transport_activity(self, now_ts):
+                # Give a stale subscription one targeted resubscribe, but never
+                # rebuild a connected node just because an unchanged book has
+                # not emitted a new price event. Once an attempt is pending or
+                # has timed out, keep the stale-price gate active and wait for
+                # genuine fresh data instead of creating a reconnect loop.
+                has_pending = bool(
+                    getattr(self, "quote_recovery_pending_instruments", set())
+                )
+                attempts = int(getattr(self, "quote_recovery_attempts", 0) or 0)
+                if not has_pending and attempts == 0:
+                    self._trigger_quote_watchdog_reload("timer_stale_quotes", now_ts)
+                else:
+                    IntegratedBTCStrategy._record_transport_alive_stale_quote(
+                        self,
+                        now_ts, recovery_timeout=False,
+                    )
                 continue
             self._trigger_quote_watchdog_reload("timer_stale_quotes", now_ts)
 
@@ -3667,6 +4524,8 @@ class IntegratedBTCStrategy(
             reasons.append("maker_mode_off")
         if self.maker_kill_switch:
             reasons.append("kill_switch_on")
+        if getattr(self, "_inventory_overage_sell_only", False):
+            reasons.append("inventory_overage_sell_only")
         if now_ts < self.quote_pause_until_ts:
             reasons.append(f"paused_{int(self.quote_pause_until_ts - now_ts)}s")
         if now_ts < self.orderbook_unavailable_until_ts:
@@ -3677,6 +4536,10 @@ class IntegratedBTCStrategy(
             reasons.append("no_instrument")
         if now_ts < float(self.regime_guard_conservative_until_ts):
             reasons.append(f"regime_guard_{int(self.regime_guard_conservative_until_ts - now_ts)}s")
+        pnl_guard = getattr(self, "session_buy_guard_decision", None)
+        pnl_decision = pnl_guard(now_ts) if callable(pnl_guard) else None
+        if pnl_decision is not None and not pnl_decision.allowed:
+            reasons.append(pnl_decision.reason)
         current_slug = str(self.current_market_slug or "")
         market_stop_loss_count = int(self.market_stop_loss_count_by_slug.get(current_slug, 0))
         if (
@@ -3695,7 +4558,15 @@ class IntegratedBTCStrategy(
 
         bid_txt = f"{float(self.latest_market_bid):.4f}" if self.latest_market_bid is not None else "None"
         ask_txt = f"{float(self.latest_market_ask):.4f}" if self.latest_market_ask is not None else "None"
-        stale_for = (now_ts - self.last_valid_quote_ts) if self.last_valid_quote_ts > 0 else -1.0
+        stale_for_txt = (f"{now_ts - self.last_valid_quote_ts:.1f}s"
+                         if self.last_valid_quote_ts > 0 else "unavailable")
+        stale_reason = quote_age_status_reason(
+            now_ts=now_ts,
+            last_valid_quote_ts=self.last_valid_quote_ts,
+            stale_after_sec=self.quote_stale_sec,
+        )
+        if stale_reason:
+            reasons.append(stale_reason)
         active_orders = list(self.active_maker_orders.keys())
         tradable = "YES" if len(reasons) == 0 else "NO"
         reason_txt = "ok" if len(reasons) == 0 else ",".join(reasons)
@@ -3710,6 +4581,62 @@ class IntegratedBTCStrategy(
         binance_spot_txt = f"{float(self._binance_ws_price):.2f}" if self._binance_ws_price is not None else "None"
         binance_age = max(0.0, now_ts - float(self._binance_ws_price_ts or 0.0)) if self._binance_ws_price_ts > 0 else -1.0
 
+
+        pnl_target_txt = (
+            f"{pnl_decision.normalized_target_usdc:.2f}"
+            if pnl_decision is not None and pnl_decision.normalized_target_usdc is not None else "n/a"
+        )
+        pnl_dd_limit_txt = (
+            f"{pnl_decision.current_allowed_drawdown_usdc:.2f}"
+            if pnl_decision is not None and pnl_decision.current_allowed_drawdown_usdc is not None else "n/a"
+        )
+        monthly_status = getattr(self, "_monthly_pnl_status", None)
+        monthly_status_txt = ""
+        if pnl_decision is not None and pnl_decision.monthly_target_usdc is not None:
+            if isinstance(monthly_status, dict):
+                monthly_value = monthly_status.get("realized_pnl_usdc")
+                monthly_progress = monthly_status.get("progress_pct")
+                monthly_age = max(0.0, now_ts - float(monthly_status.get("updated_ts") or now_ts))
+                monthly_status_txt = (
+                    f" pnl_month={'unavailable' if monthly_value is None else f'{monthly_value:+.2f}'}"
+                    f"/{pnl_decision.monthly_target_usdc:.2f}"
+                    f" pnl_month_progress={'n/a' if monthly_progress is None else f'{monthly_progress:.1f}%'}"
+                    f" pnl_month_age={monthly_age:.0f}s"
+                )
+            else:
+                monthly_status_txt = f" pnl_month=unavailable/{pnl_decision.monthly_target_usdc:.2f}"
+        pnl_status = (
+            f" pnl_session={pnl_decision.realized_pnl_usdc:+.2f}"
+            f" pnl_target={pnl_target_txt}"
+            f" pnl_guard_mode={pnl_decision.mode}"
+            f" pnl_hwm={pnl_decision.realized_high_water_usdc:+.2f}"
+            f" pnl_dd={pnl_decision.drawdown_from_high_usdc:.2f}"
+            f" pnl_dd_limit={pnl_dd_limit_txt}"
+            f" pnl_guard={pnl_decision.state}"
+            f" buy_guard={'ALLOW' if pnl_decision.allowed else 'BLOCK'}"
+            f" pnl_lock_reason={pnl_decision.reason if not pnl_decision.allowed else '-'}"
+            f"{monthly_status_txt}"
+            if pnl_decision is not None else ""
+        )
+        if pnl_decision is not None and now_ts - float(getattr(self, "_last_session_pnl_heartbeat_ts", 0.0)) >= 3600.0:
+            self._last_session_pnl_heartbeat_ts = now_ts
+            target_txt = (
+                f"{pnl_decision.normalized_target_usdc:.2f}"
+                if pnl_decision.normalized_target_usdc is not None else "n/a"
+            )
+            logger.info(
+                "[PNL STATUS] "
+                f"Session {pnl_decision.realized_pnl_usdc:+.2f}/${target_txt} "
+                f"HWM {pnl_decision.realized_high_water_usdc:+.2f} "
+                f"DD ${pnl_decision.drawdown_from_high_usdc:.2f}/${pnl_dd_limit_txt} "
+                f"Guard {pnl_decision.state} BUY {'ALLOWED' if pnl_decision.allowed else 'BLOCKED'}"
+            )
+
+        try:
+            from bot.research.health import status_health
+            derived_health_status = status_health(self, now_ts)
+        except Exception:
+            derived_health_status = " Data=UNKNOWN Research=UNKNOWN Storage=UNKNOWN Execution=UNKNOWN"
         logger.info(
             "STATUS "
             f"tradable={tradable} reason={reason_txt} "
@@ -3724,9 +4651,11 @@ class IntegratedBTCStrategy(
             f"ref_spot={ref_spot_txt} ref_src={ref_src_txt} ref_age={ref_age:.1f}s "
             f"binance_spot={binance_spot_txt} binance_age={binance_age:.1f}s "
             f"bid={bid_txt} ask={ask_txt} "
-            f"stale_for={stale_for:.1f}s invalid_ticks={self.consecutive_invalid_quote_ticks} "
+            f"stale_for={stale_for_txt} invalid_ticks={self.consecutive_invalid_quote_ticks} "
             f"inventory={float(self.inventory_delta_shares):.4f}/{float(self.maker_max_inventory_shares):.4f} "
             f"active_orders={active_orders}"
+            f"{pnl_status}"
+            f"{derived_health_status}"
             f"{self._format_time_left()}"
         )
         if "active_side_none" in reasons and self.bi_side_enabled:
@@ -3811,6 +4740,9 @@ class IntegratedBTCStrategy(
                         
     def on_quote_tick(self, tick: QuoteTick):
         handle_quote_tick(self, tick)
+
+    def on_order_book_deltas(self, deltas):
+        handle_order_book_deltas(self, deltas)
 
     def _maker_quote_sync(self, bid_price: float, ask_price: float) -> None:
         maker_quote_sync(self, bid_price, ask_price)

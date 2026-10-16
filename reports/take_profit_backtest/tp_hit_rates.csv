@@ -1,0 +1,7 @@
+tp_pct,entry_n,hit_n,hit_rate_anytime,within_30s,within_60s,within_120s,within_180s,within_300s,median_time_to_tp_sec,final_wrong_but_tp_hit_n,final_wrong_but_tp_hit_rate_of_hits,unreachable_by_price_cap_n,tp_hit_semantics
+3.0,73,65,0.8904109589041096,14,21,36,49,59,95.0,9,0.13846153846153847,0,"first later public SELL trade print >= target; proxy only, not guaranteed executable"
+5.0,73,62,0.8493150684931506,10,15,29,39,51,132.0,7,0.11290322580645161,1,"first later public SELL trade print >= target; proxy only, not guaranteed executable"
+7.5,73,60,0.821917808219178,4,9,21,33,47,159.0,6,0.1,2,"first later public SELL trade print >= target; proxy only, not guaranteed executable"
+10.0,73,57,0.7808219178082192,2,5,15,24,34,202.0,4,0.07017543859649122,2,"first later public SELL trade print >= target; proxy only, not guaranteed executable"
+15.0,73,53,0.726027397260274,0,2,8,18,27,299.0,2,0.03773584905660377,6,"first later public SELL trade print >= target; proxy only, not guaranteed executable"
+20.0,73,48,0.6575342465753424,0,0,2,9,19,382.0,2,0.041666666666666664,11,"first later public SELL trade print >= target; proxy only, not guaranteed executable"

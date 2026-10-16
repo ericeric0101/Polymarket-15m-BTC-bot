@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
+import time
 
 from execution.maker_engine import MakerEngine
 
@@ -33,6 +34,9 @@ class ForecastState:
     standard_up_probability: Decimal
     twap_average_up_probability: Optional[Decimal]
     settlement_model: str
+    created_ts: float = 0.0
+    source_observed_ts: Optional[float] = None
+    source_age_sec: Optional[float] = None
 
     @property
     def selected_up_probability(self) -> Decimal:
@@ -76,6 +80,9 @@ class ForecastState:
             "standard_up_probability": self.standard_up_probability,
             "twap_average_up_probability": self.twap_average_up_probability,
             "settlement_model": self.settlement_model,
+            "created_ts": self.created_ts,
+            "source_observed_ts": self.source_observed_ts,
+            "source_age_sec": self.source_age_sec,
         }
 
 
@@ -99,6 +106,8 @@ def build_forecast_state(
     twap_window_sec: int,
     observed_twap_average: Optional[Decimal],
     observed_twap_seconds: float,
+    source_observed_ts: Optional[float] = None,
+    source_age_sec: Optional[float] = None,
 ) -> ForecastState:
     """Apply the existing forecast policy once for either runtime consumer."""
     raw_sigma = sigma_raw_realized if sigma_raw_realized is not None and sigma_raw_realized > 0 else None
@@ -179,4 +188,7 @@ def build_forecast_state(
         standard_up_probability=standard_up_probability,
         twap_average_up_probability=twap_average_up_probability,
         settlement_model=settlement_model,
+        created_ts=time.time(),
+        source_observed_ts=source_observed_ts,
+        source_age_sec=source_age_sec,
     )

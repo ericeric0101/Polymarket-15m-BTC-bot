@@ -97,6 +97,9 @@ class _DryOrderHost(_ShadowHost, OrderRuntimeMixin):
     def _project_inventory_after_fill(self, side, qty, instrument_id=None):
         return self.inventory_delta_shares + qty if side == "buy" else self.inventory_delta_shares - qty
 
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id=None):
+        return Decimal("0")
+
     def _extract_token_id_from_instrument(self, _instrument_id):
         return "token"
 
@@ -109,6 +112,65 @@ def _event_count(db, event_type):
         return conn.execute(
             "SELECT COUNT(*) FROM order_events WHERE event_type=?", (event_type,)
         ).fetchone()[0]
+
+
+def test_absent_shadow_simulation_is_cached_for_quote_callbacks():
+    loads = []
+    db = SimpleNamespace(load_shadow_simulation=lambda slug: loads.append(slug) or None)
+    host = _ShadowHost(db)
+    host.fair_edge_bucket_shadow_enabled = False
+
+    for _ in range(3):
+        host._shadow_simulation_on_quote(
+            "inst-up", Decimal("0.65"), Decimal("0.66"), time.time()
+        )
+
+    assert loads == [host.current_market_slug]
+    assert host.current_market_slug in host._shadow_simulations_by_slug
+    assert host._shadow_simulations_by_slug[host.current_market_slug] is None
+
+
+def test_shadow_recovery_uses_client_order_id_instead_of_scanning_payloads(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    slug = "btc-updown-15m-1790895600"
+    db.log_order_event(
+        run_id="shadow-test", event_type="SHADOW_SIM_ENTRY_CANDIDATE",
+        client_order_id=f"shadow-sim:{slug}:up", side="UP", price=0.65,
+        qty=5, payload={"slug": slug, "simulation_id": f"shadow-sim:{slug}:up", "status": "PENDING"},
+    )
+    db.log_order_event(
+        run_id="shadow-test", event_type="FAIR_EDGE_BUCKET_SHADOW_CANDIDATE",
+        client_order_id=f"fair-edge-shadow:{slug}:up:high", side="UP", price=0.65,
+        qty=5, payload={"slug": slug, "simulation_id": f"fair-edge-shadow:{slug}:up:high", "status": "PENDING"},
+    )
+    with db._connect() as conn:
+        conn.execute(
+            "INSERT INTO order_events(ts, run_id, event_type, client_order_id, payload_json) VALUES (?, ?, ?, ?, ?)",
+            ("2026-10-02T00:00:00+00:00", "shadow-test", "SHADOW_SIM_ENTRY_CANDIDATE", "unrelated", "invalid-json"),
+        )
+        conn.execute(
+            "INSERT INTO order_events(ts, run_id, event_type, client_order_id, payload_json) VALUES (?, ?, ?, ?, ?)",
+            ("2026-10-02T00:00:00+00:00", "shadow-test", "FAIR_EDGE_BUCKET_SHADOW_CANDIDATE", "unrelated", "invalid-json"),
+        )
+    assert db.load_shadow_simulation(slug)["status"] == "PENDING"
+    fair = db.load_fair_edge_bucket_shadow_simulations(slug)
+    assert len(fair) == 1
+    assert fair[0]["simulation_id"] == f"fair-edge-shadow:{slug}:up:high"
+
+
+def test_cached_absence_is_replaced_when_paper_order_is_created(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _ShadowHost(db)
+    assert host._load_shadow_simulation_for_slug(host.current_market_slug) is None
+    assert host.current_market_slug in host._shadow_simulations_by_slug
+
+    created = host._record_shadow_simulated_entry(
+        instrument_id="inst-up", limit_price=Decimal("0.65"),
+        qty=Decimal("5"), econ=SimpleNamespace(expected_net_usdc=Decimal("0.10"), expected_rebate_usdc=Decimal("0")),
+        directional_snapshot={"p_fair": Decimal("0.70")},
+    )
+    assert created
+    assert host._load_shadow_simulation_for_slug(host.current_market_slug)["status"] == "PENDING"
 
 
 def test_shadow_simulation_is_one_per_market_and_settles(tmp_path):
@@ -181,7 +243,7 @@ def test_shadow_simulation_is_one_per_market_and_settles(tmp_path):
 
     host._settle_shadow_simulation(
         slug=host.current_market_slug,
-        spot=100.0,
+        outcome="UP", spot=100.0,
         strike=99.0,
     )
     settled = db.load_shadow_simulation(host.current_market_slug)
@@ -278,6 +340,69 @@ def test_dry_run_submit_uses_active_order_lifecycle_and_local_cancel(tmp_path):
     assert _event_count(db, "SHADOW_SIM_ENTRY_CANCELLED") == 1
 
 
+def test_pending_cancel_is_not_reissued_by_repeated_quote_or_phase_loops(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _DryOrderHost(db)
+    host._is_dry_run_mode = lambda: False
+    cancels = []
+    order = SimpleNamespace(client_order_id="sell-1", status="ACCEPTED")
+    host.cancel_order = lambda submitted: cancels.append(submitted)
+    host.active_maker_orders["sell:inst-up"] = {
+        "order": order,
+        "side": "sell",
+        "instrument_id": "inst-up",
+        "quantity": Decimal("5.5"),
+    }
+
+    host._cancel_maker_order_key("sell:inst-up", reason="rollover")
+    host._cancel_maker_order_key("sell:inst-up", reason="waiting_loop")
+
+    assert cancels == [order]
+    assert host.active_maker_orders["sell:inst-up"]["pending_cancel"] is True
+
+
+def test_unresolved_prior_market_cancel_is_retired_without_killing_new_market(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _DryOrderHost(db)
+    host.current_market_instruments = ["new-up", "new-down"]
+    host.active_maker_orders["sell:old-up"] = {
+        "order": SimpleNamespace(client_order_id="old-sell", status="ACCEPTED"),
+        "side": "sell",
+        "instrument_id": "old-up",
+        "pending_cancel": True,
+        "last_cancel_ts": time.time() - host.maker_cancel_ack_timeout_sec - 1,
+    }
+
+    host._cleanup_stale_pending_cancels(time.time())
+
+    assert not host.active_maker_orders
+    assert _event_count(db, "ORDER_CANCEL_PRIOR_MARKET_RETIRED") == 1
+
+
+def test_unresolved_zero_inventory_sell_cancel_is_retired_without_kill_switch(tmp_path):
+    db = TradeJournalDB(tmp_path / "journal.db")
+    host = _DryOrderHost(db)
+    host.active_maker_orders["sell:inst-up"] = {
+        "order": SimpleNamespace(client_order_id="orphaned-sell", status="ACCEPTED"),
+        "side": "sell",
+        "instrument_id": "inst-up",
+        "pending_cancel": True,
+        "last_cancel_ts": time.time() - host.maker_cancel_ack_timeout_sec - 1,
+    }
+
+    # A cache without open-order visibility returns ``None``.  The stale SELL
+    # reaches the same bounded unknown-retry threshold from the live incident.
+    for _ in range((host.maker_cancel_max_retries * 2) + 1):
+        host._cleanup_stale_pending_cancels(time.time())
+        state = host.active_maker_orders.get("sell:inst-up")
+        if state is not None:
+            state["last_cancel_ts"] = time.time() - host.maker_cancel_ack_timeout_sec - 1
+
+    assert not host.active_maker_orders
+    assert not getattr(host, "maker_kill_switch", False)
+    assert _event_count(db, "ORDER_CANCEL_ZERO_INVENTORY_RETIRED") == 1
+
+
 def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_path):
     db = TradeJournalDB(tmp_path / "journal.db")
     first_host = _ShadowHost(db)
@@ -305,7 +430,7 @@ def test_shadow_simulation_restores_filled_state_after_restart_and_settles(tmp_p
 
     restarted_host._settle_shadow_simulation(
         slug=restarted_host.current_market_slug,
-        spot=100.0,
+        outcome="UP", spot=100.0,
         strike=99.0,
     )
     settled = db.load_shadow_simulation(restarted_host.current_market_slug)
@@ -350,7 +475,7 @@ def test_fair_edge_bucket_shadow_requires_passive_fill_and_settles(tmp_path):
 
     host._settle_shadow_simulation(
         slug=host.current_market_slug,
-        spot=100.0,
+        outcome="UP", spot=100.0,
         strike=99.0,
     )
     assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_SETTLED") == 1
@@ -378,6 +503,6 @@ def test_fair_edge_bucket_shadow_restores_after_restart(tmp_path):
     assert restored["status"] == "FILLED"
 
     restarted_host._settle_shadow_simulation(
-        slug=restarted_host.current_market_slug, spot=100.0, strike=99.0
+        slug=restarted_host.current_market_slug, outcome="UP", spot=100.0, strike=99.0
     )
     assert _event_count(db, "FAIR_EDGE_BUCKET_SHADOW_SETTLED") == 1

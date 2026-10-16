@@ -41,11 +41,14 @@ CORE_ENV_KEYS = frozenset(
         "REQUIRE_TWAP_REFERENCE_SPOT",
         "TWAP_DEGRADED_BLOCK_NEW_ENTRIES",
         "QUOTE_STALE_SEC",
+        "QUOTE_MAX_DELIVERY_DELAY_SEC",
         "QUOTE_RESUBSCRIBE_GRACE_SEC",
+        "POLYMARKET_L2_PUBLISH_INTERVAL_SEC",
         "AUTO_NODE_ROLLOVER_ENABLED",
         "ENTRY_SCORE_MIN",
         "FIRST_ENTRY_SCORE_MIN",
         "FIRST_ENTRY_MAX_TIME_LEFT_SEC",
+        "ENTRY_ALLOW_TAIPEI_WEEKEND_BUYS",
         "ENTRY_MIN_TIME_LEFT_SEC",
         "ENTRY_MAX_FAIR_PRICE",
         "EXTERNAL_CONFIRMATION_ENABLED",
@@ -68,6 +71,12 @@ CORE_ENV_KEYS = frozenset(
         "RECOVERY_EXIT_REQUIRE_TWAP_CONFIRMATION",
         "RECOVERY_EXIT_MAX_TIME_LEFT_SEC",
         "RECOVERY_EXIT_MIN_HOLD_SEC",
+        "ENDGAME_TWAP_EXIT_ENABLED",
+        "ENDGAME_TWAP_EXIT_MAX_TIME_LEFT_SEC",
+        "ENDGAME_TWAP_EXIT_MIN_DISTANCE_USD",
+        "ENDGAME_TWAP_EXIT_MAX_AGE_SEC",
+        # Breaker V2 canonical-TWAP authority gate (default 0 = legacy breaker).
+        "ABSOLUTE_MAX_LOSS_TWAP_AUTHORITY_GATE_ENABLED",
         "AUTO_REDEEM_ENABLED",
         "TRADE_DB_ENABLED",
         "TRADE_DB_PATH",
@@ -76,6 +85,8 @@ CORE_ENV_KEYS = frozenset(
         "FAIR_EDGE_BUCKET_SHADOW_ENABLED",
         "SHADOW_SIMULATION_ENABLED",
         "STARTUP_VERBOSE",
+        # Host-local synced folder (e.g. iCloud Drive) for tier A/B research copies.
+        "RESEARCH_OFFSITE_DIR",
     }
 )
 

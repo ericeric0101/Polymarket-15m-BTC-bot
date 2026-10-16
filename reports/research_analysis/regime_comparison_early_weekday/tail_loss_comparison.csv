@@ -1,0 +1,5 @@
+regime,entry_N,losses,average_loser,median_loser,worst_loser,cohort,lifecycle_comparison,entries_N,losing_entries,avg_loser,lifecycle_state
+WEEKDAY,14,3,-5.966666666666667,-5.5,-6.9,ALL_SYNCHRONIZED,NOT_AVAILABLE,,,,
+WEEKEND,41,6,-5.48921568627451,-5.5,-5.5,ALL_SYNCHRONIZED,NOT_AVAILABLE,,,,
+WEEKDAY,,,,-5.5,-6.9,HOUR_MATCHED_00_06,NOT_AVAILABLE,14,3,-5.966666666666667,NOT_JOINED
+WEEKEND,,,,-5.5,-5.5,HOUR_MATCHED_00_06,NOT_AVAILABLE,13,1,-5.5,NOT_JOINED

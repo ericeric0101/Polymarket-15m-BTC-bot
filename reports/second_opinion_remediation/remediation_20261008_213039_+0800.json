@@ -1,0 +1,92 @@
+{
+  "summary": {
+    "HEAD_BEFORE": "9352e6939bf7d2978e0e6747c1ceba148a5c8579",
+    "HEAD_AFTER": "b9b3f8bb9a56e1034142b2d95f9235a1ca8287ad",
+    "REPO_INTEGRITY": "PASS",
+    "BASELINE_FULL_TESTS": "1099 passed; 1 known websockets warning",
+    "P1_001_REPRODUCED": "YES",
+    "P1_007_REPRODUCED": "YES",
+    "P2_001_REPRODUCED": "YES",
+    "P1_005_REPRODUCED": "YES",
+    "P2_004_REPRODUCED": "PARTIAL",
+    "TWAP_REQUIRED_EVENT_GUARD_VALIDATED": "YES",
+    "DRY_RUN_SINGLE_CHOKE_GUARD": "IMPLEMENTED",
+    "URGENT_EXIT_DRY_RUN_SAFE": "YES",
+    "ALL_REAL_SUBMIT_PATHS_DRY_RUN_SAFE": "YES",
+    "ABSOLUTE_LOSS_CAP_INDEPENDENT_OF_STOP_FLAG": "YES",
+    "ADAPTIVE_STOP_ENABLED": "NO",
+    "INVALIDATION_DOUBLE_INCREMENT_FIXED": "YES",
+    "INVALIDATION_AUTHORITY": "per_cycle",
+    "FRESHNESS_V2_READER_ENFORCED": "YES",
+    "V1_ROWS_EXCLUDED": "YES",
+    "MISSING_VERSION_ROWS_EXCLUDED": "YES",
+    "OPENING_BLIND_SPOT_FIXED": "YES",
+    "FIRST_NATIVE_V2_SNAPSHOT_TARGET_SEC": 2,
+    "EARLIEST_CAUSALLY_VALID_DELAY_SEC": 1.2,
+    "TRADE_JOURNAL_BACKUP_INTERVAL_SEC": 10800,
+    "ROLLOVER_FORCED_BACKUP_RETAINED": "YES",
+    "SHUTDOWN_FORCED_BACKUP_RETAINED": "YES",
+    "TWAP_REQUIRED_EVENTS_WRITABLE_ABOVE_CAP": "YES",
+    "OPTIONAL_TELEMETRY_BOUNDED": "YES",
+    "ORPHAN_GTC_DUPLICATE_RISK": "UNRESOLVED",
+    "CLIENT_ORDER_ID_IDEMPOTENT": "NO",
+    "FOCUSED_TESTS": "526 passed",
+    "FULL_TESTS": "1153 passed; 1 known websockets warning",
+    "DIFF_CHECK": "PASS",
+    "SAFE_FOR_60_TO_90_MIN_RUNTIME_VALIDATION": "YES",
+    "SAFE_FOR_24H_SOAK": "NO",
+    "SAFE_FOR_TINY_LIVE": "NO",
+    "CODE_CHANGED": "YES",
+    "COMMIT": "b9b3f8bb9a56e1034142b2d95f9235a1ca8287ad",
+    "PUSHED": "NO",
+    "BOT_RESTARTED": "NO"
+  },
+  "reproductions": [
+    {
+      "finding": "P1-001",
+      "classification": "REPRODUCED",
+      "before": "urgent SELL GTC fake submit_calls=1 under test_mode=true; desired zero assertion failed",
+      "after": "local urgent guard and production MRO public submit boundary block venue forwarding"
+    },
+    {
+      "finding": "P1-007",
+      "classification": "REPRODUCED",
+      "before": "STOP_LOSS=false: absolute engine no_exit_signal; runtime submissions=0; independent catastrophic reproduction also no_exit_signal",
+      "after": "independent absolute/catastrophic configured flags evaluated and dispatched with existing thresholds/confirmations"
+    },
+    {
+      "finding": "P2-001",
+      "classification": "REPRODUCED",
+      "before": "same timestamp sibling token evaluations hits=2 rather than 1",
+      "after": "one latest (slug, locked side, shared cycle timestamp) marker; max one increment; market/side/missing evidence reset"
+    },
+    {
+      "finding": "P1-005",
+      "classification": "REPRODUCED",
+      "before": "both ResearchStore and prediction CLI accepted 3 rows (v1/v2/missing), expected 1",
+      "after": "native v2 accepts one; v1 and missing separately counted; historical opt-in labeled separately"
+    },
+    {
+      "finding": "P2-004",
+      "classification": "PARTIALLY_REPRODUCED",
+      "before": "expired current slug yielded no row even when wall-open pair, strike and input receipts were available",
+      "after": "synthetic first snapshot 1.2s after open, plus research-only prewarm wake via existing worker; exact prior live 19s not remeasured"
+    },
+    {
+      "finding": "9352e69 storage guard",
+      "classification": "NOT_REPRODUCED as a current defect",
+      "before": "baseline required-event cap bypass tests passed",
+      "after": "all six required event types persisted into temporary real SQLite above cap; optional diagnostic excluded"
+    }
+  ],
+  "opening_measurement_scope": "synthetic; real-runtime delay NOT_MEASURED",
+  "orphan_order_scope": "strategy-level duplicate reproduced; full framework startup reconciliation UNRESOLVED",
+  "baseline_seven_tests": "113 passed",
+  "new_regression_cases": 54,
+  "reproduction_logs": {
+    "initial": "FFFFFFF                                                                  [100%]\n=================================== FAILURES ===================================\n_______ test_urgent_exit_never_reaches_authenticated_submit_in_test_mode _______\n\n    def test_urgent_exit_never_reaches_authenticated_submit_in_test_mode():\n        host = DummyUrgentExitStrategy()\n        host.test_mode = True\n        host.stop_loss_enabled = True\n        host.active_maker_orders = {}\n        host.cache.instrument = lambda _: SimpleNamespace(size_precision=6, price_precision=2)\n        asyncio.run(host._maybe_maker_urgent_exit(100))\n>       assert host.submit_calls == []\nE       AssertionError: assert [{'client_ord...e(0.21), ...}] == []\nE         \nE         Left contains one more item: {'client_order_id': ClientOrderId('BTC-15M-URGENT-EXIT-1791464883309'), 'instrument_id': 'inst-up', 'order_side': <OrderSide.SELL: 2>, 'price': Price(0.21), ...}\nE         Use -v to get more diff\n\ntests/test_second_opinion_remediation.py:27: AssertionError\n----------------------------- Captured stderr call -----------------------------\n2026-10-08 21:08:03.309 | WARNING  | bot.taker_exit:_maybe_maker_urgent_exit:1638 - MAKER URGENT EXIT submit: inst=inst-up qty=5.200000 price=0.2100 (bid=0.2000+tick) avg_entry=0.3700 unrealized_loss=+0.8840 score=-2.00 matches_position=False active_side_locked=True confirms=1 ttl=15s\n____ test_absolute_loss_breaker_remains_active_with_adaptive_stop_disabled _____\n\n    def test_absolute_loss_breaker_remains_active_with_adaptive_stop_disabled():\n        engine = ExitPolicyEngine(_make_config(stop_loss_enabled=False))\n        decision = engine.evaluate(_snapshot('0.20'), _position('0.69'),\n                                   _signal(score=Decimal('-.30'), matches=False, active_side='DOWN'))\n>       assert decision.reason == 'absolute_max_loss_breaker'\nE       AssertionError: assert 'no_exit_signal' == 'absolute_max_loss_breaker'\nE         \nE         - absolute_max_loss_breaker\nE         + no_exit_signal\n\ntests/test_second_opinion_remediation.py:35: AssertionError\n_________ test_stop_disabled_runtime_still_dispatches_absolute_breaker _________\n\n    def test_stop_disabled_runtime_still_dispatches_absolute_breaker():\n        host = _BreakerExitHost()\n        host.stop_loss_enabled = False\n        host.active_side = ActiveSide.DOWN\n        host.side_decision_score = Decimal('-.30')\n        host.exit_policy_engine = ExitPolicyEngine(_make_config(stop_loss_enabled=False))\n        asyncio.run(host._maybe_taker_exit_positions(10_000, is_simulation=False))\n>       assert len(host.submissions) == 1\nE       assert 0 == 1\nE        +  where 0 = len([])\nE        +    where [] = <test_absolute_max_loss_breaker._BreakerExitHost object at 0x14c57c3e0>.submissions\n\ntests/test_second_opinion_remediation.py:45: AssertionError\n_ test_one_logical_cycle_with_sibling_evaluations_adds_one_invalidation_confirmation _\n\n    def test_one_logical_cycle_with_sibling_evaluations_adds_one_invalidation_confirmation():\n        host = invalidation_host()\n        invalidation(host, 100)\n        invalidation(host, 100, instrument_id='down')\n>       assert host._side_invalidation_hits_by_slug['m'] == 1\nE       assert 2 == 1\n\ntests/test_second_opinion_remediation.py:70: AssertionError\n______ test_native_prediction_reader_excludes_legacy_and_missing_versions ______\n\ntmp_path = PosixPath('/private/var/folders/4s/b_6w60vn3nsfk2wf5p5659wh0000gn/T/pytest-of-cheng-kaihuang/pytest-808/test_native_prediction_reader_0')\n\n    def test_native_prediction_reader_excludes_legacy_and_missing_versions(tmp_path):\n        rows = ResearchStore(prediction_db(tmp_path)).get_prediction_snapshots()\n>       assert len(rows) == 1\nE       AssertionError: assert 3 == 1\nE        +  where 3 = len([{'event_type': 'PREDICTION_RESEARCH_SNAPSHOT', 'freshness_clock_semantics_version': 1, 'joint_fresh': True, 'market_s...'m', ...}, {'event_type': 'PREDICTION_RESEARCH_SNAPSHOT', 'joint_fresh': True, 'market_slug': 'm', 'run_id': 'r', ...}])\n\ntests/test_second_opinion_remediation.py:87: AssertionError\n______________ test_legacy_prediction_cli_reader_excludes_non_v2 _______________\n\ntmp_path = PosixPath('/private/var/folders/4s/b_6w60vn3nsfk2wf5p5659wh0000gn/T/pytest-of-cheng-kaihuang/pytest-808/test_legacy_prediction_cli_rea0')\n\n    def test_legacy_prediction_cli_reader_excludes_non_v2(tmp_path):\n        rows, _ = read_snapshots(prediction_db(tmp_path))\n>       assert len(rows) == 1\nE       AssertionError: assert 3 == 1\nE        +  where 3 = len([{'event_type': 'PREDICTION_RESEARCH_SNAPSHOT', 'freshness_clock_semantics_version': 1, 'joint_fresh': True, 'market_s...'m', ...}, {'event_type': 'PREDICTION_RESEARCH_SNAPSHOT', 'joint_fresh': True, 'market_slug': 'm', 'snapshot_ts': 102}])\n\ntests/test_second_opinion_remediation.py:93: AssertionError\n____ test_research_captures_open_market_without_waiting_for_trading_handoff ____\n\n    def test_research_captures_open_market_without_waiting_for_trading_handoff():\n        # Trading deliberately remains SETTLING on prior market. New pair/strike\n        # and locally received sources are usable; research must not promote trading.\n        old, new = 'btc-updown-15m-900', 'btc-updown-15m-1800'\n        host = _clock_capture_strategy([(1795,100,1795),(1801,100,1801)])\n        host.current_market_slug=old;host.current_market_end_timestamp=1800\n        host.market_strike_cache_by_slug={new:100}\n        host.research_market_instruments_by_slug={new:('up','down')}\n        host._polymarket_chainlink_twap_observation_ts=1801\n        host._polymarket_chainlink_twap_price_ts=1801\n        host._binance_ws_price_source_ts=1801;host._binance_ws_price_ts=1801\n        host.last_quote_source_ts_by_inst={'up':1801,'down':1801}\n        host.last_quote_received_ts_by_inst={'up':1801,'down':1801}\n        row = PredictionResearchSnapshotter(db=SimpleNamespace(enqueue_decision=lambda **_: True),run_id='r').capture(host,now_ts=1801.2)\n>       assert row is not None\nE       assert None is not None\n\ntests/test_second_opinion_remediation.py:111: AssertionError\n----------------------------- Captured stderr call -----------------------------\n2026-10-08 21:08:03.407 | INFO     | bot.prediction_research_snapshot:_emit_metrics:485 - prediction_snapshot: written=0 dropped=0 eligible=1 pex_fresh_pct=0.0 market_fresh_pct=0.0 joint_fresh_pct=0.0 avg_interval=0.00s p95_interval=0.00s compute_enqueue_p95_ms=0.00 queue_depth=unknown queue_drops=unknown\n=========================== short test summary info ============================\nFAILED tests/test_second_opinion_remediation.py::test_urgent_exit_never_reaches_authenticated_submit_in_test_mode\nFAILED tests/test_second_opinion_remediation.py::test_absolute_loss_breaker_remains_active_with_adaptive_stop_disabled\nFAILED tests/test_second_opinion_remediation.py::test_stop_disabled_runtime_still_dispatches_absolute_breaker\nFAILED tests/test_second_opinion_remediation.py::test_one_logical_cycle_with_sibling_evaluations_adds_one_invalidation_confirmation\nFAILED tests/test_second_opinion_remediation.py::test_native_prediction_reader_excludes_legacy_and_missing_versions\nFAILED tests/test_second_opinion_remediation.py::test_legacy_prediction_cli_reader_excludes_non_v2\nFAILED tests/test_second_opinion_remediation.py::test_research_captures_open_market_without_waiting_for_trading_handoff\n7 failed in 2.61s\n",
+    "catastrophic": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_ test_configured_catastrophic_breaker_is_also_independent_with_confirmations_preserved _\n\n    def test_configured_catastrophic_breaker_is_also_independent_with_confirmations_preserved():\n        engine = ExitPolicyEngine(_make_config(stop_loss_enabled=False, absolute_max_loss_enabled=False))\n        args = (_snapshot('.55'), _position('.69'), _signal(score=Decimal('-.60'), matches=False, active_side='DOWN'))\n        pending = engine.evaluate(*args)\n>       assert pending.reason == 'catastrophic_stop_loss_confirming'\nE       AssertionError: assert 'no_exit_signal' == 'catastrophic...ss_confirming'\nE         \nE         - catastrophic_stop_loss_confirming\nE         + no_exit_signal\n\ntests/test_second_opinion_remediation.py:347: AssertionError\n=========================== short test summary info ============================\nFAILED tests/test_second_opinion_remediation.py::test_configured_catastrophic_breaker_is_also_independent_with_confirmations_preserved\n1 failed, 48 deselected in 2.68s\n"
+  },
+  "focused_log": "........................................................................ [ 13%]\n........................................................................ [ 27%]\n........................................................................ [ 41%]\n........................................................................ [ 54%]\n........................................................................ [ 68%]\n........................................................................ [ 82%]\n........................................................................ [ 95%]\n......................                                                   [100%]\n526 passed in 14.26s\n",
+  "full_log": "........................................................................ [  6%]\n........................................................................ [ 12%]\n........................................................................ [ 18%]\n........................................................................ [ 24%]\n........................................................................ [ 31%]\n........................................................................ [ 37%]\n........................................................................ [ 43%]\n........................................................................ [ 49%]\n........................................................................ [ 56%]\n........................................................................ [ 62%]\n........................................................................ [ 68%]\n........................................................................ [ 74%]\n........................................................................ [ 81%]\n........................................................................ [ 87%]\n........................................................................ [ 93%]\n........................................................................ [ 99%]\n.                                                                        [100%]\n=============================== warnings summary ===============================\ntests/test_redeem_script.py::test_nonce_advanced_without_receipt_reconciles_zero_position_without_resend\n  /Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions\n    warnings.warn(  # deprecated in 14.0 - 2024-11-09\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1153 passed, 1 warning in 17.94s\n"
+}

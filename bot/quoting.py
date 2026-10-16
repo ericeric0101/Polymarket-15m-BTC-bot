@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Optional
 
+from bot.entry_session_policy import new_buy_session_decision
+
 
 def normalize_quote_mode(raw_mode: str) -> str:
     mode = str(raw_mode or "").strip().lower()
@@ -41,6 +43,7 @@ class QuotePlanGuardOutcome:
     momentum_sell_threshold_pct: Optional[Decimal]
     momentum_buy_blocked: bool
     momentum_sell_blocked: bool
+    entry_session_reason: str
 
 
 def compute_reduce_only_decision(
@@ -154,6 +157,16 @@ def apply_quote_plan_guards(
 ) -> QuotePlanGuardOutcome:
     side_disable_reason_by_side: dict[str, str] = initial_side_disable_reasons(quote_sides_mode)
 
+    entry_session = new_buy_session_decision(now_ts)
+    if "buy" in side_plan and not entry_session.allowed:
+        set_side_should_quote(
+            side_plan,
+            side_disable_reason_by_side,
+            "buy",
+            False,
+            f"entry_session_blocked_{entry_session.reason}",
+        )
+
     if (
         "buy" in side_plan
         and phase_value == "ACTIVE"
@@ -260,4 +273,5 @@ def apply_quote_plan_guards(
         momentum_sell_threshold_pct=momentum_sell_threshold_pct,
         momentum_buy_blocked=momentum_buy_blocked,
         momentum_sell_blocked=momentum_sell_blocked,
+        entry_session_reason=entry_session.reason,
     )

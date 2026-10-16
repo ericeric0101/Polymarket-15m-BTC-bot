@@ -1,0 +1,9 @@
+parameter,weekday_values,weekend_values,weekday_runs,weekend_runs,counterfactual_status
+exit_conviction_stop_loss_multiplier,1.75,,188,0,unsupported; observed config values only
+exit_stop_loss_hold_on_none_signal,True,,188,0,unsupported; observed config values only
+exit_stop_loss_requires_thesis_weakening,True,,188,0,unsupported; observed config values only
+exit_stop_loss_thesis_min_score_abs,0.05,,188,0,unsupported; observed config values only
+market_stop_loss_max_per_market,1,,188,0,unsupported; observed config values only
+stop_loss_reentry_cooldown_sec,180,,188,0,unsupported; observed config values only
+taker_exit_stop_loss_confirmations,2,,188,0,unsupported; observed config values only
+taker_exit_stop_loss_usdc,0.5,,188,0,unsupported; observed config values only

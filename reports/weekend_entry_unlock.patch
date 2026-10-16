@@ -1,0 +1,77 @@
+--- a/bot/entry_session_policy.py
++++ b/bot/entry_session_policy.py
+@@ -1,7 +1,7 @@
+-"""Taipei calendar policy for opening new BUY positions.
++"""Entry-session authority and historical Taipei calendar classifiers.
+ 
+-This deliberately controls entries only.  The process stays alive outside the
+-entry session so it can cancel orders, exit inventory, reconcile and redeem.
++New BUYs are allowed on every calendar day. Historical classifiers remain
++unchanged for research and calibration; execution guards still control entries.
+ """
+ from __future__ import annotations
+ 
+@@ -47,6 +47,4 @@
+     local = when.astimezone(TAIPEI)
+     if when < ENTRY_SESSION_ENFORCED_FROM_UTC:
+         return EntrySessionDecision(True, "entry_session_policy_not_yet_enforced", local)
+-    if local.weekday() >= 5:
+-        return EntrySessionDecision(False, "taipei_weekend_observation_only", local)
+-    return EntrySessionDecision(True, "taipei_weekday_entry_session", local)
++    return EntrySessionDecision(True, "all_days_entry_session", local)
+--- a/tests/test_entry_session_policy.py
++++ b/tests/test_entry_session_policy.py
+@@ -26,14 +26,14 @@
+     )  # Sunday 02:00 Taipei, continuation of Saturday night.
+ 
+ 
+-def test_new_buy_session_decision_blocks_taipei_weekend_for_observation_only():
++def test_new_buy_session_decision_allows_taipei_weekend():
+     decision = new_buy_session_decision(datetime(2026, 8, 29, 2, 0, tzinfo=timezone.utc).timestamp())
+ 
+-    assert decision.allowed is False
+-    assert decision.reason == "taipei_weekend_observation_only"
++    assert decision.allowed is True
++    assert decision.reason == "all_days_entry_session"
+ 
+ 
+-def test_live_entry_session_allows_weekdays_and_blocks_weekends_all_hours():
++def test_live_entry_session_allows_weekdays_and_weekends_all_hours():
+     weekdays = (
+         datetime(2026, 8, 31, 0, 30, tzinfo=ZoneInfo("Asia/Taipei")),
+         datetime(2026, 8, 31, 10, 0, tzinfo=ZoneInfo("Asia/Taipei")),
+@@ -48,11 +48,11 @@
+     for local in weekdays:
+         decision = new_buy_session_decision(local.timestamp())
+         assert decision.allowed is True
+-        assert decision.reason == "taipei_weekday_entry_session"
++        assert decision.reason == "all_days_entry_session"
+     for local in weekends:
+         decision = new_buy_session_decision(local.timestamp())
+-        assert decision.allowed is False
+-        assert decision.reason == "taipei_weekend_observation_only"
++        assert decision.allowed is True
++        assert decision.reason == "all_days_entry_session"
+ 
+ 
+ def test_historical_weeknight_classifier_stays_unchanged_for_markout_calibration():
+--- a/tests/test_quoting.py
++++ b/tests/test_quoting.py
+@@ -79,7 +79,7 @@
+ @pytest.mark.parametrize(
+     ("local_time", "buy_allowed", "buy_block_reason"),
+     [
+-        (datetime(2026, 8, 29, 10, 0), False, "entry_session_blocked_taipei_weekend_observation_only"),
++        (datetime(2026, 8, 29, 10, 0), True, None),
+         (datetime(2026, 8, 31, 10, 0), True, None),
+     ],
+ )
+@@ -97,7 +97,7 @@
+         inventory_delta_shares=Decimal("2"),
+         early_sell_only_sec=0.0,
+         time_left_sec_global=600.0,
+-        # Weekend new BUYs are blocked; SELL remains available.
++        # Weekend new BUYs and SELLs remain available to the other guards.
+         now_ts=local_time.replace(tzinfo=ZoneInfo("Asia/Taipei")).timestamp(),
+         buy_cooldown_until_ts=0.0,
+         momentum_buy_filter_pct=Decimal("0"),

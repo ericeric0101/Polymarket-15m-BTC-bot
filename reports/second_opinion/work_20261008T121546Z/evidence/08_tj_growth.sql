@@ -1,0 +1,1 @@
+SELECT 'S', substr(ts,1,10) d, COUNT(*), SUM(length(payload_json)) FROM strategy_events WHERE ts>='2026-10-01' GROUP BY d UNION ALL SELECT 'O', substr(ts,1,10) d, COUNT(*), SUM(length(payload_json)) FROM order_events WHERE ts>='2026-10-01' GROUP BY d;

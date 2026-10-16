@@ -1,0 +1,9 @@
+metric,count
+positions_total,125
+positions_with_canonical_entry,125
+positions_with_synchronized_post_entry_snapshots,0
+positions_with_settlement,0
+positions_with_stop_trigger,0
+positions_with_stop_execution,0
+complete_entry_to_settlement,0
+complete_entry_stop_settlement,0

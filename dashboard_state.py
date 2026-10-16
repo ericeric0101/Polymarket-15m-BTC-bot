@@ -18,6 +18,15 @@ class TradeRecord:
     is_settled: bool
     expected_redeem_amount: Optional[float] = None
     realized_pnl: Optional[float] = None
+    # Effective-PnL projection (monitoring.pnl_attribution); None for in-process
+    # records, which keep the legacy fields above.
+    pnl_basis: Optional[str] = None
+    position_state: Optional[str] = None
+    outcome_state: Optional[str] = None
+    redeem_state: Optional[str] = None
+    sell_qty: Optional[float] = None
+    held_shares: Optional[float] = None
+    issues: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -51,6 +60,12 @@ class DashboardState:
     pending_redeem_count: int = 0
     pending_redeem_usdc: float = 0.0
     open_exposure_usdc: float = 0.0
+    # Effective PnL summary (journal dashboard only).
+    pnl_final_usdc: Optional[float] = None
+    pnl_estimated_usdc: Optional[float] = None
+    pnl_unresolved_count: int = 0
+    pnl_period_text: str = ""
+    pnl_journal_raw_usdc: Optional[float] = None
     bot_paused: bool = False
     flatten_requested: bool = False
     recent_errors: List[Tuple[datetime, str]] = field(default_factory=list)
@@ -102,6 +117,11 @@ class DashboardState:
                 pending_redeem_count=self.pending_redeem_count,
                 pending_redeem_usdc=self.pending_redeem_usdc,
                 open_exposure_usdc=self.open_exposure_usdc,
+                pnl_final_usdc=self.pnl_final_usdc,
+                pnl_estimated_usdc=self.pnl_estimated_usdc,
+                pnl_unresolved_count=self.pnl_unresolved_count,
+                pnl_period_text=self.pnl_period_text,
+                pnl_journal_raw_usdc=self.pnl_journal_raw_usdc,
                 bot_paused=self.bot_paused,
                 flatten_requested=self.flatten_requested,
                 recent_errors=list(self.recent_errors),

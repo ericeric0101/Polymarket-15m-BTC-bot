@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from bot.breaker_authority import breaker_v2_authority_summary
+from bot.entry_session_policy import configure_entry_session_policy, entry_session_policy_summary
 from bot.app_config import AppConfig
+from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
+from bot.journal_path import anchor_repo_path
 from bot.market_cycle_state import MarketCycleState, bind_market_cycle_state
 from bot.enums import ActiveSide, MarketPhase
 from bot.position_manager import PositionManager, PositionManagerConfig
@@ -29,11 +33,30 @@ from execution.rebate_reporter import RebateReporter
 from monitoring.performance_tracker import get_performance_tracker
 from monitoring.terminal_dashboard import TerminalDashboard
 from monitoring.trade_journal_db import TradeJournalDB
+from monitoring.lead_lag_db import LeadLagDB
 from bot.exit_engine import ExitEngineConfig, ExitPolicyEngine
 from bot.entry_confirmation import EntryConfirmationConfig, EntryConfirmationEngine
 from bot.smart_money import SmartMoneyConfig, SmartMoneyTracker
 from bot.shadow_signal import DEFAULT_SHADOW_SIGNAL_CONFIG
 from bot.trade_telemetry import TradeTelemetry
+from bot.twap_forward_shadow import TwapForwardShadow
+from bot.trend_entry_shadow import TrendEntryShadow
+from bot.forward_shadow import ForwardShadowExperiment
+from bot.btc_1s_history import BTC1sHistoryCollector
+from bot.prediction_research_snapshot import PredictionResearchSnapshotter
+
+
+TWAP_RESEARCH_DB_DEFAULT = "data/research/twap_forward_shadow.db"
+
+
+def build_twap_research_db() -> LeadLagDB:
+    """One async store for retained prediction, TWAP and non-Outcome research."""
+    path = Path(os.getenv("TWAP_RESEARCH_DB_PATH", TWAP_RESEARCH_DB_DEFAULT))
+    historical = Path(__file__).resolve().parents[1] / "data/research/hyperliquid_lead_lag.db"
+    same_historical = path.exists() and historical.exists() and path.samefile(historical)
+    if path.resolve().name == "hyperliquid_lead_lag.db" or same_historical:
+        raise ValueError("Historical Hyperliquid DB cannot be used as a runtime research store")
+    return LeadLagDB(db_path=str(path))
 
 
 def initialize_strategy_settings(
@@ -84,19 +107,34 @@ def initialize_strategy_settings(
     strategy.maker_min_shares = config.maker.min_shares
     strategy.maker_exchange_min_shares = config.maker.exchange_min_shares
     strategy.maker_fixed_shares = config.maker.fixed_shares
+    strategy.depth_risk_sizing_enabled = config.maker.depth_risk_sizing_enabled
+    strategy.depth_risk_max_entry_notional_usdc = config.maker.depth_risk_max_entry_notional_usdc
+    strategy.depth_risk_max_loss_usdc = config.maker.depth_risk_max_loss_usdc
+    strategy.depth_risk_depth_fraction = config.maker.depth_risk_depth_fraction
+    strategy.depth_risk_price_boundary_ticks = config.maker.depth_risk_price_boundary_ticks
+    strategy.depth_risk_shadow_enabled = config.maker.depth_risk_shadow_enabled
+    strategy.depth_risk_shadow_interval_sec = config.maker.depth_risk_shadow_interval_sec
     strategy.maker_weak_pfair_size_adjust_enabled = config.maker.weak_pfair_size_adjust_enabled
     strategy.maker_weak_pfair_size_adjust_lower = config.maker.weak_pfair_size_adjust_lower
     strategy.maker_weak_pfair_size_adjust_upper = config.maker.weak_pfair_size_adjust_upper
     strategy.maker_weak_pfair_size_adjust_multiplier = config.maker.weak_pfair_size_adjust_multiplier
-    strategy.maker_high_entry_price_size_adjust_enabled = (
-        config.maker.high_entry_price_size_adjust_enabled
-    )
-    strategy.maker_high_entry_price_size_adjust_threshold = (
-        config.maker.high_entry_price_size_adjust_threshold
-    )
-    strategy.maker_high_entry_price_size_adjust_multiplier = (
-        config.maker.high_entry_price_size_adjust_multiplier
-    )
+    strategy.entry_sizing_rule = config.maker.entry_sizing_rule
+    strategy.entry_sizing_violations = tuple(config.maker.entry_sizing_violations)
+    logger.info(startup_sizing_summary(strategy.entry_sizing_rule, list(strategy.entry_sizing_violations)))
+    if not strategy.entry_sizing_violations and not is_canonical_rule(strategy.entry_sizing_rule):
+        logger.warning(f"Entry sizing override in effect (within bounds): {strategy.entry_sizing_rule.as_payload()}")
+    if strategy.entry_sizing_violations:
+        if not test_mode:
+            # Defense in depth: the launcher refuses first; a LIVE strategy must
+            # never start on an out-of-bounds sizing override.
+            raise RuntimeError(
+                "Refusing LIVE start: entry sizing override outside versioned bounds: "
+                + "; ".join(strategy.entry_sizing_violations)
+            )
+        logger.warning(
+            "DRY-RUN entry sizing override ignored (canonical share_v1 rule in effect): "
+            + "; ".join(strategy.entry_sizing_violations)
+        )
     strategy.kelly_sizing_enabled = config.maker.kelly_sizing_enabled
     strategy.kelly_sizing_fraction = config.maker.kelly_sizing_fraction
     strategy.kelly_sizing_max_collateral_fraction = (
@@ -143,6 +181,8 @@ def initialize_strategy_settings(
     )
     raw_quote_mode = config.maker.quote_sides
     strategy.maker_quote_sides = config.maker.quote_sides
+    strategy.normal_maker_buy_enabled = config.maker.normal_maker_buy_enabled
+    strategy.entry_quality_allow_size_down = config.maker.entry_quality_size_down_enabled
     if raw_quote_mode in {"sell", "both_buy"}:
         logger.warning(
             f"Deprecated maker quote mode '{raw_quote_mode}' detected; coercing to UP-only 'both'."
@@ -269,6 +309,13 @@ def initialize_strategy_settings(
     strategy.maker_digital_sigma_time_decay_ref_sec = config.maker.digital_sigma_time_decay_ref_sec
     strategy.maker_digital_sigma_time_decay_min = config.maker.digital_sigma_time_decay_min
     strategy.taker_exit_enabled = config.exit.taker_exit_enabled
+    strategy.stop_loss_enabled = config.exit.stop_loss_enabled
+    if not strategy.stop_loss_enabled:
+        logger.warning(
+            "STOP_LOSS_ENABLED=0: adaptive/strategy loss exits are paused. "
+            "Configured absolute and catastrophic breakers retain their existing confirmation gates; "
+            "take-profit, hold-to-redeem, and redemption remain enabled."
+        )
     strategy.hold_to_redeem_enabled = config.exit.hold_to_redeem_enabled
     strategy.tail_protect_tp_enabled = config.exit.tail_protect_tp_enabled
     strategy.tail_protect_tp_price = config.exit.tail_protect_tp_price
@@ -342,12 +389,19 @@ def initialize_strategy_settings(
     strategy.exit_hold_band_min_score_abs = config.exit.exit_hold_band_min_score_abs
     strategy.exit_hold_band_release_min_roi = config.exit.exit_hold_band_release_min_roi
     strategy.exit_stop_loss_thesis_min_score_abs = config.exit.exit_stop_loss_thesis_min_score_abs
+    strategy.endgame_twap_exit_enabled = config.exit.endgame_twap_exit_enabled
+    strategy.endgame_twap_exit_max_time_left_sec = config.exit.endgame_twap_exit_max_time_left_sec
+    strategy.endgame_twap_exit_min_distance_usd = config.exit.endgame_twap_exit_min_distance_usd
+    strategy.endgame_twap_exit_max_age_sec = config.exit.endgame_twap_exit_max_age_sec
     strategy.maker_profit_run_min_score_abs = config.exit.maker_profit_run_min_score_abs
     strategy.maker_recycle_locked_side_min_fair_edge_ps = config.exit.maker_recycle_locked_side_min_fair_edge_ps
     strategy.maker_signal_flip_cooldown_cycles = config.exit.maker_signal_flip_cooldown_cycles
     strategy.absolute_max_loss_enabled = config.exit.absolute_max_loss_enabled
     strategy.absolute_max_loss_usdc = config.exit.absolute_max_loss_usdc
     strategy.absolute_max_loss_min_hold_sec = config.exit.absolute_max_loss_min_hold_sec
+    strategy.absolute_max_loss_twap_authority_gate_enabled = bool(
+        getattr(config.exit, "absolute_max_loss_twap_authority_gate_enabled", False)
+    )
     strategy.maker_implied_sigma_enabled = config.maker.implied_sigma_enabled
     strategy.exit_policy = ExitPolicy(
         ExitPolicyConfig(
@@ -390,6 +444,7 @@ def initialize_strategy_settings(
             absolute_max_loss_enabled=strategy.absolute_max_loss_enabled,
             absolute_max_loss_usdc=strategy.absolute_max_loss_usdc,
             absolute_max_loss_min_hold_sec=strategy.absolute_max_loss_min_hold_sec,
+            stop_loss_enabled=strategy.stop_loss_enabled,
         ),
     )
     strategy.position_manager = PositionManager(
@@ -462,12 +517,14 @@ def initialize_strategy_settings(
     strategy.quote_healthcheck_interval_sec = 10
     strategy.strategy_status_interval_sec = config.observability.strategy_status_interval_sec
     strategy.quote_stale_sec = config.market_data.quote_stale_sec
+    strategy.quote_max_delivery_delay_sec = config.market_data.quote_max_delivery_delay_sec
     strategy.quote_event_clock_skew_tolerance_sec = config.market_data.quote_event_clock_skew_tolerance_sec
     strategy.quote_invalid_tick_reload_threshold = 80
     strategy.quote_reload_cooldown_sec = 60
     strategy.quote_resubscribe_grace_sec = config.market_data.quote_resubscribe_grace_sec
     strategy.last_quote_update_ts = 0.0
     strategy.last_quote_update_ts_by_inst = {}
+    strategy.last_quote_source_ts_by_inst = {}
     strategy.latest_quote_by_inst = {}
     strategy._last_edge_observation_signature_by_inst = {}
     strategy._last_edge_observation_ts_by_inst = {}
@@ -496,6 +553,10 @@ def initialize_strategy_settings(
     strategy.quote_recovery_started_ts = 0.0
     strategy.quote_recovery_pending_instruments = set()
     strategy.quote_recovery_attempts = 0
+    strategy.quote_prewarm_instruments = set()
+    strategy.quote_prewarm_first_quote_ts_by_inst = {}
+    strategy.quote_prewarm_latest_by_inst = {}
+    strategy._market_selection_lock = threading.RLock()
     strategy._quote_stream_rollover_requested = False
     maker_config = MakerEngineConfig(
         maker_half_spread=strategy.maker_half_spread,
@@ -532,9 +593,11 @@ def initialize_strategy_settings(
     strategy.external_spot_history_max = config.market_data.external_spot_history_max
     strategy.polymarket_chainlink_history = []
     strategy.polymarket_chainlink_history_max = config.market_data.polymarket_chainlink_history_max
+    strategy.polymarket_chainlink_receipt_history = []
     strategy.polymarket_chainlink_twap_enabled = config.market_data.polymarket_chainlink_twap_enabled
     strategy.polymarket_chainlink_twap_window_sec = config.market_data.polymarket_chainlink_twap_window_sec
     strategy.polymarket_chainlink_twap_symbol = config.market_data.polymarket_chainlink_twap_symbol
+    strategy.polymarket_chainlink_twap_silence_reconnect_sec = config.market_data.polymarket_chainlink_twap_silence_reconnect_sec
     strategy.require_twap_reference_spot = config.market_data.require_twap_reference_spot
     strategy.twap_degraded_block_new_entries = config.market_data.twap_degraded_block_new_entries
     strategy._twap_reference_degraded = False
@@ -588,8 +651,12 @@ def initialize_strategy_settings(
     strategy._startup_rehydrated_inventory_force_sell_only = False
     strategy.inventory_last_update_ts = 0.0
     strategy.consecutive_denied_orders = 0
+    strategy.consecutive_denied_sides = set()
     strategy.maker_kill_switch = False
+    strategy.maker_kill_switch_class = None
+    strategy._inventory_overage_sell_only = False
     strategy.active_maker_orders = {}
+    strategy._pending_cancel_cleanup_lock = threading.Lock()
     strategy.current_token_id = None
     strategy.current_market_instruments = []
     strategy.current_up_instrument_id = None
@@ -640,6 +707,11 @@ def initialize_strategy_settings(
     strategy._last_redeem_run_ts = 0.0
     strategy._balance_stop_event = threading.Event()
     strategy._balance_thread = None
+    strategy.settlement_confirmation_enabled = config.operations.settlement_confirmation_enabled
+    strategy.settlement_confirmation_interval_sec = config.operations.settlement_confirmation_interval_sec
+    strategy.settlement_confirmation_lookback_hours = config.operations.settlement_confirmation_lookback_hours
+    strategy._settlement_confirmation_stop_event = threading.Event()
+    strategy._settlement_confirmation_thread = None
     strategy._balance_refresh_lock = threading.Lock()
     strategy._balance_refresh_inflight = False
     strategy.current_market_slug = None
@@ -670,20 +742,50 @@ def initialize_strategy_settings(
     strategy.sell_balance_retry_pause_sec = config.operations.sell_balance_retry_pause_sec
     strategy._binance_ws_price = None
     strategy._binance_ws_price_ts = 0.0
+    strategy._binance_ws_price_source_ts = 0.0
+    strategy._prediction_btc_research_history = deque(maxlen=2400)
     strategy._btc_trend_source = "unavailable"
     strategy._btc_trend_source_ts = 0.0
     strategy._btc_trend_source_price = None
     strategy._binance_ws_stop_event = threading.Event()
     strategy._binance_ws_thread = None
+    history_enabled = os.getenv("BTC_1S_HISTORY_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    strategy.btc_1s_history_collector = None
+    strategy._btc_history_observer_status = 'CONFIGURED' if history_enabled else 'DISABLED_BY_POLICY'
+    if history_enabled:
+        try:
+            strategy.btc_1s_history_collector = BTC1sHistoryCollector(
+                data_dir=os.getenv("BTC_1S_HISTORY_DIR", "data/btc_history_1s"),
+                min_free_disk_gb=float(os.getenv("BTC_1S_HISTORY_MIN_FREE_DISK_GB", "5")),
+                queue_rows=300,
+                batch_rows=300,
+            )
+            strategy.btc_1s_history_collector.start()
+        except Exception as exc:
+            # Observer initialization is isolated from all strategy authority.
+            strategy.btc_1s_history_collector = None
+            strategy._btc_history_observer_status = 'FAILED'
+            logger.warning(f"BTC 1s history collector unavailable; live strategy continues: {exc}")
     strategy._polymarket_chainlink_price = None
     strategy._polymarket_chainlink_price_ts = 0.0
     strategy._polymarket_chainlink_event_ts_ms = None
     strategy._polymarket_chainlink_twap_price = None
     strategy._polymarket_chainlink_twap_price_ts = 0.0
     strategy._polymarket_chainlink_twap_event_ts_ms = None
+    strategy._polymarket_chainlink_twap_observation_ts = 0.0
     strategy._polymarket_chainlink_twap_window_sec = None
+    # Deferred near-tie settlement relabel (bot/lifecycle_runtime.py).
+    strategy._pending_settlement_relabel = None
+    strategy._recent_twap_ticks = None
     strategy._polymarket_chainlink_ws_stop_event = threading.Event()
     strategy._polymarket_chainlink_ws_thread = None
+    strategy._polymarket_chainlink_twap_silent_stall_count = 0
+    strategy._polymarket_chainlink_twap_reconnect_count = 0
+    strategy._polymarket_chainlink_twap_last_disconnect_monotonic = 0.0
+    strategy._polymarket_chainlink_twap_connection_monotonic = 0.0
+    strategy._polymarket_chainlink_twap_pending_recovery = False
+    strategy._polymarket_chainlink_twap_connection_epoch = 0
+    strategy.l2_update_ts_by_inst = {}
     strategy.external_spot_source_delta_abs_max_usd = config.market_data.external_spot_source_delta_abs_max_usd
     strategy.active_side_lock_score_abs = Decimal("0")
     from bot.signal_engine import SignalEngine, SignalEngineConfig
@@ -700,9 +802,39 @@ def initialize_strategy_settings(
     strategy._maker_worker_running = False
     strategy.run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     strategy.trade_db_enabled = config.operations.trade_db_enabled
+    # Anchored at the repo root by the canonical resolver (same path the
+    # launcher's journal writer lock, dashboard and scripts use).
     strategy.trade_db = TradeJournalDB(
-        db_path=config.operations.trade_db_path,
+        db_path=str(anchor_repo_path(config.operations.trade_db_path)),
     ) if strategy.trade_db_enabled else None
+    strategy.trade_db_health = (
+        strategy.trade_db.startup_health() if strategy.trade_db is not None
+        else {"ready": False, "reason": "trade_journal_disabled"}
+    )
+    strategy.trade_db_buy_ready = bool(strategy.trade_db_health.get("ready", False))
+    strategy.trade_db_health_reason = str(strategy.trade_db_health.get("reason") or "")
+    strategy.session_pnl_guard_enabled = config.operations.session_pnl_guard_enabled
+    strategy.session_profit_arm_usdc = config.operations.session_profit_arm_usdc
+    strategy.session_profit_drawdown_usdc = config.operations.session_profit_drawdown_usdc
+    strategy.session_hard_profit_lock_enabled = config.operations.session_hard_profit_lock_enabled
+    strategy.session_hard_profit_lock_usdc = config.operations.session_hard_profit_lock_usdc
+    strategy.session_max_loss_enabled = config.operations.session_max_loss_enabled
+    strategy.session_max_loss_usdc = config.operations.session_max_loss_usdc
+    strategy.session_pnl_guard_mode = config.operations.session_pnl_guard_mode
+    strategy.monthly_net_target_usdc = config.operations.monthly_net_target_usdc
+    strategy.entry_allow_taipei_weekend_buys = bool(config.operations.allow_taipei_weekend_buys)
+    configure_entry_session_policy(allow_taipei_weekend_buys=strategy.entry_allow_taipei_weekend_buys)
+    logger.info(entry_session_policy_summary())
+    logger.info(breaker_v2_authority_summary(strategy.absolute_max_loss_twap_authority_gate_enabled))
+    # R is intentionally the existing per-trade risk authority, not a new
+    # sizing input. V2 refuses startup if this value is absent/non-positive.
+    strategy.session_guard_per_trade_risk_usdc = config.maker.depth_risk_max_loss_usdc
+    strategy._initialize_session_pnl_guard()
+    if not strategy.trade_db_buy_ready:
+        logger.error(
+            "Trade journal startup healthcheck is not ready; blocking all new BUYs: "
+            f"reason={strategy.trade_db_health_reason}"
+        )
     strategy.shadow_simulation_enabled = config.operations.shadow_simulation_enabled
     strategy.fair_edge_bucket_shadow_enabled = config.operations.fair_edge_bucket_shadow_enabled
     strategy.shadow_simulation_fill_timeout_sec = config.operations.shadow_simulation_fill_timeout_sec
@@ -710,7 +842,69 @@ def initialize_strategy_settings(
     strategy.shadow_simulation_aged_quote_max_age_sec = config.operations.shadow_simulation_aged_quote_max_age_sec
     strategy._shadow_simulations_by_slug = {}
     strategy._fair_edge_bucket_shadow_by_id = {}
-    strategy._lead_lag_pending = {}
-    strategy._lead_lag_last_snapshot_ts_by_slug = {}
+    strategy._depth_risk_shadow_states = {}
+    strategy._depth_risk_shadow_last_ts_by_inst = {}
+    strategy._cancel_started_ns_by_order_id = {}
+    strategy.twap_research_db = build_twap_research_db()
+    for writer_name in ("twap_research_db",):
+        getattr(strategy, writer_name).set_failure_diagnostics(
+            journal=strategy.trade_db, writer_name=writer_name, run_id=strategy.run_id,
+            identity=lambda: getattr(strategy, "collection_identity", {}),
+        )
+    strategy.twap_forward_shadow = TwapForwardShadow(
+        db=strategy.twap_research_db, run_id=strategy.run_id, max_samples=180,
+        max_db_mb=float(os.getenv("TWAP_RESEARCH_MAX_DB_MB", "500")),
+        min_free_disk_gb=float(os.getenv("TWAP_RESEARCH_MIN_FREE_DISK_GB", "10")),
+    )
+    # Synchronized prediction telemetry shares the existing asynchronous TWAP
+    # research writer. It has no authority over any trading decision.
+    from bot.research.candidate_policy import CandidatePolicyShadow
+    strategy.candidate_policy_shadow = CandidatePolicyShadow(db=strategy.twap_research_db, run_id=strategy.run_id)
+    from bot.research.stop_shadow import StopCandidateShadow
+    strategy.stop_candidate_shadow = StopCandidateShadow(
+        db=strategy.twap_research_db, run_id=strategy.run_id,
+        hard_loss_usdc=getattr(strategy, "absolute_max_loss_usdc", None),
+        hard_loss_min_hold_sec=getattr(strategy, "absolute_max_loss_min_hold_sec", None),
+    )
+    strategy.prediction_research_snapshotter = PredictionResearchSnapshotter(
+        db=strategy.twap_research_db, run_id=strategy.run_id, interval_sec=1.0,
+    )
+    # Research-only comparison of early BTC trend-entry schedules. This
+    # recorder has no venue/order ownership and persists through the async DB.
+    strategy.trend_entry_shadow = TrendEntryShadow(
+        db=strategy.twap_research_db,
+        run_id=strategy.run_id,
+    )
+    weekday_only = os.getenv("FORWARD_SHADOW_WEEKDAY_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+    def research_storage_pressure() -> str:
+        status = strategy.twap_forward_shadow.storage_guard_status()
+        return str(status.get("reason") or "") if status.get("triggered") else ""
+
+    strategy.forward_shadow_experiment = ForwardShadowExperiment(
+        db=strategy.twap_research_db, run_id=strategy.run_id, weekday_only=weekday_only,
+        storage_pressure=research_storage_pressure,
+    )
+    from bot.stop_forensics_shadow import StopForensicsShadow
+    # Research-only: receives raw production invalidation observations but has
+    # no execution or stop-loss authority.
+    strategy.stop_forensics_shadow = StopForensicsShadow(
+        # Keep stop lifecycle evidence beside synchronized prediction
+        # snapshots.  The legacy lead/lag DB remains readable offline, but
+        # cross-DB joins made a canonical stop timeline ambiguous.
+        db=strategy.twap_research_db, run_id=strategy.run_id,
+    )
+    from bot.stop_timing_telemetry import StopTimingTelemetry
+    from bot.entry_sizing import SIZING_RULE_VERSION
+    # Research-only prospective stop-timing telemetry. The sink is the existing
+    # bounded, non-blocking journal worker queue (never the order-path lock).
+    _stop_timing_db = getattr(strategy, "trade_db", None)
+    strategy.stop_timing_telemetry = StopTimingTelemetry(
+        emit=(
+            (lambda event_type, payload: _stop_timing_db.enqueue_strategy_event(
+                strategy.run_id, event_type, {"sizing_rule_version_runtime": SIZING_RULE_VERSION, **payload}))
+            if _stop_timing_db is not None and hasattr(_stop_timing_db, "enqueue_strategy_event") else None
+        ),
+        run_id=strategy.run_id,
+    )
     strategy._cycle_total_trades = 0
     strategy._cycle_total_wins = 0

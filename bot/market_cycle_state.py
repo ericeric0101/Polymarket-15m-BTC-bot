@@ -30,6 +30,7 @@ class MarketCycleState:
     # Event timestamps are the source-of-truth for quote freshness; receipt
     # timestamps remain available to diagnose transport latency separately.
     last_quote_update_ts_by_inst: dict[str, float] = field(default_factory=dict)
+    last_quote_source_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_quote_received_ts_by_inst: dict[str, float] = field(default_factory=dict)
     last_edge_observation_signature_by_inst: dict[str, tuple[Any, ...]] = field(default_factory=dict)
     last_edge_observation_ts_by_inst: dict[str, float] = field(default_factory=dict)
@@ -42,6 +43,9 @@ class MarketCycleState:
     maker_signal_flip_hits_by_inst: dict[str, int] = field(default_factory=dict)
     side_invalidation_hits_by_slug: dict[str, int] = field(default_factory=dict)
     side_invalidation_confirmed_by_slug: dict[str, bool] = field(default_factory=dict)
+    stop_adverse_since_by_slug: dict[str, float] = field(default_factory=dict)
+    stop_adverse_votes_by_slug: dict[str, dict[str, Any]] = field(default_factory=dict)
+    endgame_twap_exit_state_by_epoch: dict[str, str] = field(default_factory=dict)
     strike_pending_log_state_by_slug: dict[str, str] = field(default_factory=dict)
     baseline_metrics: dict[str, Any] = field(default_factory=dict)
 
@@ -70,6 +74,7 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy.latest_quote_depth_by_inst = state.latest_quote_depth_by_inst
     strategy.latest_quote_by_inst = state.latest_quote_by_inst
     strategy.last_quote_update_ts_by_inst = state.last_quote_update_ts_by_inst
+    strategy.last_quote_source_ts_by_inst = state.last_quote_source_ts_by_inst
     strategy.last_quote_received_ts_by_inst = state.last_quote_received_ts_by_inst
     strategy._last_edge_observation_signature_by_inst = state.last_edge_observation_signature_by_inst
     strategy._last_edge_observation_ts_by_inst = state.last_edge_observation_ts_by_inst
@@ -82,5 +87,8 @@ def bind_market_cycle_state(strategy: Any, state: MarketCycleState) -> None:
     strategy._maker_signal_flip_hits = state.maker_signal_flip_hits_by_inst
     strategy._side_invalidation_hits_by_slug = state.side_invalidation_hits_by_slug
     strategy._side_invalidation_confirmed_by_slug = state.side_invalidation_confirmed_by_slug
+    strategy._stop_adverse_since_by_slug = state.stop_adverse_since_by_slug
+    strategy._stop_adverse_votes_by_slug = state.stop_adverse_votes_by_slug
+    strategy.endgame_twap_exit_state_by_epoch = state.endgame_twap_exit_state_by_epoch
     strategy._strike_pending_log_state_by_slug = state.strike_pending_log_state_by_slug
     strategy._baseline_metrics = state.baseline_metrics

@@ -1,0 +1,13 @@
+3172360192 Oct 8 00:08 ./backups/trade_journal.db
+187418436 Oct 7 21:05 ./data/analysis_archives/20261005_065718_+0800.tar.zst
+199685837 Oct 7 21:05 ./data/analysis_archives/20261005_185454_+0800.tar.zst
+223438151 Oct 7 21:06 ./data/analysis_archives/20261006_064237_+0800.tar.zst
+626801587 Oct 7 23:30 ./data/analysis_archives/legacy_active_hyperliquid_lead_lag_phase_b_20261007_233042_+0800.tar.zst
+188302548 Oct 7 21:06 ./data/analysis_archives/legacy_hyperliquid_lead_lag_20261007_210534_+0800.tar.zst
+2753429504 Oct 6 23:26 ./data/analysis_snapshots/freshness_audit_20261006_231849_+0800/trade_journal_snapshot.db
+962129920 Oct 6 23:19 ./data/analysis_snapshots/freshness_audit_20261006_231849_+0800/twap_forward_shadow_snapshot.db
+1246535680 Oct 7 23:27 ./data/research/twap_forward_shadow.db
+1575002 Apr 18 18:29 ./logs/bot/terminal_bot.log.gz
+5488640 Jun 13 12:19 ./logs/smart_money_wallets.db
+3172360192 Oct 7 23:28 ./logs/trade_journal.db
+1446792 Oct 7 07:01 ./reports/research_analysis/storage_cleanup/20261007_065935_+0800/inventory.json.gz

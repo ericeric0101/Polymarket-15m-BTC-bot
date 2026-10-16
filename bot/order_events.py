@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from bot.instrument_slug_map import slug_for_instrument
 from bot.execution_events import (
     is_benign_cancel_reject_reason,
     reconcile_benign_cancel_reject,
@@ -14,8 +15,12 @@ from bot.execution_events import (
     reconcile_rejected_order,
 )
 from bot.fill_ledger import interpret_fill_liquidity
+from bot.kill_switch import KILL_REASON_CONSECUTIVE_DENIED, KILL_REASON_REGION_RESTRICTED
+from bot.protocol_v2 import asset_protocol
 from bot.enums import ActiveSide
 from bot.post_trade import build_fill_order_event_payload
+from bot.research.lifecycle import fill_lifecycle_metadata
+from bot.research.provenance import LIFECYCLE_SCHEMA_VERSION
 
 
 def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float) -> Dict[str, Any]:
@@ -106,6 +111,35 @@ def _build_markout_entry_context(strategy: Any, filled_inst: Any, now_ts: float)
     }
 
 
+def record_denied_order_side(strategy: Any, side: Any) -> None:
+    """Count one denial and remember its side (classifies a later kill switch)."""
+    strategy.consecutive_denied_orders = int(getattr(strategy, "consecutive_denied_orders", 0) or 0) + 1
+    sides = getattr(strategy, "consecutive_denied_sides", None)
+    if not isinstance(sides, set):
+        sides = set()
+        strategy.consecutive_denied_sides = sides
+    sides.add(str(side or "").strip().lower())
+
+
+def reset_denied_order_streak(strategy: Any) -> None:
+    strategy.consecutive_denied_orders = 0
+    strategy.consecutive_denied_sides = set()
+
+
+def own_order_instrument(strategy: Any, event: Any) -> Any:
+    """Instrument our order was submitted for (Nautilus cache by client order id), or None."""
+    cache = getattr(strategy, "cache", None)
+    lookup = getattr(cache, "order", None)
+    client_order_id = getattr(event, "client_order_id", None)
+    if not callable(lookup) or client_order_id is None:
+        return None
+    try:
+        order = lookup(client_order_id)
+    except Exception:
+        return None
+    return getattr(order, "instrument_id", None) if order is not None else None
+
+
 def is_permanent_trading_restriction(reason: str) -> bool:
     """Return whether the venue explicitly forbids trading from this client.
 
@@ -164,8 +198,34 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             if total_qty <= 0 or accumulated >= total_qty:
                 strategy.active_maker_orders.pop(order_key, None)
             break
+    if filled_id.startswith("BTC-15M-FAST-FOLLOW-BUY-"):
+        # A process may have restarted after durable intent but before the
+        # venue fill callback. The client-order-id namespace preserves the
+        # entry source for that late callback.
+        filled_entry_mode = "fast_follow"
+        filled_directional_snapshot = {
+            "entry_mode": "fast_follow",
+            "entry_source": "outcome_fast_follow",
+        }
+    elif maker_matched and str(filled_side or "").lower() == "buy":
+        # Persist an explicit source for all new maker fills. Historic rows
+        # remain conservatively classified by client-order-id prefix.
+        filled_directional_snapshot.setdefault("entry_source", "normal_maker")
+    event_inst = getattr(event, "instrument_id", None)
     if filled_inst is None:
-        filled_inst = getattr(event, "instrument_id", None) or strategy.instrument_id
+        # Our own order's instrument is the authority. A crossing taker exit can
+        # be matched against the complementary token, and the venue's fill then
+        # reports that sibling instrument; booking it there would leave the sold
+        # token in inventory and corrupt the stop's cost basis.
+        filled_inst = own_order_instrument(strategy, event) or event_inst or strategy.instrument_id
+    fill_instrument_mismatch = (
+        event_inst is not None and filled_inst is not None and str(event_inst) != str(filled_inst)
+    )
+    if fill_instrument_mismatch:
+        logger.warning(
+            f"Fill instrument differs from own order: order={filled_id} own={filled_inst} "
+            f"fill_event={event_inst}; booking against the order's own instrument"
+        )
 
     fill_price_dec = Decimal(str(float(getattr(event, "last_px", 0.0) or 0.0)))
     fill_qty_dec = pending_fill_qty_dec
@@ -178,6 +238,12 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
     ).get(filled_id, {})
     liquidity_side_raw = getattr(event, "liquidity_side", "")
     side_for_ledger = filled_side or strategy._normalize_side_text(getattr(event, "order_side", ""))
+    try:
+        fill_protocol = asset_protocol(
+            strategy._extract_token_id_from_instrument(strategy._instrument_key(filled_inst))
+        ) or "v1"
+    except Exception:
+        fill_protocol = "v1"
     fill_interpretation = interpret_fill_liquidity(
         liquidity_side=liquidity_side_raw,
         raw_commission_dec=raw_commission_dec,
@@ -187,6 +253,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         fill_qty_dec=fill_qty_dec,
         filled_limit_price=filled_limit_price,
         filled_id=filled_id,
+        protocol=fill_protocol,
     )
     liquidity_class = fill_interpretation.liquidity_class
     is_maker_fill = fill_interpretation.is_maker_fill
@@ -210,7 +277,27 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         elif side_norm == "sell":
             strategy.inventory_delta_shares -= fill_qty_dec
     realized_net_usdc = None
+    fill_lifecycle_payload = {}
+    # A resting order of the previous market can fill after a rollover; book
+    # the fill to the market that owns the instrument, not the current one.
+    current_slug_at_fill = str(getattr(strategy, "current_market_slug", "") or "")
+    mapped_fill_slug = slug_for_instrument(
+        strategy, strategy._instrument_key(filled_inst) if filled_inst is not None else None,
+    )
+    fill_market_slug = mapped_fill_slug or current_slug_at_fill
+    fill_slug_payload = {
+        "slug": fill_market_slug,
+        "market_slug": fill_market_slug,
+        "slug_attribution": "instrument_map" if mapped_fill_slug else "current_market_fallback",
+    }
+    if mapped_fill_slug and mapped_fill_slug != current_slug_at_fill:
+        fill_slug_payload["journal_current_market_slug"] = current_slug_at_fill
     if side_for_ledger:
+        pre_fill_state = dict(
+            getattr(strategy, "live_inventory_cost", {}).get(
+                str(strategy._instrument_key(filled_inst)), {}
+            ) or {}
+        )
         realized_net_usdc = strategy._update_live_inventory_cost_from_fill(
             instrument_id=filled_inst,
             side=side_for_ledger,
@@ -219,6 +306,66 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             fee_usdc=effective_fee_usdc_dec,
             fee_shares=effective_fee_shares_dec,
         )
+        # All research metadata failures remain outside execution authority.
+        try:
+            inst_key_after_fill = str(strategy._instrument_key(filled_inst))
+            entry_slug = fill_market_slug
+            state_after_fill = getattr(strategy, "live_inventory_cost", {}).get(inst_key_after_fill, {})
+            fill_lifecycle_payload = fill_lifecycle_metadata(
+                market_slug=entry_slug, instrument_id=inst_key_after_fill, client_order_id=filled_id,
+                side=side_for_ledger, before=pre_fill_state, after=state_after_fill,
+            )
+            fill_lifecycle_payload["fill_event_id"] = str(getattr(event, "trade_id", "") or getattr(event, "id", "") or "")
+            research_db = getattr(strategy, "twap_research_db", None)
+            if fill_lifecycle_payload["fresh_position_entry"] and research_db is not None and entry_slug:
+                entry_ts = time.time()
+                research_db.enqueue_decision(
+                    run_id=str(getattr(strategy, "run_id", "")), slug=entry_slug, market_id=None,
+                    decision_epoch_ns=int(entry_ts * 1_000_000_000),
+                    payload={
+                        "event_type": "POSITION_LIFECYCLE_ENTRY",
+                        "lifecycle_schema_version": LIFECYCLE_SCHEMA_VERSION,
+                        **fill_lifecycle_payload,
+                        "instrument_id": inst_key_after_fill,
+                        "side": str(getattr(strategy._side_for_instrument_id(filled_inst), "value", "NONE")),
+                        "entry_ts": entry_ts, "entry_price": float(fill_price_dec),
+                        "entry_qty": float(fill_qty_dec), "market_slug": entry_slug,
+                        "research_candidate_id": filled_directional_snapshot.get("research_candidate_id"),
+                    },
+                )
+        except Exception:
+            fill_lifecycle_payload = {}
+        exit_context = getattr(strategy, "taker_exit_execution_by_client_order_id", {}).get(filled_id, {})
+        stop_reason = str(taker_exit_reason or exit_context.get("reason") or "").lower()
+        decision_reason = str(exit_context.get("decision_reason") or "").lower()
+        if (
+            side_for_ledger == "sell"
+            and realized_net_usdc is not None
+            and (stop_reason == "stop_loss" or "stop" in decision_reason)
+        ):
+            try:
+                recorder = getattr(strategy, "stop_forensics_shadow", None)
+                pre_qty = Decimal(str(pre_fill_state.get("qty", "0")))
+                avg_entry = Decimal(str(
+                    pre_fill_state.get("avg_entry_price", pre_fill_state.get("avg_price", "0"))
+                ))
+                stopped_qty = min(fill_qty_dec, pre_qty)
+                entry_fee = Decimal(str(pre_fill_state.get("entry_fee_remaining", "0")))
+                allocated_entry_fee = entry_fee * (stopped_qty / pre_qty) if pre_qty > 0 else Decimal("0")
+                if recorder is not None and stopped_qty > 0 and avg_entry > 0:
+                    recorder.record_actual_stop(
+                        slug=str(exit_context.get("slug") or getattr(strategy, "current_market_slug", "") or ""),
+                        instrument_id=str(strategy._instrument_key(filled_inst)),
+                        client_order_id=filled_id, actual_stop_ts=time.time(),
+                        actual_stop_price=fill_price_dec, actual_stop_qty=stopped_qty,
+                        actual_stop_pnl=Decimal(str(realized_net_usdc)),
+                        position_side=str(exit_context.get("position_side") or strategy._side_for_instrument_id(filled_inst).value),
+                        entry_price=avg_entry, entry_fee_usdc=allocated_entry_fee,
+                        reason=decision_reason or stop_reason,
+                        position_lifecycle_id=pre_fill_state.get("position_lifecycle_id"),
+                    )
+            except Exception as exc:
+                logger.debug(f"Stop continuation shadow start failed: {exc}")
         inst_key = strategy._instrument_key(filled_inst)
         if inst_key and hasattr(strategy, "position_manager") and hasattr(strategy, "live_inventory_cost"):
             post_state = strategy.live_inventory_cost.get(inst_key, {})
@@ -340,8 +487,11 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             },
         )
     strategy._clear_pending_taker_exit_for_order(filled_id)
-    protective_exit_reasons = {"stop_loss", "invalidation_recovery", "offside_near_close"}
-    if taker_exit_reason == "stop_loss" and strategy.stop_loss_reentry_cooldown_sec > 0:
+    protective_exit_reasons = {
+        "stop_loss", "invalidation_recovery", "offside_near_close",
+        "endgame_twap_stop_loss",
+    }
+    if taker_exit_reason in {"stop_loss", "endgame_twap_stop_loss"} and strategy.stop_loss_reentry_cooldown_sec > 0:
         inst_key = strategy._instrument_key(filled_inst)
         if inst_key:
             pause_until = time.time() + float(strategy.stop_loss_reentry_cooldown_sec)
@@ -443,7 +593,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             },
         )
 
-    strategy.consecutive_denied_orders = 0
+    reset_denied_order_streak(strategy)
     strategy.last_quote_update_ts = 0.0
 
     strategy._record_observed_fee_rate_from_fill(
@@ -459,8 +609,14 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
         fill_qty=float(event.last_qty),
         fill_price=float(event.last_px),
     )
+    # Journal the instrument that actually filled (the held token for exits).
+    # Without it _db_order_event defaults to the current active-side
+    # instrument, which flips to the paired token after an invalidation; the
+    # startup inventory replay selects ORDER_FILLED rows by instrument_id.
+    filled_inst_journal_key = str(strategy._instrument_key(filled_inst)) if filled_inst is not None else None
     strategy._db_order_event(
         event_type="ORDER_FILLED",
+        instrument_id=filled_inst_journal_key,
         client_order_id=str(getattr(event, "client_order_id", "")),
         venue_order_id=str(getattr(event, "venue_order_id", "")) if getattr(event, "venue_order_id", None) else None,
         side=(fill_side_norm.upper() if fill_side_norm else None),
@@ -473,7 +629,7 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             else None
         ),
         commission_usdc=float(effective_fee_usdc_dec),
-        payload=build_fill_order_event_payload(
+        payload={**build_fill_order_event_payload(
             liquidity_side_raw=liquidity_side_raw,
             inventory_delta_shares=strategy.inventory_delta_shares,
             raw_commission_dec=raw_commission_dec,
@@ -482,8 +638,16 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
             filled_econ=filled_econ,
             filled_directional_snapshot=filled_directional_snapshot,
             realized_net_usdc=realized_net_usdc,
-        ),
+        ), **fill_lifecycle_payload, **fill_slug_payload,
+            **({"instrument_id": filled_inst_journal_key} if filled_inst_journal_key else {}),
+            **({"fill_event_instrument_id": str(event_inst)} if fill_instrument_mismatch else {})},
     )
+    complete_research_candidate = getattr(strategy, "_complete_live_entry_research_candidate", None)
+    if callable(complete_research_candidate):
+        complete_research_candidate(
+            filled_directional_snapshot.get("research_candidate_id"),
+            "candidate_filled",
+        )
     strategy.rebate_reporter.flush_daily_report()
     if strategy.terminal_dashboard:
         side_norm = side_for_ledger or strategy._normalize_side_text(getattr(event, "order_side", ""))
@@ -522,6 +686,14 @@ def handle_order_filled(strategy: Any, event: Any) -> None:
 def handle_order_canceled(strategy: Any, event: Any) -> None:
     """Handle cancel acknowledgements to clear pending-cancel state."""
     canceled_id = str(getattr(event, "client_order_id", "") or "")
+    cancel_started_ns = getattr(strategy, "_cancel_started_ns_by_order_id", {}).pop(canceled_id, None)
+    twap_research_db = getattr(strategy, "twap_research_db", None)
+    if cancel_started_ns is not None and twap_research_db is not None:
+        twap_research_db.enqueue_latency(
+            run_id=str(getattr(strategy, "run_id", "")), client_order_id=canceled_id,
+            name="cancel_request_to_ack", started_monotonic_ns=int(cancel_started_ns),
+            ended_monotonic_ns=time.perf_counter_ns(), created_epoch_ns=time.time_ns(),
+        )
     taker_exit_reason = getattr(strategy, "taker_exit_reason_by_client_order_id", {}).get(canceled_id)
     taker_exit_execution = getattr(
         strategy,
@@ -645,7 +817,7 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             now_ts=time.time(),
         )
 
-    strategy.consecutive_denied_orders += 1
+    record_denied_order_side(strategy, reject_result.rejected_side)
     reason = reject_result.reason
     if taker_exit_reason:
         strategy._db_strategy_event(
@@ -683,7 +855,10 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
         # A 403 geo/compliance rejection is not transient. Stop immediately so
         # a rapid requote loop cannot keep submitting requests that Polymarket
         # has already declared ineligible.
-        strategy._activate_maker_kill_switch("Polymarket CLOB trading restricted for this deployment region")
+        strategy._activate_maker_kill_switch(
+            "Polymarket CLOB trading restricted for this deployment region",
+            reason_code=KILL_REASON_REGION_RESTRICTED,
+        )
         logger.error(
             "Polymarket CLOB returned a permanent trading-restriction rejection. "
             "Maker quoting has been stopped; resolve the deployment's regional "
@@ -759,7 +934,13 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
             return
         pause_sec = max(1, strategy.maker_error_pause_sec)
         strategy.quote_pause_until_ts = max(strategy.quote_pause_until_ts, now_ts + pause_sec)
-        strategy._cancel_active_maker_orders()
+        if reject_result.rejected_side == "buy":
+            # Error-pause class (i): a BUY collateral rejection says nothing
+            # about held inventory, so resting protective SELLs stay in place.
+            strategy._cancel_maker_order_side("buy", reason="buy_balance_reject")
+        else:
+            # Unknown rejected side: keep the existing fail-closed cancel-all.
+            strategy._cancel_active_maker_orders()
         logger.warning(
             f"Balance/allowance rejection detected; pause quoting for {pause_sec}s. "
             "Check wallet balance and token allowance."
@@ -767,5 +948,6 @@ def handle_order_rejection_like_event(strategy: Any, event: Any, title: str = "O
     strategy.rebate_reporter.record_denied()
     if strategy.consecutive_denied_orders >= strategy.maker_max_consecutive_denied:
         strategy._activate_maker_kill_switch(
-            f"Consecutive denied orders reached {strategy.consecutive_denied_orders}"
+            f"Consecutive denied orders reached {strategy.consecutive_denied_orders}",
+            reason_code=KILL_REASON_CONSECUTIVE_DENIED,
         )

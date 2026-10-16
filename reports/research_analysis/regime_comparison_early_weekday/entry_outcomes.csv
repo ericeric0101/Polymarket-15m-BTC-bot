@@ -1,0 +1,5 @@
+cohort,regime,shadow_settled_entry_N,wins,losses,win_rate,VERIFIED_EX_MARKET_EDGE,MARKET_FOLLOWING,UNVERIFIED,gross_pnl
+ALL_SYNCHRONIZED,WEEKDAY,14,11,3,0.7857142857142857,2,8,4,see capital_efficiency_by_regime.csv
+HOUR_MATCHED_00_06,WEEKDAY,14,11,3,0.7857142857142857,2,8,4,see capital_efficiency_time_matched.csv
+ALL_SYNCHRONIZED,WEEKEND,41,35,6,0.8536585365853658,5,18,18,see capital_efficiency_by_regime.csv
+HOUR_MATCHED_00_06,WEEKEND,13,12,1,0.9230769230769231,3,5,5,see capital_efficiency_time_matched.csv

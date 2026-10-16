@@ -1,0 +1,19 @@
+{
+  "all_rows": {
+    "binance_to_decision": 5631486,
+    "polymarket_twap_to_decision": 597271,
+    "polymarket_spot_to_decision": 597314,
+    "polymarket_bbo_to_decision": 2133082,
+    "outcome_btc_mark_to_decision": 115925,
+    "order_handoff": 333,
+    "cancel_request_to_ack": 143
+  },
+  "recent_1h": {
+    "binance_to_decision": 18190,
+    "polymarket_twap_to_decision": 3487,
+    "polymarket_bbo_to_decision": 15094,
+    "polymarket_spot_to_decision": 3483,
+    "outcome_btc_mark_to_decision": 715
+  },
+  "observed_epoch": 1791335576.8388212
+}

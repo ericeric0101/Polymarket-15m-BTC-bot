@@ -1,0 +1,7 @@
+relationship,btc_side,market_leader,n,btc_accuracy,market_leader_accuracy,btc_entry_mean,note
+agree,DOWN,DOWN,67,0.7313432835820896,0.7313432835820896,0.6644722757436795,accuracy among decisive labels; no quote-based execution inference
+agree,UP,UP,98,0.7244897959183674,0.7244897959183674,0.6949998528218173,accuracy among decisive labels; no quote-based execution inference
+disagree,DOWN,UP,15,0.4,0.6,0.45533596731314646,accuracy among decisive labels; no quote-based execution inference
+disagree,UP,DOWN,10,0.8,0.2,0.4799898295532341,accuracy among decisive labels; no quote-based execution inference
+agree,ALL,ALL,165,0.7272727272727273,0.7272727272727273,0.6827068687635067,"aggregated; descriptive, no confidence interval"
+disagree,ALL,ALL,25,0.56,0.44,0.46441896919107345,"aggregated; descriptive, no confidence interval"

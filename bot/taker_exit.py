@@ -9,14 +9,30 @@ from __future__ import annotations
 
 import time
 from decimal import Decimal, ROUND_FLOOR
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol, Set
 
 from loguru import logger
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.objects import Price, Quantity
 
+from bot.breaker_authority import (
+    DECISION_EVENT as BREAKER_V2_DECISION_EVENT,
+    FALLBACK_LEGACY as BREAKER_V2_FALLBACK_LEGACY,
+    REHYDRATED_EVENT as BREAKER_V2_REHYDRATED_EVENT,
+    SCHEMA_VERSION as BREAKER_V2_SCHEMA_VERSION,
+    SUPPRESS as BREAKER_V2_SUPPRESS,
+    BreakerV2AuthorityBook,
+    decide_authority as breaker_v2_decide_authority,
+    market_day_type as breaker_v2_market_day_type,
+    position_epoch_key as breaker_v2_position_epoch_key,
+    rehydrated_decision as breaker_v2_rehydrated_decision,
+)
+from bot.kill_switch import HARD_PROTECTIVE_EXIT_REASONS
+from bot.settlement_side import canonical_twap_side_state
+from bot.order_ids import new_client_order_id
 from bot.enums import ActiveSide
+from bot.endgame_twap_exit import evaluate_endgame_twap_exit
 from bot.exit_audit import build_invalidation_exit_audit
 from bot.recovery_exit_ladder import select_recovery_exit_action
 from bot.models import (
@@ -51,6 +67,10 @@ class TakerExitHost(Protocol):
     market_strike_cache_by_slug: dict[str, Any]
     maker_reduce_only_no_new_sell_last_sec: int
     taker_exit_disable_stop_loss_last_sec: int
+    endgame_twap_exit_enabled: bool
+    endgame_twap_exit_max_time_left_sec: int
+    endgame_twap_exit_min_distance_usd: Decimal
+    endgame_twap_exit_max_age_sec: float
     market_phase: Any
     active_side: Any
     side_decision_score: Decimal
@@ -110,12 +130,211 @@ class TakerExitMixin:
         )
         return True
 
-    async def _maybe_taker_exit_positions(self: TakerExitHost, now_ts: float, is_simulation: bool) -> None:
-        if is_simulation or not self.taker_exit_enabled:
+    def _note_protective_skip(self, inst_key: str, reason: str) -> None:
+        """Observability only: why a held instrument was not evaluated this cycle."""
+        try:
+            reasons = getattr(self, "_protective_eval_skip_reason_by_inst", None)
+            if not isinstance(reasons, dict):
+                reasons = {}
+                self._protective_eval_skip_reason_by_inst = reasons
+            reasons[inst_key] = reason
+        except Exception:
+            pass
+
+    def _note_protective_eval(self, inst_key: str, now_ts: float) -> None:
+        """Observability only: a protective evaluation actually ran for this instrument."""
+        try:
+            evals = getattr(self, "_protective_eval_last_ts_by_inst", None)
+            if not isinstance(evals, dict):
+                evals = {}
+                self._protective_eval_last_ts_by_inst = evals
+            evals[inst_key] = float(now_ts)
+            reasons = getattr(self, "_protective_eval_skip_reason_by_inst", None)
+            if isinstance(reasons, dict):
+                reasons.pop(inst_key, None)
+            # A reported PROTECTIVE_EVAL_GAP ends here; memory only (the
+            # watchdog emits PROTECTIVE_EVAL_GAP_END, never this exit path).
+            open_gaps = getattr(self, "_protective_eval_gap_open_by_inst", None)
+            if isinstance(open_gaps, dict) and inst_key in open_gaps:
+                closed = getattr(self, "_protective_eval_gap_closed", None)
+                if not isinstance(closed, list):
+                    closed = []
+                    self._protective_eval_gap_closed = closed
+                if len(closed) < 64:
+                    closed.append((inst_key, open_gaps.pop(inst_key), float(now_ts)))
+                else:
+                    open_gaps.pop(inst_key, None)
+        except Exception:
+            pass
+
+    def _breaker_v2_book(self) -> BreakerV2AuthorityBook:
+        book = getattr(self, "breaker_v2_authority_book", None)
+        if not isinstance(book, BreakerV2AuthorityBook):
+            book = BreakerV2AuthorityBook()
+            self.breaker_v2_authority_book = book
+        return book
+
+    def _resolve_breaker_v2_authority(
+        self, *, now_ts: float, slug: str, inst_key: str, inst_id: Any, epoch_key: str, opened_ts: float,
+        held_side: str, twap_features: Optional[dict], strike: Any, qty: Decimal, avg_entry: Decimal,
+        best_bid: Decimal, best_ask: Decimal, time_left_sec: Optional[float], exit_decision: Any,
+    ) -> str:
+        """Lock the Breaker V2 authority for one position epoch (called once).
+
+        Order: (1) a decision already persisted for this position (restart /
+        rebuild) is restored, never re-decided; (2) otherwise decide from the
+        canonical TWAP side state; (3) persist to the core journal BEFORE any
+        behaviour depends on it.  A SUPPRESS that cannot be persisted degrades
+        to FALLBACK_LEGACY.  Never raises: any fault yields FALLBACK_LEGACY.
+        """
+        book = self._breaker_v2_book()
+        try:
+            rehydrate_reason = "new_position_in_process"
+            lookup_decision = None
+            if not book.has_other_epoch(slug, inst_key, epoch_key):
+                trade_db = getattr(self, "trade_db", None)
+                loader = getattr(trade_db, "load_breaker_v2_authority_decision", None)
+                lookup = loader(slug, inst_key) if callable(loader) else None
+                lookup_decision, rehydrate_reason = breaker_v2_rehydrated_decision(lookup)
+            if lookup_decision is not None:
+                decision = book.lock(epoch_key, slug=slug, instrument_id=inst_key,
+                                     decision=lookup_decision, reason=rehydrate_reason)
+                try:
+                    self._db_strategy_event(BREAKER_V2_REHYDRATED_EVENT, {
+                        "schema": BREAKER_V2_SCHEMA_VERSION, "slug": slug, "instrument_id": inst_key,
+                        "position_epoch": epoch_key, "opened_ts": float(opened_ts or 0.0),
+                        "decision": decision, "rehydrate_reason": rehydrate_reason, "observed_ts": float(now_ts),
+                    })
+                except Exception:
+                    pass
+                self._breaker_v2_apply_side_effects(decision, inst_key)
+                logger.warning(
+                    f"Breaker V2 authority restored: {decision} ({rehydrate_reason}) slug={slug} inst={inst_key}"
+                )
+                return decision
+
+            strike_verified = False
+            verifier = getattr(self, "_market_strike_is_entry_eligible", None)
+            if callable(verifier):
+                try:
+                    strike_verified = bool(verifier(slug))
+                except Exception:
+                    strike_verified = False
+            twap = canonical_twap_side_state(
+                held_side=held_side, twap_features=twap_features, strike=strike,
+                strike_verified=strike_verified, expected_slug=slug, now_ts=now_ts,
+            )
+            decision, reason = breaker_v2_decide_authority(twap["state"])
+            meta = getattr(exit_decision, "metadata", {}) or {}
+            payload = {
+                "schema": BREAKER_V2_SCHEMA_VERSION,
+                "run_id": str(getattr(self, "run_id", "") or ""),
+                "slug": slug, "instrument_id": inst_key, "held_side": held_side,
+                "position_epoch": epoch_key, "opened_ts": float(opened_ts or 0.0),
+                "first_eligibility_ts": float(now_ts), "decision_ts": time.time(),
+                "decision": decision, "decision_reason": reason, "rehydrate_check": rehydrate_reason,
+                "legacy_breaker_would_sell": True,
+                "conditional_breaker_suppressed": decision == BREAKER_V2_SUPPRESS,
+                "twap_state": twap["state"], "twap_value": twap["twap"], "twap_source_ts": twap["source_ts"],
+                "twap_age_sec": twap["age_sec"], "twap_max_age_sec": twap["max_age_sec"],
+                "twap_features_slug": twap["features_slug"],
+                "strike": twap["strike"], "strike_verified": twap["strike_verified"],
+                "signed_distance_usd": twap["signed_distance_usd"],
+                "signed_distance_bps": twap["signed_distance_bps"],
+                "time_left_sec": time_left_sec, "qty": float(qty), "avg_entry": float(avg_entry),
+                "held_side_best_bid": float(best_bid), "held_side_best_ask": float(best_ask),
+                "breaker_reason": str(getattr(exit_decision, "reason", "") or ""),
+                "net_if_exit": float(getattr(exit_decision, "net_if_exit", 0) or 0),
+                "exit_px_effective": float(getattr(exit_decision, "exit_px_effective", 0) or 0),
+                "breaker_components": {
+                    key: meta.get(key) for key in (
+                        "near_settlement_fast_path", "adverse_persistence_sec",
+                        "adverse_thesis_weakening_count", "adverse_thesis_available_count",
+                        "adverse_trend_confirmed", "signal_score", "signal_locked",
+                        "signal_matches_position", "hold_sec", "absolute_max_loss_usdc",
+                    )
+                },
+                # Evaluation stratum only; never an input to the decision.
+                "market_day_type": breaker_v2_market_day_type(slug, now_ts),
+                "flag_enabled": True,
+            }
+            persisted = False
+            try:
+                persisted = bool(self._db_strategy_event(BREAKER_V2_DECISION_EVENT, payload))
+            except Exception:
+                persisted = False
+            if not persisted and decision == BREAKER_V2_SUPPRESS:
+                decision, reason = BREAKER_V2_FALLBACK_LEGACY, "suppress_not_persisted"
+                try:
+                    self._db_strategy_event(BREAKER_V2_DECISION_EVENT, {
+                        **payload, "decision": decision, "decision_reason": reason,
+                        "conditional_breaker_suppressed": False, "decision_ts": time.time(),
+                    })
+                except Exception:
+                    pass
+            decision = book.lock(epoch_key, slug=slug, instrument_id=inst_key, decision=decision, reason=reason)
+            self._breaker_v2_apply_side_effects(decision, inst_key)
+            logger.warning(
+                f"Breaker V2 authority: {decision} ({reason}) slug={slug} inst={inst_key} "
+                f"twap_state={twap['state']} twap={twap['twap']} strike={twap['strike']} "
+                f"age={twap['age_sec']} tte={time_left_sec}"
+            )
+            return decision
+        except Exception as exc:
+            logger.warning(f"Breaker V2 authority fault, legacy breaker kept: {exc}")
+            return book.lock(epoch_key, slug=slug, instrument_id=inst_key,
+                             decision=BREAKER_V2_FALLBACK_LEGACY, reason="authority_fault")
+
+    def _breaker_v2_apply_side_effects(self, decision: str, inst_key: str) -> None:
+        """SUPPRESS: never increase BUY exposure on this market pair."""
+        if decision != BREAKER_V2_SUPPRESS:
+            return
+        book = self._breaker_v2_book()
+        instruments = {inst_key}
+        pair = []
+        try:
+            pair = [self._instrument_key(inst) for inst in self._maker_quote_instruments()]
+        except Exception:
+            pair = []
+        if inst_key in pair:
+            instruments.update(pair)
+        book.block_buys(instruments)
+        canceller = getattr(self, "_cancel_maker_order_side", None)
+        if callable(canceller):
+            for inst in list(self._maker_quote_instruments()) if pair else []:
+                try:
+                    canceller(side="buy", instrument_id=inst, reason="breaker_v2_suppress_no_add_on")
+                except Exception:
+                    pass
+
+    async def _maybe_taker_exit_positions(
+        self: TakerExitHost,
+        now_ts: float,
+        is_simulation: bool,
+        blocked_instruments: Optional[Set[str]] = None,
+        hard_protective_only: bool = False,
+    ) -> None:
+        if is_simulation:
+            return
+        # Instruments whose inputs are stale or whose inventory is unreliable
+        # are reported as PROTECTIVE_EXIT_DEGRADED by bot.protective_exit and
+        # must not be evaluated from stale data or sold twice.
+        blocked = set(blocked_instruments or ())
+        # An operational/entry kill switch (bot.kill_switch) applies exactly the
+        # STOP_LOSS=0 semantics: only the independent hard breakers may SELL.
+        stop_loss_enabled = bool(getattr(self, "stop_loss_enabled", True)) and not hard_protective_only
+        engine_config = getattr(getattr(self, "exit_policy_engine", None), "config", None)
+        hard_loss_enabled = bool(getattr(self, "absolute_max_loss_enabled",
+                                        getattr(engine_config, "absolute_max_loss_enabled", False))) or bool(
+            getattr(self, "catastrophic_stop_loss_enabled",
+                    getattr(engine_config, "catastrophic_stop_loss_enabled", False)))
+        if not self.taker_exit_enabled and not hard_loss_enabled:
+            return
+        if not stop_loss_enabled and not hard_loss_enabled:
             return
         hold_to_redeem = bool(getattr(self, "hold_to_redeem_enabled", False))
         invalidation_recovery_enabled = bool(getattr(self, "taker_exit_only_after_invalidation", False))
-        if hold_to_redeem and not invalidation_recovery_enabled:
+        if hold_to_redeem and not invalidation_recovery_enabled and not hard_loss_enabled:
             return
         if self.taker_exit_cooldown_sec < 0:
             return
@@ -133,6 +352,10 @@ class TakerExitMixin:
             and time_left_sec <= float(self.taker_exit_disable_stop_loss_last_sec)
         )
         target_instruments = list(self._maker_quote_instruments())
+        endgame_window_active = bool(getattr(self, "endgame_twap_exit_enabled", False)) and (
+            time_left_sec is not None
+            and 0.0 <= time_left_sec <= float(getattr(self, "endgame_twap_exit_max_time_left_sec", 0))
+        )
         seen_instruments = {self._instrument_key(inst_id) for inst_id in target_instruments}
         # Critical: active_side can flip away from the actual held instrument.
         # When that happens we still need to evaluate exits on the off-side inventory,
@@ -155,15 +378,20 @@ class TakerExitMixin:
             inst_key = self._instrument_key(inst_id)
             if not inst_key:
                 continue
-            if self.taker_exit_eval_interval_sec > 0:
+            if inst_key in blocked:
+                self._note_protective_skip(inst_key, "blocked_degraded")
+                continue
+            if self.taker_exit_eval_interval_sec > 0 and not endgame_window_active:
                 last_eval_ts = float(self.taker_exit_last_eval_ts_by_inst.get(inst_key, 0.0))
                 if now_ts - last_eval_ts < float(self.taker_exit_eval_interval_sec):
                     continue
                 self.taker_exit_last_eval_ts_by_inst[inst_key] = now_ts
             reject_cooldown_until = float(self.taker_exit_reject_cooldown_until_by_inst.get(inst_key, 0.0))
             if now_ts < reject_cooldown_until:
+                self._note_protective_skip(inst_key, "reject_cooldown")
                 continue
             if in_reduce_only_tail and inst_key in self.taker_exit_tail_attempted_by_inst:
+                self._note_protective_skip(inst_key, "reduce_only_tail_attempted")
                 continue
             state = self.live_inventory_cost.get(inst_key)
             if not state:
@@ -172,15 +400,107 @@ class TakerExitMixin:
             if qty <= 0:
                 continue
             if inst_key in self.pending_taker_exit_by_inst:
+                self._note_protective_skip(inst_key, "pending_exit")
                 continue
             last_ts = float(self.last_taker_exit_ts_by_inst.get(inst_key, 0.0))
             if now_ts - last_ts < self.taker_exit_cooldown_sec:
+                self._note_protective_skip(inst_key, "taker_exit_cooldown")
                 continue
             quote = self._get_quote_for_instrument(inst_id)
             if quote is None:
+                self._note_protective_skip(inst_key, "no_quote")
                 continue
             best_bid, best_ask = quote
             if best_bid <= 0:
+                self._note_protective_skip(inst_key, "no_bid")
+                continue
+
+            # Run the settlement-specific circuit breaker before fair pricing,
+            # dynamic-fee I/O, the normal evaluation interval, or any generic
+            # stop-loss gate. In the final 120 seconds those costs are latency
+            # we do not need in order to decide a Chainlink-TWAP disagreement.
+            avg_entry = Decimal(str(state.get("avg_entry_price", "0")))
+            strike = self.market_strike_cache_by_slug.get(str(self.current_market_slug or ""))
+            reference_spot = getattr(self, "latest_external_spot", None)
+            reference_source = str(getattr(self, "latest_external_spot_source", "") or "")
+            reference_ts = float(getattr(self, "latest_external_spot_source_ts", 0.0) or 0.0)
+            held_side = self._side_for_instrument_id(inst_id).value
+            strike_verified = False
+            if hasattr(self, "_market_strike_is_entry_eligible"):
+                try:
+                    strike_verified = bool(self._market_strike_is_entry_eligible(str(self.current_market_slug or "")))
+                except Exception:
+                    strike_verified = False
+            endgame_decision = evaluate_endgame_twap_exit(
+                enabled=stop_loss_enabled and bool(getattr(self, "endgame_twap_exit_enabled", False)),
+                time_left_sec=time_left_sec,
+                max_time_left_sec=float(getattr(self, "endgame_twap_exit_max_time_left_sec", 0)),
+                twap_price=Decimal(str(reference_spot)) if reference_spot is not None else None,
+                twap_source=reference_source,
+                twap_age_sec=(now_ts - reference_ts) if reference_ts > 0 else None,
+                max_twap_age_sec=float(getattr(self, "endgame_twap_exit_max_age_sec", 5.0)),
+                strike=Decimal(str(strike)) if strike is not None else None,
+                strike_verified=strike_verified,
+                held_side=held_side,
+                min_distance_usd=Decimal(str(getattr(self, "endgame_twap_exit_min_distance_usd", Decimal("10")))),
+            )
+            if endgame_decision.eligible:
+                self._note_protective_eval(inst_key, now_ts)
+                opened_ts = float(state.get("opened_ts", 0.0) or 0.0)
+                position_epoch = (
+                    f"{self.current_market_slug or ''}|{inst_key}|{opened_ts:.6f}|"
+                    f"{float(avg_entry):.8f}"
+                )
+                endgame_states = getattr(self, "endgame_twap_exit_state_by_epoch", None)
+                if not isinstance(endgame_states, dict):
+                    endgame_states = {}
+                    self.endgame_twap_exit_state_by_epoch = endgame_states
+                prior_state = str(endgame_states.get(position_epoch) or "")
+                # A submitted taker request owns the epoch. A sub-minimum
+                # residual cannot be sold on this venue, so record that fact
+                # once rather than writing a row for every final-tail quote.
+                if prior_state in {"submitted", "blocked_inventory_below_minimum"}:
+                    continue
+                estimated_net = (best_bid - avg_entry) * qty
+                decision_payload = {
+                    "slug": str(self.current_market_slug or ""),
+                    "decision_type": "ENDGAME_TWAP_TAKER_STOP_LOSS",
+                    "decision_reason": endgame_decision.reason,
+                    "time_left_sec": time_left_sec,
+                    "held_side": held_side,
+                    "twap_price": float(Decimal(str(reference_spot))),
+                    "strike": float(Decimal(str(strike))),
+                    "twap_minus_strike": float(endgame_decision.twap_minus_strike or Decimal("0")),
+                    "twap_age_sec": (now_ts - reference_ts) if reference_ts > 0 else None,
+                    "twap_source": reference_source,
+                    "strike_verified": True,
+                    "best_bid": float(best_bid),
+                    "best_ask": float(best_ask),
+                    "qty": float(qty),
+                    "position_epoch": position_epoch,
+                }
+                self._db_strategy_event("ENDGAME_TWAP_EXIT_TRIGGERED", decision_payload)
+                if qty + Decimal("0.000001") < self.maker_exchange_min_shares:
+                    endgame_states[position_epoch] = "blocked_inventory_below_minimum"
+                    self._db_strategy_event(
+                        "ENDGAME_TWAP_EXIT_BLOCKED",
+                        {**decision_payload, "block_reason": "inventory_below_minimum"},
+                    )
+                    continue
+                ok = self._submit_taker_exit_order(
+                    instrument_id=inst_id,
+                    quantity=qty,
+                    reason="endgame_twap_stop_loss",
+                    est_net_if_exit=estimated_net,
+                    best_bid=best_bid,
+                    fee_rate=self._infer_market_fee_rate_default(),
+                    decision_payload=decision_payload,
+                )
+                if ok:
+                    self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+                    endgame_states[position_epoch] = "submitted"
+                else:
+                    endgame_states[position_epoch] = "submit_not_accepted"
                 continue
             spread = max(Decimal("0"), best_ask - best_bid)
             mid = (best_bid + best_ask) / Decimal("2") if (best_bid + best_ask) > 0 else Decimal("0")
@@ -234,8 +554,10 @@ class TakerExitMixin:
             )
             opened_ts = float(state.get("opened_ts", 0.0))
             hold_sec = max(0.0, now_ts - opened_ts) if opened_ts > 0 else 0.0
+
             invalidation_recovery_candidate = (
-                hold_to_redeem
+                stop_loss_enabled
+                and hold_to_redeem
                 and invalidation_recovery_enabled
                 and confirmed_locked_side_invalidated
                 # A confirmed invalidation remains a separate safeguard from a
@@ -334,6 +656,7 @@ class TakerExitMixin:
                     ),
                 )
             if awaiting_recovery_sell_release:
+                self._note_protective_skip(inst_key, "awaiting_existing_sell_cancel")
                 continue
             high_cost_cooldown_until = float(self.high_cost_exit_cooldown_until_by_inst.get(inst_key, 0.0))
             emergency_window = self._is_emergency_exit_window(time_left_sec)
@@ -357,6 +680,7 @@ class TakerExitMixin:
                     ),
                     now_ts=now_ts,
                 )
+                self._note_protective_skip(inst_key, "high_cost_cooldown")
                 continue
 
             entry_fee_remaining = Decimal(str(state.get("entry_fee_remaining", "0")))
@@ -397,21 +721,221 @@ class TakerExitMixin:
                 reason=self.side_decision_reason,
                 matches_position=(self._instrument_for_side(self.active_side) == inst_id),
             )
+            slug_for_confirmation = str(self.current_market_slug or "")
+            stop_twap = getattr(self, "twap_forward_shadow", None)
+            stop_twap_features = stop_twap.latest(slug_for_confirmation) if stop_twap is not None else None
+            stop_twap_side = str((stop_twap_features or {}).get("projected_settlement_side_trend") or "").upper()
+            stop_twap_source_ts = (stop_twap_features or {}).get("source_ts")
+            stop_twap_age_sec = (
+                max(0.0, now_ts - float(stop_twap_source_ts))
+                if stop_twap_source_ts else None
+            )
+            stop_signal_side = str(signal_decision.active_side or "").upper()
+            stop_signal_available = stop_signal_side in {"UP", "DOWN"}
+            stop_twap_available = (
+                (stop_twap_features or {}).get("official_current_twap") is not None
+                and stop_twap_side in {"UP", "DOWN"}
+                and stop_twap_age_sec is not None
+                and stop_twap_age_sec <= 5.0
+            )
+            entry_fair = state.get("fair_at_entry")
+            stop_fair_available = entry_fair is not None and fair is not None
+            try:
+                stop_fair_deteriorated = (
+                    stop_fair_available
+                    and Decimal(str(entry_fair)) - Decimal(str(fair)) >= Decimal("0.05")
+                )
+            except Exception:
+                stop_fair_available = False
+                stop_fair_deteriorated = False
+            signal_threshold = Decimal(str(getattr(
+                self, "exit_stop_loss_thesis_min_score_abs", Decimal("0.2")
+            )))
+            stop_signal_adverse = bool(
+                stop_signal_available
+                and stop_signal_side != held_side
+                and signal_decision.locked
+                and abs(signal_decision.score) >= signal_threshold
+            )
+            stop_twap_adverse = bool(stop_twap_available and stop_twap_side != held_side)
+            stop_thesis_available_count = (
+                int(stop_signal_available) + int(stop_twap_available) + int(stop_fair_available)
+            )
+            stop_thesis_weakening_count = (
+                int(stop_signal_adverse) + int(stop_twap_adverse) + int(stop_fair_deteriorated)
+            )
+            stop_vote_components = {
+                "signal_adverse": stop_signal_adverse,
+                "twap_adverse": stop_twap_adverse,
+                "fair_deteriorated": bool(stop_fair_deteriorated),
+            }
+            stop_adverse_since = getattr(self, "_stop_adverse_since_by_slug", None)
+            if stop_adverse_since is None:
+                stop_adverse_since = {}
+                self._stop_adverse_since_by_slug = stop_adverse_since
+            stop_adverse_votes = getattr(self, "_stop_adverse_votes_by_slug", None)
+            if stop_adverse_votes is None:
+                stop_adverse_votes = {}
+                self._stop_adverse_votes_by_slug = stop_adverse_votes
+            prior_components = tuple(
+                name for name, adverse in stop_adverse_votes.get(slug_for_confirmation, {}).items()
+                if name.endswith("_adverse") or name == "fair_deteriorated"
+                if adverse
+            )
+            current_components = tuple(name for name, adverse in stop_vote_components.items() if adverse)
+            if (
+                qty > 0
+                and stop_thesis_available_count >= 2
+                and stop_thesis_weakening_count >= 2
+            ):
+                if prior_components != current_components or slug_for_confirmation not in stop_adverse_since:
+                    stop_adverse_since[slug_for_confirmation] = now_ts
+                stop_adverse_votes[slug_for_confirmation] = {
+                    **stop_vote_components,
+                    "weakening_count": stop_thesis_weakening_count,
+                    "available_count": stop_thesis_available_count,
+                    "twap_source_age_sec": stop_twap_age_sec,
+                }
+            else:
+                stop_adverse_since.pop(slug_for_confirmation, None)
+                stop_adverse_votes.pop(slug_for_confirmation, None)
+            adverse_persistence_sec = max(
+                0.0, now_ts - float(stop_adverse_since.get(slug_for_confirmation, now_ts))
+            ) if slug_for_confirmation in stop_adverse_since else 0.0
+            current_stop_votes = stop_adverse_votes.get(slug_for_confirmation, {})
             stop_loss_pending_active = bool(
                 self._stop_loss_execution_priority_by_inst.get(inst_key, False)
                 or int(self.taker_exit_stop_loss_hits_by_inst.get(inst_key, 0)) > 0
             )
+            evaluate_kwargs = dict(
+                stop_loss_pending_active=stop_loss_pending_active,
+                locked_side_invalidated=confirmed_locked_side_invalidated,
+                confirmed_adverse_exit_active=confirmed_locked_side_invalidated,
+                adverse_persistence_sec=adverse_persistence_sec,
+                adverse_thesis_weakening_count=int(current_stop_votes.get("weakening_count", 0)),
+                adverse_thesis_available_count=int(current_stop_votes.get("available_count", 0)),
+            )
+            # Breaker V2 (flag off => this block is inert and the call below is
+            # byte-identical to the legacy call).  The authority is decided
+            # once per position epoch at FIRST conditional-absolute eligibility.
+            breaker_v2_enabled = bool(getattr(self, "absolute_max_loss_twap_authority_gate_enabled", False))
+            breaker_v2_decision = None
+            breaker_v2_epoch = breaker_v2_position_epoch_key(slug_for_confirmation, inst_key, opened_ts)
+            if breaker_v2_enabled:
+                breaker_v2_decision = self._breaker_v2_book().get(breaker_v2_epoch)
+                evaluate_kwargs["suppress_conditional_absolute"] = breaker_v2_decision == BREAKER_V2_SUPPRESS
             exit_decision = self.exit_policy_engine.evaluate(
                 snapshot,
                 position,
                 signal_decision,
-                stop_loss_pending_active=stop_loss_pending_active,
-                locked_side_invalidated=confirmed_locked_side_invalidated,
-                confirmed_adverse_exit_active=confirmed_locked_side_invalidated,
+                **evaluate_kwargs,
             )
+            if (
+                breaker_v2_enabled
+                and breaker_v2_decision is None
+                and exit_decision.reason == "absolute_max_loss_breaker"
+            ):
+                breaker_v2_decision = self._resolve_breaker_v2_authority(
+                    now_ts=now_ts, slug=slug_for_confirmation, inst_key=inst_key, inst_id=inst_id,
+                    epoch_key=breaker_v2_epoch, opened_ts=opened_ts, held_side=held_side,
+                    twap_features=stop_twap_features, strike=strike, qty=qty, avg_entry=avg_entry,
+                    best_bid=best_bid, best_ask=best_ask, time_left_sec=time_left_sec,
+                    exit_decision=exit_decision,
+                )
+                if breaker_v2_decision == BREAKER_V2_SUPPRESS:
+                    # Same cycle, same inputs: the conditional absolute branch is
+                    # skipped and catastrophic / every other exit is evaluated.
+                    evaluate_kwargs["suppress_conditional_absolute"] = True
+                    exit_decision = self.exit_policy_engine.evaluate(
+                        snapshot,
+                        position,
+                        signal_decision,
+                        **evaluate_kwargs,
+                    )
+            self._note_protective_eval(inst_key, now_ts)
+            # Research-only stop-timing telemetry: transition events through the
+            # non-blocking journal queue; never raises and returns no decision.
+            stop_timing = getattr(self, "stop_timing_telemetry", None)
+            if stop_timing is not None:
+                exit_bid_levels = None
+                l2_age_sec = None
+                try:  # cached-book read only; never awaits, never raises into the exit path
+                    l2_ts = float((getattr(self, "l2_update_ts_by_inst", None) or {}).get(inst_key, 0.0) or 0.0)
+                    l2_age_sec = (now_ts - l2_ts) if l2_ts > 0 else None
+                    cache = getattr(self, "cache", None)
+                    book_fn = getattr(cache, "order_book", None)
+                    levels_fn = getattr(self, "_levels_from_native_order_book", None)
+                    book = book_fn(inst_id) if callable(book_fn) else None
+                    if book is not None and callable(levels_fn):
+                        exit_bid_levels = levels_fn(book, "bids", int(getattr(self, "orderbook_levels_limit", 10) or 10))
+                except Exception:
+                    exit_bid_levels = None
+                held_bid_ts = held_bid_size = None
+                try:  # cached reads only; research inputs never raise into the exit path
+                    held_bid_ts = (getattr(self, "last_quote_update_ts_by_inst", None) or {}).get(inst_key)
+                    held_depth = (getattr(self, "latest_quote_depth_by_inst", None) or {}).get(inst_key)
+                    held_bid_size = held_depth[0] if held_depth else None
+                except Exception:
+                    held_bid_ts = held_bid_size = None
+                stop_timing.observe_safe(
+                    now_ts=now_ts, slug=slug_for_confirmation, instrument_id=inst_key,
+                    held_side=held_side, state=state, qty=qty, sellable_qty=position.sellable_qty,
+                    best_bid=best_bid, best_ask=best_ask, time_left_sec=time_left_sec,
+                    market_end_ts=end_ts, strike=strike, reference_spot=reference_spot,
+                    reference_source=reference_source, reference_ts=reference_ts,
+                    twap_features=stop_twap_features, exit_decision=exit_decision,
+                    engine_config=engine_config, signal_decision=signal_decision,
+                    locked_side_invalidated=confirmed_locked_side_invalidated,
+                    adverse_persistence_sec=adverse_persistence_sec,
+                    thesis_votes=current_stop_votes, hold_sec=hold_sec,
+                    sizing_rule_version=state.get("sizing_version"),
+                    binance_spot=getattr(self, "_binance_ws_price", None),
+                    binance_spot_ts=getattr(self, "_binance_ws_price_ts", None),
+                    exit_bid_levels=exit_bid_levels, l2_age_sec=l2_age_sec,
+                    chainlink_spot=getattr(self, "_polymarket_chainlink_price", None),
+                    chainlink_spot_ts=getattr(self, "_polymarket_chainlink_price_ts", None),
+                    held_bid_ts=held_bid_ts, held_bid_size=held_bid_size,
+                    quote_fresh_max_age_sec=getattr(self, "quote_max_delivery_delay_sec", None),
+                    spot_fresh_max_age_sec=getattr(self, "_RAW_SPOT_FRESHNESS_SEC", None),
+                    **({"breaker_v2_decision": breaker_v2_decision} if breaker_v2_enabled else {}),
+                )
+            # STOP_LOSS=0 keeps all adaptive/strategy exits disabled. Only the
+            # independently configured hard breaker may pass this boundary.
+            if (not stop_loss_enabled or not self.taker_exit_enabled or
+                    (hold_to_redeem and not invalidation_recovery_enabled)) and (
+                        exit_decision.reason not in HARD_PROTECTIVE_EXIT_REASONS):
+                continue
             net_if_exit = exit_decision.net_if_exit
+            breaker_threshold = abs(Decimal(str(getattr(self, "absolute_max_loss_usdc", "2.00"))))
+            if (
+                confirmed_locked_side_invalidated
+                and net_if_exit <= -breaker_threshold
+                and exit_decision.reason != "absolute_max_loss_breaker"
+                and exit_decision.metadata.get("conditional_absolute_suppressed") != "1"
+                and time_left_sec is not None
+                and time_left_sec > 120.0
+            ):
+                self._record_exit_policy_decision_throttled(
+                    inst_key=inst_key,
+                    reason_tag="absolute_loss_confirmation_pending",
+                    now_ts=now_ts,
+                    payload={
+                        "slug": str(self.current_market_slug or ""),
+                        "instrument_id": inst_key,
+                        "decision_type": "ABSOLUTE_LOSS_CONFIRMATION_PENDING",
+                        "reason": "requires_15s_and_two_thesis_votes",
+                        "time_left_sec": time_left_sec,
+                        "net_if_exit": float(net_if_exit),
+                        "absolute_max_loss_usdc": float(breaker_threshold),
+                        "adverse_persistence_sec": adverse_persistence_sec,
+                        "thesis_weakening_count": int(current_stop_votes.get("weakening_count", 0)),
+                        "thesis_available_count": int(current_stop_votes.get("available_count", 0)),
+                        "thesis_components": current_stop_votes,
+                    },
+                )
             force_offside_near_close = (
-                (
+                stop_loss_enabled
+                and (
                     confirmed_locked_side_invalidated
                     or not signal_decision.matches_position
                 )
@@ -475,39 +999,45 @@ class TakerExitMixin:
                         ),
                         now_ts=now_ts,
                     )
-                    continue
-                ok = self._submit_invalidation_recovery_ladder(
-                    instrument_id=inst_id,
-                    quantity=qty_to_exit,
-                    est_net_if_exit=net_if_exit,
-                    best_bid=best_bid,
-                    best_ask=best_ask,
-                    fee_rate=fee_rate,
-                    time_left_sec=time_left_sec,
-                    decision_payload={
-                        "slug": self.current_market_slug or "",
-                        "decision_type": "INVALIDATION_RECOVERY_TAKER_EXIT",
-                        "decision_reason": "hold_to_redeem_side_invalidated_recovery",
-                        "avg_entry": float(avg_entry),
-                        "time_left_sec": time_left_sec,
-                        "exit_stage": exit_stage.value,
-                        "best_ask": float(best_ask),
-                        "gross_if_exit": float(exit_decision.gross_if_exit),
-                        "exit_fee_est": float(exit_decision.exit_fee_est),
-                        "exit_px_effective": float(exit_decision.exit_px_effective),
-                        "sellable_qty": float(sellable_qty),
-                        "gross_recovery": float(gross_recovery),
-                        "cost_basis": float(cost_basis),
-                        "recovery_ratio": float(recovery_ratio),
-                        "min_recovery_ratio": float(min_recovery_ratio),
-                        "locked_side_invalidated": "1",
-                        "hold_to_redeem": "1",
-                    },
-                )
-                if ok:
-                    self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
-                    self.last_taker_exit_ts_by_inst[inst_key] = now_ts
-                    continue
+                    # The recovery ratio is only an admission gate for the
+                    # invalidation-recovery ladder. It must not suppress an
+                    # independently triggered absolute-loss breaker; let the
+                    # normal protective-exit path execute in that case.
+                    if exit_decision.reason != "absolute_max_loss_breaker":
+                        continue
+                if recovery_ratio >= min_recovery_ratio:
+                    ok = self._submit_invalidation_recovery_ladder(
+                        instrument_id=inst_id,
+                        quantity=qty_to_exit,
+                        est_net_if_exit=net_if_exit,
+                        best_bid=best_bid,
+                        best_ask=best_ask,
+                        fee_rate=fee_rate,
+                        time_left_sec=time_left_sec,
+                        decision_payload={
+                            "slug": self.current_market_slug or "",
+                            "decision_type": "INVALIDATION_RECOVERY_TAKER_EXIT",
+                            "decision_reason": "hold_to_redeem_side_invalidated_recovery",
+                            "avg_entry": float(avg_entry),
+                            "time_left_sec": time_left_sec,
+                            "exit_stage": exit_stage.value,
+                            "best_ask": float(best_ask),
+                            "gross_if_exit": float(exit_decision.gross_if_exit),
+                            "exit_fee_est": float(exit_decision.exit_fee_est),
+                            "exit_px_effective": float(exit_decision.exit_px_effective),
+                            "sellable_qty": float(sellable_qty),
+                            "gross_recovery": float(gross_recovery),
+                            "cost_basis": float(cost_basis),
+                            "recovery_ratio": float(recovery_ratio),
+                            "min_recovery_ratio": float(min_recovery_ratio),
+                            "locked_side_invalidated": "1",
+                            "hold_to_redeem": "1",
+                        },
+                    )
+                    if ok:
+                        self.taker_exit_stop_loss_hits_by_inst.pop(inst_key, None)
+                        self.last_taker_exit_ts_by_inst[inst_key] = now_ts
+                        continue
 
             if exit_decision.decision_type in (ExitDecisionType.HOLD_TO_REDEEM, ExitDecisionType.HOLD_IN_BAND):
                 if hasattr(self, "position_manager"):
@@ -588,11 +1118,10 @@ class TakerExitMixin:
                 ExitDecisionType.STOP_LOSS_PENDING_CONFIRMATION,
                 ExitDecisionType.TAKER_STOP_LOSS,
             ) and hasattr(self, "position_manager"):
-                # The unconditional circuit breaker must bypass the position_manager
-                # gate entirely. By design, it fires when the signal is healthy
-                # (locked + matching + thesis good) but the loss exceeds the
-                # absolute max. The position_manager would return "hold" in this
-                # exact scenario, silently blocking the breaker.
+                # The trend-confirmed absolute loss breaker must bypass the
+                # position_manager gate after ExitPolicyEngine has established
+                # adverse-side confirmation; otherwise a generic hold result
+                # could silently suppress the approved protective exit.
                 _is_absolute_breaker = (
                     exit_decision.reason == "absolute_max_loss_breaker"
                 )
@@ -688,12 +1217,14 @@ class TakerExitMixin:
             self.taker_exit_stop_loss_hits_by_inst[inst_key] = exit_decision.confirm_hits
             self._stop_loss_execution_priority_by_inst[inst_key] = True
             trigger = "offside_near_close" if force_offside_near_close else "stop_loss"
+            absolute_max_loss_breaker = exit_decision.reason == "absolute_max_loss_breaker"
 
             # Avoid paying taker costs into a wide spread unless it's an emergency path.
             if (
                 trigger == "stop_loss"
                 and spread_pct > self.taker_exit_stop_loss_max_spread_pct
                 and not in_reduce_only_tail
+                and not absolute_max_loss_breaker
             ):
                 self._log_taker_exit_skip_throttled(
                     inst_key=inst_key,
@@ -716,6 +1247,7 @@ class TakerExitMixin:
                     and not pending_cancel
                     and created_ts > 0
                     and (now_ts - created_ts) < float(self.taker_exit_wait_for_sell_quote_sec)
+                    and not absolute_max_loss_breaker
                 ):
                     self._log_taker_exit_skip_throttled(
                         inst_key=inst_key,
@@ -793,8 +1325,8 @@ class TakerExitMixin:
         self._cancel_maker_order_side("sell", reason="taker_exit", instrument_id=inst)
 
         qty = Quantity(float(qty_dec), precision=precision)
-        coid = ClientOrderId(f"BTC-15M-TAKER-EXIT-{int(time.time() * 1000)}")
-        if execution_mode == "limit_fak":
+        coid = new_client_order_id("TAKER-EXIT")
+        if execution_mode in {"limit_fak", "limit_fok"}:
             price_precision = int(getattr(instrument, "price_precision", 2))
             order = self.order_factory.limit(
                 instrument_id=inst,
@@ -802,10 +1334,11 @@ class TakerExitMixin:
                 quantity=qty,
                 price=Price(float(best_bid), precision=price_precision),
                 client_order_id=coid,
-                time_in_force=TimeInForce.IOC,
+                time_in_force=(TimeInForce.FOK if execution_mode == "limit_fok" else TimeInForce.IOC),
             )
             requested_order_kind = "limit"
-            venue_order_type = "FAK"
+            venue_order_type = "FOK" if execution_mode == "limit_fok" else "FAK"
+            requested_tif = "FOK" if execution_mode == "limit_fok" else "IOC"
         else:
             order = self.order_factory.market(
                 instrument_id=inst,
@@ -817,7 +1350,7 @@ class TakerExitMixin:
             )
             requested_order_kind = "market"
             venue_order_type = "FOK"
-        self.submit_order(order)
+            requested_tif = "IOC"
         inst_key = self._instrument_key(inst)
         self.pending_taker_exit_by_inst[inst_key] = str(coid)
         self.taker_exit_reason_by_client_order_id[str(coid)] = reason
@@ -826,10 +1359,16 @@ class TakerExitMixin:
             execution_by_id = {}
             self.taker_exit_execution_by_client_order_id = execution_by_id
         execution_by_id[str(coid)] = {
-            "requested_tif": "IOC",
+            "requested_tif": requested_tif,
             "requested_order_kind": requested_order_kind,
             "venue_order_type": venue_order_type,
+            "slug": str((decision_payload or {}).get("slug") or self.current_market_slug or ""),
+            "reason": str(reason),
+            "decision_reason": str((decision_payload or {}).get("decision_reason") or ""),
+            "entry_price": (decision_payload or {}).get("avg_entry"),
+            "position_side": str(getattr(self._side_for_instrument_id(inst), "value", "NONE")),
         }
+        self.submit_order(order)
         if getattr(self, "terminal_dashboard", None):
             token_side = getattr(self._side_for_instrument_id(inst), "value", "NONE")
             self.terminal_dashboard.record_order_submitted(
@@ -862,7 +1401,7 @@ class TakerExitMixin:
                 "fee_rate": float(fee_rate),
                 "fee_rate_decimal": float(fee_rate),
                 "best_bid": float(best_bid),
-                "requested_tif": "IOC",
+                "requested_tif": "FOK" if execution_mode == "limit_fok" else "IOC",
                 "requested_order_kind": requested_order_kind,
                 "venue_order_type": venue_order_type,
                 **(decision_payload or {}),
@@ -876,7 +1415,7 @@ class TakerExitMixin:
                 "client_order_id": str(coid),
                 "exit_reason": reason,
                 "outcome": "submitted",
-                "requested_tif": "IOC",
+                "requested_tif": requested_tif,
                 "requested_order_kind": requested_order_kind,
                 "venue_order_type": venue_order_type,
                 "best_bid": float(best_bid),
@@ -1028,7 +1567,7 @@ class TakerExitMixin:
         if qty_dec + Decimal("0.000001") < self.maker_exchange_min_shares:
             return False
         price_precision = int(getattr(instrument, "price_precision", 2))
-        coid = ClientOrderId(f"BTC-15M-RECOVERY-PASSIVE-{int(time.time() * 1000)}")
+        coid = new_client_order_id("RECOVERY-PASSIVE")
         order = self.order_factory.limit(
             instrument_id=instrument_id,
             order_side=OrderSide.SELL,
@@ -1167,7 +1706,10 @@ class TakerExitMixin:
 
     async def _maybe_maker_urgent_exit(self, now_ts: float) -> None:
         """Evaluate and execute maker-style urgent exit for wrong-side positions."""
-        if not getattr(self, "maker_urgent_exit_enabled", False):
+        from bot.execution_safety import real_order_submission_allowed
+        if not real_order_submission_allowed(self):
+            return
+        if not bool(getattr(self, "stop_loss_enabled", True)) or not getattr(self, "maker_urgent_exit_enabled", False):
             return
         # NOTE: intentionally NOT gated on taker_exit_enabled —
         # this is a maker mechanism, independent of taker exit config.
@@ -1370,7 +1912,7 @@ class TakerExitMixin:
             # FIX #3: Use maker_urgent_exit_ttl_sec (not maker_order_ttl_sec)
             urgent_ttl = getattr(self, "maker_urgent_exit_ttl_sec", 15)
 
-            coid = ClientOrderId(f"BTC-15M-URGENT-EXIT-{int(time.time() * 1000)}")
+            coid = new_client_order_id("URGENT-EXIT")
             order_kwargs = {
                 "instrument_id": self._normalize_instrument_id(inst_id),
                 "order_side": OrderSide.SELL,

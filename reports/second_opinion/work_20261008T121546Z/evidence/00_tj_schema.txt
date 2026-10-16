@@ -1,0 +1,58 @@
+CREATE TABLE strategy_runs (
+            run_id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            mode TEXT NOT NULL,
+            test_mode INTEGER NOT NULL,
+            maker_mode INTEGER NOT NULL,
+            instrument_id TEXT,
+            selected_slug TEXT,
+            notes_json TEXT
+        );
+CREATE TABLE order_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            client_order_id TEXT,
+            venue_order_id TEXT,
+            side TEXT,
+            price REAL,
+            qty REAL,
+            status TEXT,
+            reason TEXT,
+            instrument_id TEXT,
+            token_id TEXT,
+            fee_rate_bps INTEGER,
+            expected_net_usdc REAL,
+            commission_usdc REAL,
+            payload_json TEXT
+        );
+CREATE TABLE sqlite_sequence(name,seq);
+CREATE INDEX idx_order_events_run_ts ON order_events(run_id, ts);
+CREATE INDEX idx_order_events_client ON order_events(client_order_id);
+CREATE TABLE strategy_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            payload_json TEXT
+        );
+CREATE INDEX idx_strategy_events_run_ts ON strategy_events(run_id, ts);
+CREATE INDEX idx_strategy_events_type_id ON strategy_events(event_type, id);
+CREATE TABLE journal_schema (
+            version INTEGER NOT NULL
+        );
+CREATE INDEX idx_order_events_fill_markout_buy_ts_id
+            ON order_events(ts, id)
+            WHERE event_type='FILL_MARKOUT' AND side='BUY';
+CREATE TABLE session_pnl_state (
+            session_date_taipei TEXT PRIMARY KEY,
+            realized_pnl_usdc REAL NOT NULL,
+            realized_high_water_usdc REAL NOT NULL,
+            profit_guard_armed INTEGER NOT NULL,
+            buy_lock_active INTEGER NOT NULL,
+            buy_lock_reason TEXT NOT NULL,
+            created_ts TEXT NOT NULL,
+            updated_ts TEXT NOT NULL
+        , guard_mode TEXT NOT NULL DEFAULT 'legacy');

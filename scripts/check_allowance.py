@@ -5,6 +5,8 @@ Check or refresh Polymarket allowance on Polygon using py-clob-client-v2.
 Examples:
   venv/bin/python scripts/check_allowance.py --check-only
   venv/bin/python scripts/check_allowance.py --apply
+  venv/bin/python scripts/check_allowance.py --v2-status                    # read-only Protocol V2 approvals
+  venv/bin/python scripts/check_allowance.py --apply --setup-v2-approvals   # send only the missing V2 approvals
 """
 
 from __future__ import annotations
@@ -16,6 +18,10 @@ import sys
 from typing import Any
 
 from dotenv import load_dotenv
+
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bot.protocol_v2 import EXCHANGE_V3_ADDRESS, POSITION_MANAGER_ABI, POSITION_MANAGER_ADDRESS, ROUTER_ADDRESS
 
 USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 PUSD_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
@@ -127,6 +133,71 @@ def _onchain_approve_all(
         nonce += 1
 
 
+ERC20_ALLOWANCE_ABI = ERC20_APPROVE_ABI + [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}, {"name": "_spender", "type": "address"}],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+# Protocol V2 approvals (contract migration guide): pUSD spend by ExchangeV3 (BUY) and Router
+# (split); PositionManager operator ExchangeV3 (SELL) and Router (merge/redeem).
+V2_ERC20_SPENDERS = (("ExchangeV3", EXCHANGE_V3_ADDRESS), ("Router", ROUTER_ADDRESS))
+V2_POSITION_OPERATORS = (("ExchangeV3", EXCHANGE_V3_ADDRESS), ("Router", ROUTER_ADDRESS))
+# A "missing" pUSD allowance is one below this (base units); approvals are set to MAX.
+V2_MIN_PUSD_ALLOWANCE = 10**12
+
+
+def v2_approval_status(w3: Any, owner: str) -> list[dict[str, Any]]:
+    """Read-only: every Protocol V2 approval the holder needs and whether it is present."""
+    from web3 import Web3
+
+    pusd = w3.eth.contract(address=Web3.to_checksum_address(PUSD_ADDRESS), abi=ERC20_ALLOWANCE_ABI)
+    manager = w3.eth.contract(address=Web3.to_checksum_address(POSITION_MANAGER_ADDRESS), abi=POSITION_MANAGER_ABI)
+    rows = []
+    for name, spender in V2_ERC20_SPENDERS:
+        allowance = int(pusd.functions.allowance(owner, Web3.to_checksum_address(spender)).call())
+        rows.append({"kind": "pUSD.approve", "target": name, "address": spender,
+                     "value": allowance, "ok": allowance >= V2_MIN_PUSD_ALLOWANCE})
+    for name, operator in V2_POSITION_OPERATORS:
+        approved = bool(manager.functions.isApprovedForAll(owner, Web3.to_checksum_address(operator)).call())
+        rows.append({"kind": "PositionManager.setApprovalForAll", "target": name, "address": operator,
+                     "value": approved, "ok": approved})
+    return rows
+
+
+def _onchain_approve_v2(private_key: str, owner_address: str, chain_id: int, rpc_url: str) -> None:
+    """Send only the missing Protocol V2 approvals, from the asset holder."""
+    from web3 import Web3
+    from web3.constants import MAX_INT
+    from web3.middleware import ExtraDataToPOAMiddleware
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    owner = Web3.to_checksum_address(owner_address)
+    pusd = w3.eth.contract(address=Web3.to_checksum_address(PUSD_ADDRESS), abi=ERC20_ALLOWANCE_ABI)
+    manager = w3.eth.contract(address=Web3.to_checksum_address(POSITION_MANAGER_ADDRESS), abi=POSITION_MANAGER_ABI)
+    nonce = w3.eth.get_transaction_count(owner, "pending")
+    for row in v2_approval_status(w3, owner):
+        if row["ok"]:
+            print(f"{row['kind']} -> {row['target']}: already set")
+            continue
+        target = Web3.to_checksum_address(row["address"])
+        if row["kind"] == "pUSD.approve":
+            fn = pusd.functions.approve(target, int(MAX_INT, 16))
+        else:
+            fn = manager.functions.setApprovalForAll(target, True)
+        tx = fn.build_transaction({"chainId": chain_id, "from": owner, "nonce": nonce})
+        signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
+        txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+        receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=600)
+        print(f"{row['kind']} -> {row['target']} {target}: tx={txh.hex()} status={receipt.status}")
+        nonce += 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check/update Polymarket allowance")
     parser.add_argument(
@@ -146,14 +217,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--asset-type",
-        choices=["COLLATERAL", "CONDITIONAL"],
+        choices=["COLLATERAL", "CONDITIONAL", "CONDITIONAL-V2"],
         default="COLLATERAL",
         help="Allowance type to check/update (default: COLLATERAL)",
     )
     parser.add_argument(
         "--token-id",
         default=None,
-        help="Required for CONDITIONAL asset type",
+        help="Required for CONDITIONAL / CONDITIONAL-V2 asset types",
     )
     parser.add_argument(
         "--host",
@@ -170,6 +241,16 @@ def main() -> int:
         type=int,
         default=None,
         help="Chain ID override (default from POLYMARKET_CHAIN_ID or 137)",
+    )
+    parser.add_argument(
+        "--v2-status",
+        action="store_true",
+        help="Read-only: report Protocol V2 approvals (pUSD/PositionManager for ExchangeV3 and Router)",
+    )
+    parser.add_argument(
+        "--setup-v2-approvals",
+        action="store_true",
+        help="With --apply: send only the missing Protocol V2 approvals (requires web3 and POL gas)",
     )
     parser.add_argument(
         "--onchain",
@@ -243,7 +324,7 @@ def main() -> int:
         return 1
 
     params = BalanceAllowanceParams(
-        asset_type=(AssetType.COLLATERAL if args.asset_type == "COLLATERAL" else AssetType.CONDITIONAL),
+        asset_type=(AssetType.COLLATERAL if args.asset_type == "COLLATERAL" else args.asset_type),
         token_id=args.token_id,
         signature_type=signature_type,
     )
@@ -265,9 +346,36 @@ def main() -> int:
         print(f"Failed to fetch current allowance: {e}")
         return 1
 
+    if args.v2_status or args.setup_v2_approvals:
+        try:
+            from web3 import Web3
+            from web3.middleware import ExtraDataToPOAMiddleware
+
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            print("\n[Protocol V2 approvals]")
+            for row in v2_approval_status(w3, Web3.to_checksum_address(client.get_address())):
+                print(f"{'OK     ' if row['ok'] else 'MISSING'} {row['kind']} -> {row['target']} "
+                      f"{row['address']} value={row['value']}")
+        except Exception as e:
+            print(f"Failed to read Protocol V2 approvals: {e}")
+            return 1
+
     if not args.apply:
         print("\nCheck-only mode complete.")
         return 0
+
+    if args.setup_v2_approvals:
+        try:
+            _onchain_approve_v2(
+                private_key=private_key,
+                owner_address=client.get_address(),
+                chain_id=chain_id,
+                rpc_url=rpc_url,
+            )
+        except Exception as e:
+            print(f"Protocol V2 approve failed: {e}")
+            return 1
 
     if args.onchain:
         try:

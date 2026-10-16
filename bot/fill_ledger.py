@@ -9,7 +9,7 @@ from loguru import logger
 
 from bot.inventory import InventoryLedger
 from bot.post_trade import apply_fill_followup
-from execution.rebate_model import estimate_taker_buy_fee_shares, estimate_taker_fee_usdc
+from execution.rebate_model import estimate_taker_fee_usdc
 
 
 @dataclass
@@ -73,7 +73,17 @@ def interpret_fill_liquidity(
     fill_qty_dec: Decimal,
     filled_limit_price: Decimal,
     filled_id: str,
+    protocol: str = "v1",
 ) -> FillLiquidityInterpretation:
+    """Classify the fill and estimate its taker fee.
+
+    The venue takes a taker BUY fee in USDC on top of the spend and delivers the
+    full share quantity, for both protocols: every bot taker BUY 2026-09-10..24
+    shows ``usdc_size = price x size + fee`` and redeemed shares equal the
+    filled size (reports/pnl_reconciliation/). The fee is therefore booked in
+    USDC like a SELL fee and never reduces held shares. ``protocol`` is kept
+    for the caller's provenance.
+    """
     liquidity_class = classify_fill_liquidity(
         liquidity_side=liquidity_side,
         raw_commission_dec=raw_commission_dec,
@@ -87,13 +97,7 @@ def interpret_fill_liquidity(
             shares=fill_qty_dec,
             probability=fill_price_dec,
         )
-        if side_for_ledger == "buy":
-            effective_fee_shares_dec = estimate_taker_buy_fee_shares(
-                shares=fill_qty_dec,
-                probability=fill_price_dec,
-            )
-        else:
-            effective_fee_usdc_dec = effective_fee_usdc_calc
+        effective_fee_usdc_dec = effective_fee_usdc_calc
     warning_message = ""
     if maker_matched and liquidity_class == "taker" and filled_limit_price > 0 and side_for_ledger:
         if (
@@ -150,6 +154,57 @@ class FillLedgerMixin:
         )
         if realized_net is None or side_norm != "sell":
             if side_norm == "buy" and inst_key:
+                # Capture entry-time research evidence once.  It must never
+                # be replaced by a later quote, otherwise fair deterioration
+                # silently becomes zero at every adverse checkpoint.
+                state = self.live_inventory_cost.get(inst_key, {})
+                if pre_qty <= 0 and "fair_at_entry_captured" not in state:
+                    fair_at_entry = None
+                    try:
+                        side_value = getattr(self._side_for_instrument_id(instrument_id), "value", "").lower()
+                        probability = getattr(getattr(self, "last_forecast_state", None), "probability_for_outcome", None)
+                        fair_at_entry = Decimal(str(probability(side_value))) if callable(probability) and side_value else None
+                    except Exception:
+                        fair_at_entry = None
+                    state["fair_at_entry"] = fair_at_entry
+                    state["fair_at_entry_captured"] = True
+                    state["signal_score_at_entry"] = Decimal(str(getattr(self, "side_decision_score", "0")))
+                    twap = getattr(self, "twap_forward_shadow", None)
+                    features = twap.latest(str(getattr(self, "current_market_slug", "") or "")) if twap is not None else None
+                    state["twap_at_entry"] = (features or {}).get("official_current_twap")
+                    state["twap_minus_strike_bps_at_entry"] = (features or {}).get("twap_minus_strike_bps")
+                    # Executable (not midpoint) baseline for token-drawdown research.
+                    try:
+                        quote_fn = getattr(self, "_get_quote_for_instrument", None)
+                        quote = quote_fn(instrument_id) if callable(quote_fn) else None
+                        if quote is not None:
+                            state["entry_bid_at_fill"] = Decimal(str(quote[0]))
+                            state["entry_ask_at_fill"] = Decimal(str(quote[1]))
+                            quote_ts = (getattr(self, "last_quote_update_ts_by_inst", None) or {}).get(inst_key)
+                            state["entry_quote_age_at_fill_sec"] = (
+                                max(0.0, time.time() - float(quote_ts)) if quote_ts else None
+                            )
+                    except Exception:
+                        state.pop("entry_bid_at_fill", None)
+                        state.pop("entry_ask_at_fill", None)
+                    # Early-warning research baselines (FIRST fill only, same
+                    # host clock).  Observation only; never read by trading.
+                    state["entry_fill_price_first"] = fill_price
+                    for name, fn in (
+                        ("entry_bid_size_at_fill", lambda: Decimal(str(
+                            ((getattr(self, "latest_quote_depth_by_inst", None) or {}).get(inst_key) or (None,))[0]))),
+                        ("entry_quote_synthesis", lambda: self._quote_synthesis_reason(instrument_id)),
+                        ("entry_binance_spot", lambda: Decimal(str(getattr(self, "_binance_ws_price")))),
+                        ("entry_binance_spot_age_sec", lambda: max(
+                            0.0, time.time() - float(getattr(self, "_binance_ws_price_ts")))),
+                        ("entry_chainlink_spot", lambda: Decimal(str(getattr(self, "_polymarket_chainlink_price")))),
+                        ("entry_chainlink_spot_age_sec", lambda: max(
+                            0.0, time.time() - float(getattr(self, "_polymarket_chainlink_price_ts")))),
+                    ):
+                        try:
+                            state[name] = fn()
+                        except Exception:
+                            state[name] = None
                 # A new winning run starts from the fresh fill price.
                 self.maker_profit_run_peak_bid_by_inst[inst_key] = fill_price
                 self.maker_profit_run_peak_fair_by_inst[inst_key] = fill_price
@@ -198,7 +253,11 @@ class FillLedgerMixin:
             self._clear_profit_run_state(instrument_id)
             if inst_key:
                 self.recent_buy_fill_ts_by_inst.pop(inst_key, None)
-                self.recent_sell_fill_ts_by_inst.pop(inst_key, None)
+                # Keep the SELL timestamp: the conditional-token balance lags
+                # the fill, and the sellable-qty grace window keys on it.
+                # Dropping it on a full exit let a stale balance be "recovered"
+                # as ghost inventory with zero cost basis, which settlement
+                # then booked as free shares (market cycle PnL double count).
         return realized_net
 
     def _record_market_buy_count_if_needed(
@@ -299,6 +358,13 @@ class FillLedgerMixin:
         self.quote_pause_until_ts = followup.quote_pause_until_ts
         self.loss_recovery_size_multiplier = followup.loss_recovery_size_multiplier
         self.loss_recovery_min_edge_addition = followup.loss_recovery_min_edge_addition
+        # The session guard intentionally consumes realized PnL only.  A
+        # journal failure must not undo the fill/inventory update or block a
+        # protective SELL; it only closes subsequent BUY authority.
+        if fill_side_norm == "sell" and realized_net_usdc is not None:
+            record_session_pnl = getattr(self, "_record_session_realized_pnl", None)
+            if callable(record_session_pnl):
+                record_session_pnl(realized_net_usdc, source="sell_fill")
         if fill_side_norm == "buy" and self.post_fill_buy_cooldown_sec > 0:
             logger.info(
                 f"Post-fill buy cooldown activated: {self.post_fill_buy_cooldown_sec}s "

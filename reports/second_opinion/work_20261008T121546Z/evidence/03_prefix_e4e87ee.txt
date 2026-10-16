@@ -1,0 +1,15 @@
+
+    def test_stopping_missing_book_and_removed_instrument_remain_fail_closed(monkeypatch):
+        fake, inst, msg, subscriptions, published, _ = _retry_state_client(monkeypatch)
+        fake._btc15m_disconnecting = True
+        assert not fake._publish_l2_snapshot_if_due(inst, msg)
+>       assert fake._btc15m_l2_publish_state[inst.id]['retry_at'] == 0
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       KeyError: 'retry_at'
+
+tests/test_market_data_backpressure.py:811: KeyError
+=========================== short test summary info ============================
+FAILED tests/test_market_data_backpressure.py::test_quote_only_prewarm_then_l2_promotion_initializes_retry_state
+FAILED tests/test_market_data_backpressure.py::test_first_subscribed_and_partial_retry_state
+FAILED tests/test_market_data_backpressure.py::test_stopping_missing_book_and_removed_instrument_remain_fail_closed
+3 failed, 1 passed, 23 deselected in 3.08s

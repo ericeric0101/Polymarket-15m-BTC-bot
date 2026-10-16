@@ -1,0 +1,12 @@
+{
+  "aggressive_partial_exit_proven": false,
+  "evidence": "market path forces PolyOrderType.FOK; limit path delegates IOC through the FAK converter",
+  "insufficient_depth_can_reject_entire_order": true,
+  "limit_ioc_order_type": "FAK",
+  "limit_ioc_uses_adapter_tif_converter": true,
+  "market_order_type": "FOK",
+  "market_orders_allow_partial_fill": false,
+  "price_bounded_limit_ioc_avoids_fok_requirement": true,
+  "requested_tif": "IOC",
+  "verdict": "NOT_PROVEN_MARKET_PATH_IS_FOK"
+}

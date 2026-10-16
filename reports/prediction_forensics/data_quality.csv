@@ -1,0 +1,15 @@
+slug,entry_found,settlement_label_found,twap_rows,valid_fresh_ex_market_probability_rows,fresh_market_mid_rows,path_features_at_entry,required_path_at_entry,entry_snapshot_age_sec,entry_quote_freshness,btc_1s_rows_in_cohort_window,entry_btc_10s_available,entry_btc_30s_available
+btc-updown-15m-1790920800,True,True,156,129,52,True,True,3.1355879306793213,FRESH,17728,True,False
+btc-updown-15m-1790921700,True,True,180,157,85,True,True,3.3184878826141357,FRESH,17728,True,False
+btc-updown-15m-1790923500,True,True,184,180,93,True,True,1.6783761978149414,FRESH,17728,True,True
+btc-updown-15m-1790925300,True,True,139,120,60,False,False,,FRESH,17728,True,True
+btc-updown-15m-1790926200,True,True,106,83,69,False,False,,FRESH,17728,True,True
+btc-updown-15m-1790927100,True,True,119,95,54,True,True,11.780890941619873,FRESH,17728,True,True
+btc-updown-15m-1790928900,True,True,140,118,54,False,False,,FRESH,17728,True,True
+btc-updown-15m-1790930700,True,True,93,77,21,False,False,,FRESH,17728,True,True
+btc-updown-15m-1790932500,True,True,151,132,47,False,False,,FRESH,17728,True,True
+btc-updown-15m-1790934300,True,True,155,132,76,True,True,2.100234031677246,FRESH,17728,True,True
+btc-updown-15m-1790936100,True,True,170,151,84,False,False,,FRESH,17728,True,True
+btc-updown-15m-1790937900,True,True,113,99,52,True,True,4.324097156524658,FRESH,17728,True,True
+btc-updown-15m-1790938800,True,True,98,74,20,True,True,4.438348054885864,FRESH,17728,True,True
+btc-updown-15m-1790939700,True,True,117,96,47,False,False,,FRESH,17728,True,True

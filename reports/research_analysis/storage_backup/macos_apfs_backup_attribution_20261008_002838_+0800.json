@@ -1,0 +1,1190 @@
+{
+  "started_at": "2026-10-07T23:58:16.086089+08:00",
+  "status": "MEASUREMENTS_COMPLETE",
+  "head": "33896ce9ba123708999c896bd7c2fd4023412d5f",
+  "bot_processes": [],
+  "inventory": {
+    "df_h": {
+      "returncode": 0,
+      "stdout": "Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s1s1   228Gi    17Gi    20Gi    46%    447k  208M    0%   /\n",
+      "stderr": ""
+    },
+    "df_k": {
+      "returncode": 0,
+      "stdout": "Filesystem     1024-blocks      Used Available Capacity iused     ifree %iused  Mounted on\n/dev/disk3s1s1   239362496  17585440  20824380    46%  446774 208243800    0%   /\n",
+      "stderr": ""
+    },
+    "container": {
+      "returncode": 0,
+      "stdout": "APFS Containers (3 found)\n|\n+-- Container disk3 0D20E4ED-0831-47FC-857E-B1C757625580\n    ====================================================\n    APFS Container Reference:     disk3\n    Size (Capacity Ceiling):      245107195904 B (245.1 GB)\n    Capacity In Use By Volumes:   223783034880 B (223.8 GB) (91.3% used)\n    Capacity Not Allocated:       21324161024 B (21.3 GB) (8.7% free)\n    |\n    +-< Physical Store disk0s2 B93E3237-82DC-4F73-A093-4164B0837DEF\n    |   -----------------------------------------------------------\n    |   APFS Physical Store Disk:   disk0s2\n    |   Size:                       245107195904 B (245.1 GB)\n    |\n    +-> Volume disk3s1 53E99CA9-AF75-4EDE-A971-3F7B21B4D5DE\n    |   ---------------------------------------------------\n    |   APFS Volume Disk (Role):   disk3s1 (System)\n    |   Name:                      Macintosh HD (Case-insensitive)\n    |   Mount Point:               /System/Volumes/Update/mnt1\n    |   Capacity Consumed:         18007490560 B (18.0 GB)\n    |   Sealed:                    Broken\n    |   FileVault:                 Yes (Unlocked)\n    |   Encrypted:                 No\n    |   |\n    |   Snapshot:                  9F7430EF-06CB-475C-BF39-304D063C462A\n    |   Snapshot Disk:             disk3s1s1\n    |   Snapshot Mount Point:      /\n    |   Snapshot Sealed:           Yes\n    |\n    +-> Volume disk3s2 07019350-2A02-4907-96A9-230B67B7900D\n    |   ---------------------------------------------------\n    |   APFS Volume Disk (Role):   disk3s2 (Preboot)\n    |   Name:                      Preboot (Case-insensitive)\n    |   Mount Point:               /System/Volumes/Preboot\n    |   Capacity Consumed:         16707424256 B (16.7 GB)\n    |   Sealed:                    No\n    |   FileVault:                 No\n    |\n    +-> Volume disk3s3 C3485C6C-2E74-4D8E-86D5-5309B90D2A35\n    |   ---------------------------------------------------\n    |   APFS Volume Disk (Role):   disk3s3 (Recovery)\n    |   Name:                      Recovery (Case-insensitive)\n    |   Mount Point:               Not Mounted\n    |   Capacity Consumed:         2502438912 B (2.5 GB)\n    |   Sealed:                    No\n    |   FileVault:                 No\n    |\n    +-> Volume disk3s5 B907826A-81A8-445B-BA51-B0CA1DD098B0\n    |   ---------------------------------------------------\n    |   APFS Volume Disk (Role):   disk3s5 (Data)\n    |   Name:                      Data (Case-insensitive)\n    |   Mount Point:               /System/Volumes/Data\n    |   Capacity Consumed:         180260147200 B (180.3 GB)\n    |   Sealed:                    No\n    |   FileVault:                 Yes (Unlocked)\n    |\n    +-> Volume disk3s6 59D551F5-82EE-4BE6-9CCF-BDDAD213C4D2\n        ---------------------------------------------------\n        APFS Volume Disk (Role):   disk3s6 (VM)\n        Name:                      VM (Case-insensitive)\n        Mount Point:               /System/Volumes/VM\n        Capacity Consumed:         5371445248 B (5.4 GB)\n        Sealed:                    No\n        FileVault:                 No\n",
+      "stderr": ""
+    },
+    "system_snapshots": {
+      "returncode": 0,
+      "stdout": "Snapshots for disk3s1s1 (3 found)\n|\n+-- 9F7430EF-06CB-475C-BF39-304D063C462A\n|   Name:        com.apple.os.update-9C7AC3379C9BCA825C5E3CEB27FC945471A4DC2766A5F06BE5215AB07C8650CA\n|   XID:         25497754\n|   Purgeable:   No\n|\n+-- 61E9CAFB-B0B3-4380-B5F6-126467AC14ED\n|   Name:        com.apple.os.update-8F406C5750C35D04EA6D4595721419F1760E7DAA896C5F77C1F03BC7E4734CB64B25165643663F58088E8B29B0D11765\n|   XID:         40984378\n|   Purgeable:   No\n|   NOTE:        This snapshot limits the minimum size of APFS Container disk3\n|\n+-- CF7862B6-0DFA-4252-A611-31B9D9BC3077\n    Name:        com.apple.os.update-MSUPrepareUpdate\n    XID:         40984456\n    Purgeable:   No\n",
+      "stderr": ""
+    },
+    "data_snapshots": {
+      "returncode": 0,
+      "stdout": "Snapshot for disk3s5 (1 found)\n|\n+-- D23DAEFB-D0E5-40D3-8558-31EE4211ED19\n    Name:        com.apple.TimeMachine.2026-10-07-230042.local\n    XID:         44625239\n    Purgeable:   Yes\n    NOTE:        This snapshot limits the minimum size of APFS Container disk3\n",
+      "stderr": ""
+    },
+    "time_machine": {
+      "returncode": 0,
+      "stdout": "Snapshots for volume group containing disk /:\ncom.apple.TimeMachine.2026-10-07-230042.local\ncom.apple.os.update-8F406C5750C35D04EA6D4595721419F1760E7DAA896C5F77C1F03BC7E4734CB64B25165643663F58088E8B29B0D11765\ncom.apple.os.update-9C7AC3379C9BCA825C5E3CEB27FC945471A4DC2766A5F06BE5215AB07C8650CA\ncom.apple.os.update-MSUPrepareUpdate\n",
+      "stderr": ""
+    },
+    "time_machine_status": {
+      "returncode": 0,
+      "stdout": "Backup session status:\n{\n    ClientID = \"com.apple.backupd\";\n    Percent = \"-1\";\n    Running = 0;\n}\n",
+      "stderr": ""
+    },
+    "data_snapshots_post_30": {
+      "returncode": 0,
+      "stdout": "Snapshots for disk3s5 (2 found)\n|\n+-- D23DAEFB-D0E5-40D3-8558-31EE4211ED19\n|   Name:        com.apple.TimeMachine.2026-10-07-230042.local\n|   XID:         44625239\n|   Purgeable:   Yes\n|   NOTE:        This snapshot limits the minimum size of APFS Container disk3\n|\n+-- B33874AD-36D6-49CB-9426-4E4BFB529E93\n    Name:        com.apple.TimeMachine.2026-10-08-000242.local\n    XID:         44627631\n    Purgeable:   Yes\n",
+      "stderr": ""
+    },
+    "data_snapshots_post_60": {
+      "returncode": 0,
+      "stdout": "Snapshots for disk3s5 (2 found)\n|\n+-- D23DAEFB-D0E5-40D3-8558-31EE4211ED19\n|   Name:        com.apple.TimeMachine.2026-10-07-230042.local\n|   XID:         44625239\n|   Purgeable:   Yes\n|   NOTE:        This snapshot limits the minimum size of APFS Container disk3\n|\n+-- B33874AD-36D6-49CB-9426-4E4BFB529E93\n    Name:        com.apple.TimeMachine.2026-10-08-000242.local\n    XID:         44627631\n    Purgeable:   Yes\n",
+      "stderr": ""
+    },
+    "data_snapshots_post_120": {
+      "returncode": 0,
+      "stdout": "Snapshots for disk3s5 (2 found)\n|\n+-- D23DAEFB-D0E5-40D3-8558-31EE4211ED19\n|   Name:        com.apple.TimeMachine.2026-10-07-230042.local\n|   XID:         44625239\n|   Purgeable:   Yes\n|   NOTE:        This snapshot limits the minimum size of APFS Container disk3\n|\n+-- B33874AD-36D6-49CB-9426-4E4BFB529E93\n    Name:        com.apple.TimeMachine.2026-10-08-000242.local\n    XID:         44627631\n    Purgeable:   Yes\n",
+      "stderr": ""
+    },
+    "data_snapshots_post_300": {
+      "returncode": 0,
+      "stdout": "Snapshots for disk3s5 (2 found)\n|\n+-- D23DAEFB-D0E5-40D3-8558-31EE4211ED19\n|   Name:        com.apple.TimeMachine.2026-10-07-230042.local\n|   XID:         44625239\n|   Purgeable:   Yes\n|   NOTE:        This snapshot limits the minimum size of APFS Container disk3\n|\n+-- B33874AD-36D6-49CB-9426-4E4BFB529E93\n    Name:        com.apple.TimeMachine.2026-10-08-000242.local\n    XID:         44627631\n    Purgeable:   Yes\n",
+      "stderr": ""
+    },
+    "data_snapshots_post_600": {
+      "returncode": 0,
+      "stdout": "Snapshots for disk3s5 (2 found)\n|\n+-- D23DAEFB-D0E5-40D3-8558-31EE4211ED19\n|   Name:        com.apple.TimeMachine.2026-10-07-230042.local\n|   XID:         44625239\n|   Purgeable:   Yes\n|   NOTE:        This snapshot limits the minimum size of APFS Container disk3\n|\n+-- B33874AD-36D6-49CB-9426-4E4BFB529E93\n    Name:        com.apple.TimeMachine.2026-10-08-000242.local\n    XID:         44627631\n    Purgeable:   Yes\n",
+      "stderr": ""
+    },
+    "time_machine_post20": {
+      "returncode": 0,
+      "stdout": "Snapshots for volume group containing disk /:\ncom.apple.TimeMachine.2026-10-07-230042.local\ncom.apple.TimeMachine.2026-10-08-000242.local\ncom.apple.os.update-8F406C5750C35D04EA6D4595721419F1760E7DAA896C5F77C1F03BC7E4734CB64B25165643663F58088E8B29B0D11765\ncom.apple.os.update-9C7AC3379C9BCA825C5E3CEB27FC945471A4DC2766A5F06BE5215AB07C8650CA\ncom.apple.os.update-MSUPrepareUpdate\n",
+      "stderr": ""
+    },
+    "data_snapshots_post20": {
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Unable to run because unable to use the DiskManagement framework.\nCommon reasons include, but are not limited to, the DiskArbitration\nframework being unavailable due to being booted in single-user mode.\n"
+    },
+    "container_post20": {
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "Unable to run because unable to use the DiskManagement framework.\nCommon reasons include, but are not limited to, the DiskArbitration\nframework being unavailable due to being booted in single-user mode.\n"
+    },
+    "df_post20": {
+      "returncode": 0,
+      "stdout": "Filesystem     1024-blocks      Used Available Capacity iused     ifree %iused  Mounted on\n/dev/disk3s1s1   239362496  17585440  17477028    51%  446774 174770280    0%   /\n",
+      "stderr": ""
+    }
+  },
+  "samples": [
+    {
+      "time": "2026-10-07T23:58:16.685600+08:00",
+      "monotonic": 1658046.145487875,
+      "phase": "idle",
+      "free_bytes": 21324181504,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992243,
+        "allocated": 14188261376
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-07T23:58:46.731588+08:00",
+      "monotonic": 1658076.190378375,
+      "phase": "idle",
+      "free_bytes": 21322498048,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992243,
+        "allocated": 14188261376
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-07T23:59:16.723868+08:00",
+      "monotonic": 1658106.183313291,
+      "phase": "idle",
+      "free_bytes": 21322383360,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992243,
+        "allocated": 14188261376
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-07T23:59:46.722635+08:00",
+      "monotonic": 1658136.182979458,
+      "phase": "idle",
+      "free_bytes": 21320986624,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:00:16.728097+08:00",
+      "monotonic": 1658166.189383958,
+      "phase": "idle",
+      "free_bytes": 21322063872,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:00:46.728955+08:00",
+      "monotonic": 1658196.191183041,
+      "phase": "idle",
+      "free_bytes": 21324767232,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:01:16.723107+08:00",
+      "monotonic": 1658226.186270625,
+      "phase": "idle",
+      "free_bytes": 21234913280,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:01:46.725615+08:00",
+      "monotonic": 1658256.189728458,
+      "phase": "idle",
+      "free_bytes": 21233590272,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:02:16.719743+08:00",
+      "monotonic": 1658286.18480975,
+      "phase": "idle",
+      "free_bytes": 21233156096,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:02:46.694317+08:00",
+      "monotonic": 1658316.160303458,
+      "phase": "idle",
+      "free_bytes": 21229121536,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:03:16.706916+08:00",
+      "monotonic": 1658346.173863875,
+      "phase": "idle",
+      "free_bytes": 21218127872,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:03:46.721325+08:00",
+      "monotonic": 1658376.189220666,
+      "phase": "idle",
+      "free_bytes": 21213724672,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:04:16.722736+08:00",
+      "monotonic": 1658406.191571291,
+      "phase": "idle",
+      "free_bytes": 21201444864,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:04:46.726303+08:00",
+      "monotonic": 1658436.196083166,
+      "phase": "idle",
+      "free_bytes": 21199945728,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:05:16.725652+08:00",
+      "monotonic": 1658466.196375791,
+      "phase": "idle",
+      "free_bytes": 21191614464,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:05:46.709617+08:00",
+      "monotonic": 1658496.181278666,
+      "phase": "idle",
+      "free_bytes": 21189062656,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:06:16.714509+08:00",
+      "monotonic": 1658526.187131083,
+      "phase": "idle",
+      "free_bytes": 21187284992,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:06:46.710600+08:00",
+      "monotonic": 1658556.184146541,
+      "phase": "idle",
+      "free_bytes": 21186850816,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:07:16.706328+08:00",
+      "monotonic": 1658586.180817375,
+      "phase": "idle",
+      "free_bytes": 21184638976,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:07:46.712150+08:00",
+      "monotonic": 1658616.187594291,
+      "phase": "idle",
+      "free_bytes": 21158940672,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:16.715729+08:00",
+      "monotonic": 1658646.192118416,
+      "phase": "idle",
+      "free_bytes": 21153906688,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14050992202,
+        "allocated": 14188257280
+      },
+      "backup_dir": {
+        "logical": 3172315447,
+        "allocated": 3179257856
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:20.114618+08:00",
+      "monotonic": 1658649.591077916,
+      "phase": "backup",
+      "free_bytes": 21151883264,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": {
+        "size": 1908736,
+        "allocated": 1904640,
+        "inode": 227606139,
+        "mtime_ns": 1791389300140612075,
+        "flags": 0
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:21.146017+08:00",
+      "monotonic": 1658650.622527833,
+      "phase": "backup",
+      "free_bytes": 20707921920,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": {
+        "size": 428830720,
+        "allocated": 444600320,
+        "inode": 227606139,
+        "mtime_ns": 1791389301152387533,
+        "flags": 0
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:22.157587+08:00",
+      "monotonic": 1658651.634155875,
+      "phase": "backup",
+      "free_bytes": 20137197568,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": {
+        "size": 1006632960,
+        "allocated": 1015025664,
+        "inode": 227606139,
+        "mtime_ns": 1791389302166545999,
+        "flags": 0
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:23.170498+08:00",
+      "monotonic": 1658652.647146125,
+      "phase": "backup",
+      "free_bytes": 19566411776,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": {
+        "size": 1574363136,
+        "allocated": 1585451008,
+        "inode": 227606139,
+        "mtime_ns": 1791389303208227183,
+        "flags": 0
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:24.213376+08:00",
+      "monotonic": 1658653.689994791,
+      "phase": "backup",
+      "free_bytes": 18861694976,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": {
+        "size": 2281037824,
+        "allocated": 2290094080,
+        "inode": 227606139,
+        "mtime_ns": 1791389304359803493,
+        "flags": 0
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:25.361150+08:00",
+      "monotonic": 1658654.837821125,
+      "phase": "backup",
+      "free_bytes": 18089717760,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172315136,
+        "allocated": 3179253760,
+        "inode": 227592145,
+        "mtime_ns": 1791386872623589813,
+        "flags": 0
+      },
+      "temp": {
+        "size": 3053453312,
+        "allocated": 3061846016,
+        "inode": 227606139,
+        "mtime_ns": 1791389305368729249,
+        "flags": 0
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:25.664349+08:00",
+      "monotonic": 1658655.140976541,
+      "phase": "post_immediate",
+      "free_bytes": 17978134528,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14051070026,
+        "allocated": 14188322816
+      },
+      "backup_dir": {
+        "logical": 3172360503,
+        "allocated": 3179290624
+      }
+    },
+    {
+      "time": "2026-10-08T00:08:56.103728+08:00",
+      "monotonic": 1658685.581600916,
+      "phase": "post_30",
+      "free_bytes": 17977806848,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14051070026,
+        "allocated": 14188322816
+      },
+      "backup_dir": {
+        "logical": 3172360503,
+        "allocated": 3179290624
+      }
+    },
+    {
+      "time": "2026-10-08T00:09:26.102891+08:00",
+      "monotonic": 1658715.581621,
+      "phase": "post_60",
+      "free_bytes": 17973268480,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14051070026,
+        "allocated": 14188322816
+      },
+      "backup_dir": {
+        "logical": 3172360503,
+        "allocated": 3179290624
+      }
+    },
+    {
+      "time": "2026-10-08T00:10:26.095689+08:00",
+      "monotonic": 1658775.57619925,
+      "phase": "post_120",
+      "free_bytes": 17969053696,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14051070067,
+        "allocated": 14188326912
+      },
+      "backup_dir": {
+        "logical": 3172360503,
+        "allocated": 3179290624
+      }
+    },
+    {
+      "time": "2026-10-08T00:13:26.095562+08:00",
+      "monotonic": 1658955.5819035,
+      "phase": "post_300",
+      "free_bytes": 17957646336,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14051070026,
+        "allocated": 14188322816
+      },
+      "backup_dir": {
+        "logical": 3172360503,
+        "allocated": 3179290624
+      }
+    },
+    {
+      "time": "2026-10-08T00:18:26.184348+08:00",
+      "monotonic": 1659255.594968,
+      "phase": "post_600",
+      "free_bytes": 17910775808,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305,
+        "flags": 0
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493,
+        "flags": 0
+      },
+      "temp": null,
+      "repo": {
+        "logical": 14051070026,
+        "allocated": 14188322816
+      },
+      "backup_dir": {
+        "logical": 3172360503,
+        "allocated": 3179290624
+      }
+    },
+    {
+      "phase": "post_1200",
+      "time": "2026-10-08T00:28:25.675336+08:00",
+      "free_bytes": 17896476672,
+      "source": {
+        "size": 3172360192,
+        "allocated": 3182026752,
+        "inode": 200895787,
+        "mtime_ns": 1791386883120380305
+      },
+      "backup": {
+        "size": 3172360192,
+        "allocated": 3179286528,
+        "inode": 227606139,
+        "mtime_ns": 1791389305550362493
+      },
+      "temp": null
+    }
+  ],
+  "deleted_open_large_files": [],
+  "backup_handles": {
+    "returncode": 1,
+    "stdout": "",
+    "stderr": ""
+  },
+  "initial_source": {
+    "size": 3172360192,
+    "allocated": 3182026752,
+    "inode": 200895787,
+    "mtime_ns": 1791386883120380305,
+    "flags": 0
+  },
+  "initial_backup": {
+    "size": 3172315136,
+    "allocated": 3179253760,
+    "inode": 227592145,
+    "mtime_ns": 1791386872623589813,
+    "flags": 0
+  },
+  "idle_start": "2026-10-07T23:58:16.662420+08:00",
+  "idle_end": "2026-10-08T00:08:17.166119+08:00",
+  "idle_free_delta_bytes": -170274816,
+  "idle_free_range_bytes": 170860544,
+  "experiment_gate": {
+    "idle_range_limit_bytes": 1073741824,
+    "production_required_bytes": 6344720384,
+    "additional_experiment_margin_bytes": 5368709120,
+    "idle_stable": true,
+    "enough_free": true
+  },
+  "source_sha_before": "0477c586298e2c3e07cd92a6acb103f2a17a1d8096f42f95fcec4832d7436e1f",
+  "backup_start": "2026-10-08T00:08:20.112021+08:00",
+  "backup_source_connect": "mode=ro via unchanged TradeJournalDB.flush_backup(force=True) -> maintenance_lock -> _publish_backup",
+  "backup_success": true,
+  "backup_end": "2026-10-08T00:08:25.664340+08:00",
+  "backup_health": {
+    "state": "HEALTHY",
+    "failures_total": 0,
+    "destination": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/backups/trade_journal.db",
+    "free_bytes": 21153779712,
+    "required_free_bytes": 6344720384,
+    "image_bytes": 3172360192,
+    "temporary_rollback_bytes": 0,
+    "last_success_ts": 1791389305.6636002,
+    "failure_stage": null,
+    "error": null,
+    "sqlite_errorname": null,
+    "sqlite_errorcode": null,
+    "exception_class": null
+  },
+  "source_sha_after": "0477c586298e2c3e07cd92a6acb103f2a17a1d8096f42f95fcec4832d7436e1f",
+  "source_stat_unchanged": true,
+  "final_backup": {
+    "size": 3172360192,
+    "allocated": 3179286528,
+    "inode": 227606139,
+    "mtime_ns": 1791389305550362493,
+    "flags": 0
+  },
+  "final_backup_handles": {
+    "returncode": 1,
+    "stdout": "",
+    "stderr": ""
+  },
+  "final_bots": [],
+  "finished_at": "2026-10-08T00:18:30.226113+08:00",
+  "post20_complete": true,
+  "summary": {
+    "BOT_RUNNING": "NO",
+    "SOURCE_DB_GIB": 2.9544906616210938,
+    "BACKUP_DB_GIB": 2.9544906616210938,
+    "IDLE_FREE_SPACE_DELTA_GIB": -0.15858078002929688,
+    "SINGLE_BACKUP_PEAK_FREE_DROP_GIB": 2.9576683044433594,
+    "POST_BACKUP_RECOVERY_1MIN_GIB": 0,
+    "POST_BACKUP_RECOVERY_5MIN_GIB": 0,
+    "POST_BACKUP_RECOVERY_10MIN_GIB": 0,
+    "UNRECOVERED_AFTER_10MIN_GIB": 3.0204010009765625,
+    "TIME_MACHINE_LOCAL_SNAPSHOTS": 2,
+    "OTHER_APFS_SNAPSHOTS": 3,
+    "DELETED_OPEN_LARGE_FILES": 0,
+    "FULL_BACKUP_DOUBLE_ALLOCATION": "SUPPORTED",
+    "APFS_COW": "PLAUSIBLE",
+    "ATOMIC_REPLACE": "SUPPORTED",
+    "DELAYED_RECLAMATION": "NOT_SUPPORTED",
+    "TIME_MACHINE_SNAPSHOT": "PLAUSIBLE",
+    "OTHER_APFS_SNAPSHOT": "NOT_SUPPORTED",
+    "DELETED_OPEN_FILES": "NOT_SUPPORTED",
+    "PURGEABLE_ACCOUNTING": "NOT_MEASURABLE",
+    "OUTSIDE_PROCESS_WRITES": "NOT_MEASURABLE",
+    "REAL_REPO_GROWTH": "NOT_SUPPORTED",
+    "BEST_SUPPORTED_ROOT_CAUSE": "Full SQLite image allocated before atomic replace; persistent ~image-sized loss is consistent with pre-backup Time Machine snapshot retention, but exact retained extents remain unmeasured.",
+    "TOP_ENGINEERING_MITIGATION": "Evaluate backup destination on a separate physical filesystem/external SSD while preserving verified recovery images; no policy change made.",
+    "CODE_CHANGED": "NO",
+    "ACTIVE_DB_MUTATED": "NO",
+    "FILES_DELETED": 0,
+    "BOT_RESTARTED": "NO",
+    "COMMIT": "NONE",
+    "PUSHED": "NO"
+  },
+  "classification": {
+    "FULL_BACKUP_DOUBLE_ALLOCATION": "SUPPORTED",
+    "APFS_COW": "PLAUSIBLE",
+    "ATOMIC_REPLACE": "SUPPORTED",
+    "DELAYED_RECLAMATION": "NOT_SUPPORTED",
+    "TIME_MACHINE_SNAPSHOT": "PLAUSIBLE",
+    "OTHER_APFS_SNAPSHOT": "NOT_SUPPORTED",
+    "DELETED_OPEN_FILES": "NOT_SUPPORTED",
+    "PURGEABLE_ACCOUNTING": "NOT_MEASURABLE",
+    "OUTSIDE_PROCESS_WRITES": "NOT_MEASURABLE",
+    "REAL_REPO_GROWTH": "NOT_SUPPORTED"
+  },
+  "analysis": {
+    "baseline_free_bytes": 21153906688,
+    "peak_free_loss_bytes": 3175772160,
+    "post20_deficit_gib": 3.0337181091308594,
+    "observed_temp_peak_allocated_bytes": 3061846016,
+    "repo_logical_delta_bytes": 77824,
+    "repo_allocated_delta_bytes": 65536,
+    "backup_allocated_delta_bytes": 32768,
+    "unexplained_at_immediate_bytes": 3175706624
+  },
+  "report_paths": {
+    "md": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/reports/research_analysis/storage_backup/macos_apfs_backup_attribution_20261008_002838_+0800.md",
+    "json": "/Users/cheng-kaihuang/Polymarket-BTC-15-Minute-Trading-Bot-main/reports/research_analysis/storage_backup/macos_apfs_backup_attribution_20261008_002838_+0800.json"
+  },
+  "final_inventory_confirmation": {
+    "time": "2026-10-08T00:29:17.442217+08:00",
+    "method": "escalated read-only diskutil apfs listSnapshots Data + tmutil + ps",
+    "data_time_machine_snapshots": [
+      "com.apple.TimeMachine.2026-10-07-230042.local",
+      "com.apple.TimeMachine.2026-10-08-000242.local"
+    ],
+    "system_other_snapshots": 3,
+    "run_bot_processes": 0,
+    "note": "post20 sampler df succeeded; its diskutil was sandbox-restricted, so native inventory was confirmed separately afterward."
+  }
+}

@@ -1,0 +1,443 @@
+"""Bounded, event-driven research model for the official Polymarket TWAP.
+
+It intentionally has no strategy/order imports.  Returned features and emitted
+events are research observations only; callers decide where to persist them.
+"""
+from __future__ import annotations
+
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from decimal import Decimal
+from threading import Lock
+from typing import Any
+from pathlib import Path
+import shutil
+import time
+
+
+def _f(value: Decimal | float | None) -> float | None:
+    return None if value is None else float(value)
+
+
+def _side(value: Decimal | None, strike: Decimal | None) -> str:
+    if value is None or strike is None:
+        return "UNKNOWN"
+    return "UP" if value > strike else "DOWN" if value < strike else "TIE"
+
+
+@dataclass(frozen=True)
+class TwapSample:
+    observed_ts: float
+    source_ts: float
+    fast_spot: Decimal | None
+    official_twap: Decimal | None
+    best_bid: Decimal | None
+    best_ask: Decimal | None
+    strike: Decimal | None
+    time_left_sec: float | None
+    settlement_diagnostics: dict[str, Any] | None = None
+
+
+# These observations are required for crossing/checkpoint/settlement research.
+# A historical total-size cap must never silently discard them.
+# Leave-band for SETTLEMENT_PATH_THRESHOLD_CROSS (probability points / sigma).
+THRESHOLD_HYSTERESIS = {"p_up_ex_market": 0.02, "market_mid_probability_up": 0.02, "required_move_sigma": 0.25}
+
+REQUIRED_EVENT_TYPES = frozenset({
+    "MARKET_OPENING_TWAP_SAMPLE", "TWAP_STRIKE_CROSS", "TWAP_PROJECTED_SIDE_CHANGE",
+    "TMINUS_CHECKPOINT", "SETTLEMENT_PATH_THRESHOLD_CROSS", "MARKET_TWAP_SUMMARY",
+})
+
+
+class TwapForwardShadow:
+    """Per-market fixed-memory official-TWAP projection experiment."""
+
+    def __init__(self, *, max_samples: int = 180, trend_cap_bps: float = 25.0,
+                 db: Any = None, run_id: str = "", max_db_mb: float = 500.0,
+                 min_free_disk_gb: float = 10.0, storage_check_interval_sec: float = 60.0) -> None:
+        # Production constructs this with 180 samples; accepting a smaller
+        # bound is useful for deterministic unit tests and does not alter the
+        # production default.
+        self.max_samples = max(1, int(max_samples))
+        self.trend_cap_bps = max(0.0, float(trend_cap_bps))
+        self._samples: dict[str, deque[TwapSample]] = defaultdict(lambda: deque(maxlen=self.max_samples))
+        self._summary: dict[str, dict[str, Any]] = {}
+        self._latest: dict[str, dict[str, Any]] = {}
+        self.db, self.run_id, self.max_db_mb = db, str(run_id), float(max_db_mb)
+        self.min_free_disk_gb = max(0.0, float(min_free_disk_gb))
+        self.storage_check_interval_sec = max(1.0, float(storage_check_interval_sec))
+        self._checkpoint_done: dict[str, set[int]] = defaultdict(set)
+        self._last_emitted_sign: dict[str, int] = {}
+        self._last_emitted_projected_side: dict[str, str] = {}
+        self._last_threshold_state: dict[str, dict[str, dict[float, bool]]] = defaultdict(dict)
+        self._storage_guard_triggered = False
+        self._storage_guard_reason = ""
+        self._persistence_counters = {"accepted": 0, "queue_drops": 0, "write_errors": 0, "optional_suppressed": 0}
+        self._last_storage_health = {}
+        self._last_storage_check_ts = 0.0
+        self._lock = Lock()
+
+    def sample_count(self, slug: str) -> int:
+        with self._lock:
+            return len(self._samples[str(slug)])
+
+    @staticmethod
+    def _slope(samples: list[TwapSample], now: TwapSample, horizon: float, min_span: float) -> float | None:
+        eligible = [item for item in samples if item.official_twap is not None and now.observed_ts - item.observed_ts >= min_span]
+        if now.official_twap is None or not eligible:
+            return None
+        prior = min(eligible, key=lambda item: abs((now.observed_ts - item.observed_ts) - horizon))
+        span = now.observed_ts - prior.observed_ts
+        if span < min_span or prior.official_twap is None or prior.official_twap <= 0:
+            return None
+        return float((now.official_twap - prior.official_twap) / prior.official_twap * Decimal("10000") / Decimal(str(span)))
+
+    @staticmethod
+    def _spot_slope(samples: list[TwapSample], now: TwapSample) -> float | None:
+        eligible = [item for item in samples if item.fast_spot is not None and now.observed_ts - item.observed_ts >= 4.0]
+        if now.fast_spot is None or not eligible:
+            return None
+        prior = min(eligible, key=lambda item: abs((now.observed_ts - item.observed_ts) - 10.0))
+        span = now.observed_ts - prior.observed_ts
+        if prior.fast_spot is None or prior.fast_spot <= 0 or span < 4:
+            return None
+        return float((now.fast_spot - prior.fast_spot) / prior.fast_spot * Decimal("10000") / Decimal(str(span)))
+
+    def observe(self, *, slug: str, now_ts: float, source_ts: float, fast_spot: Decimal | None,
+                official_twap: Decimal | None, strike: Decimal | None, time_left_sec: float | None,
+                best_bid: Decimal | None = None, best_ask: Decimal | None = None,
+                settlement_diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+        sample = TwapSample(float(now_ts), float(source_ts), fast_spot, official_twap, best_bid, best_ask, strike, time_left_sec, settlement_diagnostics)
+        with self._lock:
+            samples = self._samples[str(slug)]
+            history = list(samples)
+            samples.append(sample)
+        twap_strike = ((official_twap - strike) / strike * Decimal("10000")) if official_twap and strike and strike > 0 else None
+        spot_twap = ((fast_spot - official_twap) / official_twap * Decimal("10000")) if fast_spot and official_twap and official_twap > 0 else None
+        slope5 = self._slope(history, sample, 5.0, 4.0)
+        slope10 = self._slope(history, sample, 10.0, 8.0)
+        spot_slope = self._spot_slope(history, sample)
+        remaining = max(0.0, float(time_left_sec or 0.0))
+        # This is deliberately a pressure approximation, not a claim about
+        # Chainlink's outgoing observation weights.
+        flat = fast_spot if fast_spot is not None else official_twap
+        trend_spot = flat
+        if flat is not None and spot_slope is not None:
+            cap = Decimal(str(self.trend_cap_bps)) / Decimal("10000")
+            movement = Decimal(str(spot_slope)) / Decimal("10000") * Decimal(str(remaining))
+            movement = max(-cap, min(cap, movement))
+            trend_spot = flat * (Decimal("1") + movement)
+        # A conservative first-order blend: each remaining second replaces
+        # approximately 1/60 of a 60-second rolling window.  It is labelled
+        # projection, never used as the official settlement value.
+        replace_fraction = min(Decimal("1"), Decimal(str(remaining)) / Decimal("60"))
+        projected_flat = official_twap + (flat - official_twap) * replace_fraction if official_twap and flat else None
+        projected_trend = official_twap + (trend_spot - official_twap) * replace_fraction if official_twap and trend_spot else None
+        eta = None
+        if twap_strike is not None and slope10 is not None and abs(slope10) > 1e-9:
+            # eta is valid only when the slope points toward the strike.
+            eta_value = -float(twap_strike) / slope10
+            if eta_value > 0 and eta_value <= remaining:
+                eta = eta_value
+        agreement = spot_twap is not None and slope10 is not None and ((spot_twap > 0) == (slope10 > 0))
+        confidence = "HIGH" if agreement and slope10 is not None and len(history) >= 10 else "MEDIUM" if slope10 is not None else "UNAVAILABLE"
+        result = {
+            "market_slug": str(slug), "observed_ts": float(now_ts), "source_ts": float(source_ts),
+            "fast_spot": _f(fast_spot), "official_current_twap": _f(official_twap),
+            "fast_spot_source": "binance_ws", "best_bid": _f(best_bid), "best_ask": _f(best_ask),
+            "strike": _f(strike), "time_left_sec": time_left_sec,
+            "twap_minus_strike_bps": _f(twap_strike), "spot_minus_twap_bps": _f(spot_twap),
+            "twap_slope_5s_bps_per_sec": slope5, "twap_slope_10s_bps_per_sec": slope10,
+            "approx_replacement_pressure_bps_per_sec": spot_slope,
+            "projected_settlement_twap_flat": _f(projected_flat),
+            "projected_settlement_twap_flat_bps_vs_strike": _f((projected_flat - strike) / strike * Decimal("10000")) if projected_flat and strike else None,
+            "projected_settlement_twap_trend": _f(projected_trend),
+            "projected_settlement_twap_trend_bps_vs_strike": _f((projected_trend - strike) / strike * Decimal("10000")) if projected_trend and strike else None,
+            "projected_settlement_side_flat": _side(projected_flat, strike),
+            "projected_settlement_side_trend": _side(projected_trend, strike),
+            "projected_crossing_eta_sec": eta, "crossing_eta_confidence": confidence,
+        }
+        try:
+            market_start = int(str(slug).rsplit("-", 1)[-1])
+            result["market_start_ts"] = market_start
+            result["market_age_source_sec"] = float(source_ts) - market_start
+            result["market_age_receive_sec"] = float(now_ts) - market_start
+        except (TypeError, ValueError):
+            pass
+        if settlement_diagnostics:
+            result.update(settlement_diagnostics)
+        self._update_summary(str(slug), result)
+        with self._lock:
+            self._latest[str(slug)] = dict(result)
+        self._persist_material(result)
+        return result
+
+    def latest(self, slug: str) -> dict[str, Any] | None:
+        with self._lock:
+            value = self._latest.get(str(slug))
+            return dict(value) if value is not None else None
+
+    def _persist(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
+        if self.db is None:
+            return
+        if self._storage_guard_triggered and event_type not in REQUIRED_EVENT_TYPES:
+            self._persistence_counters["optional_suppressed"] += 1
+            self._update_persistence_health()
+            return
+        self._persist_raw(slug, ts, event_type, payload)
+
+    def _storage_health(self, now_ts: float) -> dict[str, Any]:
+        """Throttle filesystem checks; distinguish optional cap from write safety."""
+        if self.db is None:
+            return {"checked": False, "triggered": False}
+        if now_ts - self._last_storage_check_ts < self.storage_check_interval_sec:
+            return {"checked": False, "triggered": self._storage_guard_triggered}
+        self._last_storage_check_ts = now_ts
+        try:
+            path = Path(str(getattr(self.db, "db_path", "")))
+            def size_mb(candidate: Path) -> float:
+                return candidate.stat().st_size / 1024 / 1024 if candidate.is_file() else 0.0
+            main_mb, wal_mb, shm_mb = size_mb(path), size_mb(Path(f"{path}-wal")), size_mb(Path(f"{path}-shm"))
+            total_mb = main_mb + wal_mb + shm_mb
+            free_gb = shutil.disk_usage(path.parent if path.parent.exists() else Path(".")).free / 1024 / 1024 / 1024
+            reason = "free_disk_low" if free_gb < self.min_free_disk_gb else "db_size_cap" if total_mb >= self.max_db_mb else ""
+            prior_reason = self._storage_guard_reason
+            self._storage_guard_triggered, self._storage_guard_reason = bool(reason), reason
+            if reason and reason != prior_reason:
+                # This is a single compact state event, intentionally allowed
+                # before optional event suppression begins.
+                self._persist_raw("", now_ts, "RESEARCH_STORAGE_GUARD_TRIGGERED", {
+                    "db_main_mb": main_mb, "db_wal_mb": wal_mb, "db_shm_mb": shm_mb, "db_total_disk_mb": total_mb,
+                    "db_size_mb": total_mb, "configured_max_db_mb": self.max_db_mb,
+                    "disk_free_gb": free_gb, "configured_min_free_disk_gb": self.min_free_disk_gb,
+                    "trigger_reason": reason, "timestamp": now_ts,
+                })
+            self._last_storage_health = {"checked": True, "triggered": self._storage_guard_triggered,
+                    "reason": self._storage_guard_reason, "observed_ts": now_ts,
+                    "db_main_mb": main_mb, "db_wal_mb": wal_mb, "db_shm_mb": shm_mb,
+                    "db_total_disk_mb": total_mb, "db_size_mb": total_mb, "disk_free_gb": free_gb}
+            self._update_persistence_health()
+            return dict(self._last_storage_health)
+        except Exception:
+            self._last_storage_health = {"checked": True, "triggered": self._storage_guard_triggered,
+                                         "observation_unavailable": True, "observed_ts": now_ts}
+            return dict(self._last_storage_health)
+
+    def _update_persistence_health(self) -> None:
+        # research_health is the shared writer's cached counters, not a DB scan.
+        try:
+            writer = getattr(self.db, "research_health", lambda: {})()
+        except Exception:
+            self._last_storage_health["observation_unavailable"] = True
+            writer = {}
+        errors = self._persistence_counters["write_errors"] + int(writer.get("write_errors", 0) or 0)
+        drops = self._persistence_counters["queue_drops"] + int(writer.get("queue_drops", 0) or 0)
+        detail = ("CRITICAL_CANONICAL_PERSISTENCE" if errors or drops or self._storage_guard_reason == "free_disk_low"
+                  else "DEGRADED_OPTIONAL_TELEMETRY" if self._storage_guard_triggered else "NORMAL")
+        self._last_storage_health.update({"storage_detail": detail, "write_errors": errors,
+            "queue_drops": drops, "persistence_counters": dict(self._persistence_counters)})
+
+    def _persist_raw(self, slug: str, ts: float, event_type: str, payload: dict[str, Any]) -> None:
+        try:
+            accepted = self.db.enqueue_decision(run_id=self.run_id, slug=slug, market_id=None,
+                                     decision_epoch_ns=int(max(0.0, ts) * 1_000_000_000),
+                                     payload={"event_type": event_type, **payload})
+            self._persistence_counters["queue_drops" if accepted is False else "accepted"] += 1
+        except Exception:
+            self._persistence_counters["write_errors"] += 1
+        self._update_persistence_health()
+
+    def _persist_material(self, result: dict[str, Any]) -> None:
+        slug, ts = str(result["market_slug"]), float(result["observed_ts"])
+        self._storage_health(ts)
+        self._track_probability_summary(slug, result)
+        try:
+            opening_source_age = float(result.get("market_age_source_sec"))
+        except (TypeError, ValueError):
+            opening_source_age = -1.0
+        if 0.0 <= opening_source_age <= 20.0:
+            # A compact opening-window trace is useful to diagnose missed
+            # coverage and early source movement; no per-tick writes after it.
+            self._persist(slug, ts, "MARKET_OPENING_TWAP_SAMPLE", result)
+        value = result.get("twap_minus_strike_bps")
+        sign = 1 if value is not None and value > 0 else -1 if value is not None and value < 0 else 0
+        if sign and slug in self._last_emitted_sign and sign != self._last_emitted_sign[slug]:
+            self._persist(slug, ts, "TWAP_STRIKE_CROSS", result)
+        if sign:
+            self._last_emitted_sign[slug] = sign
+        side = str(result.get("projected_settlement_side_trend") or "UNKNOWN")
+        previous = self._last_emitted_projected_side.get(slug)
+        if side not in {"UNKNOWN", "TIE"} and previous is not None and side != previous:
+            self._persist(slug, ts, "TWAP_PROJECTED_SIDE_CHANGE", result)
+        if side not in {"UNKNOWN", "TIE"}:
+            self._last_emitted_projected_side[slug] = side
+        left = result.get("time_left_sec")
+        if left is not None:
+            try:
+                remaining = float(left)
+            except (TypeError, ValueError):
+                remaining = 0.0
+            # A T-minus observation must be strictly pre-settlement. If a
+            # delayed tick crosses multiple horizons, attach it only to the
+            # nearest still-relevant horizon and mark the skipped horizons as
+            # missed rather than fabricating one row per threshold.
+            if remaining > 0.0:
+                due = [checkpoint for checkpoint in (120, 60, 30, 15, 10, 5)
+                       if remaining <= checkpoint and checkpoint not in self._checkpoint_done[slug]]
+                if due:
+                    checkpoint = min(due, key=lambda value: (abs(value - remaining), value))
+                    self._checkpoint_done[slug].update(due)
+                    self._persist(slug, ts, "TMINUS_CHECKPOINT", {
+                        **result,
+                        "checkpoint_sec": checkpoint,
+                        "checkpoint_capture_lag_sec": max(0.0, checkpoint - remaining),
+                    })
+
+    def _track_probability_summary(self, slug: str, result: dict[str, Any]) -> None:
+        """Track probability/path extrema in RAM; persist threshold changes only."""
+        summary = self._summary.setdefault(slug, {"market_slug": slug})
+        p = result.get("p_up_ex_market")
+        market = result.get("market_mid_probability_up")
+        required_sigma = result.get("required_move_sigma")
+        if p is not None:
+            p = float(p)
+            summary["max_p_up_ex_market"] = p if summary.get("max_p_up_ex_market") is None else max(summary["max_p_up_ex_market"], p)
+            summary["min_p_up_ex_market"] = p if summary.get("min_p_up_ex_market") is None else min(summary["min_p_up_ex_market"], p)
+            self._emit_threshold_crossings(slug, result, "p_up_ex_market", p, (.025, .05, .10, .25, .50, .75, .90, .95, .975))
+        if market is not None:
+            market = float(market)
+            summary["max_market_mid_probability_up"] = market if summary.get("max_market_mid_probability_up") is None else max(summary["max_market_mid_probability_up"], market)
+            summary["min_market_mid_probability_up"] = market if summary.get("min_market_mid_probability_up") is None else min(summary["min_market_mid_probability_up"], market)
+            self._emit_threshold_crossings(slug, result, "market_mid_probability_up", market, (.025, .05, .10, .25, .50, .75, .90, .95, .975))
+        if required_sigma is not None:
+            value = float(required_sigma)
+            summary["max_required_move_sigma_to_flip"] = value if summary.get("max_required_move_sigma_to_flip") is None else max(summary["max_required_move_sigma_to_flip"], value)
+            summary["min_required_move_sigma_to_flip"] = value if summary.get("min_required_move_sigma_to_flip") is None else min(summary["min_required_move_sigma_to_flip"], value)
+            self._emit_threshold_crossings(slug, result, "required_move_sigma", value, (1, 2, 3, 4))
+        if result.get("probability_model_mode") == "FINAL_WINDOW_PARTIAL_INTEGRAL" and result.get("required_future_avg_to_flip") is not None:
+            summary.setdefault("final_window_first_valid_required_avg_ts", result.get("observed_ts"))
+
+    def _emit_threshold_crossings(self, slug: str, result: dict[str, Any], measure: str,
+                                  value: float, thresholds: tuple[float, ...]) -> None:
+        state = self._last_threshold_state[slug].setdefault(measure, {})
+        margin = THRESHOLD_HYSTERESIS.get(measure, 0.0)
+        for threshold in thresholds:
+            is_probability = measure != "required_move_sigma"
+            below = is_probability and threshold <= .10
+            qualifies = (value <= threshold) if below else value >= threshold
+            previous = state.get(threshold)
+            # Schmitt trigger: entering is immediate (first-beyond timing stays
+            # exact) but leaving needs `margin` past the threshold, so tick
+            # noise around a level cannot emit an entered/left pair per update.
+            if previous is True and not qualifies:
+                still_inside = (value <= threshold + margin) if below else (value >= threshold - margin)
+                if still_inside:
+                    qualifies = True
+            if previous is None and qualifies:
+                self._persist(slug, float(result["observed_ts"]), "SETTLEMENT_PATH_THRESHOLD_CROSS",
+                              {**result, "measure": measure, "threshold": threshold, "crossing_direction": "first_observed_beyond"})
+            elif previous is not None and previous != qualifies:
+                self._persist(slug, float(result["observed_ts"]), "SETTLEMENT_PATH_THRESHOLD_CROSS",
+                              {**result, "measure": measure, "threshold": threshold,
+                               "crossing_direction": "entered" if qualifies else "left"})
+            state[threshold] = qualifies
+            if qualifies:
+                prefix = "first" if measure == "p_up_ex_market" else "first_market"
+                if measure in {"p_up_ex_market", "market_mid_probability_up"}:
+                    pct_label = f"{threshold * 100:g}".replace(".", "")
+                    if threshold < .10:
+                        pct_label = pct_label.zfill(3 if threshold < .05 else 2)
+                    label = f"p{pct_label}"
+                    side = "down" if threshold <= .10 else "up"
+                    summary = self._summary.setdefault(slug, {"market_slug": slug})
+                    summary.setdefault(f"{prefix}_{label}_{side}_ts", result.get("observed_ts"))
+
+    def _update_summary(self, slug: str, result: dict[str, Any]) -> None:
+        summary = self._summary.setdefault(slug, {"market_slug": slug, "twap_cross_count": 0, "projected_cross_count": 0,
+                                                  "min_twap_minus_strike_bps": None, "max_twap_minus_strike_bps": None,
+                                                  "max_positive_twap_slope": None, "max_negative_twap_slope": None,
+                                                  "min_crossing_eta_sec": None, "last_twap_sign": None, "last_projected_side": None})
+        try:
+            market_start = int(str(slug).rsplit("-", 1)[-1])
+            receive_age = float(result.get("observed_ts")) - market_start
+            source_age = float(result.get("source_ts")) - market_start
+        except (TypeError, ValueError):
+            market_start, receive_age, source_age = None, None, None
+        if market_start is not None:
+            summary["market_start_ts"] = market_start
+            if summary.get("first_observed_market_age_sec") is None:
+                summary["first_observed_market_age_sec"] = receive_age
+            if source_age is not None and 0.0 <= source_age <= 20.0:
+                summary["opening_20s_observation_count"] = int(summary.get("opening_20s_observation_count", 0)) + 1
+                summary["opening_20s_first_age_sec"] = (
+                    source_age if summary.get("opening_20s_first_age_sec") is None
+                    else min(summary["opening_20s_first_age_sec"], source_age)
+                )
+                summary["opening_20s_last_age_sec"] = (
+                    source_age if summary.get("opening_20s_last_age_sec") is None
+                    else max(summary["opening_20s_last_age_sec"], source_age)
+                )
+                summary["opening_20s_first_receive_age_sec"] = (
+                    receive_age if summary.get("opening_20s_first_receive_age_sec") is None
+                    else min(summary["opening_20s_first_receive_age_sec"], receive_age)
+                )
+                summary["opening_20s_last_receive_age_sec"] = (
+                    receive_age if summary.get("opening_20s_last_receive_age_sec") is None
+                    else max(summary["opening_20s_last_receive_age_sec"], receive_age)
+                )
+        value = result.get("twap_minus_strike_bps")
+        if value is not None:
+            summary["min_twap_minus_strike_bps"] = value if summary["min_twap_minus_strike_bps"] is None else min(summary["min_twap_minus_strike_bps"], value)
+            summary["max_twap_minus_strike_bps"] = value if summary["max_twap_minus_strike_bps"] is None else max(summary["max_twap_minus_strike_bps"], value)
+            sign = 1 if value > 0 else -1 if value < 0 else 0
+            if summary["last_twap_sign"] is not None and sign and sign != summary["last_twap_sign"]:
+                summary["twap_cross_count"] += 1
+            if sign: summary["last_twap_sign"] = sign
+        slope = result.get("twap_slope_10s_bps_per_sec")
+        if slope is not None:
+            if slope > 0: summary["max_positive_twap_slope"] = max(summary["max_positive_twap_slope"] or slope, slope)
+            if slope < 0: summary["max_negative_twap_slope"] = min(summary["max_negative_twap_slope"] or slope, slope)
+        eta = result.get("projected_crossing_eta_sec")
+        if eta is not None: summary["min_crossing_eta_sec"] = eta if summary["min_crossing_eta_sec"] is None else min(summary["min_crossing_eta_sec"], eta)
+        side = result.get("projected_settlement_side_trend")
+        if summary["last_projected_side"] not in (None, side) and side not in ("UNKNOWN", "TIE"):
+            summary["projected_cross_count"] += 1
+        if side not in ("UNKNOWN", "TIE"): summary["last_projected_side"] = side
+
+    def finalize_market(
+        self, slug: str, *, settlement_side: str, settlement_ts: float | None = None,
+        settlement_reference_source: str = "", settlement_reference_is_canonical: bool = False,
+        settlement_reference_age_sec: float | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            summary = dict(self._summary.pop(str(slug), {"market_slug": str(slug)}))
+            summary["settlement_side"] = str(settlement_side)
+            last_sample = self._samples.get(str(slug), deque())
+            fallback_ts = float(last_sample[-1].observed_ts) if last_sample else time.time()
+            summary["raw_buffer_samples"] = len(self._samples.pop(str(slug), ()))
+            self._latest.pop(str(slug), None)
+            self._checkpoint_done.pop(str(slug), None)
+            self._last_emitted_sign.pop(str(slug), None)
+            self._last_emitted_projected_side.pop(str(slug), None)
+            self._last_threshold_state.pop(str(slug), None)
+        summary_ts = float(settlement_ts) if settlement_ts is not None else fallback_ts
+        summary["summary_ts"] = summary_ts
+        opening_count = int(summary.get("opening_20s_observation_count", 0))
+        first_age = summary.get("opening_20s_first_age_sec")
+        last_age = summary.get("opening_20s_last_age_sec")
+        summary["opening_20s_capture_observed"] = bool(opening_count)
+        summary["opening_20s_coverage_span_sec"] = (
+            max(0.0, float(last_age) - float(first_age))
+            if first_age is not None and last_age is not None else 0.0
+        )
+        summary["settlement_reference_source"] = str(settlement_reference_source or "unavailable")
+        summary["settlement_reference_is_canonical"] = bool(settlement_reference_is_canonical)
+        summary["settlement_reference_age_sec"] = settlement_reference_age_sec
+        summary["canonical_settlement_side"] = str(settlement_side) if settlement_reference_is_canonical else None
+        self._persist(str(slug), summary_ts, "MARKET_TWAP_SUMMARY", summary)
+        return summary
+
+    def storage_guard_status(self) -> dict[str, Any]:
+        return {"triggered": self._storage_guard_triggered, "reason": self._storage_guard_reason,
+                "optional_research_writes_enabled": not self._storage_guard_triggered,
+                **self._last_storage_health}

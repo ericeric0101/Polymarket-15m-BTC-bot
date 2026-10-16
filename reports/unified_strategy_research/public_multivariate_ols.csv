@@ -1,0 +1,3 @@
+response,term,coefficient,robust_se_hc1,ci95_low_normal,ci95_high_normal,normal_approx_p_value,n,controls,warning
+log1p(volume_shares),weekend,-0.09265967542670095,0.17638974846018732,-0.4383835824086681,0.2530642315552662,0.5993662226347298,200,week and ET 6h block fixed effects; log1p(trade-print RV),exploratory OLS; count overdispersion not modeled with negative binomial
+log1p(trade_count),weekend,-0.04113802481211004,0.12053640111378401,-0.2773893709951267,0.19511332137090662,0.7328842981470127,200,week and ET 6h block fixed effects; log1p(trade-print RV),exploratory OLS; count overdispersion not modeled with negative binomial

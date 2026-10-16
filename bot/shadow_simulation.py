@@ -169,11 +169,11 @@ class ShadowSimulationMixin:
             )
 
     def _settle_fair_edge_bucket_shadow_simulations(
-        self, *, slug: str, spot: float, strike: float
+        self, *, slug: str, outcome: str, spot: float | None = None, strike: float | None = None
     ) -> None:
-        if not self._fair_edge_bucket_shadow_enabled_for_run() or spot <= 0 or strike <= 0:
-            return
-        outcome = "UP" if spot >= strike else "DOWN"
+        outcome = str(outcome or "").upper()
+        if not self._fair_edge_bucket_shadow_enabled_for_run() or outcome not in ("UP", "DOWN"):
+            return  # unknown canonical outcome: leave FILLED, never guess
         for state in list(getattr(self, "_fair_edge_bucket_shadow_by_id", {}).values()):
             if str(state.get("slug")) != str(slug) or str(state.get("status")) != "FILLED":
                 continue
@@ -194,12 +194,17 @@ class ShadowSimulationMixin:
             )
 
     def _load_shadow_simulation_for_slug(self, slug: str) -> Optional[Dict[str, Any]]:
-        cached = getattr(self, "_shadow_simulations_by_slug", {}).get(slug)
-        if cached is not None:
-            return cached
+        cache = getattr(self, "_shadow_simulations_by_slug", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._shadow_simulations_by_slug = cache
+        if slug in cache:
+            return cache[slug]
         record = self.trade_db.load_shadow_simulation(slug) if self.trade_db else None
-        if record is not None:
-            self._shadow_simulations_by_slug[slug] = record
+        # A missing simulation is a valid result. Without a negative cache,
+        # every quote repeats a JSON-extract scan of the entire trade journal;
+        # on a large journal that blocks the DataEngine event loop for seconds.
+        cache[slug] = record
         return record
 
     def _restore_shadow_simulation_for_slug(self, slug: str) -> Optional[Dict[str, Any]]:
@@ -507,6 +512,7 @@ class ShadowSimulationMixin:
 
         if status != "FILLED":
             return
+        self._observe_stop_shadow(state=state, slug=slug, bid=bid, ask=ask, now_ts=now_ts)
         elapsed = max(0.0, now_ts - float(state.get("filled_ts") or now_ts))
         done = set(int(value) for value in state.get("markouts_done", []))
         mid = (bid + ask) / Decimal("2")
@@ -538,14 +544,45 @@ class ShadowSimulationMixin:
                 },
             )
 
-    def _settle_shadow_simulation(self, *, slug: str, spot: float, strike: float) -> None:
-        self._settle_fair_edge_bucket_shadow_simulations(slug=slug, spot=spot, strike=strike)
-        if not self._shadow_simulation_enabled_for_run() or spot <= 0 or strike <= 0:
+    def _observe_stop_shadow(self, *, state: Dict[str, Any], slug: str, bid: Decimal, ask: Decimal, now_ts: float) -> None:
+        """Research only: record hypothetical stop candidates; never touches orders."""
+        recorder = getattr(self, "stop_candidate_shadow", None)
+        if recorder is None:
+            return
+        try:
+            end_ts = getattr(self, "current_market_end_timestamp", None)
+            snapshotter = getattr(self, "prediction_research_snapshotter", None)
+            last = (getattr(snapshotter, "_last_payload_by_slug", {}) or {}).get(slug) or {}
+            side = str(state.get("side") or "").upper()
+            p_up = last.get("p_up_ex_market")
+            recorder.observe(
+                position=state, bid=bid, ask=ask, now_ts=now_ts,
+                twap=getattr(self, "_polymarket_chainlink_twap_price", None),
+                strike=(getattr(self, "market_strike_cache_by_slug", {}) or {}).get(slug),
+                time_left_sec=(float(end_ts) - now_ts) if end_ts is not None else None,
+                score=getattr(self, "side_decision_score", None),
+                legacy_sigma=last.get("required_move_sigma"), z_diffusion=last.get("required_move_z_diffusion"),
+                model_probability=(p_up if side == "UP" else (1 - p_up) if p_up is not None else None),
+            )
+        except Exception as exc:
+            logger.debug(f"Stop shadow observation failed: {exc}")
+
+    def _settle_shadow_simulation(self, *, slug: str, outcome: str, spot: float | None = None,
+                                  strike: float | None = None) -> None:
+        """Settle simulated fills with the canonical outcome; spot/strike are diagnostics."""
+        outcome = str(outcome or "").upper()
+        recorder = getattr(self, "stop_candidate_shadow", None)
+        if recorder is not None:
+            try:
+                recorder.resolve(slug=slug, outcome=outcome, settlement_ts=time.time())
+            except Exception as exc:
+                logger.debug(f"Stop shadow resolution failed: {exc}")
+        self._settle_fair_edge_bucket_shadow_simulations(slug=slug, outcome=outcome, spot=spot, strike=strike)
+        if not self._shadow_simulation_enabled_for_run() or outcome not in ("UP", "DOWN"):
             return
         state = self._load_shadow_simulation_for_slug(slug)
         if state is None or str(state.get("status") or "") != "FILLED":
             return
-        outcome = "UP" if spot >= strike else "DOWN"
         won = str(state.get("side") or "").upper() == outcome
         price = Decimal(str(state["entry_price"]))
         qty = Decimal(str(state["qty"]))

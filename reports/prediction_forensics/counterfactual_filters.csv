@@ -1,0 +1,8 @@
+filter,trades_kept,wins_kept,losses_kept,gross_shadow_pnl_kept,winners_rejected,losers_avoided,feature_available_n,feature_missing_n,eligible_but_rejected
+A_ex_market_agrees,1,1,0,0.8953488372093023,0,0,1,13,0
+B_ex_at_least_market_side_probability,1,1,0,0.8953488372093023,0,0,1,13,0
+C_opposite_flip_ge_1_sigma,3,3,0,3.12640616939023,3,1,7,7,4
+C_opposite_flip_ge_2_sigma,0,0,0,0,6,1,7,7,7
+C_opposite_flip_ge_3_sigma,0,0,0,0,6,1,7,7,7
+D_previous_60s_canonical_strike_crossings_lt_2,13,12,1,19.89459777728772,0,1,14,0,1
+E_BTC_10s_30s_not_opposing,8,8,0,15.16831572600567,4,2,14,0,6

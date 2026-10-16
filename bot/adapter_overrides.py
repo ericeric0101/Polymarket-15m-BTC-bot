@@ -4,8 +4,11 @@ import asyncio
 import os
 import time
 import threading
+from itertools import islice
+from concurrent.futures import Future as ConcurrentFuture
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import py_clob_client_v2.http_helpers.helpers as pyclob_helpers
@@ -14,7 +17,550 @@ from py_clob_client_v2.exceptions import PolyApiException
 
 
 _QUOTE_PROVENANCE_TTL_SEC = 600.0
+_DEFAULT_L2_PUBLISH_INTERVAL_SEC = 0.25
+# Optional L2 updates must never sit ahead of a live quote long enough to
+# violate the strategy's two-second delivery-freshness contract.  The previous
+# 64/32 and later 16/4 bounds still let four subscribed outcomes starve a
+# slower consumer. Keep only a few queued events and coalesce per instrument.
+_MAX_MARKET_DATA_BACKLOG = 4
+_MAX_OPTIONAL_L2_BACKLOG = 2
+_MAX_MARKET_DATA_RELEASE_BACKLOG = 2
 _quote_provenance_by_tick_key: dict[tuple[object, ...], dict[str, object]] = {}
+_polymarket_market_ws_client_patched = False
+
+
+def l2_publish_interval_sec(value: object | None = None) -> float:
+    """Read the bounded operational L2 cadence (default preserves 4 Hz)."""
+    if value is None:
+        value = os.getenv("POLYMARKET_L2_PUBLISH_INTERVAL_SEC", str(_DEFAULT_L2_PUBLISH_INTERVAL_SEC))
+    try:
+        return max(0.05, float(value))
+    except (TypeError, ValueError):
+        return _DEFAULT_L2_PUBLISH_INTERVAL_SEC
+
+
+def build_polymarket_websocket_config(config_factory, *, url: str, headers: list, heartbeat: int = 10):
+    """Build adapter WS config with Polymarket's required market text heartbeat."""
+    kwargs = {"url": url, "headers": headers, "heartbeat": heartbeat}
+    if str(url).rstrip("/").endswith("/market"):
+        # Nautilus defaults heartbeat_msg=None to RFC 6455 control Ping frames.
+        # Polymarket's market endpoint requires the text frame "PING" instead.
+        kwargs["heartbeat_msg"] = "PING"
+    return config_factory(**kwargs)
+
+
+def is_polymarket_pong(raw: bytes | str) -> bool:
+    """Identify the market endpoint's text heartbeat response."""
+    value = raw.decode("ascii", errors="ignore") if isinstance(raw, bytes) else str(raw)
+    return value.strip().upper() == "PONG"
+
+
+def _install_polymarket_market_ws_heartbeat_override() -> None:
+    """Use the CLOB's documented app-level heartbeat without altering user WS."""
+    import nautilus_trader.adapters.polymarket.websocket.client as ws_mod
+
+    cls = ws_mod.PolymarketWebSocketClient
+    if getattr(cls, "_btc15m_market_text_heartbeat_patched", False):
+        return
+
+    async def patched_connect_client(self, client_id: int) -> None:
+        subs = self._client_subscriptions.get(client_id, [])
+        if not subs:
+            self._log.error(f"ws-client {client_id}: Cannot connect: no subscriptions")
+            return
+
+        self._log.debug(f"ws-client {client_id}: Connecting to {self._ws_url}...")
+        self._is_connecting[client_id] = True
+        try:
+            config = build_polymarket_websocket_config(
+                ws_mod.WebSocketConfig,
+                url=self._ws_url,
+                headers=[],
+                heartbeat=10,
+            )
+            self._clients[client_id] = await ws_mod.WebSocketClient.connect(
+                loop_=self._loop,
+                config=config,
+                handler=self._handler,
+                post_reconnection=lambda cid=client_id: self._handle_reconnect(cid),
+            )
+            current_subs = self._client_subscriptions.get(client_id, [])
+            self._log.info(
+                f"ws-client {client_id}: Connected to {self._ws_url} with {len(current_subs)} subscriptions",
+            )
+            await self._subscribe_all(client_id)
+        finally:
+            self._is_connecting[client_id] = False
+
+    cls._connect_client = patched_connect_client
+    cls._btc15m_market_text_heartbeat_patched = True
+
+
+def bounded_l2_depth(value: object | None = None) -> int:
+    if value is None:
+        value = os.getenv("ORDERBOOK_LEVELS_LIMIT", "10")
+    try:
+        return min(100, max(1, int(value)))
+    except (TypeError, ValueError):
+        return 10
+
+
+def should_enqueue_trade_tick(engine, tick) -> bool:
+    """Avoid queueing Polymarket prints when no DataEngine consumer requested them."""
+    subscribed = getattr(engine, "subscribed_trade_ticks", None)
+    if not callable(subscribed):
+        # Unknown engine API: preserve data rather than infer that it is unused.
+        return True
+    try:
+        instrument_id = str(getattr(tick, "instrument_id", ""))
+        return any(str(item) == instrument_id for item in subscribed())
+    except Exception:
+        return True
+
+
+def build_bounded_order_book_snapshot(*, instrument_id, book, depth: int, ts_event: int, ts_init: int):
+    """Build a CLEAR + top-N snapshot so deep stale levels cannot survive in cache."""
+    from nautilus_trader.model.data import BookOrder, OrderBookDelta, OrderBookDeltas
+    from nautilus_trader.model.enums import BookAction, OrderSide, RecordFlag
+    from nautilus_trader.model.objects import Price, Quantity
+
+    levels = max(1, int(depth))
+    orders = [(BookAction.CLEAR, BookOrder(
+        OrderSide.NO_ORDER_SIDE, Price.from_str("0"), Quantity.from_str("0"), 0,
+    ))]
+    for side, side_levels in ((OrderSide.BUY, book.bids()), (OrderSide.SELL, book.asks())):
+        for level in islice(side_levels, levels):
+            orders.append((BookAction.ADD, BookOrder(
+                side, level.price, Quantity.from_str(str(level.size())), 0,
+            )))
+    deltas = []
+    for index, (action, order) in enumerate(orders):
+        flags = RecordFlag.F_SNAPSHOT | (RecordFlag.F_LAST if index == len(orders) - 1 else 0)
+        deltas.append(OrderBookDelta(instrument_id, action, order, flags, 0, ts_event, ts_init))
+    return OrderBookDeltas(instrument_id, deltas)
+
+
+def enqueue_bounded_market_data(engine, data) -> bool:
+    """Never create async putter backlogs; prefer quotes and coalesce them by instrument."""
+    if getattr(engine, "_btc15m_disposing", False):
+        return False
+    queue = getattr(engine, "_data_queue", None)
+    if queue is None:
+        return False
+    kind = type(data).__name__
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        state = {
+            "quotes": {}, "l2_suppression_active": False,
+            "l2_suppressed_window": 0, "l2_suppressed_total": 0,
+            "l2_suppressed_by_instrument": {}, "l2_gap_by_instrument": {},
+            "quote_coalesced_window": 0, "quote_coalesced_total": 0,
+        }
+        engine._btc15m_backpressure = state
+    limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
+    depth = queue.qsize()
+    # Nautilus queues are commonly configured in the thousands. A percentage
+    # threshold alone still permits tens of seconds of stale L2 to sit ahead
+    # of actionable quotes. Keep the optional market-data backlog bounded in
+    # absolute event count as well as by the configured queue size.
+    pressure_mark = min(max(1, int(limit * 0.25)), _MAX_MARKET_DATA_BACKLOG) if limit else 0
+    l2_pressure_mark = min(pressure_mark, _MAX_OPTIONAL_L2_BACKLOG)
+    if kind == "OrderBookDeltas" and state["l2_suppression_active"]:
+        _record_l2_suppression(engine, data)
+        return False
+    if kind == "OrderBookDeltas" and limit and depth >= l2_pressure_mark:
+        state["l2_suppression_active"] = True
+        _record_l2_suppression(engine, data)
+        return False
+    if kind == "QuoteTick" and (queue.full() or (limit and depth >= pressure_mark)):
+        if limit and depth >= pressure_mark:
+            state["l2_suppression_active"] = True
+        state["quotes"][str(getattr(data, "instrument_id", ""))] = data
+        _record_backpressure(engine, "quote_coalesced")
+        return False
+    try:
+        queue.put_nowait(data)
+        monitor = getattr(engine, "_consumer_timing", None)
+        if monitor is not None:
+            try:
+                monitor.mark_enqueued(data)
+            except Exception:
+                pass
+        return True
+    except asyncio.QueueFull:
+        if kind == "QuoteTick":
+            state["quotes"][str(getattr(data, "instrument_id", ""))] = data
+            _record_backpressure(engine, "quote_coalesced")
+        return False
+
+
+def _record_backpressure(engine, counter: str) -> None:
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        return
+    window_key = f"{counter}_window"
+    total_key = f"{counter}_total"
+    state[window_key] = int(state.get(window_key, 0)) + 1
+    state[total_key] = int(state.get(total_key, 0)) + 1
+
+
+def _record_l2_suppression(engine, data) -> None:
+    """Keep bounded per-instrument suppression and unrecovered-gap evidence."""
+    _record_backpressure(engine, "l2_suppressed")
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        return
+    by_instrument = state.setdefault("l2_suppressed_by_instrument", {})
+    gaps = state.setdefault("l2_gap_by_instrument", {})
+    instrument = str(getattr(data, "instrument_id", "") or "unknown")
+    now = time.monotonic()
+    try:
+        event_ts = int(getattr(data, "ts_event", None))
+    except (TypeError, ValueError):
+        event_ts = None
+    if instrument not in by_instrument and len(by_instrument) >= 32:
+        evicted = next(iter(by_instrument))
+        by_instrument.pop(evicted, None)
+        gaps.pop(evicted, None)
+    totals = by_instrument.setdefault(instrument, {
+        "count_total": 0, "count_window": 0, "recovered_gaps": 0,
+    })
+    totals["count_total"] += 1
+    totals["count_window"] += 1
+    gap = gaps.setdefault(instrument, {
+        "first_suppressed_monotonic": now,
+        "last_suppressed_monotonic": now,
+        "first_suppressed_event_ts": event_ts,
+        "last_suppressed_event_ts": event_ts,
+        "suppressed_count": 0,
+    })
+    gap["last_suppressed_monotonic"] = now
+    gap["last_suppressed_event_ts"] = event_ts
+    gap["suppressed_count"] += 1
+
+
+def _record_l2_gap_recovery(engine, data, now: float) -> None:
+    state = getattr(engine, "_btc15m_backpressure", None)
+    if state is None:
+        return
+    instrument = str(getattr(data, "instrument_id", "") or "unknown")
+    gaps = state.setdefault("l2_gap_by_instrument", {})
+    gap = gaps.get(instrument)
+    if gap is None:
+        return
+    try:
+        event_ts = int(getattr(data, "ts_event"))
+    except (TypeError, ValueError):
+        return
+    last_suppressed_ts = gap.get("last_suppressed_event_ts")
+    # Only a snapshot sourced after the last dropped update proves recovery;
+    # an older item already queued before the gap is insufficient.
+    if last_suppressed_ts is None or event_ts <= int(last_suppressed_ts):
+        return
+    totals = state.setdefault("l2_suppressed_by_instrument", {}).setdefault(
+        instrument, {"count_total": 0, "count_window": 0, "recovered_gaps": 0},
+    )
+    totals["recovered_gaps"] += 1
+    totals["last_recovery_event_ts"] = event_ts
+    totals["last_recovery_latency_sec"] = max(
+        0.0, now - float(gap["last_suppressed_monotonic"]),
+    )
+    totals["last_gap_suppressed_count"] = int(gap["suppressed_count"])
+    gaps.pop(instrument, None)
+
+
+def flush_coalesced_quote_ticks(engine, *, consumer_drained: bool = False) -> int:
+    if getattr(engine, "_btc15m_disposing", False):
+        return 0
+    state = getattr(engine, "_btc15m_backpressure", None)
+    queue = getattr(engine, "_data_queue", None)
+    if not state or queue is None:
+        return 0
+    limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or getattr(queue, "maxsize", 0) or 0)
+    release_mark = min(
+        max(1, int(limit * 0.10)), _MAX_MARKET_DATA_RELEASE_BACKLOG,
+    ) if limit else 0
+    if consumer_drained and limit and queue.qsize() <= release_mark and not state["quotes"]:
+        state["l2_suppression_active"] = False
+    # A continuous producer can keep the queue above release_mark forever.
+    # Releasing a latest quote into each consumer-freed slot prevents the
+    # staged quote from starving while optional L2 remains suppressed.
+    quote_mark = min(max(1, int(limit * 0.25)), _MAX_MARKET_DATA_BACKLOG) if limit else 0
+    sent = 0
+    for key, quote in tuple(state["quotes"].items()):
+        if consumer_drained and limit and queue.qsize() >= quote_mark:
+            break
+        sampled_depth = queue.qsize()
+        try:
+            queue.put_nowait(quote)
+        except asyncio.QueueFull:
+            break
+        else:
+            monitor = getattr(engine, "_consumer_timing", None)
+            if monitor is not None:
+                try:
+                    monitor.mark_enqueued(quote)
+                except Exception:
+                    pass
+            state["quotes"].pop(key, None)
+            sent += 1
+            try:
+                pending_report = getattr(engine, "_btc15m_queue_telemetry_pending_report", None)
+                record_quote_data_engine_queue_depth(
+                    quote, sampled_depth, queue_window=pending_report,
+                )
+                if pending_report is not None:
+                    engine._btc15m_queue_telemetry_pending_report = None
+                record_quote_data_engine_publish_ts(quote, time.time())
+                report = record_data_engine_queue_telemetry(engine, quote, queue.qsize())
+                if report is not None:
+                    emit_data_engine_queue_report(engine, report)
+            except Exception:
+                pass
+    if consumer_drained and limit and queue.qsize() <= release_mark and not state["quotes"]:
+        state["l2_suppression_active"] = False
+    return sent
+
+
+def _short_queue_instrument(instrument_id: object) -> str:
+    """Keep console telemetry identifiable without printing full token IDs."""
+    value = str(instrument_id)
+    if len(value) <= 20:
+        return value
+    return f"{value[:8]}…{value[-8:]}"
+
+
+def _compact_l2_queue_activity(report: dict[str, object], *, limit: int = 3) -> str:
+    """Render only current-window suppression and unresolved gaps for the console.
+
+    Full per-instrument lifetime counters remain in the in-memory telemetry
+    report. They are useful for forensic inspection but made the regular
+    ten-second operational log several thousand characters long.
+    """
+    suppressed = report.get("l2_suppressed_by_instrument", {})
+    gaps = report.get("l2_open_gaps_by_instrument", {})
+    suppressed = suppressed if isinstance(suppressed, dict) else {}
+    gaps = gaps if isinstance(gaps, dict) else {}
+    keys = {
+        key
+        for key, value in suppressed.items()
+        if isinstance(value, dict) and int(value.get("count_window", 0) or 0) > 0
+    }
+    keys.update(gaps)
+    entries = []
+    for key in sorted(keys, key=str):
+        window = suppressed.get(key, {})
+        gap = gaps.get(key, {})
+        window_count = int(window.get("count_window", 0) or 0) if isinstance(window, dict) else 0
+        gap_count = int(gap.get("suppressed_count", 0) or 0) if isinstance(gap, dict) else 0
+        detail = f"{_short_queue_instrument(key)}:w={window_count}"
+        if gap_count:
+            detail += f"/gap={gap_count}"
+        entries.append(detail)
+    if not entries:
+        return "none"
+    visible = entries[:limit]
+    if len(entries) > limit:
+        visible.append(f"+{len(entries) - limit} more")
+    return ",".join(visible)
+
+
+def format_data_engine_queue_report(report: dict[str, object], queue_limit: int) -> str:
+    """Build a bounded, operator-readable queue health summary."""
+    counts = report.get("counts", {})
+    high_water = report.get("high_water", {})
+    counts = counts if isinstance(counts, dict) else {}
+    high_water = high_water if isinstance(high_water, dict) else {}
+    events = ",".join(
+        f"{kind}:{count}(hi={high_water.get(kind, 0)})"
+        for kind, count in sorted(counts.items())
+    ) or "none"
+    utilization = report.get("utilization_pct")
+    utilization_text = f"{utilization}%" if utilization is not None else "unknown"
+    return (
+        "DataEngine queue: "
+        f"depth={report['queue_depth']}/{queue_limit or 'unknown'} peak={report['peak']} "
+        f"util={utilization_text} rate={report['enqueue_rate']:.1f}->{report['process_rate']:.1f}/s "
+        f"l2={report['l2_suppressed_window']}(total={report['l2_suppressed_total']}) "
+        f"coalesced={report['quote_coalesced_window']}(total={report['quote_coalesced_total']}) "
+        f"qlat_ms=p50:{report.get('quote_latency_p50_ms', 0):.1f}/"
+        f"p95:{report.get('quote_latency_p95_ms', 0):.1f}/"
+        f"p99:{report.get('quote_latency_p99_ms', 0):.1f} "
+        f"l2_active=[{_compact_l2_queue_activity(report)}] events=[{events}]"
+    )
+
+
+def emit_data_engine_queue_report(engine, report) -> None:
+    engine._btc15m_queue_telemetry_pending_report = report
+    queue_limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or 0)
+    message = format_data_engine_queue_report(report, queue_limit)
+    # Keep the existing warning threshold. Loguru renders WARNING in the
+    # configured warning colour, while healthy summaries stay INFO-coloured.
+    warning_active = bool(queue_limit and report["queue_depth"] >= int(queue_limit * 0.75))
+    report["warning_active"] = warning_active
+    if warning_active:
+        logger.warning(message)
+    else:
+        logger.info(message)
+
+
+def cleanup_data_engine_runtime_state(engine) -> None:
+    """Best-effort cancel and detach per-engine tasks/state during synchronous dispose."""
+    task = getattr(engine, "_btc15m_sentinel_enqueue_task", None)
+    if task is not None:
+        try:
+            if isinstance(task, asyncio.Future):
+                loop = task.get_loop()
+                if not task.done():
+                    try:
+                        running_loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        running_loop = None
+                    if running_loop is loop:
+                        task.cancel()
+                    elif loop.is_running():
+                        loop.call_soon_threadsafe(task.cancel)
+                    else:
+                        task.cancel()
+            elif isinstance(task, ConcurrentFuture):
+                task.cancel()
+            elif callable(getattr(task, "cancel", None)):
+                task.cancel()
+        except (RuntimeError, AttributeError):
+            pass
+    engine._btc15m_sentinel_enqueue_task = None
+    engine._btc15m_backpressure = None
+    engine._btc15m_queue_telemetry_state = None
+    engine._btc15m_queue_telemetry_pending_report = None
+
+
+def begin_data_engine_shutdown(engine) -> None:
+    """Fence event producers and WS parsers before shutdown starts draining queues."""
+    engine._btc15m_disposing = True
+    backpressure = getattr(engine, "_btc15m_backpressure", None)
+    if backpressure is not None:
+        backpressure.get("quotes", {}).clear()
+    clients = getattr(engine, "_clients", {})
+    values = clients.values() if isinstance(clients, dict) else ()
+    for client in values:
+        if getattr(client, "_btc15m_disconnecting", None) is not None:
+            # Node.stop() does not disconnect data clients until after strategy
+            # shutdown. Fence their raw websocket callbacks now so a busy CLOB
+            # stream cannot monopolize the owning event loop during that gap.
+            cancel_quote_delivery_tasks(client)
+
+
+def _generation_observation(client, kind):
+    monitor = getattr(client, "_consumer_timing", None)
+    if monitor is not None:
+        try:
+            monitor.quote_generation_event(kind)
+        except Exception:
+            pass
+
+
+def cancel_quote_generation(client, instrument_id=None):
+    pending = getattr(client, "_quote_generation_pending", {})
+    if instrument_id is None:
+        pending.clear()
+    else:
+        pending.pop(instrument_id, None)
+    if not pending:
+        handle = getattr(client, "_quote_generation_flush_handle", None)
+        if handle is not None:
+            handle.cancel()
+        client._quote_generation_flush_handle = None
+
+
+def request_quote_generation(client, instrument, message, *, source="ws_price_change"):
+    """Keep event metadata only; book prices/sizes are read on the next loop turn."""
+    if getattr(client, "_btc15m_disconnecting", False):
+        return
+    subscribed = client.subscribed_quote_ticks()
+    pending = getattr(client, "_quote_generation_pending", None)
+    if pending is None:
+        pending = client._quote_generation_pending = {}
+    # Storage is bounded by current quote ownership, including prewarm tokens.
+    for obsolete in tuple(pending):
+        if obsolete not in subscribed:
+            pending.pop(obsolete, None)
+    if instrument.id not in subscribed:
+        return
+    _generation_observation(client, "requested")
+    if instrument.id in pending:
+        _generation_observation(client, "coalesced")
+    pending[instrument.id] = (instrument, message.timestamp, source,
+                             getattr(client, "_btc15m_raw_ws_received_ts", None),
+                             client._clock.timestamp_ns())
+    if getattr(client, "_quote_generation_flush_handle", None) is None:
+        try:
+            client._quote_generation_flush_handle = client._loop.call_soon(flush_quote_generation, client)
+        except RuntimeError:
+            cancel_quote_generation(client)
+
+
+def flush_quote_generation(client):
+    client._quote_generation_flush_handle = None
+    pending = getattr(client, "_quote_generation_pending", {})
+    if getattr(client, "_btc15m_disconnecting", False):
+        pending.clear()
+        return
+    # Fixed burst boundary: reentrant updates schedule a later turn, never recurse.
+    for instrument_id in tuple(pending):
+        metadata = pending.pop(instrument_id, None)
+        if metadata is None or instrument_id not in client.subscribed_quote_ticks():
+            continue
+        instrument, timestamp, source, received, ts_init_ns = metadata
+        _generation_observation(client, "executed")
+        try:
+            client._publish_quote(instrument, SimpleNamespace(timestamp=timestamp),
+                                  source=source, raw_ws_received_ts=received, ts_init_ns=ts_init_ns)
+        except Exception:
+            # Preserve newer reentrant metadata. Retry on the existing delivery
+            # cadence only after failure; normal generation has no fixed delay.
+            if not getattr(client, "_btc15m_disconnecting", False) and instrument_id in client.subscribed_quote_ticks():
+                pending.setdefault(instrument_id, metadata)
+    if pending and getattr(client, "_quote_generation_flush_handle", None) is None:
+        try:
+            client._quote_generation_flush_handle = client._loop.call_later(
+                max(0.05, float(getattr(client, "_quote_delivery_coalesce_sec", 0.25))),
+                flush_quote_generation, client)
+        except RuntimeError:
+            cancel_quote_generation(client)
+
+
+def cancel_quote_delivery_tasks(client) -> None:
+    """Synchronously fence client quote tasks before an event loop can close.
+
+    ``_disconnect`` is normally awaited by Nautilus.  A wedged engine can,
+    however, reach component disposal before that coroutine receives another
+    scheduling turn.  Cancelling here is deliberately synchronous so a pending
+    coalescer cannot call ``_handle_data`` against a closed loop.
+    """
+    client._btc15m_disconnecting = True
+    cancel_quote_generation(client)
+    for name in ("_quote_transport_heartbeat_task", "_quote_delivery_task"):
+        task = getattr(client, name, None)
+        if task is not None and not task.done():
+            try:
+                task.cancel()
+            except (RuntimeError, AttributeError):
+                pass
+        setattr(client, name, None)
+    client._quote_delivery_pending = {}
+
+
+async def drain_cancelled_quote_delivery_tasks(client) -> None:
+    """Await cancelled quote tasks when a live loop is still available."""
+    current = asyncio.current_task()
+    tasks = []
+    for name in ("_quote_transport_heartbeat_task", "_quote_delivery_task"):
+        task = getattr(client, name, None)
+        if task is not None and task is not current:
+            tasks.append(task)
+    cancel_quote_delivery_tasks(client)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _quote_provenance_key(quote: object) -> tuple[object, ...]:
@@ -59,11 +605,34 @@ def quote_provenance_for_tick(tick: object) -> dict[str, object]:
     return dict(_quote_provenance_by_tick_key.get(_quote_provenance_key(tick), {}))
 
 
-def record_quote_data_engine_queue_depth(quote: object, queue_depth: int) -> None:
-    """Attach DataEngine queue depth observed immediately before enqueue."""
+def record_quote_data_engine_queue_depth(
+    quote: object,
+    queue_depth: int,
+    *,
+    queue_window: dict[str, object] | None = None,
+) -> None:
+    """Attach DataEngine backlog sampled immediately before enqueueing this quote."""
     metadata = _quote_provenance_by_tick_key.get(_quote_provenance_key(quote))
     if metadata is not None:
         metadata["data_engine_queue_depth"] = int(queue_depth)
+        if queue_window is not None:
+            metadata["data_engine_queue_window"] = dict(queue_window)
+
+
+def record_quote_data_engine_publish_ts(quote: object, published_ts: float) -> None:
+    """Record when the adapter hands a coalesced quote to the DataEngine."""
+    metadata = _quote_provenance_by_tick_key.get(_quote_provenance_key(quote))
+    if metadata is not None:
+        metadata["data_engine_published_ts"] = float(published_ts)
+
+
+def record_quote_data_engine_latency(quote: object, delivered_ts: float) -> float | None:
+    metadata = _quote_provenance_by_tick_key.get(_quote_provenance_key(quote))
+    if metadata is None or metadata.get("data_engine_published_ts") is None:
+        return None
+    latency = max(0.0, float(delivered_ts) - float(metadata["data_engine_published_ts"]))
+    metadata["data_engine_queue_latency_sec"] = latency
+    return latency
 
 
 def coalesce_price_changes_by_asset(price_changes: object) -> list[list[object]]:
@@ -89,6 +658,140 @@ def position_fetch_retry_delay_sec(error: Exception, attempt: int) -> float | No
 def should_publish_order_book_deltas(*, has_delta_subscription: bool) -> bool:
     """Avoid filling the DataEngine with depth updates no consumer requested."""
     return bool(has_delta_subscription)
+
+
+def should_publish_l2_snapshot(
+    *,
+    has_delta_subscription: bool,
+    now_monotonic: float,
+    last_publish_monotonic: float,
+    interval_sec: float | None = None,
+) -> bool:
+    """Bound subscribed L2 delivery while keeping periodic full-book freshness."""
+    if not has_delta_subscription:
+        return False
+    if last_publish_monotonic <= 0:
+        return True
+    interval = l2_publish_interval_sec(interval_sec)
+    return float(now_monotonic) - float(last_publish_monotonic) + 1e-9 >= interval
+
+
+def batch_order_book_deltas(data_mod, instrument_id, deltas):
+    """Build one ordered DataEngine event for all book changes in a WS frame."""
+    if not deltas:
+        return None
+    last_flag = data_mod.RecordFlag.F_LAST
+    batched = []
+    for index, delta in enumerate(deltas):
+        flags = type(delta.flags)(int(delta.flags) & ~int(last_flag))
+        if index == len(deltas) - 1:
+            flags |= last_flag
+        batched.append(data_mod.OrderBookDelta(
+            instrument_id=delta.instrument_id,
+            action=delta.action,
+            order=delta.order,
+            flags=flags,
+            sequence=delta.sequence,
+            ts_event=delta.ts_event,
+            ts_init=delta.ts_init,
+        ))
+    return data_mod.OrderBookDeltas(instrument_id, batched)
+
+
+async def enqueue_shutdown_sentinels(engine, *, timeout_sec: float = 8.0) -> None:
+    """Wait for queue capacity, then bound shutdown if a consumer is wedged."""
+    begin_data_engine_shutdown(engine)
+    queues = [
+        getattr(engine, name, None)
+        for name in ("_cmd_queue", "_req_queue", "_res_queue", "_data_queue")
+    ]
+    # Shutdown is not a quote-delivery opportunity: staged quotes have already
+    # been discarded and future producer callbacks fenced above.
+    putters = [queue.put(engine._sentinel) for queue in queues if queue is not None]
+    try:
+        await asyncio.wait_for(asyncio.gather(*putters), timeout=max(0.1, timeout_sec))
+    except asyncio.TimeoutError:
+        logger.error("DataEngine queues did not drain for shutdown; cancelling stuck queue workers")
+        workers = []
+        for name in ("_cmd_queue_task", "_req_queue_task", "_res_queue_task", "_data_queue_task"):
+            task = getattr(engine, name, None)
+            if task is not None and not task.done():
+                task.cancel()
+                workers.append(task)
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+
+
+def record_data_engine_queue_telemetry(engine, data, queue_depth: int, *, now_ts: float | None = None, phase: str = "enqueue"):
+    """Aggregate queue pressure by event type without writing to the hot-path DB."""
+    now = time.monotonic() if now_ts is None else float(now_ts)
+    state = getattr(engine, "_btc15m_queue_telemetry_state", None)
+    if state is None:
+        state = {
+            "started": now, "counts": {}, "high_water": {},
+            "enqueued": 0, "processed": 0, "peak": int(queue_depth),
+            "window_start_depth": int(queue_depth), "quote_latency_samples": [],
+        }
+        engine._btc15m_queue_telemetry_state = state
+    type_name = type(data).__name__
+    counter = "processed" if phase == "process" else "enqueued"
+    state[counter] = int(state[counter]) + 1
+    if phase != "process":
+        state["counts"][type_name] = int(state["counts"].get(type_name, 0)) + 1
+    state["high_water"][type_name] = max(
+        int(state["high_water"].get(type_name, 0)), int(queue_depth)
+    )
+    state["peak"] = max(int(state["peak"]), int(queue_depth))
+    if now - float(state["started"]) < 10.0:
+        return None
+    window_sec = max(0.0, now - float(state["started"]))
+    queue_limit = int(getattr(getattr(engine, "_config", None), "qsize", 0) or 0)
+    report = {
+        "window_sec": window_sec,
+        "counts": dict(state["counts"]),
+        "high_water": dict(state["high_water"]),
+        "queue_depth": int(queue_depth),
+        "peak": int(state["peak"]),
+        "enqueued": int(state["enqueued"]),
+        "processed": int(state["processed"]),
+        "enqueue_rate": int(state["enqueued"]) / window_sec if window_sec else 0.0,
+        "process_rate": int(state["processed"]) / window_sec if window_sec else 0.0,
+        "throughput_delta": int(state["enqueued"]) - int(state["processed"]),
+        "utilization_pct": (100.0 * int(queue_depth) / queue_limit) if queue_limit else None,
+    }
+    samples = sorted(state.get("quote_latency_samples", []))
+    if samples:
+        report["quote_latency_p50_ms"] = 1000.0 * samples[int((len(samples) - 1) * 0.50)]
+        report["quote_latency_p95_ms"] = 1000.0 * samples[int((len(samples) - 1) * 0.95)]
+        report["quote_latency_p99_ms"] = 1000.0 * samples[int((len(samples) - 1) * 0.99)]
+        report["quote_latency_max_ms"] = 1000.0 * samples[-1]
+    report["window_start_depth"] = int(state["window_start_depth"])
+    report["window_end_depth"] = int(queue_depth)
+    report["depth_delta"] = report["window_end_depth"] - report["window_start_depth"]
+    pressure = getattr(engine, "_btc15m_backpressure", {}) or {}
+    for counter in ("l2_suppressed", "quote_coalesced"):
+        window_key = f"{counter}_window"
+        total_key = f"{counter}_total"
+        report[f"{counter}_window"] = int(pressure.get(window_key, 0))
+        report[f"{counter}_total"] = int(pressure.get(total_key, 0))
+        pressure[window_key] = 0
+    report["l2_suppressed_by_instrument"] = {
+        key: dict(value) for key, value in pressure.get("l2_suppressed_by_instrument", {}).items()
+    }
+    report["l2_open_gaps_by_instrument"] = {
+        key: {
+            "suppressed_count": int(value.get("suppressed_count", 0)),
+            "last_suppressed_event_ts": value.get("last_suppressed_event_ts"),
+        }
+        for key, value in pressure.get("l2_gap_by_instrument", {}).items()
+    }
+    for value in pressure.get("l2_suppressed_by_instrument", {}).values():
+        value["count_window"] = 0
+    state.update(
+        started=now, counts={}, high_water={}, enqueued=0, processed=0,
+        peak=int(queue_depth), window_start_depth=int(queue_depth), quote_latency_samples=[],
+    )
+    return report
 
 
 def should_emit_quote_heartbeat(
@@ -123,6 +826,7 @@ def build_transport_heartbeat_quote(data_mod, quote: object, ts_init: int):
 
 
 def install_runtime_compatibility_overrides() -> None:
+    _install_polymarket_market_ws_heartbeat_override()
     _install_polymarket_data_overrides()
     _install_live_data_engine_observability_override()
     _install_polymarket_execution_overrides()
@@ -158,7 +862,9 @@ def _install_polymarket_data_overrides() -> None:
     original_init = cls.__init__
     original_connect = cls._connect
     original_disconnect = cls._disconnect
+    original_dispose = cls._dispose
     original_handle_raw_ws_message = cls._handle_raw_ws_message
+    original_unsubscribe_quotes = cls.unsubscribe_quote_ticks
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
@@ -180,20 +886,95 @@ def _install_polymarket_data_overrides() -> None:
             self._quote_delivery_pending = {}
         if not hasattr(self, "_quote_delivery_task"):
             self._quote_delivery_task = None
+        # This is separate from WebSocket connectivity.  It is set before
+        # client teardown so late callbacks cannot revive the quote pipeline.
+        self._btc15m_disconnecting = False
+        self._quote_generation_pending = {}
+        self._quote_generation_flush_handle = None
         if not hasattr(self, "_quote_delivery_coalesce_sec"):
             self._quote_delivery_coalesce_sec = max(
                 0.05,
                 float(os.getenv("POLYMARKET_QUOTE_COALESCE_SEC", "0.25")),
             )
+        if not hasattr(self, "_btc15m_l2_snapshot_publish_ts"):
+            self._btc15m_l2_snapshot_publish_ts = {}
+        if not hasattr(self, "_btc15m_l2_publish_state"):
+            self._btc15m_l2_publish_state = {}
+        if not hasattr(self, "_btc15m_l2_depth"):
+            self._btc15m_l2_depth = bounded_l2_depth()
+
+    def l2_publish_state(self, instrument_id):
+        """Complete partial skip-state without resetting existing backoff.
+
+        These synchronous adapter callbacks run on the same owner loop. Every
+        producer uses this initializer, including quote-only prewarm and late
+        stopping callbacks, before the instrument can gain an L2 subscription.
+        """
+        state = self._btc15m_l2_publish_state.setdefault(instrument_id, {})
+        for key, value in (("last_attempt", 0.0), ("last_success", 0.0),
+                           ("failures", 0), ("retry_at", 0.0)):
+            state.setdefault(key, value)
+        return state
+
+    def publish_l2_snapshot_if_due(self, instrument, ws_message) -> bool:
+        """Publish a bounded current local book with failure backoff."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            l2_publish_state(self, instrument.id)["last_status"] = "skipped_stopping"
+            return False
+        if instrument.id not in self.subscribed_order_book_deltas():
+            l2_publish_state(self, instrument.id)["last_status"] = "skipped_unsubscribed"
+            return False
+        now_monotonic = time.monotonic()
+        state = l2_publish_state(self, instrument.id)
+        interval = l2_publish_interval_sec()
+        if now_monotonic < state["retry_at"]:
+            state["last_status"] = "skipped_backoff"
+            return False
+        if not should_publish_l2_snapshot(
+            has_delta_subscription=True,
+            now_monotonic=now_monotonic,
+            last_publish_monotonic=float(state["last_attempt"]),
+            interval_sec=interval,
+        ):
+            state["last_status"] = "skipped_rate_limit"
+            return False
+        book = self._local_books.get(instrument.id)
+        if book is None:
+            state["last_status"] = "skipped_missing_local_book"
+            return False
+        state["last_attempt"] = now_monotonic
+        try:
+            snapshot = build_bounded_order_book_snapshot(
+                instrument_id=instrument.id, book=book, depth=self._btc15m_l2_depth,
+                ts_event=data_mod.millis_to_nanos(float(ws_message.timestamp)),
+                ts_init=self._clock.timestamp_ns(),
+            )
+            self._handle_data(snapshot)
+        except Exception as exc:
+            state["failures"] += 1
+            state["last_status"] = "failed"
+            state["retry_at"] = now_monotonic + min(5.0, interval * (2 ** min(state["failures"], 5)))
+            last_log = float(state.get("last_error_log", 0.0))
+            if now_monotonic - last_log >= 10.0:
+                self._log.warning(f"L2 snapshot publish failed; bounded retry: instrument={instrument.id} failures={state['failures']} error={exc}")
+                state["last_error_log"] = now_monotonic
+            return False
+        state.update(last_success=now_monotonic, failures=0, retry_at=0.0, last_status="published")
+        self._btc15m_l2_snapshot_publish_ts[instrument.id] = now_monotonic
+        return True
 
     async def flush_latest_quotes(self) -> None:
         """Deliver a bounded, latest-only QuoteTick stream to the strategy loop."""
         try:
             while True:
                 await asyncio.sleep(float(self._quote_delivery_coalesce_sec))
+                if getattr(self, "_btc15m_disconnecting", False):
+                    return
                 pending = self._quote_delivery_pending
                 self._quote_delivery_pending = {}
                 for quote in pending.values():
+                    if getattr(self, "_btc15m_disconnecting", False):
+                        return
                     self._handle_data(quote)
                 if not self._quote_delivery_pending:
                     return
@@ -202,6 +983,8 @@ def _install_polymarket_data_overrides() -> None:
 
     def queue_latest_quote(self, quote) -> None:
         """Replace intermediate quotes that have not yet reached the main loop."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            return
         retain_latest_quote(self._quote_delivery_pending, quote)
         task = getattr(self, "_quote_delivery_task", None)
         if task is None or task.done():
@@ -215,6 +998,8 @@ def _install_polymarket_data_overrides() -> None:
         """
         while True:
             await asyncio.sleep(float(getattr(self, "_quote_heartbeat_sec", 5.0)))
+            if getattr(self, "_btc15m_disconnecting", False):
+                return
             is_connected = bool(self._ws_client.is_connected())
             for instrument_id, quote in tuple(getattr(self, "_last_quotes", {}).items()):
                 if instrument_id not in self.subscribed_quote_ticks():
@@ -233,24 +1018,32 @@ def _install_polymarket_data_overrides() -> None:
 
     async def patched_connect(self) -> None:
         await original_connect(self)
+        self._btc15m_disconnecting = False
         task = getattr(self, "_quote_transport_heartbeat_task", None)
         if task is None or task.done():
             self._quote_transport_heartbeat_task = self.create_task(quote_transport_heartbeat(self))
 
     async def patched_disconnect(self) -> None:
-        task = getattr(self, "_quote_transport_heartbeat_task", None)
-        if task is not None:
-            task.cancel()
-            self._quote_transport_heartbeat_task = None
-        delivery_task = getattr(self, "_quote_delivery_task", None)
-        if delivery_task is not None:
-            delivery_task.cancel()
-            self._quote_delivery_task = None
-        self._quote_delivery_pending = {}
+        await drain_cancelled_quote_delivery_tasks(self)
         await original_disconnect(self)
+
+    def patched_unsubscribe_quotes(self, command):
+        cancel_quote_generation(self, command.instrument_id)
+        return original_unsubscribe_quotes(self, command)
+
+    def patched_dispose(self) -> None:
+        # Component disposal can run after a timeout path where Nautilus did
+        # not get to await ``_disconnect``.  Fence/cancel first so no quote
+        # coalescer survives into a replacement event loop.
+        cancel_quote_delivery_tasks(self)
+        original_dispose(self)
 
     def patched_handle_raw_ws_message(self, raw: bytes) -> None:
         """Capture ingress time before Nautilus decodes and routes a WS payload."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            return
+        if is_polymarket_pong(raw):
+            return
         self._btc15m_raw_ws_received_ts = time.time()
         original_handle_raw_ws_message(self, raw)
 
@@ -277,7 +1070,15 @@ def _install_polymarket_data_overrides() -> None:
             f"Instrument tick size changed: id={instrument.id} price_increment={instrument.price_increment} ws_tick={ws_tick}",
         )
 
-    def patched_apply_quote_change(self, instrument, ws_message, price_change) -> bool:
+    def patched_apply_quote_change(
+        self,
+        instrument,
+        ws_message,
+        price_change,
+        *,
+        delta_sink=None,
+        publish_delta: bool = True,
+    ) -> bool:
         """Apply an incremental CLOB update to the local book without publishing a quote."""
         now_ns = self._clock.timestamp_ns()
         order = data_mod.BookOrder(
@@ -307,16 +1108,21 @@ def _install_polymarket_data_overrides() -> None:
 
         local_book = self._local_books[instrument.id]
         local_book.apply(deltas)
-        if should_publish_order_book_deltas(
+        if delta_sink is not None:
+            delta_sink.append(delta)
+        if publish_delta and should_publish_order_book_deltas(
             has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
         ):
             self._handle_data(deltas)
         return True
 
-    def patched_publish_quote(self, instrument, ws_message) -> None:
+    def patched_publish_quote(self, instrument, ws_message, *, source: str = "ws_price_change", raw_ws_received_ts: float | None = None, ts_init_ns: int | None = None) -> None:
         """Publish the final top-of-book after all message updates are applied."""
+        if getattr(self, "_btc15m_disconnecting", False):
+            return
         if instrument.id in self.subscribed_quote_ticks():
-            now_ns = self._clock.timestamp_ns()
+            # Deferred generation must not make a delayed book update look new.
+            now_ns = ts_init_ns if ts_init_ns is not None else self._clock.timestamp_ns()
             local_book = self._local_books[instrument.id]
             bid_price = local_book.best_bid_price()
             ask_price = local_book.best_ask_price()
@@ -344,7 +1150,7 @@ def _install_polymarket_data_overrides() -> None:
                 bid_size=bid_size,
                 ask_size=ask_size,
                 ts_event=data_mod.millis_to_nanos(float(ws_message.timestamp)),
-                ts_init=self._clock.timestamp_ns(),
+                ts_init=now_ns,
             )
 
             last_quote = self._last_quotes.get(instrument.id)
@@ -367,14 +1173,15 @@ def _install_polymarket_data_overrides() -> None:
             self._quote_heartbeat_emit_ns[instrument.id] = now_ns
             record_quote_provenance(
                 quote,
-                source="ws_price_change",
-                raw_ws_received_ts=getattr(self, "_btc15m_raw_ws_received_ts", None),
+                source=source,
+                raw_ws_received_ts=raw_ws_received_ts,
             )
             self._queue_latest_quote(quote)
 
     def patched_handle_quote(self, instrument, ws_message, price_change) -> None:
-        if self._apply_quote_change(instrument, ws_message, price_change):
-            self._publish_quote(instrument, ws_message)
+        if self._apply_quote_change(instrument, ws_message, price_change, publish_delta=False):
+            request_quote_generation(self, instrument, ws_message)
+            self._publish_l2_snapshot_if_due(instrument, ws_message)
 
     def patched_handle_quotes(self, ws_message) -> None:
         """Coalesce quote fan-out while retaining every local-book delta in order."""
@@ -387,59 +1194,50 @@ def _install_polymarket_data_overrides() -> None:
                 continue
             applied = False
             for price_change in changes:
-                applied = self._apply_quote_change(instrument, ws_message, price_change) or applied
+                applied = self._apply_quote_change(
+                    instrument,
+                    ws_message,
+                    price_change,
+                    publish_delta=False,
+                ) or applied
             if applied:
-                self._publish_quote(instrument, ws_message)
+                request_quote_generation(self, instrument, ws_message)
+                self._publish_l2_snapshot_if_due(instrument, ws_message)
 
     def patched_handle_book_snapshot(self, instrument, ws_message) -> None:
         now_ns = self._clock.timestamp_ns()
         deltas = ws_message.parse_to_snapshot(instrument=instrument, ts_init=now_ns)
         if deltas is None:
             return
-        if should_publish_order_book_deltas(
-            has_delta_subscription=instrument.id in self.subscribed_order_book_deltas(),
-        ):
-            self._handle_deltas(instrument, deltas)
-        else:
-            # Retain a complete local book for quote generation while avoiding
-            # a DataEngine event for depth nobody subscribed to consume.
-            local_book = data_mod.OrderBook(instrument.id, book_type=data_mod.BookType.L2_MBP)
-            local_book.apply_deltas(deltas)
-            self._local_books[instrument.id] = local_book
-        if instrument.id in self.subscribed_quote_ticks():
-            quote = ws_message.parse_to_quote(
-                instrument=instrument,
-                ts_init=now_ns,
-                drop_quotes_missing_side=self._config.drop_quotes_missing_side,
-            )
-            if quote is None:
-                self._log_drop_quote_warning_throttled(
-                    instrument.id,
-                    "missing bid or ask prices in snapshot",
-                )
-                return
-            self._last_quotes[instrument.id] = quote
-            self._quote_heartbeat_emit_ns[instrument.id] = now_ns
-            record_quote_provenance(
-                quote,
-                source="ws_snapshot",
-                raw_ws_received_ts=getattr(self, "_btc15m_raw_ws_received_ts", None),
-            )
-            self._queue_latest_quote(quote)
+        # Full/reconnect snapshots refresh the complete adapter-local book first;
+        # cache fan-out follows the same bounded cadence as incremental updates.
+        local_book = data_mod.OrderBook(instrument.id, book_type=data_mod.BookType.L2_MBP)
+        local_book.apply_deltas(deltas)
+        self._local_books[instrument.id] = local_book
+        l2_publish_state(self, instrument.id)
+        request_quote_generation(self, instrument, ws_message, source="ws_snapshot")
+        self._publish_l2_snapshot_if_due(instrument, ws_message)
 
     cls.__init__ = patched_init
     cls._connect = patched_connect
     cls._disconnect = patched_disconnect
+    cls._dispose = patched_dispose
     cls._handle_raw_ws_message = patched_handle_raw_ws_message
     cls._log_drop_quote_warning_throttled = patched_log_drop_quote_warning_throttled
     cls._log_tick_size_warning_throttled = patched_log_tick_size_warning_throttled
     cls._apply_quote_change = patched_apply_quote_change
     cls._publish_quote = patched_publish_quote
+    cls.unsubscribe_quote_ticks = patched_unsubscribe_quotes
     cls._queue_latest_quote = queue_latest_quote
     cls._handle_quote = patched_handle_quote
     cls._handle_quotes = patched_handle_quotes
     cls._handle_book_snapshot = patched_handle_book_snapshot
+    cls._publish_l2_snapshot_if_due = publish_l2_snapshot_if_due
     cls._btc15m_runtime_compat_patched = True
+    logger.info(
+        "Polymarket bounded L2 publisher configured: "
+        f"interval={l2_publish_interval_sec():.3f}s depth={bounded_l2_depth()}"
+    )
 
 
 def _install_live_data_engine_observability_override() -> None:
@@ -450,17 +1248,128 @@ def _install_live_data_engine_observability_override() -> None:
         return
 
     original_process = LiveDataEngine.process
+    original_handle_data = LiveDataEngine._handle_data
+    original_dispose = LiveDataEngine._dispose
+
+    def patched_enqueue_sentinels(self) -> None:
+        # Set synchronously before scheduling, preventing a producer callback
+        # from refilling the queue before the sentinel coroutine starts.
+        begin_data_engine_shutdown(self)
+        task = getattr(self, "_btc15m_sentinel_enqueue_task", None)
+        if task is not None and not task.done():
+            return
+
+        async def enqueue_when_available():
+            await enqueue_shutdown_sentinels(self)
+
+        def clear_task(done_task):
+            if getattr(self, "_btc15m_sentinel_enqueue_task", None) is done_task:
+                self._btc15m_sentinel_enqueue_task = None
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            task = self._loop.create_task(
+                enqueue_when_available(), name="btc15m_data_engine_shutdown_sentinels"
+            )
+            self._btc15m_sentinel_enqueue_task = task
+            task.add_done_callback(clear_task)
+        elif self._loop.is_running():
+            task = asyncio.run_coroutine_threadsafe(
+                enqueue_when_available(), self._loop
+            )
+            self._btc15m_sentinel_enqueue_task = task
+            task.add_done_callback(clear_task)
+        else:
+            logger.error("DataEngine loop is not running; cannot gracefully enqueue shutdown sentinels")
 
     def patched_process(self, data) -> None:
-        if type(data).__name__ == "QuoteTick":
+        # Once disposal begins, do not refill queues while sentinels are
+        # draining them. This also prevents late feed callbacks from reviving
+        # observability/backpressure state after cleanup.
+        if getattr(self, "_btc15m_disposing", False):
+            return
+        if type(data).__name__ == "TradeTick" and not should_enqueue_trade_tick(self, data):
+            self._btc15m_unrequested_trade_ticks_dropped = int(
+                getattr(self, "_btc15m_unrequested_trade_ticks_dropped", 0)
+            ) + 1
+            return
+        try:
+            queue_depth = self.data_qsize()
+            if type(data).__name__ == "QuoteTick":
+                record_quote_data_engine_queue_depth(data, queue_depth)
+        except Exception:
+            queue_depth = 0
+        # Nautilus' ThrottledEnqueuer creates background queue.put tasks when
+        # full. For market data, use a bounded same-loop queue instead.
+        try:
+            on_engine_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_engine_loop = False
+        if type(data).__name__ in {"QuoteTick", "OrderBookDeltas"} and on_engine_loop:
+            accepted = enqueue_bounded_market_data(self, data)
+            if not accepted:
+                return
             try:
-                record_quote_data_engine_queue_depth(data, self.data_qsize())
+                if type(data).__name__ == "QuoteTick":
+                    pending_report = getattr(self, "_btc15m_queue_telemetry_pending_report", None)
+                    record_quote_data_engine_queue_depth(
+                        data, queue_depth, queue_window=pending_report,
+                    )
+                    if pending_report is not None:
+                        self._btc15m_queue_telemetry_pending_report = None
+                record_quote_data_engine_publish_ts(data, time.time())
+                report = record_data_engine_queue_telemetry(self, data, self.data_qsize())
+                if report is not None:
+                    emit_data_engine_queue_report(self, report)
             except Exception:
-                # Queue observability must never interfere with market data.
                 pass
+            return
+        try:
+            report = record_data_engine_queue_telemetry(self, data, queue_depth)
+            if report is not None:
+                emit_data_engine_queue_report(self, report)
+        except Exception:
+            # Queue observability must never interfere with market data.
+            pass
         original_process(self, data)
 
+    def patched_handle_data(self, data) -> None:
+        try:
+            report = record_data_engine_queue_telemetry(
+                self, data, self.data_qsize(), phase="process",
+            )
+            if report is not None:
+                emit_data_engine_queue_report(self, report)
+            if type(data).__name__ == "QuoteTick":
+                latency = record_quote_data_engine_latency(data, time.time())
+                if latency is not None:
+                    state = getattr(self, "_btc15m_queue_telemetry_state", {})
+                    samples = state.setdefault("quote_latency_samples", [])
+                    samples.append(latency)
+                    del samples[:-256]
+        except Exception:
+            pass
+        original_handle_data(self, data)
+        if type(data).__name__ == "OrderBookDeltas":
+            # Recovery is evidence only after the original DataEngine handler
+            # has accepted the replacing snapshot without raising.
+            _record_l2_gap_recovery(self, data, time.monotonic())
+        flush_coalesced_quote_ticks(self, consumer_drained=True)
+
+    def patched_dispose(self) -> None:
+        self._btc15m_disposing = True
+        try:
+            original_dispose(self)
+        finally:
+            cleanup_data_engine_runtime_state(self)
+
+    LiveDataEngine._enqueue_sentinels = patched_enqueue_sentinels
     LiveDataEngine.process = patched_process
+    LiveDataEngine._handle_data = patched_handle_data
+    LiveDataEngine._dispose = patched_dispose
     LiveDataEngine._btc15m_queue_telemetry_patched = True
 
 

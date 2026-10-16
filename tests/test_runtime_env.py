@@ -125,3 +125,19 @@ def test_versioned_profile_has_no_sensitive_keys():
     profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
 
     assert _keys(profile).isdisjoint(SENSITIVE_ENV_KEYS)
+
+
+def test_active_profile_has_no_retired_outcome_configuration():
+    profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
+
+    assert "OUTCOME_" not in profile.read_text(encoding="utf-8")
+
+
+def test_active_btc_profile_enables_normal_maker_buy():
+    profile = Path(__file__).parents[1] / "config" / "profiles" / "btc15_twap_v3.env"
+    assert "NORMAL_MAKER_BUY_ENABLED=true" in profile.read_text(encoding="utf-8")
+
+    environ: dict[str, str] = {}
+    load_runtime_env(repo_root=profile.parents[2], environ=environ)
+
+    assert environ["NORMAL_MAKER_BUY_ENABLED"].lower() == "true"

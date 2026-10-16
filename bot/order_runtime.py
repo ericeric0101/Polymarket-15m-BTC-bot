@@ -7,6 +7,62 @@ from typing import Any, List, Optional, Protocol, Tuple
 from loguru import logger
 from nautilus_trader.model.identifiers import InstrumentId
 
+from bot.kill_switch import (
+    KILL_REASON_CANCEL_RECONCILE_FAILED,
+    KILL_REASON_CANCEL_RECONCILE_UNKNOWN,
+    KILL_REASON_UNSPECIFIED,
+    classify_kill_reason,
+    escalate,
+    keeps_resting_sells,
+)
+
+
+_TERMINAL_ORDER_STATES = ("REJECTED", "FILLED", "CANCELED", "CANCELLED", "EXPIRED")
+
+
+def is_prior_market_order(strategy: Any, state: dict[str, Any]) -> bool:
+    """Classify an order as prior-market only when both identities are known."""
+    market_instruments = getattr(strategy, "current_market_instruments", None)
+    if not market_instruments:
+        return False
+    current_keys = {str(item) for item in market_instruments if item is not None}
+    order_instrument = str(state.get("instrument_id", "") or "")
+    return bool(order_instrument and current_keys and order_instrument not in current_keys)
+
+
+def classify_rollover_sell_orders(strategy: Any) -> dict[str, list[str]]:
+    """Use one conservative SELL exposure classification for all rollover paths."""
+    active_orders = getattr(strategy, "active_maker_orders", None)
+    result = {"blocking": [], "ignored_prior": [], "terminal": [], "unavailable": []}
+    if not isinstance(active_orders, dict):
+        result["blocking"].append("active_order_state_unavailable")
+        result["unavailable"].append("active_order_state_unavailable")
+        return result
+    for order_key, state in active_orders.items():
+        key = str(order_key)
+        is_sell_key = key.lower().startswith("sell:")
+        if not isinstance(state, dict):
+            # The launcher historically failed closed on any malformed active
+            # order entry; retain that behavior instead of guessing its side.
+            result["blocking"].append("active_order_state_unavailable")
+            result["unavailable"].append(key)
+            continue
+        side = str(state.get("side", "") or "").lower()
+        if side != "sell" and not is_sell_key:
+            continue
+        order = state.get("order")
+        status = str(getattr(order, "status", "") or "").upper()
+        if any(terminal in status for terminal in _TERMINAL_ORDER_STATES):
+            result["terminal"].append(key)
+        elif is_prior_market_order(strategy, state):
+            result["ignored_prior"].append(key)
+        else:
+            # Unknown market/token identity is not safe to dismiss as prior.
+            result["blocking"].append(key)
+            if not str(state.get("instrument_id", "") or "") or not getattr(strategy, "current_market_instruments", None):
+                result["unavailable"].append(key)
+    return result
+
 
 class OrderRuntimeHost(Protocol):
     active_maker_orders: dict[str, dict[str, Any]]
@@ -19,7 +75,8 @@ class OrderRuntimeHost(Protocol):
     cache: Any
 
     def _normalize_instrument_id(self, instrument_id: Any) -> Any: ...
-    def _activate_maker_kill_switch(self, reason: str) -> None: ...
+    def _get_confirmed_inventory_qty_for_instrument(self, instrument_id: Optional[Any] = None) -> Decimal: ...
+    def _activate_maker_kill_switch(self, reason: str, *, reason_code: str = ...) -> None: ...
     def cancel_order(self, order: Any) -> None: ...
     def _db_order_event(self, **kwargs: Any) -> None: ...
 
@@ -58,22 +115,66 @@ class OrderRuntimeMixin:
             return None
         bid_decimal = quote.bid_price.as_decimal() if quote.bid_price is not None else None
         ask_decimal = quote.ask_price.as_decimal() if quote.ask_price is not None else None
+        # Exit/telemetry callers keep the historical repaired quote, but the
+        # repair is recorded so a BUY can never be priced from a fabricated side.
+        synthesis = None
         if bid_decimal is None and ask_decimal is not None:
             bid_decimal = max(Decimal("0.01"), ask_decimal - Decimal("0.01"))
+            synthesis = "missing_bid"
         if ask_decimal is None and bid_decimal is not None:
             ask_decimal = min(Decimal("0.99"), bid_decimal + Decimal("0.01"))
+            synthesis = synthesis or "missing_ask"
         if bid_decimal is None or ask_decimal is None:
             return None
         if bid_decimal > ask_decimal:
             mid_tmp = (bid_decimal + ask_decimal) / 2
             bid_decimal = max(Decimal("0.01"), mid_tmp - Decimal("0.005"))
             ask_decimal = min(Decimal("0.99"), mid_tmp + Decimal("0.005"))
+            synthesis = "crossed_book"
+        synthesized = getattr(self, "quote_synthesis_by_inst", None)
+        if not isinstance(synthesized, dict):
+            synthesized = {}
+            self.quote_synthesis_by_inst = synthesized
+        if synthesis is None:
+            synthesized.pop(str(inst), None)
+        else:
+            synthesized[str(inst)] = synthesis
         return bid_decimal, ask_decimal
 
-    def _activate_maker_kill_switch(self: OrderRuntimeHost, reason: str) -> None:
+    def _quote_synthesis_reason(self: OrderRuntimeHost, instrument_id: Any) -> Optional[str]:
+        """Return why the latest quote was repaired, or None for a real two-sided book."""
+        inst = self._normalize_instrument_id(instrument_id)
+        if inst is None:
+            return "unknown_instrument"
+        return (getattr(self, "quote_synthesis_by_inst", None) or {}).get(str(inst))
+
+    def _activate_maker_kill_switch(
+        self: OrderRuntimeHost, reason: str, *, reason_code: str = KILL_REASON_UNSPECIFIED,
+    ) -> None:
+        # Class policy lives in bot.kill_switch; an unclassified trigger is UNRESOLVED.
+        trigger_class = classify_kill_reason(
+            reason_code, denied_sides=getattr(self, "consecutive_denied_sides", None),
+        )
+        prior_class = getattr(self, "maker_kill_switch_class", None) if self.maker_kill_switch else None
+        kill_class = escalate(prior_class, trigger_class)
         self.maker_kill_switch = True
-        self._cancel_active_maker_orders()
-        logger.error(f"MAKER KILL SWITCH ACTIVATED: {reason}")
+        self.maker_kill_switch_class = kill_class
+        if keeps_resting_sells(kill_class):
+            # Operational/entry kill: stop entries, keep resting protective SELLs.
+            self._cancel_maker_order_side("buy", reason="kill_switch_entry")
+        else:
+            self._cancel_active_maker_orders()
+        logger.error(f"MAKER KILL SWITCH ACTIVATED [{kill_class}] code={reason_code}: {reason}")
+        db_event = getattr(self, "_db_strategy_event", None)
+        if callable(db_event):
+            db_event("MAKER_KILL_SWITCH_ACTIVATED", {
+                "slug": str(getattr(self, "current_market_slug", "") or ""),
+                "reason": str(reason),
+                "reason_code": str(reason_code),
+                "trigger_class": trigger_class,
+                "prior_class": prior_class,
+                "kill_class": kill_class,
+            })
 
     def _cancel_active_maker_orders(self: OrderRuntimeHost) -> None:
         for order_key in list(self.active_maker_orders.keys()):
@@ -112,10 +213,13 @@ class OrderRuntimeMixin:
             )
             return
         if state.get("pending_cancel"):
-            last_cancel_ts = float(state.get("last_cancel_ts", 0.0))
-            if last_cancel_ts > 0 and (now_ts - last_cancel_ts) < self.maker_cancel_cooldown_sec:
-                logger.debug(f"Skip duplicate cancel [{side}] within cooldown")
-                return
+            # A cancel request is already in flight.  Market phase, rollover,
+            # and no-target quote loops may all ask to cancel the same order;
+            # re-sending from those paths every cooldown interval creates an
+            # API/log storm and races the venue acknowledgement.  The sole
+            # retry authority is _cleanup_stale_pending_cancels(), after its
+            # explicit ACK timeout and open-order reconciliation.
+            return
         if order is None:
             state["pending_cancel"] = True
             state["last_cancel_ts"] = now_ts
@@ -129,7 +233,11 @@ class OrderRuntimeMixin:
                 state["last_cancel_ts"] = now_ts
                 state["cancel_reason"] = reason
             else:
+                cancel_started_ns = time.perf_counter_ns()
                 self.cancel_order(order)
+                starts = getattr(self, "_cancel_started_ns_by_order_id", None)
+                if isinstance(starts, dict):
+                    starts[str(order.client_order_id)] = cancel_started_ns
                 state["pending_cancel"] = True
                 state["last_cancel_ts"] = now_ts
                 state["cancel_retries"] = int(state.get("cancel_retries", 0))
@@ -148,7 +256,49 @@ class OrderRuntimeMixin:
             return True
         return (now_ts - created_ts) >= self.maker_order_ttl_sec
 
+    def _is_prior_market_order(self: OrderRuntimeHost, state: dict[str, Any]) -> bool:
+        """Whether an order belongs to a market no longer selected by strategy.
+
+        This is intentionally about market identity, not merely local ledger
+        quantity.  A completed 15-minute market can leave a late/noisy CLOB
+        cancel acknowledgement behind; it must not kill trading in the next
+        market once its token is no longer part of the selected pair.
+        """
+        return is_prior_market_order(self, state)
+
+    def _is_zero_inventory_pending_sell(self: OrderRuntimeHost, state: dict[str, Any]) -> bool:
+        """Whether an unresolved pending SELL is provably not protecting bot inventory.
+
+        This is intentionally narrower than a generic stale-order escape hatch.
+        The internal fill ledger is the strategy's confirmed inventory authority
+        for SELL submission; when it says zero, a previously requested cancel
+        cannot be preserving this strategy's conditional-token position.  We
+        may retire the *local tracker* after bounded reconciliation failures,
+        but never make this exception for a BUY, a non-pending order, missing
+        inventory authority, or any positive confirmed quantity.
+        """
+        if str(state.get("side", "") or "").lower() != "sell":
+            return False
+        if not bool(state.get("pending_cancel", False)):
+            return False
+        getter = getattr(self, "_get_confirmed_inventory_qty_for_instrument", None)
+        if not callable(getter):
+            return False
+        try:
+            confirmed_qty = Decimal(str(getter(state.get("instrument_id")) or "0"))
+        except Exception:
+            return False
+        return confirmed_qty <= Decimal("0.000001")
+
     def _cleanup_stale_pending_cancels(self, now_ts: float) -> None:
+        cleanup_lock = getattr(self, "_pending_cancel_cleanup_lock", None)
+        if cleanup_lock is None:
+            self._cleanup_stale_pending_cancels_locked(now_ts)
+            return
+        with cleanup_lock:
+            self._cleanup_stale_pending_cancels_locked(now_ts)
+
+    def _cleanup_stale_pending_cancels_locked(self, now_ts: float) -> None:
         for order_key, state in list(self.active_maker_orders.items()):
             side = str(state.get("side", "") or "")
             if not state.get("pending_cancel"):
@@ -159,6 +309,25 @@ class OrderRuntimeMixin:
             if (now_ts - last_cancel_ts) >= self.maker_cancel_ack_timeout_sec:
                 order = state.get("order")
                 coid = str(order.client_order_id) if order else "unknown"
+                if self._is_prior_market_order(state):
+                    # The order's market has already rolled over.  Keep a
+                    # durable audit record, but do not let a missing old-market
+                    # cancel ACK trip the global kill switch for the new pair.
+                    logger.warning(
+                        f"Retiring unresolved prior-market cancel [{side}] {coid}; "
+                        "new-market quoting remains independently protected."
+                    )
+                    self._db_order_event(
+                        event_type="ORDER_CANCEL_PRIOR_MARKET_RETIRED",
+                        client_order_id=coid,
+                        side=side.upper(),
+                        status="CANCELED_STALE_MARKET",
+                        reason="prior_market_cancel_ack_unavailable",
+                        payload={"instrument_id": str(state.get("instrument_id", "") or ""),
+                                 "local_tracker_retired": True, "venue_cancel_confirmed": False},
+                    )
+                    self.active_maker_orders.pop(order_key, None)
+                    continue
                 is_open = self._is_order_still_open_in_cache(coid)
                 retries = int(state.get("cancel_retries", 0))
                 if is_open is False:
@@ -176,6 +345,30 @@ class OrderRuntimeMixin:
                     unknown_retries = int(state.get("reconcile_unknown_retries", 0)) + 1
                     state["reconcile_unknown_retries"] = unknown_retries
                     if unknown_retries > self.maker_cancel_max_retries * 2:
+                        if self._is_zero_inventory_pending_sell(state):
+                            # A stale local SELL tracker must not permanently
+                            # freeze a later market when the fill ledger proves
+                            # that it protects no bot inventory.  This does not
+                            # assert that the venue processed the cancellation;
+                            # it records an explicit unresolved-order audit
+                            # event and isolates the old local state instead.
+                            logger.warning(
+                                f"Retiring unresolved zero-inventory SELL cancel [{side}] {coid}; "
+                                "no local conditional-token inventory remains."
+                            )
+                            self._db_order_event(
+                                event_type="ORDER_CANCEL_ZERO_INVENTORY_RETIRED",
+                                client_order_id=coid,
+                                side=side.upper(),
+                                status="CANCELED_UNVERIFIED_ZERO_INVENTORY",
+                                reason="max_unknown_retries_confirmed_inventory_zero",
+                                payload={
+                                    "unknown_count": unknown_retries,
+                                    "instrument_id": str(state.get("instrument_id", "") or ""),
+                                },
+                            )
+                            self.active_maker_orders.pop(order_key, None)
+                            continue
                         logger.error(f"Cancel reconcile unknown for [{side}] {coid} exceeded max retries. Triggering Maker Kill Switch.")
                         self._db_order_event(
                             event_type="ORDER_CANCEL_RECONCILE_UNKNOWN_KILL",
@@ -184,7 +377,10 @@ class OrderRuntimeMixin:
                             status="KILL_SWITCH_UNKNOWN",
                             reason="max_unknown_retries",
                         )
-                        self._activate_maker_kill_switch(f"Order {coid} state unknown after {unknown_retries} retries")
+                        self._activate_maker_kill_switch(
+                            f"Order {coid} state unknown after {unknown_retries} retries",
+                            reason_code=KILL_REASON_CANCEL_RECONCILE_UNKNOWN,
+                        )
                         continue
 
                     state["last_cancel_ts"] = now_ts
@@ -208,6 +404,9 @@ class OrderRuntimeMixin:
                 if retries < self.maker_cancel_max_retries and order is not None:
                     try:
                         self.cancel_order(order)
+                        starts = getattr(self, "_cancel_started_ns_by_order_id", None)
+                        if isinstance(starts, dict):
+                            starts[coid] = time.perf_counter_ns()
                         state["last_cancel_ts"] = now_ts
                         state["cancel_retries"] = retries + 1
                         logger.warning(
@@ -239,7 +438,8 @@ class OrderRuntimeMixin:
                     reason=f"open_after_retries={retries}",
                 )
                 self._activate_maker_kill_switch(
-                    f"Cancel reconcile failed for {coid} after {retries} retries"
+                    f"Cancel reconcile failed for {coid} after {retries} retries",
+                    reason_code=KILL_REASON_CANCEL_RECONCILE_FAILED,
                 )
 
     def _is_order_still_open_in_cache(self, client_order_id: str) -> Optional[bool]:

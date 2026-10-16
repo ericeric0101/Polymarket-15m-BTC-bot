@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import math
 import os
 import threading
 import time
@@ -9,7 +10,6 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 from loguru import logger
-import redis
 
 from alert_watcher import AlertWatcher
 from dashboard_state import DashboardState
@@ -33,14 +33,24 @@ from nautilus_trader.config import (
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 
+from bot.ops import collection_lifecycle
+from bot.research.provenance import process_identity
 from bot.app_config import AppConfig
+from bot.adapter_overrides import begin_data_engine_shutdown
 from bot.compat_patches import apply_compatibility_patches
 from bot.market_discovery import (
     resolve_best_btc_15m_market,
     resolve_btc_15m_market_slugs,
     resolve_primary_btc_15m_instrument_ids,
 )
+from bot.journal_path import (
+    acquire_journal_writer_lock,
+    journal_writer_lock_path,
+    release_journal_writer_lock,
+    resolve_trade_db_path,
+)
 from bot.process_lock import ProcessLock
+from bot.order_runtime import classify_rollover_sell_orders
 from run_bot import (
     IntegratedBTCStrategy,
 )
@@ -48,12 +58,114 @@ from telegram_bot import start_telegram_bot_thread
 from telegram_notifier import TelegramNotifier
 
 
-# This is the execution layer's minimum nonzero quantity: quote submission
-# treats anything below it as unsellable (see apply_sellable_inventory_guard).
-# Keep automatic-rollover protection consistent so fee residual dust cannot
-# indefinitely prevent a stale-instrument refresh.
+def _collection_strategies(node):
+    try:
+        return list(getattr(node, "_collection_strategy_refs", None) or node.trader.strategies())
+    except Exception:
+        return []
+
+
+def _collection_transition(node, transition, **context):
+    monitor = getattr(node, "_consumer_timing", None)
+    timing = monitor.snapshot() if monitor is not None else None
+    for strategy in _collection_strategies(node):
+        collection_lifecycle(strategy, transition, synchronous=True, consumer_timing=timing,
+                             shutdown_stages=dict(getattr(node, "_collection_shutdown_timestamps", {})), **context)
+
+
+def idempotent_stop_callback(stop_fn):
+    """Serialize watchdog, timer and lifecycle stop requests for one node cycle."""
+    lock = threading.Lock()
+    requested = False
+
+    def request_once() -> bool:
+        nonlocal requested
+        with lock:
+            if requested:
+                return False
+            requested = True
+        try:
+            stop_fn()
+        except Exception:
+            with lock:
+                requested = False
+            raise
+        return True
+
+    return request_once
+
+
+def threadsafe_node_stop_callback(node: TradingNode):
+    """Return a once-only node stop request safe from watchdog worker threads.
+
+    Quote watchdog and scheduled rollover work run outside Nautilus' asyncio
+    event-loop thread.  ``TradingNode.stop()`` creates its ``stop_async`` task
+    on that loop, so calling it directly from a worker thread can leave the
+    disconnect coroutine unscheduled.  Marshal the call back to the owning
+    loop; the node then performs its normal awaited client/engine shutdown.
+    """
+    def stop_after_fencing_market_data() -> None:
+        point = getattr(node, "_collection_shutdown_point", None)
+        if callable(point):
+            point("owner_loop_stop_callback_start")
+        engine = getattr(getattr(node, "kernel", None), "data_engine", None)
+        if engine is not None:
+            # The kernel disconnects clients only after strategy shutdown.
+            # Stop optional market-data producers before that multi-second
+            # phase so the DataEngine queue cannot refill while disconnecting.
+            begin_data_engine_shutdown(engine)
+        node.stop()
+
+    def request_stop() -> None:
+        point = getattr(node, "_collection_shutdown_point", None)
+        if callable(point):
+            point("stop_dispatch")
+        for strategy in _collection_strategies(node):
+            from bot.instrument_admission import stop_instrument_admission
+            stop_instrument_admission(strategy)
+            collection_lifecycle(strategy, "stop_request", stop_requested_at=time.time(),
+                                 **getattr(strategy, "_collection_stop_context", {"stop_request_source": "unknown"}))
+        loop = getattr(getattr(node, "kernel", None), "loop", None)
+        if loop is not None and not loop.is_closed() and loop.is_running():
+            node._btc15m_stop_requested_monotonic = time.monotonic()
+            loop.call_soon_threadsafe(stop_after_fencing_market_data)
+            logger.warning("Node stop request dispatched to owning event loop")
+            return
+        node._btc15m_stop_requested_monotonic = time.monotonic()
+        stop_after_fencing_market_data()
+        logger.warning("Node stop request dispatched directly; owning event loop is not running")
+
+    return idempotent_stop_callback(request_stop)
+
+
+def request_auto_rollover_stop(node: TradingNode) -> bool:
+    """Request node shutdown through a strategy's event-loop-safe callback."""
+    try:
+        strategies = list(node.trader.strategies())
+    except Exception:
+        strategies = []
+    for strategy in strategies:
+        callback = getattr(strategy, "_request_node_stop_callback", None)
+        if callable(callback):
+            strategy._collection_stop_context = {"stop_request_source": "scheduled_auto_rollover"}
+            callback()
+            return True
+    # Alternate node construction paths may not attach the callback to a
+    # strategy. Use the same event-loop-safe fallback rather than calling stop
+    # from the rollover worker directly.
+    threadsafe_node_stop_callback(node)()
+    return True
+
+
+# The execution layer has a hard lower bound for nonzero balance checks, but a
+# venue SELL must also meet the strategy's configured exchange minimum (5 by
+# default).  Rollover protection uses the latter when available so dust that
+# cannot form an order does not indefinitely prevent a stale-instrument refresh.
 _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES = 0.01
 _MARKET_DISCOVERY_RETRY_SEC = 15.0
+_NODE_DISCONNECT_WAIT_SEC = 15.0
+_CLIENT_DISCONNECT_TASK_DRAIN_SEC = 60.0
+_CLIENT_DISCONNECT_CANCEL_DRAIN_SEC = 5.0
 
 
 class MarketDiscoveryUnavailable(RuntimeError):
@@ -78,6 +190,14 @@ def _install_fresh_main_thread_event_loop() -> None:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 
+def _live_exec_engine_config() -> LiveExecEngineConfig:
+    # Polymarket can report a completed conditional-token fill with a quantity
+    # slightly above the requested token amount. Rejecting that venue-confirmed
+    # event leaves the local ledger at zero while the wallet already holds the
+    # tokens, which can strand a TP.
+    return LiveExecEngineConfig(qsize=6000, allow_overfills=True)
+
+
 def _strategy_requested_rollover(node: Optional[TradingNode]) -> bool:
     """Read strategy rollover state before disposing the trading node."""
     if node is None:
@@ -91,6 +211,213 @@ def _strategy_requested_rollover(node: Optional[TradingNode]) -> bool:
         return False
 
 
+def node_engines_disconnected(node: Optional[TradingNode]) -> tuple[bool, list[str]]:
+    """Return whether engines exposed by this Nautilus build finished shutdown.
+
+    The node API has differed between Nautilus releases, so absent engine
+    attributes are not treated as an error.  An engine that explicitly reports
+    ``check_disconnected() is False`` is, however, unsafe to replace: lingering
+    callbacks can otherwise publish into the next cycle's event loop.
+    """
+    if node is None:
+        return False, ["node_missing"]
+    pending: list[str] = []
+    seen: set[int] = set()
+    engine_candidates = (
+        ("DataEngine", getattr(node, "data_engine", None)),
+        ("DataEngine", getattr(node, "_data_engine", None)),
+        ("ExecEngine", getattr(node, "exec_engine", None)),
+        ("ExecEngine", getattr(node, "_exec_engine", None)),
+        # TradingNode exposes its engines through ``kernel`` in the Nautilus
+        # version used in production, rather than as public node properties.
+        ("DataEngine", getattr(getattr(node, "kernel", None), "data_engine", None)),
+        ("ExecEngine", getattr(getattr(node, "kernel", None), "exec_engine", None)),
+    )
+    for label, engine in engine_candidates:
+        if engine is None or id(engine) in seen:
+            continue
+        seen.add(id(engine))
+        checker = getattr(engine, "check_disconnected", None)
+        if not callable(checker):
+            continue
+        try:
+            if checker() is False:
+                pending.append(label)
+        except Exception as exc:
+            pending.append(f"{label}:{type(exc).__name__}")
+    return not pending, pending
+
+
+def wait_for_node_engines_disconnected(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _NODE_DISCONNECT_WAIT_SEC,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> tuple[bool, list[str]]:
+    """Give async engine shutdown a bounded chance before rebuilding a node."""
+    deadline = monotonic_fn() + max(0.0, float(timeout_sec))
+    while True:
+        clean, pending = node_engines_disconnected(node)
+        if clean or monotonic_fn() >= deadline:
+            return clean, pending
+        sleep_fn(min(0.25, max(0.0, deadline - monotonic_fn())))
+
+
+def _client_disconnect_tasks(node: Optional[TradingNode]) -> tuple[Any, list[asyncio.Task]]:
+    """Find LiveDataClient disconnect cleanup tasks on a stopped node's loop."""
+    loop = getattr(getattr(node, "kernel", None), "loop", None)
+    if loop is None or loop.is_closed():
+        return loop, []
+    try:
+        tasks = asyncio.all_tasks(loop)
+    except RuntimeError:
+        return loop, []
+    disconnect_tasks = []
+    for task in tasks:
+        try:
+            coro = task.get_coro()
+            qualname = str(getattr(coro, "__qualname__", ""))
+        except Exception:
+            continue
+        if "disconnect.<locals>._disconnect_with_cleanup" in qualname:
+            disconnect_tasks.append(task)
+    return loop, disconnect_tasks
+
+
+def _describe_asyncio_task(task: asyncio.Task) -> str:
+    try:
+        stack = task.get_stack(limit=4)
+        frames = [f"{frame.f_code.co_name}:{frame.f_lineno}" for frame in stack]
+    except Exception:
+        frames = []
+    name = task.get_name() if callable(getattr(task, "get_name", None)) else "task"
+    return f"{name}[{' -> '.join(frames) or 'stack unavailable'}]"
+
+
+def wait_for_client_disconnect_tasks(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _CLIENT_DISCONNECT_TASK_DRAIN_SEC,
+) -> tuple[bool, list[str]]:
+    """Pump the stopped node loop until its client disconnect coroutines finish.
+
+    Nautilus 1.225 can time out its engine-disconnect poll and still return from
+    ``node.run`` while a LiveDataClient's untracked ``_disconnect_with_cleanup``
+    task remains. ``node.dispose`` closes that loop, so give those exact tasks a
+    bounded chance to finish first and report their frames if they do not.
+    """
+    loop, tasks = _client_disconnect_tasks(node)
+    if not tasks:
+        return True, []
+    if loop is None or loop.is_closed():
+        return False, ["client_disconnect_loop_unavailable"]
+    if loop.is_running():
+        return False, ["client_disconnect_loop_still_running"]
+
+    async def _wait_for_tasks() -> set[asyncio.Task]:
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, float(timeout_sec)),
+        )
+        return pending
+
+    try:
+        pending = loop.run_until_complete(_wait_for_tasks())
+    except Exception as exc:
+        return False, [f"client_disconnect_wait:{type(exc).__name__}:{exc}"]
+
+    failures = []
+    for task in tasks:
+        if task in pending:
+            failures.append(f"pending:{_describe_asyncio_task(task)}")
+            continue
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            error = None
+        if error is not None:
+            failures.append(f"failed:{_describe_asyncio_task(task)}:{type(error).__name__}:{error}")
+    return not failures, failures
+
+
+def cancel_client_disconnect_tasks(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _CLIENT_DISCONNECT_CANCEL_DRAIN_SEC,
+) -> list[str]:
+    """Cancel and drain timed-out client cleanup tasks before loop disposal."""
+    loop, tasks = _client_disconnect_tasks(node)
+    if not tasks:
+        return []
+    if loop is None or loop.is_closed() or loop.is_running():
+        return ["client_disconnect_tasks_cannot_be_drained"]
+    for task in tasks:
+        task.cancel()
+
+    async def _drain_cancelled() -> set[asyncio.Task]:
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, float(timeout_sec)),
+        )
+        return pending
+
+    try:
+        pending = loop.run_until_complete(_drain_cancelled())
+    except Exception as exc:
+        return [f"client_disconnect_cancel_drain:{type(exc).__name__}:{exc}"]
+    return [
+        f"cancelled_task_still_pending:{_describe_asyncio_task(task)}"
+        for task in pending
+    ]
+
+
+def dispose_node_and_wait_for_engines_disconnected(
+    node: Optional[TradingNode],
+    *,
+    timeout_sec: float = _NODE_DISCONNECT_WAIT_SEC,
+    client_disconnect_timeout_sec: float = _CLIENT_DISCONNECT_TASK_DRAIN_SEC,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+) -> tuple[bool, list[str]]:
+    """Dispose a stopped node, then verify it no longer owns engine callbacks.
+
+    Some Nautilus builds only complete engine teardown during ``dispose()``.
+    Checking before disposal can therefore produce a false unclean-shutdown
+    result. Failure still remains fail-closed: callers must not rebuild while
+    any exposed engine reports itself connected.
+    """
+    dispose_error: str | None = None
+    if node is None:
+        return False, ["node_missing"]
+    _collection_transition(node, "client_disconnect_drain_start")
+    client_tasks_clean, client_task_errors = wait_for_client_disconnect_tasks(
+        node,
+        timeout_sec=client_disconnect_timeout_sec,
+    )
+    if not client_tasks_clean:
+        cancel_errors = cancel_client_disconnect_tasks(node)
+        client_task_errors.extend(cancel_errors)
+    _collection_transition(node, "client_disconnect_drain_complete", clean=client_tasks_clean)
+    _collection_transition(node, "node_dispose_start")
+    try:
+        node.dispose()
+    except Exception as exc:
+        dispose_error = f"dispose:{type(exc).__name__}"
+    _collection_transition(node, "node_dispose_complete", error=dispose_error)
+    clean, pending = wait_for_node_engines_disconnected(
+        node,
+        timeout_sec=timeout_sec,
+        sleep_fn=sleep_fn,
+        monotonic_fn=monotonic_fn,
+    )
+    _collection_transition(node, "engine_disconnect_complete", clean=clean, pending=pending)
+    if dispose_error:
+        pending = [*pending, dispose_error]
+    pending = [*pending, *client_task_errors]
+    return clean and dispose_error is None and not client_task_errors, pending
+
+
 def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str]:
     """Return exposure that makes an automatic node stop unsafe.
 
@@ -102,36 +429,45 @@ def _strategy_rollover_exposure_reasons(node: Optional[TradingNode]) -> list[str
     timeout or profile setting.
     """
     if node is None:
-        return []
+        return ["strategy exposure state unavailable: node is missing"]
     try:
         strategies = list(node.trader.strategies())
-    except Exception:
-        return []
+    except Exception as exc:
+        # Unknown exposure must not be treated as a flat account.  In
+        # particular, the scheduled rollover worker must defer if it cannot
+        # inspect the strategy state it is about to shut down.
+        return [f"strategy exposure state unavailable: {type(exc).__name__}: {exc}"]
+    if not strategies:
+        return ["strategy exposure state unavailable: node has no registered strategies"]
 
     reasons: list[str] = []
-    terminal_states = ("REJECTED", "FILLED", "CANCELED", "CANCELLED")
     for index, strategy in enumerate(strategies):
         try:
-            inventory = float(getattr(strategy, "inventory_delta_shares", 0) or 0)
-        except (TypeError, ValueError):
+            inventory_raw = getattr(strategy, "inventory_delta_shares")
+            inventory = float(inventory_raw or 0)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            reasons.append(f"strategy[{index}]:inventory_state_unavailable")
             inventory = 0.0
-        if inventory >= _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES:
+        if not math.isfinite(inventory):
+            reasons.append(f"strategy[{index}]:inventory_state_unavailable")
+            inventory = 0.0
+        try:
+            exchange_min = float(
+                getattr(strategy, "maker_exchange_min_shares", _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES)
+                or _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES
+            )
+        except (TypeError, ValueError):
+            exchange_min = _MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES
+        protected_min = max(_MIN_ROLLOVER_PROTECTED_INVENTORY_SHARES, exchange_min)
+        if inventory + 0.000001 >= protected_min:
             reasons.append(f"strategy[{index}]:inventory={inventory:.6f}")
 
-        active_orders = getattr(strategy, "active_maker_orders", {})
-        if not isinstance(active_orders, dict):
-            continue
-        for order_key, state in active_orders.items():
-            if not isinstance(state, dict):
-                continue
-            side = str(state.get("side", "") or "").lower()
-            if side != "sell" and not str(order_key).lower().startswith("sell:"):
-                continue
-            order = state.get("order")
-            status = str(getattr(order, "status", "") or "").upper()
-            if any(terminal in status for terminal in terminal_states):
-                continue
-            reasons.append(f"strategy[{index}]:active_sell={order_key}")
+        sell_exposure = classify_rollover_sell_orders(strategy)
+        for order_key in sell_exposure["blocking"]:
+            if order_key == "active_order_state_unavailable":
+                reasons.append(f"strategy[{index}]:active_order_state_unavailable")
+            else:
+                reasons.append(f"strategy[{index}]:active_sell={order_key}")
     return reasons
 
 
@@ -271,18 +607,87 @@ def resolve_polymarket_auth() -> Optional[Dict[str, str]]:
         return None
 
 
-def run_preflight_checks(simulation: bool) -> bool:
+AUTH_OK = "AUTH_OK"
+AUTH_401 = "AUTH_401"
+AUTH_403 = "AUTH_403"
+AUTH_NETWORK_ERROR = "NETWORK_ERROR"
+AUTH_UNKNOWN = "UNKNOWN"
+
+
+def classify_auth_probe_error(exc: BaseException) -> str:
+    """Map a read-only probe failure to an auth status without inspecting secrets."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError,
+                        ConnectionError, TimeoutError)):
+        return AUTH_NETWORK_ERROR
+    status = getattr(exc, "status_code", None)
+    if status == 401:
+        return AUTH_401
+    if status == 403:
+        return AUTH_403
+    # py_clob_client_v2 wraps httpx.RequestError as PolyApiException(status_code=None).
+    if status is None and type(exc).__name__ == "PolyApiException":
+        return AUTH_NETWORK_ERROR
+    return AUTH_UNKNOWN
+
+
+def probe_polymarket_auth(auth: Dict[str, str], *, client_factory: Any = None) -> tuple[str, str]:
+    """Prove the resolved LIVE credentials with ONE harmless authenticated read.
+
+    GET /balance-allowance (COLLATERAL) only: no order create/cancel, no API-key
+    create/derive inside the probe, no allowance or balance update. Returns ``(status, detail)``;
+    ``detail`` holds only an HTTP status / exception class, never credentials.
+    """
+    try:
+        if client_factory is None:
+            from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import ApiCreds, AssetType, BalanceAllowanceParams
+
+            signature_type = int(auth.get("signature_type") or 0)
+            kwargs: Dict[str, Any] = {
+                "key": auth["private_key"],
+                "creds": ApiCreds(api_key=auth["api_key"], api_secret=auth["api_secret"],
+                                  api_passphrase=auth["passphrase"]),
+                "signature_type": signature_type,
+            }
+            if auth.get("funder"):
+                kwargs["funder"] = auth["funder"]
+            client = ClobClient(os.getenv("POLYMARKET_CLOB_BASE_URL", "https://clob.polymarket.com"),
+                                int(os.getenv("POLYMARKET_CHAIN_ID", "137")), **kwargs)
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=signature_type)
+        else:
+            client, params = client_factory(auth), None
+        response = client.get_balance_allowance(params)
+    except Exception as exc:
+        status = classify_auth_probe_error(exc)
+        code = getattr(exc, "status_code", None)
+        return status, f"{type(exc).__name__}(status_code={code})"
+    if isinstance(response, dict):
+        return AUTH_OK, "balance_allowance_read_ok"
+    return AUTH_UNKNOWN, f"unexpected_response_type={type(response).__name__}"
+
+
+def run_preflight_checks(simulation: bool) -> Optional[Dict[str, str]]:
     logger.info("Preflight check started.")
 
+    # Same resolution as the LIVE node: configured L2 credentials, otherwise the
+    # existing L1 -> L2 create/derive. The probe below then proves whichever
+    # credentials LIVE would actually trade with (decided 2026-10-10).
     auth = resolve_polymarket_auth()
     if not auth:
         logger.error("Polymarket auth resolution failed.")
-        return False
+        return None
+
+    if not simulation:
+        auth_status, auth_detail = probe_polymarket_auth(auth)
+        if auth_status != AUTH_OK:
+            logger.error(f"Polymarket auth probe: status={auth_status} detail={auth_detail} -> LIVE preflight FAILED")
+            return None
+        logger.info(f"Polymarket auth probe: status={auth_status} ({auth_detail})")
 
     slugs = resolve_btc_15m_market_slugs()
     if not slugs:
         logger.error("Preflight failed: no BTC 15-min market slugs resolved")
-        return False
+        return None
     startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
     if startup_verbose:
         logger.info(f"Preflight market slugs: {slugs}")
@@ -290,89 +695,117 @@ def run_preflight_checks(simulation: bool) -> bool:
     primary_slug, instrument_ids = resolve_best_btc_15m_market(slugs)
     if not primary_slug:
         logger.error("Preflight failed: no primary BTC 15-min slug selected")
-        return False
+        return None
     if not instrument_ids:
         logger.error(f"Preflight failed: no instrument IDs resolved for slug {primary_slug}")
-        return False
+        return None
     logger.info(f"Preflight market: primary_slug={primary_slug} instruments={len(instrument_ids)}")
     if startup_verbose:
         logger.info(f"Preflight instrument_ids: {[inst.value for inst in instrument_ids]}")
 
-    redis_client = init_redis()
-    if redis_client:
-        logger.info("Preflight Redis check: OK")
-    else:
-        logger.warning("Preflight Redis check: skipped/unavailable")
-
     mode_text = "SIMULATION" if simulation else "LIVE TRADING"
     logger.info(f"Preflight mode target: {mode_text}")
-    logger.info("Polymarket auth check: OK")
+    logger.info(
+        "Polymarket auth check: OK (authenticated read-only probe)" if not simulation
+        else "Polymarket auth check: credentials resolved (DRY-RUN: not probed)"
+    )
     logger.info("PREFLIGHT CHECK PASSED")
-    return True
+    return auth
 
 
-def init_redis():
-    try:
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        redis_password = os.getenv("REDIS_PASSWORD")
-        redis_username = os.getenv("REDIS_USERNAME")
-        redis_client = redis.Redis(
-            host=redis_host,
-            port=int(os.getenv("REDIS_PORT", 6379)),
-            db=int(os.getenv("REDIS_DB", 2)),
-            username=redis_username if redis_username else None,
-            password=redis_password if redis_password else None,
-            decode_responses=True,
-            socket_connect_timeout=5,
-            socket_keepalive=True,
-        )
-        redis_client.ping()
-        if redis_host not in ("localhost", "127.0.0.1") and not redis_password:
-            logger.warning("REDIS_HOST is remote and REDIS_PASSWORD is empty. This is unsafe.")
-        logger.info("Redis connection established")
-        return redis_client
-    except Exception as e:
-        logger.warning(f"Redis connection failed: {e}")
-        logger.warning("Simulation mode will be static (from .env)")
-        return None
+def unrequested_clean_node_return_requires_stop(
+    *, node_run_returned: bool, rollover_requested: bool
+) -> bool:
+    """A clean node return without recovery intent must not spawn another bot."""
+    return bool(node_run_returned and not rollover_requested)
+
+
+def rollover_restart_label(source: str | None) -> str:
+    """Return an accurate operator-facing reason for starting another node cycle."""
+    labels = {
+        "scheduled_auto_rollover": "scheduled auto node rollover",
+        "quote_watchdog_recovery": "quote watchdog recovery",
+        "strategy_requested": "strategy-requested rollover",
+        "market_discovery_retry": "market discovery retry",
+    }
+    return labels.get(str(source or ""), "requested node rollover")
+
+
+def _strategy_rollover_source(node: Optional[TradingNode]) -> str:
+    """Classify a strategy-requested stop before node disposal clears its actors."""
+    if node is not None:
+        try:
+            if any(
+                bool(getattr(strategy, "_quote_stream_rollover_requested", False))
+                for strategy in node.trader.strategies()
+            ):
+                return "quote_watchdog_recovery"
+        except Exception:
+            pass
+    return "strategy_requested"
+
+
+EXIT_JOURNAL_WRITER_LOCK_HELD = "journal_writer_lock_held"
 
 
 def run_integrated_bot(
     simulation: bool = True,
     test_mode: bool = True,
     enable_terminal_dashboard: bool = False,
+    auth: Optional[Dict[str, str]] = None,
+):
+    """Run the bot while holding the trade-journal writer lock (LIVE and DRY-RUN).
+
+    Two bot processes must never write the same journal: a DRY-RUN next to a
+    LIVE run would share session-PnL and per-market guard state. The lock is
+    released before the caller's exit-retention steps run.
+    """
+    journal_path = resolve_trade_db_path()
+    if not acquire_journal_writer_lock(journal_path):
+        logger.error(
+            f"Another bot process (LIVE or DRY-RUN) is writing {journal_path} "
+            f"(lock {journal_writer_lock_path(journal_path)}). Refusing to start."
+        )
+        return EXIT_JOURNAL_WRITER_LOCK_HELD
+    try:
+        return _run_integrated_bot_cycles(
+            simulation=simulation,
+            test_mode=test_mode,
+            enable_terminal_dashboard=enable_terminal_dashboard,
+            auth=auth,
+        )
+    finally:
+        release_journal_writer_lock(journal_path)
+
+
+def _run_integrated_bot_cycles(
+    simulation: bool = True,
+    test_mode: bool = True,
+    enable_terminal_dashboard: bool = False,
+    auth: Optional[Dict[str, str]] = None,
 ):
     startup_verbose = os.getenv("STARTUP_VERBOSE", "0").strip().lower() in ("1", "true", "yes", "on")
     logger.info("Starting integrated Polymarket BTC 15-min trading bot.")
 
-    redis_client = init_redis()
-    if redis_client:
-        try:
-            redis_client.set("btc_trading:simulation_mode", "1" if simulation else "0")
-            logger.info(f"Initial mode set in Redis: {'SIMULATION' if simulation else 'LIVE'}")
-        except Exception as e:
-            logger.warning(f"Could not set Redis simulation mode: {e}")
-
     auto_rollover_enabled = os.getenv("AUTO_NODE_ROLLOVER_ENABLED", "1").strip().lower() not in ("0", "false", "no")
-    # Node rollover is operational recovery, not strategy tuning. Preserve the
-    # established hourly policy without carrying three profile readers.
-    auto_rollover_sec = 3600
+    # Node rollover is operational recovery, not strategy tuning. Use a bounded
+    # three-hour refresh to reduce research gaps while retaining recovery.
+    auto_rollover_sec = 10800
     auto_rollover_cooldown_sec = 3
     auto_rollover_max_failures = 5
     logger.info(
         "Startup config: "
         f"mode={'SIMULATION' if simulation else 'LIVE'} "
-        f"redis={'on' if redis_client else 'off'} "
         f"terminal_dashboard={'on' if enable_terminal_dashboard else 'off'} "
         f"auto_rollover={'on' if auto_rollover_enabled else 'off'}({auto_rollover_sec}s)"
     )
     if startup_verbose:
         logger.info(
-            f"Startup detail: unexpected_exit_restart=on "
+            f"Startup detail: unexpected_clean_exit_restart=off "
             f"rollover_cooldown={auto_rollover_cooldown_sec}s max_failures={auto_rollover_max_failures}"
         )
 
-    auth = resolve_polymarket_auth()
+    auth = auth or resolve_polymarket_auth()
     if not auth:
         raise RuntimeError("Cannot resolve Polymarket auth (provide PK or full API credentials).")
 
@@ -396,7 +829,12 @@ def run_integrated_bot(
     if telegram_thread is not None:
         logger.info("Telegram bot controller started in background thread.")
 
+    previous_strategy = None
+
     def _build_node_for_cycle(cycle_index: int) -> tuple[TradingNode, str]:
+        discovery_started_at = time.time()
+        if previous_strategy is not None:
+            collection_lifecycle(previous_strategy, "market_discovery_start", synchronous=True, next_cycle_idx=cycle_index)
         _install_fresh_main_thread_event_loop()
         btc_slugs = resolve_btc_15m_market_slugs()
         if not btc_slugs:
@@ -496,7 +934,7 @@ def run_integrated_bot(
                 log_directory="./logs/nautilus",
             ),
             data_engine=LiveDataEngineConfig(qsize=6000),
-            exec_engine=LiveExecEngineConfig(qsize=6000),
+            exec_engine=_live_exec_engine_config(),
             risk_engine=LiveRiskEngineConfig(
                 bypass=simulation,
             ),
@@ -505,7 +943,6 @@ def run_integrated_bot(
         )
 
         strategy = IntegratedBTCStrategy(
-            redis_client=redis_client,
             test_mode=test_mode,
             selected_slug=primary_slug,
             enable_terminal_dashboard=enable_terminal_dashboard,
@@ -514,12 +951,31 @@ def run_integrated_bot(
             alert_watcher=alert_watcher,
         )
 
+        strategy.collection_identity = {**process_identity(), "cycle_idx": cycle_index,
+            "runtime_source_fingerprint": strategy.runtime_source_fingerprint,
+            "runtime_git_revision": strategy.runtime_git_revision}
         logger.info("Building Nautilus node...")
         node = TradingNode(config=config)
         node.add_data_client_factory(POLYMARKET, PolymarketLiveDataClientFactory)
         node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
         node.trader.add_strategy(strategy)
+        node._collection_strategy_refs = [strategy]
         node.build()
+        from bot.instrument_admission import bind_instrument_admission
+        bind_instrument_admission(node, strategy)
+        try:
+            from bot.quote_recovery_observability import bind_collection_observers
+            bind_collection_observers(node, strategy)
+            strategy._collection_shutdown_point = node._collection_shutdown_point
+            from bot.consumer_timing import bind_consumer_timing
+            bind_consumer_timing(node, strategy)
+        except Exception:
+            logger.warning("Collection stage observers unavailable; trading setup continues")
+        # Strategies are Actors and do not have a public back-reference to the
+        # TradingNode. Give lifecycle/watchdog recovery an explicit stop hook so
+        # a requested rollover actually returns node.run() to this launcher.
+        strategy._request_node_stop_callback = threadsafe_node_stop_callback(node)
+        collection_lifecycle(strategy, "new_node_built", market_discovery_started_at=discovery_started_at)
         logger.info("Nautilus node built successfully")
         return node, primary_slug
 
@@ -536,6 +992,8 @@ def run_integrated_bot(
         rollover_requested = threading.Event()
         strategy_requested_rollover = False
         node_run_returned = False
+        unsafe_engine_shutdown = False
+        rollover_source: str | None = None
         rollover_stop = threading.Event()
         rollover_thread: Optional[threading.Thread] = None
 
@@ -545,6 +1003,7 @@ def run_integrated_bot(
 
             if auto_rollover_enabled:
                 def _rollover_worker() -> None:
+                    nonlocal rollover_source
                     wait_sec = auto_rollover_sec
                     last_deferred_log_ts = 0.0
                     while not rollover_stop.wait(wait_sec):
@@ -563,6 +1022,7 @@ def run_integrated_bot(
                             wait_sec = 5.0
                             continue
 
+                        rollover_source = "scheduled_auto_rollover"
                         rollover_requested.set()
                         logger.warning(
                             f"Auto node rollover timer reached ({auto_rollover_sec}s). "
@@ -570,7 +1030,7 @@ def run_integrated_bot(
                         )
                         try:
                             if node is not None:
-                                node.stop()
+                                request_auto_rollover_stop(node)
                         except Exception as e:
                             logger.error(f"Failed to stop node during auto rollover: {e}")
                         return
@@ -581,7 +1041,15 @@ def run_integrated_bot(
             logger.info(f"Bot cycle {cycle_idx} starting...")
             node.run()
             node_run_returned = True
+            _collection_transition(node, "node_run_return", stop_request_source=(rollover_source or (_strategy_rollover_source(node) if _strategy_requested_rollover(node) else "unexpected_node_exit")))
+            stop_requested_at = float(getattr(node, "_btc15m_stop_requested_monotonic", 0.0) or 0.0)
+            if stop_requested_at > 0:
+                logger.info(
+                    "Node run returned after stop request: "
+                    f"elapsed_sec={max(0.0, time.monotonic() - stop_requested_at):.3f}"
+                )
         except KeyboardInterrupt:
+            _collection_transition(node, "operator_stop", stop_request_source="operator_stop")
             user_stopped = True
             logger.info("Shutdown requested by user.")
         except MarketDiscoveryUnavailable as e:
@@ -590,12 +1058,16 @@ def run_integrated_bot(
             # no order or exit is affected; retry discovery on a bounded,
             # intentional cadence without consuming the crash-failure budget.
             rollover_requested.set()
+            rollover_source = "market_discovery_retry"
+            if previous_strategy is not None:
+                collection_lifecycle(previous_strategy, "market_discovery_retry", synchronous=True, next_cycle_idx=cycle_idx, stop_request_source=rollover_source)
             retry_delay_sec = _MARKET_DISCOVERY_RETRY_SEC
             logger.warning(
                 f"Node cycle {cycle_idx} deferred: {e} "
                 f"Retrying market discovery in {retry_delay_sec:.0f}s."
             )
         except Exception as e:
+            _collection_transition(node, "exception", stop_request_source="exception", exception_type=type(e).__name__)
             consecutive_failures += 1
             recent_errors = list(dashboard_state.recent_errors)[-19:]
             recent_errors.append((datetime.now(timezone.utc), f"Node cycle {cycle_idx} failed: {e}"))
@@ -607,8 +1079,12 @@ def run_integrated_bot(
                 rollover_thread.join(timeout=1)
             strategy_requested_rollover = _strategy_requested_rollover(node)
             if strategy_requested_rollover:
+                if rollover_source is None:
+                    rollover_source = _strategy_rollover_source(node)
                 rollover_requested.set()
-                logger.info("Strategy requested rollover (stale instruments)")
+                contexts = [getattr(s, "_collection_stop_context", {}) for s in _collection_strategies(node)]
+                trigger = next((c.get("watchdog_trigger") for c in contexts if c.get("watchdog_trigger")), None)
+                logger.info(f"Strategy requested rollover: rollover_source={rollover_source} watchdog_trigger={trigger}")
             if node_run_returned:
                 if rollover_requested.is_set():
                     consecutive_failures = 0
@@ -619,26 +1095,63 @@ def run_integrated_bot(
                     # restart forever.
                     consecutive_failures += 1
             if node is not None:
-                try:
-                    node.dispose()
-                except Exception as e:
-                    logger.warning(f"Node dispose raised: {e}")
+                strategies = _collection_strategies(node)
+                if strategies:
+                    previous_strategy = strategies[0]
+                # Dispose first: Nautilus versions differ on whether stop() or
+                # dispose() performs the final engine disconnect transition.
+                # Then verify before allowing another cycle to be constructed.
+                engines_clean, pending_engines = dispose_node_and_wait_for_engines_disconnected(node)
+                if not engines_clean:
+                    unsafe_engine_shutdown = True
+                    # Do not place a second node on a loop whose previous
+                    # Data/Exec engine still owns callbacks.  This is fail
+                    # closed: it protects stale quote delivery and avoids the
+                    # closed-event-loop task race seen during watchdog rollovers.
+                    logger.error(
+                        "Node shutdown did not complete before rebuild; refusing automatic "
+                        f"next cycle: pending={pending_engines}"
+                    )
             _install_fresh_main_thread_event_loop()
-            logger.info(f"Bot cycle {cycle_idx} stopped")
+            logger.info(
+                f"Bot cycle {cycle_idx} stopped elapsed_sec={time.time() - cycle_started_at:.3f} "
+                f"node_run_returned={node_run_returned} rollover={rollover_requested.is_set()}"
+            )
 
         if user_stopped:
-            break
+            return EXIT_OPERATOR_STOP
+        if unsafe_engine_shutdown:
+            logger.error(
+                "Automatic node rollover stopped after unclean engine shutdown; "
+                "operator restart is required after the old process has exited."
+            )
+            return "unsafe_engine_shutdown"
+        if unrequested_clean_node_return_requires_stop(
+            node_run_returned=node_run_returned,
+            rollover_requested=rollover_requested.is_set(),
+        ):
+            # Nautilus can consume Ctrl-C internally and return from run()
+            # normally. Rebuilding here silently starts a new bot cycle after
+            # the operator tried to stop it. An unrequested clean return has
+            # no proven recovery intent, so fail closed instead.
+            logger.error(
+                "Node returned without an explicit rollover request; "
+                "stopping instead of silently rebuilding."
+            )
+            return EXIT_CLEAN_RETURN_NO_ROLLOVER
         if not auto_rollover_enabled:
-            break
+            return "auto_rollover_disabled"
         if consecutive_failures >= auto_rollover_max_failures:
             logger.error(
                 f"Auto rollover aborted after {consecutive_failures} consecutive failures "
                 f"(max={auto_rollover_max_failures})."
             )
-            break
+            return "failure_budget_exhausted"
 
         if rollover_requested.is_set():
-            logger.info("Starting next cycle after scheduled auto rollover...")
+            logger.info(
+                f"Starting next cycle after {rollover_restart_label(rollover_source)}..."
+            )
         else:
             run_sec = int(time.time() - cycle_started_at)
             logger.warning(
@@ -659,6 +1172,171 @@ def acquire_live_process_lock() -> ProcessLock | None:
         "Refusing to start a second wallet writer."
     )
     return None
+
+
+EXIT_OPERATOR_STOP = "operator_stop"
+# Nautilus handles SIGINT/SIGTERM itself and returns node.run() cleanly without a rollover request.
+EXIT_CLEAN_RETURN_NO_ROLLOVER = "clean_return_without_rollover"
+GRACEFUL_EXIT_REASONS = frozenset({EXIT_OPERATOR_STOP, EXIT_CLEAN_RETURN_NO_ROLLOVER})
+DEFAULT_RETENTION_EXIT_TIMEOUT_SEC = 300.0
+
+
+def _env_on(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def run_exit_retention(project_root: Path, exit_reason: Optional[str], *, popen=None) -> Optional[str]:
+    """Final-exit research retention (RESEARCH_RETENTION_ON_EXIT, default OFF).
+
+    Called only from main() after run_integrated_bot() has returned for good, so a
+    node rollover can never reach it. Runs scripts/research_exit_retention.py in a
+    child process bounded by RESEARCH_RETENTION_EXIT_TIMEOUT_SEC; on timeout or a
+    second Ctrl+C the child is terminated and its open transaction rolls back.
+    Returns a short outcome label for logging/tests.
+    """
+    if not _env_on("RESEARCH_RETENTION_ON_EXIT"):
+        return None
+    if exit_reason not in GRACEFUL_EXIT_REASONS:
+        logger.info(f"Research exit retention skipped: exit_reason={exit_reason} is not a graceful final exit")
+        return "skipped_not_graceful"
+    try:
+        timeout_sec = float(os.getenv("RESEARCH_RETENTION_EXIT_TIMEOUT_SEC", DEFAULT_RETENTION_EXIT_TIMEOUT_SEC))
+    except ValueError:
+        timeout_sec = DEFAULT_RETENTION_EXIT_TIMEOUT_SEC
+    import subprocess
+    import sys
+    popen = popen or subprocess.Popen
+    log_path = project_root / "logs" / "research_retention_exit.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        f"Research exit retention starting (exit_reason={exit_reason}); adds at most {timeout_sec:.0f}s to shutdown. "
+        f"Press Ctrl+C again to abort (source data is preserved). log={log_path}"
+    )
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n=== exit retention {datetime.now(timezone.utc).isoformat()} reason={exit_reason} ===\n")
+        log_file.flush()
+        process = popen(
+            [sys.executable, str(project_root / "scripts" / "research_exit_retention.py"), "--timeout-sec", str(timeout_sec)],
+            cwd=project_root, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+        try:
+            code = process.wait(timeout=timeout_sec + 10)
+        except subprocess.TimeoutExpired:
+            _stop_child(process)
+            logger.warning("Research exit retention timed out and was aborted; source data preserved.")
+            return "timeout_aborted"
+        except KeyboardInterrupt:
+            _stop_child(process)
+            logger.warning("Research exit retention aborted by operator; source data preserved.")
+            return "operator_aborted"
+    logger.info(f"Research exit retention finished: exit_code={code} (details in {log_path})")
+    return "completed" if code == 0 else f"refused_or_aborted_exit_{code}"
+
+
+def _stop_child(process) -> None:
+    import subprocess
+    try:
+        process.terminate()  # SIGTERM -> child raises, open transaction rolls back
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()  # crash semantics: SQLite discards the uncommitted transaction
+        process.wait(timeout=5)
+    except KeyboardInterrupt:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def start_research_maintenance(project_root: Path) -> Optional[int]:
+    """Run one research export/partition pass in a detached, niced subprocess.
+
+    Never blocks or fails startup: only completed UTC days are processed, verified
+    days are skipped, and nothing is deleted (retention is a manual command).
+    """
+    if os.getenv("RESEARCH_MAINTENANCE_ON_START", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    script = project_root / "scripts" / "research_maintenance.py"
+    if not script.is_file():
+        return None
+    try:
+        import subprocess
+        import sys
+        log_path = project_root / "logs" / "research_maintenance.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a") as log_file:
+            log_file.write(f"\n=== research maintenance start {datetime.now(timezone.utc).isoformat()} ===\n")
+            process = subprocess.Popen(
+                ["nice", "-n", "15", sys.executable, str(script)], cwd=project_root,
+                stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+        logger.info(f"Research maintenance started in background: pid={process.pid} log={log_path}")
+        return process.pid
+    except Exception as exc:
+        logger.warning(f"Research maintenance could not start; trading startup continues: {exc}")
+        return None
+
+
+def enforce_entry_sizing_startup_policy(app_config: Any, *, live: bool) -> bool:
+    """Log the final resolved sizing rule; refuse LIVE when it is out of bounds.
+
+    Validation runs on the fully resolved config (code default -> profile ->
+    .env -> shell), so a leftover shell export cannot silently change sizing.
+    DRY-RUN warns and runs on the canonical share_v1 rule instead.
+    """
+    from bot.entry_sizing import is_canonical_rule, startup_sizing_summary
+
+    rule = app_config.maker.entry_sizing_rule
+    violations = list(app_config.maker.entry_sizing_violations)
+    logger.info(startup_sizing_summary(rule, violations))
+    if not violations:
+        if not is_canonical_rule(rule):
+            # In-bounds overrides can only shrink sizing; never accept them silently.
+            logger.warning(f"Entry sizing override in effect (within bounds): {rule.as_payload()}")
+        return True
+    detail = "; ".join(violations)
+    if live:
+        logger.error(f"Refusing LIVE start: entry sizing outside versioned bounds: {detail}")
+        print(f"Refusing LIVE start: entry sizing outside versioned bounds: {detail}")
+        return False
+    logger.warning(f"DRY-RUN entry sizing override ignored; canonical share_v1 rule in effect: {detail}")
+    return True
+
+
+def run_journal_retention_on_exit(project_root: Path, exit_reason: Optional[str], *, popen=None) -> Optional[str]:
+    """Daily journal diagnostic retention on a graceful final exit (archive -> verify -> delete).
+
+    Runs after run_integrated_bot() has returned for good, so the journal writer
+    is closed; the child still refuses if any process holds the journal open.
+    Never VACUUMs. A timeout or Ctrl+C aborts the child; its open transaction
+    rolls back and no unverified row is deleted.
+    """
+    if exit_reason not in GRACEFUL_EXIT_REASONS:
+        logger.info(f"Journal retention skipped: exit_reason={exit_reason} is not a graceful final exit")
+        return "skipped_not_graceful"
+    import subprocess
+    import sys
+    popen = popen or subprocess.Popen
+    log_path = project_root / "logs" / "journal_retention.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    timeout_sec = DEFAULT_RETENTION_EXIT_TIMEOUT_SEC
+    with log_path.open("a") as log_file:
+        log_file.write(f"\n=== journal retention {datetime.now(timezone.utc).isoformat()} reason={exit_reason} ===\n")
+        log_file.flush()
+        process = popen(
+            [sys.executable, str(project_root / "scripts" / "journal_retention.py"), "run", "--apply", "--exit-hook"],
+            cwd=project_root, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        )
+        try:
+            code = process.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            _stop_child(process)
+            logger.warning("Journal retention timed out and was aborted; journal rows preserved.")
+            return "timeout_aborted"
+        except KeyboardInterrupt:
+            _stop_child(process)
+            logger.warning("Journal retention aborted by operator; journal rows preserved.")
+            return "operator_aborted"
+    logger.info(f"Journal retention finished: exit_code={code} (details in {log_path})")
+    return "completed" if code == 0 else f"refused_or_failed_exit_{code}"
 
 
 def main():
@@ -692,12 +1370,15 @@ def main():
     test_mode = bool(args.test_mode or not args.live)
     enable_terminal_dashboard = args.terminal_dashboard
     app_config = AppConfig.from_env(enable_terminal_dashboard=enable_terminal_dashboard)
+    if not enforce_entry_sizing_startup_policy(app_config, live=not simulation):
+        return
 
     if enable_terminal_dashboard:
         logger.remove()
         log_dir = Path("logs/bot")
         log_dir.mkdir(parents=True, exist_ok=True)
-        logger.add(str(log_dir / "terminal_bot.log"), rotation="20 MB", retention="5 days", level="DEBUG")
+        from monitoring.storage_retention import StoragePolicy, logging_options
+        logger.add(str(log_dir / "terminal_bot.log"), **logging_options(log_dir, StoragePolicy.from_env()))
         print(f"\n[INFO] Terminal dashboard enabled.")
         print(f"[INFO] Background logs are re-routed to: {log_dir}/terminal_bot.log")
         print(f"[INFO] Tip: Run 'tail -f {log_dir}/terminal_bot.log' in another terminal to view live logs.\n")
@@ -708,14 +1389,20 @@ def main():
         enabled=compatibility.auto_apply_patches,
         mode=compatibility.patch_mode,
     )
+    # Protocol V2 routing is required for correctness, not an optional compatibility
+    # patch: V2 assets must be signed for ExchangeV3 and loaded from positionIds.
+    from bot.protocol_v2_runtime import install_protocol_v2_overrides
+    install_protocol_v2_overrides()
 
-    if not run_preflight_checks(simulation=simulation):
+    auth = run_preflight_checks(simulation=simulation)
+    if auth is None:
         print("Preflight check failed. Startup aborted.")
         return
 
     if args.preflight_only:
         print("Preflight check passed. Exiting without starting bot.")
         return
+
 
     if not simulation:
         print("WARNING: LIVE TRADING MODE - REAL MONEY AT RISK!")
@@ -727,12 +1414,17 @@ def main():
     live_lock = acquire_live_process_lock() if not simulation else None
     if not simulation and live_lock is None:
         return
+    start_research_maintenance(Path(__file__).resolve().parent.parent)
     try:
-        run_integrated_bot(
+        exit_reason = run_integrated_bot(
             simulation=simulation,
             test_mode=test_mode,
             enable_terminal_dashboard=enable_terminal_dashboard,
+            auth=auth,
         )
+        # Final process exit only (never a rollover); the node and its writers are already disposed.
+        run_exit_retention(Path(__file__).resolve().parent.parent, exit_reason)
+        run_journal_retention_on_exit(Path(__file__).resolve().parent.parent, exit_reason)
     finally:
         if live_lock is not None:
             live_lock.release()

@@ -1,0 +1,266 @@
+{
+ "btc-updown-15m-1791565200": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x1ff4bdddf73341f7401be69461f8c7b785133043283fd65927d40e4a898869ee-25534990624280977189252664512877250103157928698830863803879445163521363245025.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791565200",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791565200"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -11.512505751538392,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T17:15:01.136066+00:00"
+  },
+  "slug": "btc-updown-15m-1791565200",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791566100": {
+  "cycle_pnl": {
+   "active_side": "NONE",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x405ac0b5f7ce92a82d977cba3791c095d2e4f5e25a0ab0eafd1e4de8af371e32-2650580732161730744241094287753395544324391571708551231513746332733628374073.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791566100",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791566100"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": 4.933526574913852,
+   "runtime_outcome": "UP",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T17:30:00.055435+00:00"
+  },
+  "slug": "btc-updown-15m-1791566100",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791567000": {
+  "cycle_pnl": {
+   "active_side": "UP",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x88da5e5a080a70c7d09ff057f1a58a1493f5207abb53ba2215f12a65f882710a-100089978488250707266171657698903252029243906163914252591965830293106656513092.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791567000",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791567000"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": 2.5192577869818975,
+   "runtime_outcome": "UP",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T17:45:00.172479+00:00"
+  },
+  "slug": "btc-updown-15m-1791567000",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791567900": {
+  "cycle_pnl": {
+   "active_side": "UP",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x08a14be7eec20b9ceb66f5b9cbf0fb5496458b3ebc81f44418cd430c4328e12a-102167151764195688977120701468395838564270457253043369081729473095095654840293.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791567900",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791567900"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": 3.0769165393922058,
+   "runtime_outcome": "UP",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T18:00:00.053514+00:00"
+  },
+  "slug": "btc-updown-15m-1791567900",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791568800": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0xf4749faa065a0a957a71bd61f992f32346f7eb508213fa6d70949dc3b23f1dde-65002464011335039454174351470346480394799902021877069751161241579157544831341.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791568800",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791568800"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -7.77180933661581,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T18:15:00.143096+00:00"
+  },
+  "slug": "btc-updown-15m-1791568800",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791569700": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0xe204525cca734958a0f3ccfb53831a070a06f1d6f5da221b6437a55d4d914229-109165231881480945499708907309505664326605987700743441699832168144658706094809.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791569700",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791569700"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -18.78636087511876,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T18:30:00.041238+00:00"
+  },
+  "slug": "btc-updown-15m-1791569700",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791570600": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0xaf7381dcbad0708c12f6bf3c6042539071ed771347cf5dd6eaa9d81910d73bb2-33478120761845496171043145067108583900810708021007105561456674795065408493557.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791570600",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791570600"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -5.104021929041329,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T18:45:00.141838+00:00"
+  },
+  "slug": "btc-updown-15m-1791570600",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791571500": {
+  "cycle_pnl": {
+   "active_side": "NONE",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x2eb76f16f46e5b6a88b3422638c487540dc2945d0b3be43336ac955f20d57071-33446669963747854373234644006225808103626764351921784727098002204072511202382.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791571500",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791571500"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -2.0388421144386832,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T19:00:00.204499+00:00"
+  },
+  "slug": "btc-updown-15m-1791571500",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791572400": {
+  "cycle_pnl": {
+   "active_side": "UP",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x1f7b08036c3c0077739e4a3ac92bdc155671c832357ef349e937502553bab32b-46003263905208348754871990438813655349562183334841604352505192530362686140271.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791572400",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791572400"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": 8.064115373827105,
+   "runtime_outcome": "UP",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T19:15:00.115541+00:00"
+  },
+  "slug": "btc-updown-15m-1791572400",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791573300": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x9581244e1e2c778c0653218690dda289d04673f3e4592c0651ed1634e9bc75b8-101030719782996622460721934856918192075707358581235915543463047931469014920784.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791573300",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791573300"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -6.957367612474783,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T19:30:00.116909+00:00"
+  },
+  "slug": "btc-updown-15m-1791573300",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791574200": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x108a37dd010e7f51bdc269ae2ace810f7b37c9a4b4187432dea5f5429edf72cd-83269446475560171273169148085329426712901632227764541155462043470289739281836.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791574200",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791574200"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -6.049302997008285,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T19:45:00.109594+00:00"
+  },
+  "slug": "btc-updown-15m-1791574200",
+  "telemetry_rows": 0
+ },
+ "btc-updown-15m-1791575100": {
+  "cycle_pnl": {
+   "active_side": "DOWN",
+   "cycle_combined_pnl_usdc": 0.0,
+   "cycle_fill_realized_usdc": 0.0,
+   "cycle_settlement_pnl_usdc": 0.0,
+   "instrument_id": "0x45cf6cbe5819e93f4ccefe29244c547cac1386c0b60cc4eb4faa42e0bfa58c5c-51933519413349124815267685338149457924103803541936085415619563182225248436244.POLYMARKET",
+   "market_slug": "btc-updown-15m-1791575100",
+   "recent_window_size": 4,
+   "slug": "btc-updown-15m-1791575100"
+  },
+  "orders": {},
+  "positions": {},
+  "settlement": {
+   "margin_bps": -9.997306063205036,
+   "runtime_outcome": "DOWN",
+   "source": "canonical_twap",
+   "ts": "2026-10-09T20:00:00.116542+00:00"
+  },
+  "slug": "btc-updown-15m-1791575100",
+  "telemetry_rows": 0
+ }
+}

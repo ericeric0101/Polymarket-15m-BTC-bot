@@ -1,0 +1,5 @@
+checkpoint_sec,paired_observations,brier_n_markets,brier_delta_mean,brier_delta_ci_low,brier_delta_ci_high,log_loss_n_markets,log_loss_delta_mean,log_loss_delta_ci_low,log_loss_delta_ci_high,bootstrap_unit,descriptive_only
+5,3,3,0.0,0.0,0.0,3,0.0,0.0,0.0,market_slug,True
+10,3,3,0.0,0.0,0.0,3,0.0,0.0,0.0,market_slug,True
+15,3,3,0.0,0.0,0.0,3,0.0,0.0,0.0,market_slug,True
+30,3,3,0.0,0.0,0.0,3,0.0,0.0,0.0,market_slug,True
