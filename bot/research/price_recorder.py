@@ -339,13 +339,20 @@ class BookSampler:
                     del self._books[token]
             return new
 
-    def tokens(self) -> list[str]:
+    def tokens(self, prefix: Optional[str] = None) -> list[str]:
+        """Tracked tokens, optionally only those whose market slug starts with ``prefix``."""
         with self._lock:
-            return list(self._meta)
+            return [t for t, m in self._meta.items() if prefix is None or m["slug"].startswith(prefix)]
 
-    def reset(self) -> None:
+    def reset(self, prefix: Optional[str] = None) -> None:
+        """Invalidate books (all, or one connection's ``prefix`` subset) until fresh snapshots arrive."""
         with self._lock:
-            self._books.clear()
+            if prefix is None:
+                self._books.clear()
+                return
+            for token in [t for t in self._books
+                          if self._meta.get(t, {}).get("slug", "").startswith(prefix)]:
+                del self._books[token]
 
     def apply(self, payload: Any, received_ts: float) -> int:
         items = payload if isinstance(payload, list) else [payload]
@@ -423,8 +430,78 @@ def market_tokens_for(slugs: list[str], fetch_market: Callable[[str], Optional[d
             assets = select_market_assets(market)
         except UnsupportedMarketProtocol:
             continue
-        end_ts = float(slug.rsplit("-", 1)[-1]) + 900
+        end_ts = float(slug.rsplit("-", 1)[-1]) + slug_duration_sec(slug)
         for outcome, token in zip(assets.outcomes, assets.asset_ids):
             if outcome.strip().lower() in ("up", "down"):
                 meta[str(token)] = {"slug": slug, "outcome": outcome.strip().capitalize(), "end_ts": end_ts}
     return meta
+
+
+# Up/Down markets that settle on the Chainlink 60 s TWAP (same rule text, verified on Gamma
+# 2026-10-16). BTC 15m keeps its original feed/source names; the others are additive.
+ALT_ASSETS = ("eth", "sol", "xrp")
+MARKET_STREAMS = tuple((a, d) for a in ("btc",) + ALT_ASSETS for d in (900, 300))
+_DURATION_TAG = {900: "15m", 300: "5m"}
+
+
+def slug_duration_sec(slug: str) -> int:
+    """Market length from a ``<asset>-updown-<5m|15m>-<start>`` slug (default 15m)."""
+    return 300 if "-updown-5m-" in str(slug) else 900
+
+
+def stream_slugs(now_ts: float, streams=MARKET_STREAMS, ahead: int = 1) -> list[str]:
+    """Current (and ``ahead`` next) market slugs for every (asset, duration) stream."""
+    out = []
+    for asset, dur in streams:
+        start = int(now_ts) // dur * dur
+        out += [f"{asset}-updown-{_DURATION_TAG[dur]}-{start + dur * k}" for k in range(ahead + 1)]
+    return out
+
+
+def alt_source_name(kind: str, asset: str) -> str:
+    return f"{'chainlink_twap60' if kind == 'twap' else 'chainlink_spot'}:{asset}"
+
+
+def _e18_or_value(item: dict[str, Any]) -> Optional[float]:
+    raw = item.get("full_accuracy_value")
+    try:
+        if raw is not None:
+            from decimal import Decimal
+            v = float(Decimal(str(raw)) / Decimal(10 ** 18))   # same as bot.price_streams.from_e18_decimal
+            if v > 0:
+                return v
+    except (TypeError, ValueError):
+        pass
+    return _num(item.get("value"))
+
+
+def parse_rtds_chainlink(payload: Any) -> list[tuple[str, str, float, int]]:
+    """RTDS Chainlink frames -> [(kind 'spot'|'twap', asset, price, source_ms)] for any symbol.
+
+    Handles raw spot updates (``crypto_prices_chainlink``), 60 s TWAP updates and the
+    TWAP subscribe snapshot (``payload.data`` list). Unknown frames give [].
+    """
+    if not isinstance(payload, dict):
+        return []
+    topic = str(payload.get("topic") or "").lower()
+    inner = payload.get("payload")
+    if not isinstance(inner, dict):
+        return []
+    if topic == "crypto_prices_chainlink":
+        kind = "spot"
+    elif topic == "crypto_prices_twap_sixty":
+        kind = "twap"
+    else:
+        return []
+    asset = str(inner.get("symbol") or "").lower().split("/")[0]
+    if not asset:
+        return []
+    items = inner.get("data") if isinstance(inner.get("data"), list) else [inner]
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        price, ms = _e18_or_value(item), _event_ms(item.get("timestamp"))
+        if price is not None and price > 0 and ms:
+            out.append((kind, asset, float(price), int(ms)))
+    return out

@@ -3,7 +3,7 @@
 Standalone process, independent of the trading bot and of the price recorder. It keeps
 live Chainlink RTDS (spot + 60 s TWAP) and the current/next BTC 15m Polymarket books
 in memory, evaluates the plan_v2 ZC rule at T-55, T-50 ... T-5 of every market, and
-logs one JSON row per checkpoint. No order is built or sent in this mode.
+logs one JSON row per market and checkpoint, for BTC/ETH/SOL/XRP 5m and 15m markets. No order is built or sent in this mode.
 
     .venv/bin/python scripts/twap_z_executor.py --mode dry-run
 
@@ -30,66 +30,66 @@ for p in (REPO_ROOT, REPO_ROOT / "scripts"):
 
 from bot.price_streams import (  # noqa: E402
     POLYMARKET_LIVE_WS_URL,
-    RTDS_APPLICATION_HEARTBEAT_TEXT,
     build_polymarket_chainlink_subscribe_payload,
-    extract_polymarket_chainlink_tick,
-    rtds_application_heartbeat_due,
     safe_json_loads,
 )
+from bot.research.price_recorder import MARKET_STREAMS, parse_rtds_chainlink, stream_slugs  # noqa: E402
 from bot.research.twap_z_executor import (  # noqa: E402
     CHECKPOINTS,
-    MARKET_SEC,
     LiveBookSampler,
     LiveChainlink,
     evaluate_checkpoint,
 )
-from price_recorder import Feed, MarketTracker, build_book_feed  # noqa: E402
+from price_recorder import Feed, MarketTracker, _rtds_heartbeat, build_book_feeds  # noqa: E402
 
 BOOK_FEED_MAX_SILENCE_SEC = 5.0
 MIN_FREE_DISK_GB = 10.0
 
 
-def build_chainlink_feed(chainlink: LiveChainlink, stop: threading.Event) -> Feed:
-    last_ping = {"t": 0.0}
-
-    def on_open(ws) -> None:
-        ws.send(json.dumps(build_polymarket_chainlink_subscribe_payload(
-            use_twap=True, window_seconds=60, symbol="btc/usd", include_spot=True)))
-
-    def heartbeat(ws, now: float) -> None:
-        if rtds_application_heartbeat_due(now_monotonic=now, last_sent_monotonic=last_ping["t"]):
-            ws.send(RTDS_APPLICATION_HEARTBEAT_TEXT)
-            last_ping["t"] = now
+def build_chainlink_feeds(chainlinks: dict[str, LiveChainlink], stop: threading.Event) -> list[Feed]:
+    """One raw-spot socket (all symbols) + one 60 s TWAP socket per asset (RTDS streams one TWAP filter per socket)."""
 
     def on_message(raw) -> int:
-        payload = safe_json_loads(raw)
-        if payload is None:
-            return 0
-        tick = extract_polymarket_chainlink_tick(payload)
-        if tick is None:
-            return 0
-        if tick.source.startswith("polymarket_chainlink_twap_60"):
-            kind = "twap"
-        elif tick.source == "polymarket_chainlink_ws":
-            kind = "spot"
-        else:
-            return 0
-        chainlink.observe(kind, float(tick.price), tick.received_at_ts, tick.updated_at_ms)
-        return 1
+        n = 0
+        for kind, asset, price, source_ms in parse_rtds_chainlink(safe_json_loads(raw)):
+            live = chainlinks.get(asset)
+            if live is not None:
+                live.observe(kind, price, time.time(), source_ms)
+                n += 1
+        return n
 
-    return Feed("chainlink_rtds", POLYMARKET_LIVE_WS_URL, stop, on_open, on_message, heartbeat)
+    def spot_open(ws) -> None:
+        ws.send(json.dumps({"action": "subscribe", "subscriptions": [
+            {"topic": "crypto_prices_chainlink", "type": "*", "filters": ""}]}))
+
+    feeds = [Feed("chainlink_spot", POLYMARKET_LIVE_WS_URL, stop, spot_open, on_message, _rtds_heartbeat())]
+    for asset in chainlinks:
+        payload = build_polymarket_chainlink_subscribe_payload(
+            use_twap=True, window_seconds=60, symbol=f"{asset}/usd", include_spot=False)
+        feeds.append(Feed(f"chainlink_twap_{asset}", POLYMARKET_LIVE_WS_URL, stop,
+                          lambda ws, _p=payload: ws.send(json.dumps(_p)), on_message, _rtds_heartbeat()))
+    return feeds
 
 
-def next_checkpoint(now: float) -> tuple[str, int, float]:
-    """Earliest (slug, checkpoint, ts) strictly after ``now``."""
-    start = int(now) // MARKET_SEC * MARKET_SEC
-    for s in (start, start + MARKET_SEC):
-        end = s + MARKET_SEC
-        for h in CHECKPOINTS:
-            t = float(end - h)
-            if t > now:
-                return f"btc-updown-15m-{s}", h, t
-    raise AssertionError("unreachable")
+def next_checkpoint(now: float, streams=MARKET_STREAMS) -> tuple[float, int, list[str]]:
+    """Earliest checkpoint time after ``now`` and the market slugs that reach it (same T-h)."""
+    best: Optional[tuple[float, int]] = None
+    for _asset, dur in streams:
+        start = int(now) // dur * dur
+        for s in (start, start + dur):
+            for h in CHECKPOINTS:
+                t = float(s + dur - h)
+                if t > now and (best is None or t < best[0]):
+                    best = (t, h)
+    t, h = best
+    slugs = [slug for slug in stream_slugs(t - h - 0.5, streams, ahead=0)
+             if int(slug.rsplit("-", 1)[-1]) + (300 if "-5m-" in slug else 900) == int(t) + h]
+    return t, h, slugs
+
+
+def _book_feed_name(slug: str) -> str:
+    asset = slug.split("-", 1)[0]
+    return "polymarket_book" if asset == "btc" else f"polymarket_book_{asset}"
 
 
 def disk_free_gb(path: pathlib.Path) -> float:
@@ -102,6 +102,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--mode", choices=["dry-run"], default="dry-run")
     parser.add_argument("--out-dir", default=str(REPO_ROOT / "data" / "twap_z_executor"))
     parser.add_argument("--duration-sec", type=float, default=0.0)
+    parser.add_argument("--assets", default="btc,eth,sol,xrp")
     args = parser.parse_args(argv)
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -110,12 +111,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
 
-    chainlink = LiveChainlink()
+    streams = tuple(st for st in MARKET_STREAMS if st[0] in args.assets.split(","))
+    chainlinks = {asset: LiveChainlink() for asset in dict.fromkeys(a for a, _d in streams)}
     books = LiveBookSampler()
-    tracker = MarketTracker(books, stop)
+    tracker = MarketTracker(books, stop, streams)
     tracker.refresh()
     tracker.start()
-    feeds = [build_chainlink_feed(chainlink, stop), build_book_feed(books, tracker, stop)]
+    book_feeds = {f.feed_name: f for f in build_book_feeds(books, tracker, stop)}
+    feeds = build_chainlink_feeds(chainlinks, stop) + list(book_feeds.values())
     for f in feeds:
         f.start()
     started = time.time()
@@ -138,7 +141,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         while not stop.is_set():
-            slug, h, t = next_checkpoint(time.time())
+            t, h, slugs = next_checkpoint(time.time(), streams)
             # Coarse wait, then spin the last few ms so evaluation starts on the checkpoint.
             while not stop.is_set() and t - time.time() > 0.02:
                 stop.wait(min(1.0, t - time.time() - 0.01))
@@ -146,30 +149,37 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pass
             if stop.is_set():
                 break
-            now = time.time()
             mono = time.monotonic()
-            feed_ok = {"polymarket_book": bool(feeds[1].last_tick_monotonic)
-                       and mono - feeds[1].last_tick_monotonic <= BOOK_FEED_MAX_SILENCE_SEC}
-            c0 = time.perf_counter()
-            d = evaluate_checkpoint(chainlink=chainlink, books=books, slug=slug, checkpoint=h,
-                                    scheduled_ts=t, now=now, feed_ok=feed_ok, already_selected=slug in selected)
-            d.compute_ms = (time.perf_counter() - c0) * 1000
-            if d.action in ("WOULD_SUBMIT", "RULE_MATCH_FAIL_CLOSED"):
-                selected.add(slug)   # plan_v2: only the first matching checkpoint per market
-            if len(selected) > 200:
-                selected = {s for s in selected if int(s.rsplit("-", 1)[-1]) + MARKET_SEC > now}
-            row = d.to_row()
-            row["decision_latency_ms"] = (now - t) * 1000 + d.compute_ms
-            lat.append(row["decision_latency_ms"])
-            counts[d.action] = counts.get(d.action, 0) + 1
-            if disk_free_gb(out_dir) > MIN_FREE_DISK_GB:
+            book_ok = {name: bool(f.last_tick_monotonic) and mono - f.last_tick_monotonic <= BOOK_FEED_MAX_SILENCE_SEC
+                       for name, f in book_feeds.items()}
+            rows = []
+            for slug in slugs:
+                now = time.time()
+                c0 = time.perf_counter()
+                d = evaluate_checkpoint(chainlink=chainlinks[slug.split("-", 1)[0]], books=books, slug=slug,
+                                        checkpoint=h, scheduled_ts=t, now=now,
+                                        feed_ok={k: v for k, v in book_ok.items() if k == _book_feed_name(slug)},
+                                        already_selected=slug in selected)
+                d.compute_ms = (time.perf_counter() - c0) * 1000
+                if d.action in ("WOULD_SUBMIT", "RULE_MATCH_FAIL_CLOSED"):
+                    selected.add(slug)   # plan_v2/v3: only the first matching checkpoint per market
+                row = d.to_row()
+                row["stream"] = slug.rsplit("-", 1)[0]
+                row["decision_latency_ms"] = (now - t) * 1000 + d.compute_ms
+                lat.append(row["decision_latency_ms"])
+                counts[d.action] = counts.get(d.action, 0) + 1
+                rows.append(row)
+                if d.action != "SKIP":
+                    logger.info(f"{slug} T-{h}: {d.action} z={d.z if d.z is None else round(d.z, 2)} "
+                                f"mid={d.mid} side={d.side} ask={d.ask} reasons={','.join(d.reasons) or '-'} "
+                                f"lat={row['decision_latency_ms']:.1f}ms")
+            if len(selected) > 2000:
+                selected = {s for s in selected if int(s.rsplit("-", 1)[-1]) + 900 > time.time()}
+            if rows and disk_free_gb(out_dir) > MIN_FREE_DISK_GB:
                 day = time.strftime("%Y-%m-%d", time.gmtime(t))
                 with open(out_dir / f"{day}.jsonl", "a") as fh:
-                    fh.write(json.dumps(row, default=str) + "\n")
-            if d.action != "SKIP" or h == 5:
-                logger.info(f"{slug} T-{h}: {d.action} z={d.z if d.z is None else round(d.z, 2)} "
-                            f"mid={d.mid} side={d.side} ask={d.ask} reasons={','.join(d.reasons) or '-'} "
-                            f"lat={row['decision_latency_ms']:.1f}ms")
+                    for row in rows:
+                        fh.write(json.dumps(row, default=str) + "\n")
             if h == 5:
                 write_status(time.time())
             if args.duration_sec and time.time() - started >= args.duration_sec:

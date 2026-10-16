@@ -32,6 +32,7 @@ LOCK_BOOK_MAX_AGE = 1.0
 PRIMARY_N, MAX_DAYS, ASOF_SEC = v1.PRIMARY_N, v1.MAX_DAYS, v1.ASOF_SEC
 YR3 = v1.YR3
 LABEL_DELAY_SEC = 600
+V2_SLUG_PREFIX = "btc-updown-15m-"
 
 
 class BookIndex:
@@ -74,8 +75,11 @@ class ExchangeIndex:
 def build_grid(prices: pd.DataFrame, books: pd.DataFrame, cs: ChainlinkSeries, now_ts: float) -> pd.DataFrame:
     prices = prices.assign(t=prices.last_received_ms / 1000.0).sort_values("t")
     bx, ex = BookIndex(books), ExchangeIndex(prices)
+    # plan_v2 population is BTC 15m only. Since 2026-10-16 the recorder also stores other
+    # assets and 5m markets (plan_v3); they must never enter the v2 grid.
     slugs = sorted(s for s in books.market_slug.unique()
-                   if POPULATION_START <= float(s.rsplit("-", 1)[-1]) and float(s.rsplit("-", 1)[-1]) + 900 <= now_ts)
+                   if s.startswith(V2_SLUG_PREFIX)
+                   and POPULATION_START <= float(s.rsplit("-", 1)[-1]) and float(s.rsplit("-", 1)[-1]) + 900 <= now_ts)
     # Basis pairs on one local clock: Chainlink re-keyed by receipt second (v1.rolling_basis pairs by ts_sec).
     rb = prices[prices.source.isin(["binance_btcusdt", "chainlink_spot"])].copy()
     rb["ts_sec"] = (rb.last_received_ms // 1000).astype("int64")

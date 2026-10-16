@@ -1,5 +1,5 @@
-"""Standalone 1-second recorder: Chainlink RTDS (raw spot + 60 s TWAP), Binance BTCUSDT, Coinbase BTC-USD,
-and the current/next BTC 15m Polymarket order books (best bid/ask per token).
+"""Standalone 1-second recorder: Chainlink RTDS (raw spot + 60 s TWAP) for BTC/ETH/SOL/XRP, Binance BTCUSDT,
+Coinbase BTC-USD, and the current/next 5m and 15m Up/Down Polymarket order books of those assets.
 
 Research only. Runs as its own process, independent of the trading bot:
 
@@ -40,9 +40,14 @@ from bot.research.price_recorder import (  # noqa: E402
     BookSampler,
     HourlyParquetStore,
     SecondBucketer,
+    ALT_ASSETS,
+    MARKET_STREAMS,
+    alt_source_name,
     book_schema,
     market_tokens_for,
     parse_coinbase_ticker,
+    parse_rtds_chainlink,
+    stream_slugs,
 )
 
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
@@ -118,17 +123,16 @@ def fetch_gamma_market(slug: str):
 class MarketTracker(threading.Thread):
     """Keeps the sampler on the current and next BTC 15m markets; queues new tokens to subscribe."""
 
-    def __init__(self, sampler: BookSampler, stop: threading.Event) -> None:
+    def __init__(self, sampler: BookSampler, stop: threading.Event, streams=MARKET_STREAMS) -> None:
         super().__init__(name="market-tracker", daemon=True)
-        self.sampler, self.stop_event = sampler, stop
+        self.sampler, self.stop_event, self.streams = sampler, stop, tuple(streams)
         self.pending: list[str] = []
         self.lock = threading.Lock()
         self.errors = 0
         self._previous: dict = {}
 
     def refresh(self) -> None:
-        start = int(time.time()) // 900 * 900
-        slugs = [f"btc-updown-15m-{start + 900 * k}" for k in (0, 1)]
+        slugs = stream_slugs(time.time(), self.streams)
         meta = {}
         for slug in slugs:
             try:
@@ -145,9 +149,15 @@ class MarketTracker(threading.Thread):
             with self.lock:
                 self.pending.extend(new)
 
-    def take_pending(self) -> list[str]:
+    def take_pending(self, prefix: Optional[str] = None) -> list[str]:
+        """New tokens to subscribe; with ``prefix``, only those of markets whose slug starts with it."""
         with self.lock:
-            out, self.pending = self.pending, []
+            if prefix is None:
+                out, self.pending = self.pending, []
+                return out
+            slug_of = {t: m["slug"] for t, m in self._previous.items()}
+            out = [t for t in self.pending if slug_of.get(t, "").startswith(prefix)]
+            self.pending = [t for t in self.pending if t not in out]
         return out
 
     def run(self) -> None:
@@ -157,13 +167,19 @@ class MarketTracker(threading.Thread):
                 self.refresh()
 
 
-def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event) -> Feed:
+def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event,
+                    prefix: Optional[str] = None) -> Feed:
+    """One CLOB market socket for the tracked tokens whose slug starts with ``prefix`` (all if None).
+
+    One socket per asset keeps each subscription's snapshot burst small enough that the
+    server does not drop us as a slow consumer (1013), which happened with 32 tokens on one socket.
+    """
     last_ping = {"t": 0.0}
 
     def on_open(ws) -> None:
-        sampler.reset()          # books must be rebuilt from fresh snapshots on this connection
-        tracker.take_pending()   # everything tracked is subscribed below
-        tokens = sampler.tokens()
+        sampler.reset(prefix)          # this socket's books are rebuilt from fresh snapshots
+        tracker.take_pending(prefix)   # everything tracked is subscribed below
+        tokens = sampler.tokens(prefix)
         if tokens:
             ws.send(json.dumps({"assets_ids": tokens, "type": "market"}))
 
@@ -171,7 +187,7 @@ def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threadin
         if now - last_ping["t"] >= CLOB_PING_SEC:
             ws.send("PING")
             last_ping["t"] = now
-        new = tracker.take_pending()
+        new = tracker.take_pending(prefix)
         if new:
             ws.send(json.dumps({"assets_ids": new, "operation": "subscribe"}))
 
@@ -184,7 +200,13 @@ def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threadin
         sampler.apply(payload, time.time())
         return 1
 
-    return Feed("polymarket_book", CLOB_MARKET_WS_URL, stop, on_open, on_message, heartbeat)
+    name = "polymarket_book" if prefix is None or prefix == "btc-" else f"polymarket_book_{prefix.rstrip('-')}"
+    return Feed(name, CLOB_MARKET_WS_URL, stop, on_open, on_message, heartbeat)
+
+
+def build_book_feeds(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event) -> list[Feed]:
+    assets = list(dict.fromkeys(a for a, _d in tracker.streams))
+    return [build_book_feed(sampler, tracker, stop, prefix=f"{a}-") for a in assets]
 
 
 def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
@@ -237,9 +259,50 @@ def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, st
 
     return [
         Feed("chainlink_rtds", POLYMARKET_LIVE_WS_URL, stop, rtds_open, rtds_message, rtds_heartbeat),
+        *build_alt_chainlink_feeds(chainlink_bucketer, stop),
         Feed("binance", BINANCE_AGGTRADE_WS_URL, stop, lambda ws: None, binance_message),
         Feed("coinbase", COINBASE_WS_URL, stop, coinbase_open, coinbase_message),
     ]
+
+
+def _rtds_heartbeat():
+    last_ping = {"t": 0.0}
+
+    def heartbeat(ws, now: float) -> None:
+        if rtds_application_heartbeat_due(now_monotonic=now, last_sent_monotonic=last_ping["t"]):
+            ws.send(RTDS_APPLICATION_HEARTBEAT_TEXT)
+            last_ping["t"] = now
+    return heartbeat
+
+
+def build_alt_chainlink_feeds(chainlink_bucketer: SecondBucketer, stop: threading.Event,
+                              assets=ALT_ASSETS) -> list[Feed]:
+    """ETH/SOL/XRP Chainlink: one raw-spot socket (all symbols) + one TWAP socket per asset.
+
+    RTDS only streams TWAP updates for one symbol filter per connection (probed
+    2026-10-16), so each asset gets its own TWAP socket. BTC stays on the original feed.
+    """
+    wanted = set(assets)
+
+    def on_message(raw) -> int:
+        n = 0
+        for kind, asset, price, source_ms in parse_rtds_chainlink(safe_json_loads(raw)):
+            if asset in wanted:
+                chainlink_bucketer.observe(alt_source_name(kind, asset), price, time.time(), source_ms)
+                n += 1
+        return n
+
+    def spot_open(ws) -> None:
+        ws.send(json.dumps({"action": "subscribe", "subscriptions": [
+            {"topic": "crypto_prices_chainlink", "type": "*", "filters": ""}]}))
+
+    feeds = [Feed("chainlink_rtds_alt_spot", POLYMARKET_LIVE_WS_URL, stop, spot_open, on_message, _rtds_heartbeat())]
+    for asset in assets:
+        payload = build_polymarket_chainlink_subscribe_payload(
+            use_twap=True, window_seconds=60, symbol=f"{asset}/usd", include_spot=False)
+        feeds.append(Feed(f"chainlink_rtds_twap_{asset}", POLYMARKET_LIVE_WS_URL, stop,
+                          lambda ws, _p=payload: ws.send(json.dumps(_p)), on_message, _rtds_heartbeat()))
+    return feeds
 
 
 def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStore, started: float,
@@ -292,7 +355,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     tracker = MarketTracker(sampler, stop)
     tracker.refresh()            # first subscription list before the book socket opens
     tracker.start()
-    feeds = build_feeds(bucketer, chainlink_bucketer, stop) + [build_book_feed(sampler, tracker, stop)]
+    feeds = build_feeds(bucketer, chainlink_bucketer, stop) + build_book_feeds(sampler, tracker, stop)
     for feed in feeds:
         feed.start()
     started = time.time()
