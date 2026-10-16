@@ -139,6 +139,26 @@ def threadsafe_node_stop_callback(node: TradingNode):
     return idempotent_stop_callback(request_stop)
 
 
+# BTC 15-minute markets start on multiples of 900s (UTC epoch). A node
+# rollover stalls the event loop for ~10-15s and then needs to re-warm quotes,
+# so the scheduled rollover only starts inside [open+30s, close-120s]: the
+# opening strike capture and the final settlement-averaging window stay
+# covered by a running node.
+_MARKET_PERIOD_SEC = 900
+_ROLLOVER_EARLIEST_PHASE_SEC = 30
+_ROLLOVER_LATEST_PHASE_SEC = 780
+
+
+def _rollover_market_phase_defer_sec(now_ts: float) -> float:
+    """Seconds to wait before a scheduled rollover may start (0 = start now)."""
+    phase = float(now_ts) % _MARKET_PERIOD_SEC
+    if _ROLLOVER_EARLIEST_PHASE_SEC <= phase <= _ROLLOVER_LATEST_PHASE_SEC:
+        return 0.0
+    if phase < _ROLLOVER_EARLIEST_PHASE_SEC:
+        return _ROLLOVER_EARLIEST_PHASE_SEC - phase
+    return _MARKET_PERIOD_SEC - phase + _ROLLOVER_EARLIEST_PHASE_SEC
+
+
 def request_auto_rollover_stop(node: TradingNode) -> bool:
     """Request node shutdown through a strategy's event-loop-safe callback."""
     try:
@@ -1021,6 +1041,16 @@ def _run_integrated_bot_cycles(
                             # normal exit lifecycle, not this operational timer,
                             # decides when the protected position is gone.
                             wait_sec = 5.0
+                            continue
+
+                        market_defer_sec = _rollover_market_phase_defer_sec(time.time())
+                        if market_defer_sec > 0:
+                            logger.warning(
+                                "Auto node rollover deferred "
+                                f"{market_defer_sec:.0f}s: keeping the market close/open window "
+                                "free of the rollover stall."
+                            )
+                            wait_sec = market_defer_sec
                             continue
 
                         rollover_source = "scheduled_auto_rollover"

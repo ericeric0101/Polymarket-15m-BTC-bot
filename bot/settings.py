@@ -26,6 +26,7 @@ from bot.risk_policy import (
 )
 from execution.exit_policy import ExitPolicy, ExitPolicyConfig
 from execution.fee_rate_client import FeeRateClient
+from bot.research_return_history import TimeWindowedHistory
 from execution.maker_engine import MakerEngine, MakerEngineConfig
 from execution.parameter_tuner import ParameterTuner
 from execution.rebate_model import CRYPTO_FEE_CURVE
@@ -652,6 +653,7 @@ def initialize_strategy_settings(
     strategy._last_fee_log_state_by_token = {}
     strategy.fee_rate_fetch_interval_sec = config.market_data.fee_rate_fetch_interval_sec
     strategy._fee_rate_local_cache_by_token = {}
+    strategy._fee_rate_refresh_tasks_by_token = {}
     strategy.latest_market_bid = None
     strategy.trade_telemetry = TradeTelemetry()
     strategy.latest_market_ask = None
@@ -754,7 +756,7 @@ def initialize_strategy_settings(
     strategy._binance_ws_price = None
     strategy._binance_ws_price_ts = 0.0
     strategy._binance_ws_price_source_ts = 0.0
-    strategy._prediction_btc_research_history = deque(maxlen=2400)
+    strategy._prediction_btc_research_history = TimeWindowedHistory(window_sec=90.0)
     strategy._btc_trend_source = "unavailable"
     strategy._btc_trend_source_ts = 0.0
     strategy._btc_trend_source_price = None

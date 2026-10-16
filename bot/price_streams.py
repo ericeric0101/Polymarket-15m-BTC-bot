@@ -54,6 +54,53 @@ def rtds_silent_stall_due(
     return now_monotonic - last_valid_twap_monotonic >= max_silence_sec
 
 
+CHAINLINK_FEED_MAX_AGE_SEC_DEFAULT = 3.0
+
+
+def chainlink_feed_health(
+    *,
+    now_ts: float,
+    connected: bool,
+    spot_received_ts: Optional[float],
+    twap_received_ts: Optional[float],
+    max_age_sec: float = CHAINLINK_FEED_MAX_AGE_SEC_DEFAULT,
+) -> dict[str, Any]:
+    """Classify whether the RTDS Chainlink spot/TWAP feed is usable right now.
+
+    Ages use the local receipt clock (source clocks can be skewed). A caller
+    that needs a live Chainlink reference should fail closed when ``stale``.
+    """
+
+    def _age(ts: Optional[float]) -> Optional[float]:
+        try:
+            value = float(ts) if ts is not None else 0.0
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, float(now_ts) - value) if value > 0 else None
+
+    spot_age = _age(spot_received_ts)
+    twap_age = _age(twap_received_ts)
+    reasons = []
+    if not connected:
+        reasons.append("ws_disconnected")
+    if spot_age is None:
+        reasons.append("spot_missing")
+    elif spot_age > max_age_sec:
+        reasons.append("spot_stale")
+    if twap_age is None:
+        reasons.append("twap_missing")
+    elif twap_age > max_age_sec:
+        reasons.append("twap_stale")
+    return {
+        "stale": bool(reasons),
+        "reasons": reasons,
+        "connected": bool(connected),
+        "spot_age_sec": spot_age,
+        "twap_age_sec": twap_age,
+        "max_age_sec": float(max_age_sec),
+    }
+
+
 def chainlink_observation_ts(tick: PriceTick) -> Optional[float]:
     """Return the source observation clock, never the local receipt clock."""
     if tick.updated_at_ms is None or tick.updated_at_ms <= 0:

@@ -38,7 +38,9 @@ from bot.price_streams import (
     BINANCE_AGGTRADE_WS_URL,
     POLYMARKET_LIVE_WS_URL,
     RTDS_APPLICATION_HEARTBEAT_TEXT,
+    CHAINLINK_FEED_MAX_AGE_SEC_DEFAULT,
     build_polymarket_chainlink_subscribe_payload,
+    chainlink_feed_health,
     chainlink_observation_ts,
     extract_binance_aggtrade_tick,
     extract_polymarket_chainlink_tick,
@@ -121,6 +123,19 @@ class SpotPricerMixin:
     # Polymarket Chainlink WebSocket
     # ------------------------------------------------------------------
 
+    def _chainlink_feed_health(self, *, now_ts: Optional[float] = None) -> dict:
+        """Current RTDS Chainlink spot/TWAP freshness (observation only; no gating here)."""
+        return chainlink_feed_health(
+            now_ts=time.time() if now_ts is None else float(now_ts),
+            connected=bool(getattr(self, "_polymarket_chainlink_ws_connected", False)),
+            spot_received_ts=getattr(self, "_polymarket_chainlink_price_ts", None),
+            twap_received_ts=getattr(self, "_polymarket_chainlink_twap_price_ts", None),
+            max_age_sec=float(
+                getattr(self, "chainlink_feed_max_age_sec", CHAINLINK_FEED_MAX_AGE_SEC_DEFAULT)
+                or CHAINLINK_FEED_MAX_AGE_SEC_DEFAULT
+            ),
+        )
+
     def _start_polymarket_chainlink_ws(self) -> None:
         import threading
         if (
@@ -174,6 +189,7 @@ class SpotPricerMixin:
                     self._polymarket_chainlink_twap_connection_epoch = connection_epoch
                     self._polymarket_chainlink_twap_connection_monotonic = connected_monotonic
                     self._polymarket_chainlink_twap_pending_recovery = True
+                    self._polymarket_chainlink_ws_connected = True
                     last_application_ping_monotonic = 0.0
                     last_valid_twap_monotonic = connected_monotonic
                     self._db_strategy_event(
@@ -370,6 +386,7 @@ class SpotPricerMixin:
                                 received_ts=tick.received_at_ts,
                             )
             except Exception as exc:
+                self._polymarket_chainlink_ws_connected = False
                 disconnected_monotonic = time.monotonic()
                 connected_monotonic = float(
                     getattr(self, "_polymarket_chainlink_twap_connection_monotonic", 0.0) or 0.0
