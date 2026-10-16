@@ -1,5 +1,8 @@
 """Live decision core for the TWAP-z late-window executor.
 
+Applies to every Up/Down market settled on the Chainlink 60 s TWAP (BTC/ETH/SOL/XRP,
+5m and 15m): the settlement window is the last 60 s regardless of market length.
+
 The rule is plan_v2 sections 2-4 of reports/twap_z_forward_shadow_20261015 (ZC variant):
 at T-55, T-50 ... T-5 evaluate z on live Chainlink data; take the first checkpoint per
 market with 0.10 <= mid <= 0.90, |z| >= 2 and a valid book on the z side, and buy that
@@ -15,7 +18,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from bot.research.price_recorder import BookSampler
+from bot.research.price_recorder import BookSampler, slug_duration_sec
 
 MARKET_SEC = 900
 TWAP_WINDOW = 60
@@ -189,7 +192,7 @@ def evaluate_checkpoint(*, chainlink: LiveChainlink, books: LiveBookSampler, slu
                         already_selected: bool) -> Decision:
     """One plan_v2 grid row on live state, plus the executor's fail-closed reasons."""
     start = int(slug.rsplit("-", 1)[-1])
-    end = start + MARKET_SEC
+    end = start + slug_duration_sec(slug)
     d = Decision(market_slug=slug, checkpoint=checkpoint, scheduled_ts=scheduled_ts, eval_ts=now)
     known = chainlink._known_spot(now)
     d.strike = chainlink.strike(start, now)
