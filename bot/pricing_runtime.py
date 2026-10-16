@@ -92,9 +92,18 @@ class PricingRuntimeMixin:
             pass
         return default_rate
 
+    # A stale cached fee is served without awaiting the network for up to this
+    # many fetch intervals; past that the lookup blocks again (fail-safe).
+    FEE_RATE_MAX_STALE_INTERVALS = 4
+
     async def _get_dynamic_fee_rate(self: PricingRuntimeHost, token_id: Optional[str] = None) -> Optional[Decimal]:
         """
         Fetch dynamic fee rate from CLOB /fee-rate endpoint using current token_id.
+
+        Decision paths call this, so the network is kept off it: a fresh cache
+        hit returns immediately, an expired-but-recent cache entry is returned
+        while a single background refresh runs, and only a token never seen
+        (normally prefetched by ``_prefetch_fee_rates``) awaits the fetch.
         """
         token = token_id or self.current_token_id
         if not token:
@@ -104,14 +113,73 @@ class PricingRuntimeMixin:
         if local_cached is not None:
             cached_ts = float(local_cached.get("ts", 0.0))
             cached_rate = local_cached.get("fee_rate")
-            if (
-                isinstance(cached_rate, Decimal)
-                and cached_rate >= 0
-                and cached_ts > 0
-                and (now_ts - cached_ts) < self.fee_rate_fetch_interval_sec
-            ):
-                return cached_rate
+            if isinstance(cached_rate, Decimal) and cached_rate >= 0 and cached_ts > 0:
+                age = now_ts - cached_ts
+                interval = float(self.fee_rate_fetch_interval_sec)
+                if age < interval:
+                    return cached_rate
+                if age < interval * self.FEE_RATE_MAX_STALE_INTERVALS:
+                    self._schedule_fee_rate_refresh(token)
+                    return cached_rate
 
+        inflight = self._fee_rate_refresh_tasks().get(token)
+        if inflight is not None and not inflight.done():
+            try:
+                return await asyncio.shield(inflight)
+            except Exception:
+                return None
+        return await self._fetch_and_cache_fee_rate(token)
+
+    def _fee_rate_refresh_tasks(self: PricingRuntimeHost) -> dict[str, Any]:
+        tasks = getattr(self, "_fee_rate_refresh_tasks_by_token", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._fee_rate_refresh_tasks_by_token = tasks
+        return tasks
+
+    def _schedule_fee_rate_refresh(self: PricingRuntimeHost, token: str) -> bool:
+        """Start one background fee fetch for ``token`` unless one is running."""
+        tasks = self._fee_rate_refresh_tasks()
+        existing = tasks.get(token)
+        if existing is not None and not existing.done():
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        task = loop.create_task(self._fetch_and_cache_fee_rate(token))
+        tasks[token] = task
+
+        def _done(t: Any, _token: str = token) -> None:
+            if tasks.get(_token) is t:
+                tasks.pop(_token, None)
+            if not t.cancelled():
+                t.exception()  # consume, so a failed refresh is not reported as unretrieved
+
+        task.add_done_callback(_done)
+        return True
+
+    def _prefetch_fee_rates(self: PricingRuntimeHost, token_ids: List[Any]) -> int:
+        """Warm the fee cache for tokens about to be traded; never blocks."""
+        started = 0
+        now_ts = time.time()
+        for raw in token_ids or []:
+            token = str(raw or "").strip()
+            if not token:
+                continue
+            cached = self._fee_rate_local_cache_by_token.get(token)
+            if cached is not None:
+                try:
+                    if now_ts - float(cached.get("ts", 0.0)) < float(self.fee_rate_fetch_interval_sec):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            if self._schedule_fee_rate_refresh(token):
+                started += 1
+        return started
+
+    async def _fetch_and_cache_fee_rate(self: PricingRuntimeHost, token: str) -> Optional[Decimal]:
+        now_ts = time.time()
         fee_rate = await self.fee_rate_client.get_fee_rate_decimal(token)
         source = "clob_fee_rate"
         if fee_rate is None or fee_rate < 0:

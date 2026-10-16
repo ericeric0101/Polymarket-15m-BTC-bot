@@ -476,6 +476,26 @@ def market_pair_instruments_by_slug(
     return result
 
 
+def _prefetch_market_fee_rates(strategy: Any, instrument_ids: List[Any]) -> None:
+    """Warm the fee cache for the current and prewarmed pair (off the decision path)."""
+    prefetch = getattr(strategy, "_prefetch_fee_rates", None)
+    extract = getattr(strategy, "_extract_token_id_from_instrument", None)
+    if not callable(prefetch) or not callable(extract):
+        return
+    tokens = []
+    for inst in instrument_ids:
+        try:
+            token = extract(str(inst))
+        except Exception:
+            token = None
+        if token:
+            tokens.append(token)
+    try:
+        prefetch(tokens)
+    except Exception as exc:
+        logger.debug(f"Fee prefetch skipped: {exc}")
+
+
 def replace_market_subscriptions(
     strategy: Any,
     previous_instrument_ids: List[Any],
@@ -537,6 +557,7 @@ def replace_market_subscriptions(
                 healthy = False
                 logger.warning(f"Market subscription failed for {inst}: {exc}")
 
+    _prefetch_market_fee_rates(strategy, list(desired_quotes.values()))
     strategy._managed_market_quote_subscription_ids = tracked_quote
     strategy._managed_market_l2_subscription_ids = tracked_l2
     strategy._managed_market_subscription_instruments = tracked_instruments
