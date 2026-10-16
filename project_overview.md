@@ -844,7 +844,7 @@ expects `TAKER_EXIT_MAX_TIME_LEFT_SEC`, renamed to
   entry, exit, stop, sizing, order-routing, session-guard, or TWAP runtime
   behavior.
 
-## Multi-source 1-second price recorder (2026-10-15; research only, separate process)
+## Multi-source 1-second price recorder (2026-10-15; multi-crypto since 2026-10-16; research only, separate process)
 
 `scripts/price_recorder.py` (logic in `bot/research/price_recorder.py`) records
 Chainlink RTDS raw spot and 60 s TWAP, Binance BTCUSDT aggTrade, Coinbase
@@ -867,6 +867,124 @@ trading bot, so it has no effect on trading I/O, memory or threads.
   every minute with per-feed connects/ticks/last-tick age and store counters.
 - Exchange `last_source_ms` uses each exchange's clock; compare lead/lag on
   `last_received_ms` (one local clock).
+
+**Multi-crypto recording since 2026-10-16 10:39 Taipei.** The recorder now also stores
+ETH/SOL/XRP Chainlink data, plus 5m and 15m books for BTC, ETH, SOL and XRP.
+- **What is unchanged:** BTC sources and names (`chainlink_spot`, `chainlink_twap60`,
+  `binance_btcusdt`, `coinbase_btcusd`).
+- **New price sources:** `chainlink_spot:<asset>` and `chainlink_twap60:<asset>`
+  for eth, sol and xrp.
+- **New books:** `data/polymarket_book_1s/` holds the current and next market of 8
+  streams: `{btc,eth,sol,xrp}-updown-{5m,15m}-<start>`. The market length comes
+  from the slug (`slug_duration_sec`).
+- **RTDS constraint:** one socket streams 60 s TWAP updates for only one symbol
+  filter; other symbols get just a subscribe snapshot (probed 2026-10-16). Each
+  asset therefore has its own TWAP socket. One shared socket carries raw spot
+  for all symbols.
+- **CLOB constraint:** a single socket with 32 book tokens was dropped with
+  `1013 slow consumer`. Books therefore use one socket per asset, and
+  `BookSampler.reset(prefix)` invalidates only that socket's books.
+- **Load:** about 25% of one CPU core. Storage is about 40 MB/day, about 1.2 GB
+  at 30-day retention.
+- **Data gaps:** restart gaps are logged in
+  `reports/twap_z_forward_shadow_20261015/data_gaps.md`. On 2026-10-16
+  02:15–02:39Z, BTC 15m v2 lost about 1–2 markets.
+- **Restart procedure:** start the new process first, check that it writes, then
+  stop the old one.
+
+## TWAP-z late-window strategy: live track (2026-10-16; research, no LIVE orders yet)
+
+**Decision (CK, 2026-10-16).** The live-progress target moves from Entry V3 to the
+TWAP-z late-window rule.
+- **Why not Entry V3:** the POST-24H DRY-RUN found HOLD EV −0.028/share, with the
+  entry price consistent with fair (`reports/post24h_entry_v3_analysis_20261016/`).
+  Earlier research found that no pre-entry feature adds information beyond price.
+- **Status of Entry V3:** it stays a DRY-RUN data source only.
+
+**Mechanism.**
+- Settlement is the Chainlink 60 s TWAP stamped at market end, which equals the
+  mean of Chainlink spot over seconds [END−62, END−3]. The strike is the TWAP
+  stamped at market start.
+- Inside the last minute, part of the settlement average is already fixed.
+  `z = (S − required_future_avg) / (S·σ·sqrt(remaining/(3·yr)))` measures how
+  hard a flip is.
+- This holds for every Chainlink-TWAP Up/Down market: BTC/ETH/SOL/XRP, 5m and
+  15m. All 8 were verified on Gamma, with `resolutionSource = *-usd-twap-60s-streams`.
+
+**Rule (frozen, plan_v2 §2–4 = plan_v3 §4).**
+- Checkpoints: T−55, T−50 … T−5.
+- Entry condition: `0.10 ≤ mid ≤ 0.90` and `|z| ≥ 2`, where z uses Chainlink spot
+  (ZC).
+- Buy the side that z points to, at its ask; first match per market only.
+- Hold to settlement.
+- Fee: `0.07·p·(1−p)`.
+
+**Pre-registrations** (in `reports/twap_z_forward_shadow_20261015/`):
+
+| Plan | Scope | Population start | Primary analysis | Inference |
+|---|---|---|---|---|
+| `plan_v2.md` | BTC 15m only | 2026-10-15T01:00Z | N ≥ 50 | `evaluate_v2.py`; its population is restricted to `btc-updown-15m-` |
+| `plan_v3.md` | 7 new streams (BTC 5m; ETH/SOL/XRP 5m+15m) | 2026-10-16T03:00Z | N ≥ 150 pooled | Cluster bootstrap by market end time. Per-asset TWAP-window validation runs before evaluation. PASS also requires that no stream contributes more than 50% of total PnL. |
+
+For both plans, PnL stays hidden until the primary N is reached.
+
+**Executor.**
+- Code: `scripts/twap_z_executor.py`, with logic in `bot/research/twap_z_executor.py`.
+- It is a standalone process, not inside the Nautilus bot.
+- **Mechanics check:** the live core reproduces `recorder_mechanics.ChainlinkSeries`
+  exactly. Replaying 1,078 checkpoints gave 0 mismatches
+  (`reports/twap_z_late_window_executor_20261016/verify_replay.py`).
+- **Fail-closed:** no order when Chainlink spot or TWAP receipt age is over 3 s,
+  a book socket has been silent for more than 5 s, the strike is missing, or the
+  book is invalid.
+- **Selection:** a market counts as selected at its first rule match, even when
+  the executor failed closed, so live never selects more than the shadow.
+- **Output:** `data/twap_z_executor/YYYY-MM-DD.jsonl`, one row per market and
+  checkpoint, plus `_status.json`.
+- **Latency:** decision p50 is about 2 ms.
+
+**Phases** (spec: `reports/twap_z_late_window_executor_20261016/spec.md`):
+- **P1 — DRY-RUN, 1–2 days:**
+  - BTC 15m since 2026-10-16 09:40; all 8 streams since 10:41.
+  - Gate: decision p99 < 500 ms, and trigger agreement with the recorder shadow
+    ≥ 90% per stream (coverage only).
+- **P2 — micro-live:**
+  - FAK at the ask, 5.5 shares per trade. Polymarket's minimum is 5 shares, and a
+    5-share buy nets fewer than 5 after the fee.
+  - Loss caps: $15/day and $50 cumulative, shared by all streams.
+  - P2 measures fill rate and slippage only. Scaling up requires a v2 or v3 PASS.
+  - LIVE is started by CK only.
+- **Frequency:** BTC 15m alone gave about 3 rule matches per day in DEV. The 8
+  streams are the frequency lever; thresholds are not loosened.
+
+**Next research (not started).** An "intraday leg" for 15m markets:
+- **Question:** at fixed checkpoints from T−600 to T−120 (all before T−65, so no
+  overlap with TWAP-z), does model P minus ask predict EV over all recorded
+  markets?
+- **Data:** recorder data from about 2026-10-22 onward.
+- **Design:** pre-registered thresholds, with days split into development and
+  confirmation.
+- **Prior evidence:** strike-distance features added nothing beyond price in
+  Entry V3 (`reports/entry_v3_hold_ev_research_20261012`).
+
+**Related engineering branches** (not merged into this branch):
+- `fix/late-window-latency`, based on the Entry V3 integration line 4b1375d:
+  - fee lookup is stale-while-revalidate with prefetch;
+  - scheduled rollover runs only inside [open+30 s, close−120 s];
+  - adds the `chainlink_feed_health()` flag;
+  - the research return buffer becomes a 90 s window.
+- `fix/binance-reference-basis`, a LIVE-line fix:
+  - the side decision fails closed on the Binance reference;
+  - exits use basis-adjusted Binance.
+  - It touches protected modules (`side_decision.py`, `taker_exit.py`,
+    `run_bot.py`), so it must not be merged into the Entry V3 research line.
+
+**Storage hygiene (2026-10-16).** Research DB snapshots are cold-archived as
+verified `tar.zst` under `data/analysis_archives/` (see its README):
+- `freshness_audit_20261006` went from 3.7 GB to 220 MB;
+- the POST-24H input snapshots went from 0.96 GB to 66 MB.
+The trade journal keeps using `scripts/journal_retention.py`, described in the
+section above.
 
 ## BTC 1-second historical research data
 
