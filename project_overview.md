@@ -1,5 +1,31 @@
 # Polymarket BTC 15-Minute Trading Bot — Current Authority
 
+## Branch authority (2026-10-16)
+
+- **`main` is the LIVE line.**
+  - PR #5 merged `codex/db-resilience-and-stoploss-priority` into `main` with a
+    merge commit (`ac98161`), after PR #6 had fixed the CI baseline.
+  - Evidence: in `logs/trade_journal.db`, `strategy_runs.notes_json` shows all 16
+    LIVE runs from 2026-10-10 to 10-12 (the 48 h Breaker V2 run) at `08bcb32`
+    with `git_dirty=false`.
+  - Runtime code on `main` equals `08bcb32`. PR #6 changed only tests, CI and
+    `requirements.txt`; it added `web3`, which auto-redeem needs.
+- **`integration/entry-v3-forward-shadow` is the Entry V3 research line.** It has
+  never run LIVE, carries the research profile, the startup guard and the
+  protected-module freeze, and is not merged into `main`.
+- **Work in flight:**
+
+  | PR | Head → base | Content |
+  |---|---|---|
+  | #2 | `feat/multi-crypto-twap-z` → `main` | multi-crypto recording, TWAP-z executor |
+  | #3 | `fix/binance-reference-basis` → `main` | Binance basis fix (LIVE line) |
+  | #4 | `fix/late-window-latency` → `integration/entry-v3-forward-shadow` | late-window latency fixes |
+
+- **Retired branches:** `stable-live-2026-05-04`, `reference-post-eb5d32b` and
+  `fix/shadow-fast-spot-provenance` are kept as `archive/*` tags.
+- **Merging rule:** always use "Create a merge commit"; never squash or rebase. A
+  LIVE run is identified by its exact commit SHA.
+
 ## Phase B runtime authority (2026-10-07)
 
 Outcome/Hyperliquid network ingestion and Fast Follow runtime have been retired.
