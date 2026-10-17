@@ -1,0 +1,44 @@
+{
+ "window_utc": [
+  "2026-10-16T03:00:00Z",
+  "2026-10-16T05:00:00Z"
+ ],
+ "assets": {
+  "btc": {
+   "best_offset": -62,
+   "n_windows": 2971,
+   "median_abs_bps": 3.5623690910942417e-12,
+   "p99_abs_bps": 0.16730775708019818,
+   "max_abs_bps": 0.2707704671578792,
+   "second_best_median_bps": 0.015867463541529292,
+   "included": true
+  },
+  "eth": {
+   "best_offset": -62,
+   "n_windows": 2685,
+   "median_abs_bps": 5.593719996811117e-12,
+   "p99_abs_bps": 0.23168403900797377,
+   "max_abs_bps": 0.3248478625923699,
+   "second_best_median_bps": 0.022895391798980712,
+   "included": true
+  },
+  "sol": {
+   "best_offset": -62,
+   "n_windows": 2768,
+   "median_abs_bps": 4.0590425016716366e-12,
+   "p99_abs_bps": 0.2690294862138315,
+   "max_abs_bps": 0.3933752186439252,
+   "second_best_median_bps": 0.029294613865557918,
+   "included": true
+  },
+  "xrp": {
+   "best_offset": -62,
+   "n_windows": 2789,
+   "median_abs_bps": 4.994720161045898e-12,
+   "p99_abs_bps": 0.3265026857195598,
+   "max_abs_bps": 0.5771538993784585,
+   "second_best_median_bps": 0.026323436734812425,
+   "included": true
+  }
+ }
+}

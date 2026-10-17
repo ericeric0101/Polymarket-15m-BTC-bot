@@ -42,11 +42,16 @@ from bot.research.price_recorder import (  # noqa: E402
     SecondBucketer,
     ALT_ASSETS,
     MARKET_STREAMS,
+    BINANCE_ALT_STREAM_URL,
     alt_source_name,
+    book_feed_name,
     book_schema,
     market_tokens_for,
+    parse_binance_combined_aggtrade,
     parse_coinbase_ticker,
     parse_rtds_chainlink,
+    parse_trade_prints,
+    trade_schema,
     stream_slugs,
 )
 
@@ -58,6 +63,7 @@ MARKET_REFRESH_SEC = 30.0
 COINBASE_SUBSCRIBE = {"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["ticker"]}
 SILENCE_RECONNECT_SEC = 30.0
 MAX_CONNECTION_SEC = 23 * 3600
+BOOK_SAMPLE_LEAD_SEC = 0.010
 
 
 class Feed(threading.Thread):
@@ -168,7 +174,7 @@ class MarketTracker(threading.Thread):
 
 
 def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event,
-                    prefix: Optional[str] = None) -> Feed:
+                    prefix: Optional[str] = None, on_trades: Optional[Callable[[list], None]] = None) -> Feed:
     """One CLOB market socket for the tracked tokens whose slug starts with ``prefix`` (all if None).
 
     One socket per asset keeps each subscription's snapshot burst small enough that the
@@ -197,16 +203,25 @@ def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threadin
         payload = safe_json_loads(raw)
         if payload is None:
             return 0
-        sampler.apply(payload, time.time())
+        received = time.time()
+        sampler.apply(payload, received)
+        if on_trades is not None:
+            rows = parse_trade_prints(payload, received, sampler.meta_for)
+            if rows:
+                on_trades(rows)
         return 1
 
-    name = "polymarket_book" if prefix is None or prefix == "btc-" else f"polymarket_book_{prefix.rstrip('-')}"
+    name = "polymarket_book" if prefix is None else book_feed_name(prefix)
     return Feed(name, CLOB_MARKET_WS_URL, stop, on_open, on_message, heartbeat)
 
 
-def build_book_feeds(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event) -> list[Feed]:
-    assets = list(dict.fromkeys(a for a, _d in tracker.streams))
-    return [build_book_feed(sampler, tracker, stop, prefix=f"{a}-") for a in assets]
+def build_book_feeds(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event,
+                     on_trades: Optional[Callable[[list], None]] = None) -> list[Feed]:
+    """One socket per (asset, length) stream. One socket per asset (BTC 5m + 15m together)
+    was still dropped ~450 times a day with 1013 slow consumer (2026-10-16/17)."""
+    tags = {900: "15m", 300: "5m"}
+    return [build_book_feed(sampler, tracker, stop, prefix=f"{a}-updown-{tags[d]}-", on_trades=on_trades)
+            for a, d in tracker.streams]
 
 
 def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
@@ -257,8 +272,18 @@ def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, st
         bucketer.observe("coinbase_btcusd", price, received, source_ms)
         return 1
 
+    def binance_alt_message(raw) -> int:
+        parsed = parse_binance_combined_aggtrade(safe_json_loads(raw))
+        if parsed is None:
+            return 0
+        asset, price, trade_ms = parsed
+        bucketer.observe(f"binance_{asset}usdt", price, time.time(), trade_ms)
+        return 1
+
     return [
         Feed("chainlink_rtds", POLYMARKET_LIVE_WS_URL, stop, rtds_open, rtds_message, rtds_heartbeat),
+        # ETH/SOL/XRP exchange prices (lead Chainlink by ~2-3 s; 2026-10-17 diagnostics).
+        Feed("binance_alt", BINANCE_ALT_STREAM_URL, stop, lambda ws: None, binance_alt_message),
         *build_alt_chainlink_feeds(chainlink_bucketer, stop),
         Feed("binance", BINANCE_AGGTRADE_WS_URL, stop, lambda ws: None, binance_message),
         Feed("coinbase", COINBASE_WS_URL, stop, coinbase_open, coinbase_message),
@@ -306,7 +331,8 @@ def build_alt_chainlink_feeds(chainlink_bucketer: SecondBucketer, stop: threadin
 
 
 def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStore, started: float,
-                 book_store: Optional[HourlyParquetStore] = None) -> None:
+                 book_store: Optional[HourlyParquetStore] = None,
+                 trade_store: Optional[HourlyParquetStore] = None) -> None:
     now = time.time()
     status = {
         "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
@@ -317,6 +343,7 @@ def write_status(path: pathlib.Path, feeds: list[Feed], store: HourlyParquetStor
                   for f in feeds},
         "store": vars(store.stats),
         "book_store": vars(book_store.stats) if book_store is not None else None,
+        "trade_store": vars(trade_store.stats) if trade_store is not None else None,
         "disk_ok": store.disk_ok(),
     }
     try:
@@ -331,9 +358,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data-dir", default=str(REPO_ROOT / "data" / "price_sources_1s"))
     parser.add_argument("--book-dir", default=str(REPO_ROOT / "data" / "polymarket_book_1s"))
+    parser.add_argument("--trade-dir", default=str(REPO_ROOT / "data" / "polymarket_trades"))
     parser.add_argument("--retention-days", type=int, default=30)
     parser.add_argument("--min-free-disk-gb", type=float, default=10.0)
     parser.add_argument("--max-buffer-rows", type=int, default=60_000)
+    parser.add_argument("--book-max-buffer-rows", type=int, default=200_000)
+    parser.add_argument("--book-flush-sec", type=float, default=600.0,
+                        help="also write the current hour's books as a part file at this cadence")
     parser.add_argument("--duration-sec", type=float, default=0.0, help="stop after N seconds (0 = run forever)")
     args = parser.parse_args(argv)
 
@@ -341,10 +372,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                                min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.max_buffer_rows)
     bucketer = SecondBucketer(store.add)
     chainlink_bucketer = SecondBucketer(store.add, by_source_clock=True, grace_sec=5.0)
+    # 8 streams x current/next x Up/Down sample ~115k book rows per hour: the hourly
+    # 60k buffer dropped minutes 33-59 of every hour (2026-10-16/17), hence part files.
     book_store = HourlyParquetStore(args.book_dir, retention_days=args.retention_days,
-                                    min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.max_buffer_rows,
+                                    min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.book_max_buffer_rows,
+                                    partial_flush_sec=args.book_flush_sec,
                                     schema=book_schema(), count_key="outcome",
                                     sort_cols=("ts_sec", "market_slug", "outcome"))
+    trade_store = HourlyParquetStore(args.trade_dir, retention_days=args.retention_days,
+                                     min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.book_max_buffer_rows,
+                                     partial_flush_sec=args.book_flush_sec, schema=trade_schema(), count_key="outcome",
+                                     sort_cols=("trade_ms", "market_slug", "outcome"))
+
+    def on_trades(rows) -> None:
+        for row in rows:
+            trade_store.add(row)
+
     sampler = BookSampler()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -352,10 +395,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     store.enforce_retention()
     book_store.enforce_retention()
+    trade_store.enforce_retention()
     tracker = MarketTracker(sampler, stop)
     tracker.refresh()            # first subscription list before the book socket opens
     tracker.start()
-    feeds = build_feeds(bucketer, chainlink_bucketer, stop) + build_book_feeds(sampler, tracker, stop)
+    feeds = build_feeds(bucketer, chainlink_bucketer, stop) + build_book_feeds(sampler, tracker, stop, on_trades)
     for feed in feeds:
         feed.start()
     started = time.time()
@@ -363,19 +407,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     last_status = 0.0
     logger.info(f"price recorder started -> {args.data_dir}")
     try:
-        while not stop.wait(1.0):
+        last_target = 0
+        while True:
+            # Read books ~10 ms before each wall-clock second and stamp them with that second,
+            # so the row for second S is the state just before S (no post-decision updates).
+            # Exactly one sample per second: the next target is always after the last one.
+            target = max(int(time.time()) + 1, last_target + 1)
+            if stop.wait(max(0.0, target - BOOK_SAMPLE_LEAD_SEC - time.time())):
+                break
+            last_target = target
             now = time.time()
+            for row in sampler.sample(now, ts_sec=target):
+                book_store.add(row)
             bucketer.flush_older_than(now)
             chainlink_bucketer.flush_older_than(now)
-            for row in sampler.sample(now):
-                book_store.add(row)
-            for st in (store, book_store):
+            for st in (store, book_store, trade_store):
                 for path in st.flush():  # completed UTC hours only
                     logger.info(f"wrote {path}")
                     st.enforce_retention()
             if now - last_status >= 60.0:
                 last_status = now
-                write_status(status_path, feeds, store, started, book_store)
+                write_status(status_path, feeds, store, started, book_store, trade_store)
             if args.duration_sec and now - started >= args.duration_sec:
                 stop.set()
     finally:
@@ -384,10 +436,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             feed.join(timeout=10)
         bucketer.flush_older_than(time.time() + 2)
         chainlink_bucketer.flush_older_than(time.time() + 10)
-        for st in (store, book_store):
+        for st in (store, book_store, trade_store):
             for path in st.flush(include_current_hour=True):
                 logger.info(f"wrote {path}")
-        write_status(status_path, feeds, store, started, book_store)
+        write_status(status_path, feeds, store, started, book_store, trade_store)
         logger.info(f"price recorder stopped: {vars(store.stats)}")
     return 0
 

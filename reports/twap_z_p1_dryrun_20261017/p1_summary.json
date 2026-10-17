@@ -1,0 +1,35 @@
+{
+ "window_taipei": [
+  "2026-10-16 10:41:38",
+  "2026-10-17 10:57:13"
+ ],
+ "hours": 24.26,
+ "markets_full": 1544,
+ "markets_book_covered": 784,
+ "exec_triggers": 64,
+ "rule_match_fail_closed": 0,
+ "latency_ms": {
+  "p50": 6.78,
+  "p99": 18.2,
+  "max": 50.82
+ },
+ "agreement_covered": {
+  "neither": 751,
+  "same": 21,
+  "shadow_only": 5,
+  "same_side_diff_time": 5,
+  "executor_only": 2
+ },
+ "skip_reason_top": {
+  "BOOK_INVALID": 13989,
+  "Z_BELOW_THRESHOLD": 1494,
+  "MID_OUT_OF_RANGE": 1355,
+  "REQUIRED_AVG_UNAVAILABLE": 700,
+  "STRIKE_UNAVAILABLE": 220,
+  "SPOT_STALE": 126,
+  "TWAP_FEED_STALE": 72,
+  "SIGMA_UNAVAILABLE": 44,
+  "FEED_DOWN:polymarket_book_eth": 6,
+  "FEED_DOWN:polymarket_book_sol": 1
+ }
+}

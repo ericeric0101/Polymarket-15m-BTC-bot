@@ -20,6 +20,7 @@
   | #2 | `feat/multi-crypto-twap-z` → `main` | multi-crypto recording, TWAP-z executor |
   | #3 | `fix/binance-reference-basis` → `main` | Binance basis fix (LIVE line) |
   | #4 | `fix/late-window-latency` → `integration/entry-v3-forward-shadow` | late-window latency fixes |
+  | #7 | `fix/recorder-book-buffer` → `main` | recorder fixes, live TWAP-z executor, latency probe, MB1 (FAIL) |
 
 - **Retired branches:** `stable-live-2026-05-04`, `reference-post-eb5d32b` and
   `fix/shadow-fast-spot-provenance` are kept as `archive/*` tags.
@@ -1055,6 +1056,40 @@ For both plans, PnL stays hidden until the primary N is reached.
 - **Frequency:** BTC 15m alone gave about 3 rule matches per day in DEV. The 8
   streams are the frequency lever; thresholds are not loosened.
 
+**P2 micro-live (code ready 2026-10-17, `8f62716`; CK starts it in their own terminal).**
+
+Command:
+
+```
+TWAP_Z_LIVE_CONFIRM=REAL_MONEY .venv/bin/python scripts/twap_z_executor.py --mode live --confirm-live
+```
+
+Optional flags: `--streams btc-updown-5m,xrp-updown-5m`, `--shares 5.5`,
+`--max-daily-loss 15`, `--max-total-loss 50`.
+
+- **Same decision code as the dry-run, separate feeds and output:** output goes to
+  `data/twap_z_executor_live/` (decision rows, `orders_*.jsonl`,
+  `positions.jsonl`).
+- **Orders:** FAK limit BUY at the decision-time ask. There is no SELL and no
+  retry, and at most one order per market.
+- **Caps are conservative:** every unsettled position counts as a full loss of its
+  cost, and cost is reserved atomically before posting.
+- **Kill switch:** `touch data/twap_z_executor_live/STOP`.
+- **Startup:** live mode refuses to start without both confirmations, with
+  collateral below 3 × shares, or while a STOP file exists. It then signs one
+  warm-up order (never posted) to cache the order version, tick size and neg-risk.
+- **Redeem:** settled winners are redeemed with the existing
+  `scripts/check_positions_and_redeem.py --apply --slug updown`.
+- **Comparison:** `scripts/compare_twap_z_dry_live.py --fetch` compares the
+  dry-run and live runs market by market: who triggered, fill rate, fill price
+  minus decision ask, decision-to-post latency, and settled live PnL against the
+  dry-run's hypothetical PnL.
+- **Status:**
+  - DEV evidence shows no edge yet (amendment A1.3; mean net about 0 per share,
+    `reports/twap_z_dev_pnl_20261017/`).
+  - Micro-live is a measurement of real fills and slippage. Scaling still requires
+    a confirmatory PASS on data from T_U = 2026-10-17T03:30Z.
+
 **Next research (not started).** An "intraday leg" for 15m markets:
 - **Question:** at fixed checkpoints from T−600 to T−120 (all before T−65, so no
   overlap with TWAP-z), does model P minus ask predict EV over all recorded
@@ -1083,6 +1118,40 @@ verified `tar.zst` under `data/analysis_archives/` (see its README):
 - the POST-24H input snapshots went from 0.96 GB to 66 MB.
 The trade journal keeps using `scripts/journal_retention.py`, described in the
 section above.
+
+## Short-window crypto late-window strategies: conclusion (2026-10-17)
+
+**Status: both directions closed.** No MB2 and no further TWAP-z tuning. Any
+reopening needs a new pre-registration and its own worktree.
+
+- **TWAP-z (taker).** No edge.
+  - DEV mean net PnL is about 0 per share.
+  - The z model is overconfident: realised vol is 1.34× the model's.
+  - Binance and Coinbase lead Chainlink by about 2–3 s, but given the market mid
+    a lead model adds nothing (coef −0.16, t −0.4).
+  - Polymarket quotes follow Binance within about 1 s.
+  - Evidence: `reports/twap_z_dev_pnl_20261017/`.
+  - CK stopped micro-live on 2026-10-17.
+- **Speed path.** Infeasible from the home Mac.
+  - Order post and cancel take about 0.37 s each (p50), measured with
+    `scripts/clob_latency_probe.py`.
+  - A cloud-VM RTT check is pending: `reports/clob_cloud_latency_20261017/`.
+- **MB1 bid-only maker. FAIL.**
+  - Pre-registration: `reports/maker_bid_20261017/plan_mb1.md`.
+  - Result (201 positions): −0.056/share, one-sided 95% LB −0.077, −55.49 USDC.
+  - Picked-off fills are not the driver: −0.059 vs −0.054 per share.
+  - The cause is adverse selection on passive fills. Markets where both sides
+    filled paid 1.09 per pair, against a payout of 1.
+  - Details: `reports/maker_bid_20261017/result_mb1.md`.
+- **Reading.** In the last minutes of 5m/15m crypto markets the price already
+  carries the public information. What remains is a latency race this setup
+  cannot win.
+- **Research priority moves** to slower horizons:
+  - MD1, Deribit vs Polymarket daily, on branch
+    `research/deribit-vs-polymarket-daily`;
+  - S1, sports odds, on branch `research/sports-odds-scanner`.
+- **Recorder.** It keeps running until about 2026-10-22 for the 15m intraday-leg
+  question, then gets re-evaluated.
 
 ## BTC 1-second historical research data
 

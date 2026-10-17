@@ -73,3 +73,71 @@ def test_book_sampler_prefix_reset_keeps_other_sockets_books():
     assert s.tokens("eth-") == ["e"]
     s.reset("eth-")
     assert {r["token_id"] for r in s.sample(2.0)} == {"b"}
+
+
+def test_book_store_partial_flush_never_drops_a_busy_hour(tmp_path):
+    from bot.research.price_recorder import HourlyParquetStore, book_schema
+    clock = {"t": 1792119600.0}                      # 03:00:00Z
+    store = HourlyParquetStore(tmp_path, max_buffer_rows=1000, partial_flush_sec=600, schema=book_schema(),
+                               count_key="outcome", sort_cols=("ts_sec", "market_slug", "outcome"),
+                               free_disk_provider=lambda p: type("U", (), {"free": 1 << 50})(),
+                               clock=lambda: clock["t"])
+    for i in range(3600):                            # one row per second for a whole hour
+        clock["t"] = 1792119600.0 + i
+        store.add({"ts_sec": int(clock["t"]), "market_slug": "btc-updown-5m-1", "outcome": "Up",
+                   "token_id": "t", "best_bid": 0.4, "best_ask": 0.5, "bid_size": 1.0, "ask_size": 1.0,
+                   "n_updates": 1, "last_update_received_ms": 1, "last_event_ms": 1})
+        store.flush()
+    store.flush(include_current_hour=True)
+    assert store.stats.rows_dropped_buffer_full == 0
+    assert store.stats.rows_written == 3600 and store.stats.files_written >= 6
+
+
+def test_write_hour_file_never_overwrites_an_existing_part(tmp_path, monkeypatch):
+    import os
+    from bot.research import price_recorder as pr
+    rows = [{"source": "s", "ts_sec": 1, "close": 1.0, "high": 1.0, "low": 1.0, "n_updates": 1,
+             "last_source_ms": 1, "last_received_ms": 1}]
+    first = pr.write_hour_file(tmp_path, "2026-10-17", "03", rows)
+    real_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: False if self.name == "03.parquet" else real_exists(self))
+    second = pr.write_hour_file(tmp_path, "2026-10-17", "03", rows)   # simulates a racing second process
+    assert first.name == "03.parquet" and second.name == "03_2.parquet"
+    assert len(list((tmp_path / "2026-10-17").glob("*.parquet"))) == 2
+
+
+def test_book_stream_prefix_and_feed_names():
+    from bot.research.price_recorder import book_feed_name, book_stream_prefix
+    assert book_stream_prefix("btc-updown-5m-1792116000") == "btc-updown-5m-"
+    assert book_feed_name("btc-updown-15m-") == "polymarket_book"
+    assert book_feed_name("eth-updown-5m-") == "polymarket_book_eth_5m"
+
+
+def test_aligned_sample_is_stamped_with_the_next_second_and_records_sample_ms():
+    from bot.research.price_recorder import BookSampler
+    s = BookSampler()
+    s.set_tokens({"b": {"slug": "btc-updown-5m-1", "outcome": "Up", "end_ts": 9e9}})
+    s.apply({"event_type": "book", "asset_id": "b", "bids": [{"price": "0.4", "size": "1"}],
+             "asks": [{"price": "0.5", "size": "1"}]}, 99.0)
+    (row,) = s.sample(99.990, ts_sec=100)
+    assert row["ts_sec"] == 100 and row["sample_ms"] == 99990 and row["sample_ms"] <= row["ts_sec"] * 1000
+
+
+def test_parse_binance_combined_aggtrade():
+    from bot.research.price_recorder import BINANCE_ALT_STREAM_URL, parse_binance_combined_aggtrade
+    assert "ethusdt@aggTrade" in BINANCE_ALT_STREAM_URL and "xrpusdt@aggTrade" in BINANCE_ALT_STREAM_URL
+    msg = {"stream": "solusdt@aggTrade", "data": {"e": "aggTrade", "s": "SOLUSDT", "p": "104.85", "T": 1792210000123}}
+    assert parse_binance_combined_aggtrade(msg) == ("sol", 104.85, 1792210000123)
+    assert parse_binance_combined_aggtrade({"data": {"e": "trade"}}) is None
+
+
+def test_parse_trade_prints_keeps_tracked_tokens_only():
+    from bot.research.price_recorder import parse_trade_prints
+    meta = {"tok": {"slug": "btc-updown-5m-1792213200", "outcome": "Up", "end_ts": 1}}
+    msg = [{"event_type": "last_trade_price", "asset_id": "tok", "price": "0.51", "size": "1.960785",
+            "side": "BUY", "timestamp": "1792213394549", "fee_rate_bps": "0", "transaction_hash": "0xab"},
+           {"event_type": "last_trade_price", "asset_id": "other", "price": "0.5", "size": "1", "timestamp": "1"},
+           {"event_type": "price_change"}]
+    (row,) = parse_trade_prints(msg, 1792213394.7, meta.get)
+    assert row["ts_sec"] == 1792213394 and row["trade_ms"] == 1792213394549 and row["received_ms"] == 1792213394700
+    assert row["market_slug"] == "btc-updown-5m-1792213200" and row["price"] == 0.51 and row["side"] == "BUY"

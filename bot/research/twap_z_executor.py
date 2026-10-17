@@ -145,6 +145,22 @@ class LiveBookSampler(BookSampler):
                     "ask_size": asks.get(ba) if ba is not None else None,
                     "last_update_received_ms": book.get("last_ms")}
 
+    def level_size(self, token: str, price: float, side: str = "bids") -> Optional[float]:
+        """Size resting at exactly `price` on one side of a token's book (0.0 if none)."""
+        with self._lock:
+            book = self._books.get(token)
+            if book is None:
+                return None
+            levels = book[side]
+            for px, sz in levels.items():
+                if abs(px - price) < 1e-9:
+                    return float(sz)
+            return 0.0
+
+    def market_meta(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return {t: dict(m) for t, m in self._meta.items()}
+
     def market_tokens(self, slug: str) -> dict[str, str]:
         with self._lock:
             return {m["outcome"]: t for t, m in self._meta.items() if m["slug"] == slug}

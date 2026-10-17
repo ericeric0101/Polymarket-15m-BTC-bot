@@ -144,7 +144,15 @@ def write_hour_file(root: Path, day: str, hour: str, rows: list[dict[str, Any]],
     try:
         pq.write_table(pa.Table.from_pylist(rows, schema=schema if schema is not None else _schema()),
                        temp, compression="zstd")
-        os.replace(temp, final)
+        # No-clobber publish: link() fails if the name exists, so two recorder
+        # processes overlapping during a restart can never overwrite each other.
+        while True:
+            try:
+                os.link(temp, final)
+                break
+            except FileExistsError:
+                n += 1
+                final = directory / f"{hour}_{n}.parquet"
     finally:
         temp.unlink(missing_ok=True)
     return final
@@ -178,6 +186,7 @@ class HourlyParquetStore:
         schema=None,
         count_key: str = "source",
         sort_cols: tuple[str, ...] = ("ts_sec", "source"),
+        partial_flush_sec: float = 0.0,
     ) -> None:
         self.root = Path(root)
         self.schema, self.count_key, self.sort_cols = schema, count_key, sort_cols
@@ -189,6 +198,10 @@ class HourlyParquetStore:
         self._lock = threading.Lock()
         self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._buffered = 0
+        # >0: also write the current hour as a part file (HH_n.parquet) at this
+        # cadence, or when the buffer is 80% full, so a busy store never drops rows.
+        self.partial_flush_sec = float(partial_flush_sec)
+        self._last_partial_flush = self._clock()
         self.stats = RecorderStats()
 
     def add(self, row: dict[str, Any]) -> None:
@@ -213,8 +226,13 @@ class HourlyParquetStore:
 
     def flush(self, *, include_current_hour: bool = False) -> list[Path]:
         """Write completed hours (and the current one on shutdown)."""
-        current = _hour_key(int(self._clock()))
+        now = self._clock()
+        current = _hour_key(int(now))
         with self._lock:
+            if self.partial_flush_sec > 0 and (now - self._last_partial_flush >= self.partial_flush_sec
+                                               or self._buffered >= 0.8 * self.max_buffer_rows):
+                include_current_hour = True
+                self._last_partial_flush = now
             keys = [k for k in self._rows if include_current_hour or k < current]
             batches = {k: self._rows.pop(k) for k in keys}
             self._buffered -= sum(len(v) for v in batches.values())
@@ -297,6 +315,9 @@ def book_schema():
             ("n_updates", pa.int32()),                 # book messages applied during this second
             ("last_update_received_ms", pa.int64()),   # local receipt of the last change to this book
             ("last_event_ms", pa.int64()),             # venue timestamp of that change, if given
+            # Since 2026-10-17: local time the state was read. Sampling is aligned to ~10 ms
+            # BEFORE second ts_sec, so a row's state never post-dates ts_sec (causal as-of).
+            ("sample_ms", pa.int64()),
         ])
     return _BOOK_SCHEMA
 
@@ -338,6 +359,11 @@ class BookSampler:
                 if token not in self._meta:
                     del self._books[token]
             return new
+
+    def meta_for(self, token: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            m = self._meta.get(str(token))
+            return dict(m) if m else None
 
     def tokens(self, prefix: Optional[str] = None) -> list[str]:
         """Tracked tokens, optionally only those whose market slug starts with ``prefix``."""
@@ -396,8 +422,10 @@ class BookSampler:
                         applied += 1
         return applied
 
-    def sample(self, now_ts: float) -> list[dict[str, Any]]:
-        sec = int(now_ts)
+    def sample(self, now_ts: float, ts_sec: Optional[int] = None) -> list[dict[str, Any]]:
+        """Rows stamped ``ts_sec`` (default: floor of now) holding the book state read at ``now_ts``."""
+        sec = int(now_ts) if ts_sec is None else int(ts_sec)
+        sample_ms = int(now_ts * 1000)
         rows = []
         with self._lock:
             for token, book in self._books.items():
@@ -412,7 +440,7 @@ class BookSampler:
                              "bid_size": bids.get(bb) if bb is not None else None,
                              "ask_size": asks.get(ba) if ba is not None else None,
                              "n_updates": book["n"], "last_update_received_ms": book["last_ms"],
-                             "last_event_ms": book["event_ms"]})
+                             "last_event_ms": book["event_ms"], "sample_ms": sample_ms})
                 book["n"] = 0
         return rows
 
@@ -505,3 +533,78 @@ def parse_rtds_chainlink(payload: Any) -> list[tuple[str, str, float, int]]:
         if price is not None and price > 0 and ms:
             out.append((kind, asset, float(price), int(ms)))
     return out
+
+
+def book_stream_prefix(slug_or_stream: str) -> str:
+    """'eth-updown-5m-1792...' (or 'eth-updown-5m') -> 'eth-updown-5m-' : one CLOB socket per stream."""
+    parts = str(slug_or_stream).split("-")
+    return "-".join(parts[:3]) + "-"
+
+
+def book_feed_name(prefix: str) -> str:
+    """Status/feed name of a stream's book socket; BTC 15m keeps the original v2 name."""
+    stream = prefix.rstrip("-")
+    return "polymarket_book" if stream == "btc-updown-15m" else f"polymarket_book_{stream.replace('-updown-', '_')}"
+
+
+BINANCE_ALT_STREAM_URL = ("wss://stream.binance.com:9443/stream?streams="
+                          + "/".join(f"{a}usdt@aggTrade" for a in ALT_ASSETS))
+
+
+def parse_binance_combined_aggtrade(payload: Any) -> Optional[tuple[str, float, Optional[int]]]:
+    """(asset, price, trade_ms) from a Binance combined-stream aggTrade frame, else None."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return None
+    d = payload["data"]
+    if d.get("e") != "aggTrade":
+        return None
+    sym = str(d.get("s") or "").lower()
+    if not sym.endswith("usdt"):
+        return None
+    price = _num(d.get("p"))
+    if price is None or price <= 0:
+        return None
+    return sym[:-4], float(price), _event_ms(d.get("T") or d.get("E"))
+
+
+_TRADE_SCHEMA = None
+
+
+def trade_schema():
+    """One row per Polymarket trade print (market channel `last_trade_price`)."""
+    global _TRADE_SCHEMA
+    if _TRADE_SCHEMA is None:
+        import pyarrow as pa
+        _TRADE_SCHEMA = pa.schema([
+            ("ts_sec", pa.int64()),                 # venue second of the trade (file partitioning)
+            ("trade_ms", pa.int64()),               # venue timestamp
+            ("received_ms", pa.int64()),            # local receipt
+            ("market_slug", pa.string()),
+            ("outcome", pa.string()),
+            ("token_id", pa.string()),
+            ("price", pa.float64()),
+            ("size", pa.float64()),
+            ("side", pa.string()),                  # aggressor side as reported (BUY / SELL)
+            ("fee_rate_bps", pa.float64()),
+            ("tx_hash", pa.string()),
+        ])
+    return _TRADE_SCHEMA
+
+
+def parse_trade_prints(payload: Any, received_ts: float, meta_for: Callable[[str], Optional[dict]]) -> list[dict[str, Any]]:
+    """`last_trade_price` events of tracked tokens -> trade rows (others ignored)."""
+    items = payload if isinstance(payload, list) else [payload]
+    rows = []
+    for it in items:
+        if not isinstance(it, dict) or str(it.get("event_type") or "") != "last_trade_price":
+            continue
+        token = str(it.get("asset_id") or "")
+        meta = meta_for(token)
+        price, size, ms = _num(it.get("price")), _num(it.get("size")), _event_ms(it.get("timestamp"))
+        if meta is None or price is None or size is None or not ms:
+            continue
+        rows.append({"ts_sec": int(ms // 1000), "trade_ms": int(ms), "received_ms": int(received_ts * 1000),
+                     "market_slug": meta["slug"], "outcome": meta["outcome"], "token_id": token,
+                     "price": float(price), "size": float(size), "side": str(it.get("side") or ""),
+                     "fee_rate_bps": _num(it.get("fee_rate_bps")), "tx_hash": str(it.get("transaction_hash") or "")})
+    return rows
