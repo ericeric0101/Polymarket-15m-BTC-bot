@@ -23,7 +23,8 @@ sys.path.insert(0, str(O))
 import evaluate as v1  # noqa: E402  (shared rule, settlement, verdict, labels)
 from recorder_mechanics import ChainlinkSeries, load_parquet_dir  # noqa: E402
 
-POPULATION_START = datetime(2026, 10, 15, 1, 0, tzinfo=timezone.utc).timestamp()
+# Amendment A1.3: data before T_U was unblinded (DEV); the confirmatory population starts at T_U.
+POPULATION_START = datetime(2026, 10, 17, 3, 30, tzinfo=timezone.utc).timestamp()
 # TWAP stamped at second S = mean of Chainlink spot seconds [S-62, S-3] (plan_v2.md section 1.2).
 WINDOW_OFFSET = -62
 LOCK_SECONDS = range(10, 0, -1)       # T-10 ... T-1, 1 s steps (descriptive "determined" policy)
@@ -49,7 +50,16 @@ class BookIndex:
         ts, rows = hit
         i = int(np.searchsorted(ts, t, side="right")) - 1
         lo = not_before if not_before is not None else t - ASOF_SEC
-        return rows.iloc[i] if i >= 0 and ts[i] >= lo else None
+        # Amendment A1.1: only a row whose state provably existed at t (read at or before t,
+        # or last changed at or before t); otherwise fall back to an earlier second.
+        while i >= 0 and ts[i] >= lo:
+            r = rows.iloc[i]
+            sample_ms = r.get("sample_ms") if hasattr(r, "get") else None
+            if (pd.notna(sample_ms) and sample_ms <= t * 1000) or (
+                    pd.notna(r.last_update_received_ms) and r.last_update_received_ms <= t * 1000):
+                return r
+            i -= 1
+        return None
 
 
 def _valid(row) -> bool:

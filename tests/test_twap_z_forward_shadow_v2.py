@@ -68,11 +68,16 @@ def test_sigma_annualises_one_second_log_returns():
     assert ChainlinkSeries(_prices(dict(list(spot.items())[:100]), {}), window_offset=-59).sigma(START) is None
 
 
-def _books(rows):
-    return pd.DataFrame(rows, columns=["ts_sec", "market_slug", "outcome", "best_bid", "best_ask"])
+def _books(rows, lead_ms=10):
+    """Aligned-recorder rows: each row is read `lead_ms` before its second (amendment A1.1)."""
+    b = pd.DataFrame(rows, columns=["ts_sec", "market_slug", "outcome", "best_bid", "best_ask"])
+    b["sample_ms"] = b.ts_sec * 1000 - lead_ms
+    b["last_update_received_ms"] = b.ts_sec * 1000 - 500
+    return b
 
 
 def test_v2_grid_builds_eligible_rows_and_selects_by_chainlink_z(monkeypatch):
+    monkeypatch.setattr(ev2, "POPULATION_START", START)
     rng = np.random.default_rng(3)
     secs = range(START - 400, END + 1)
     spot = dict(zip(secs, 100 + np.cumsum(rng.normal(0, .002, len(secs)))))
@@ -117,3 +122,15 @@ def test_lock_policy_finds_first_fully_observed_second():
     assert row["seconds_before_end"] == 2 and row["side"] == "Up"
     assert row["margin_bps"] == pytest.approx(20.0) and row["eligible"] and row["win"] == 1
     assert row["net"] == pytest.approx(1 - .98 - .07 * .98 * .02)
+
+
+def test_book_index_is_causal_amendment_a1():
+    slug = f"btc-updown-15m-{START}"
+    t = END - 30
+    legacy = pd.DataFrame([(t - 1, slug, "Up", .40, .41, None, (t - 1) * 1000 - 200),
+                           (t, slug, "Up", .50, .51, None, t * 1000 + 400)],   # changed 0.4 s AFTER t
+                          columns=["ts_sec", "market_slug", "outcome", "best_bid", "best_ask",
+                                   "sample_ms", "last_update_received_ms"])
+    assert ev2.BookIndex(legacy).asof(slug, "Up", t).best_ask == .41      # falls back to the causal row
+    aligned = legacy.assign(sample_ms=[(t - 1) * 1000 - 10, t * 1000 - 10])
+    assert ev2.BookIndex(aligned).asof(slug, "Up", t).best_ask == .51     # read 10 ms before t: usable
