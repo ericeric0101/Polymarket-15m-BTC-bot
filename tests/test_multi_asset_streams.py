@@ -129,3 +129,15 @@ def test_parse_binance_combined_aggtrade():
     msg = {"stream": "solusdt@aggTrade", "data": {"e": "aggTrade", "s": "SOLUSDT", "p": "104.85", "T": 1792210000123}}
     assert parse_binance_combined_aggtrade(msg) == ("sol", 104.85, 1792210000123)
     assert parse_binance_combined_aggtrade({"data": {"e": "trade"}}) is None
+
+
+def test_parse_trade_prints_keeps_tracked_tokens_only():
+    from bot.research.price_recorder import parse_trade_prints
+    meta = {"tok": {"slug": "btc-updown-5m-1792213200", "outcome": "Up", "end_ts": 1}}
+    msg = [{"event_type": "last_trade_price", "asset_id": "tok", "price": "0.51", "size": "1.960785",
+            "side": "BUY", "timestamp": "1792213394549", "fee_rate_bps": "0", "transaction_hash": "0xab"},
+           {"event_type": "last_trade_price", "asset_id": "other", "price": "0.5", "size": "1", "timestamp": "1"},
+           {"event_type": "price_change"}]
+    (row,) = parse_trade_prints(msg, 1792213394.7, meta.get)
+    assert row["ts_sec"] == 1792213394 and row["trade_ms"] == 1792213394549 and row["received_ms"] == 1792213394700
+    assert row["market_slug"] == "btc-updown-5m-1792213200" and row["price"] == 0.51 and row["side"] == "BUY"

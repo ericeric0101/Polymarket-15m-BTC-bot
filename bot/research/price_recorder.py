@@ -360,6 +360,11 @@ class BookSampler:
                     del self._books[token]
             return new
 
+    def meta_for(self, token: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            m = self._meta.get(str(token))
+            return dict(m) if m else None
+
     def tokens(self, prefix: Optional[str] = None) -> list[str]:
         """Tracked tokens, optionally only those whose market slug starts with ``prefix``."""
         with self._lock:
@@ -560,3 +565,46 @@ def parse_binance_combined_aggtrade(payload: Any) -> Optional[tuple[str, float, 
     if price is None or price <= 0:
         return None
     return sym[:-4], float(price), _event_ms(d.get("T") or d.get("E"))
+
+
+_TRADE_SCHEMA = None
+
+
+def trade_schema():
+    """One row per Polymarket trade print (market channel `last_trade_price`)."""
+    global _TRADE_SCHEMA
+    if _TRADE_SCHEMA is None:
+        import pyarrow as pa
+        _TRADE_SCHEMA = pa.schema([
+            ("ts_sec", pa.int64()),                 # venue second of the trade (file partitioning)
+            ("trade_ms", pa.int64()),               # venue timestamp
+            ("received_ms", pa.int64()),            # local receipt
+            ("market_slug", pa.string()),
+            ("outcome", pa.string()),
+            ("token_id", pa.string()),
+            ("price", pa.float64()),
+            ("size", pa.float64()),
+            ("side", pa.string()),                  # aggressor side as reported (BUY / SELL)
+            ("fee_rate_bps", pa.float64()),
+            ("tx_hash", pa.string()),
+        ])
+    return _TRADE_SCHEMA
+
+
+def parse_trade_prints(payload: Any, received_ts: float, meta_for: Callable[[str], Optional[dict]]) -> list[dict[str, Any]]:
+    """`last_trade_price` events of tracked tokens -> trade rows (others ignored)."""
+    items = payload if isinstance(payload, list) else [payload]
+    rows = []
+    for it in items:
+        if not isinstance(it, dict) or str(it.get("event_type") or "") != "last_trade_price":
+            continue
+        token = str(it.get("asset_id") or "")
+        meta = meta_for(token)
+        price, size, ms = _num(it.get("price")), _num(it.get("size")), _event_ms(it.get("timestamp"))
+        if meta is None or price is None or size is None or not ms:
+            continue
+        rows.append({"ts_sec": int(ms // 1000), "trade_ms": int(ms), "received_ms": int(received_ts * 1000),
+                     "market_slug": meta["slug"], "outcome": meta["outcome"], "token_id": token,
+                     "price": float(price), "size": float(size), "side": str(it.get("side") or ""),
+                     "fee_rate_bps": _num(it.get("fee_rate_bps")), "tx_hash": str(it.get("transaction_hash") or "")})
+    return rows
