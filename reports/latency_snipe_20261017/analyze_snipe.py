@@ -42,6 +42,7 @@ W_MS = 1000
 REFRACTORY_MS = 3000
 L_GRID_MS = (0, 5, 10, 25, 50, 100, 200, 370)
 MARKOUT_MS = (5000, 60000)
+SERVER_D_GRID_MS = (0, 50, 100, 150, 200, 300, 500)
 
 
 def read_lines(d: Path):
@@ -139,8 +140,11 @@ def load_markets(tape: Path) -> dict:
     return meta
 
 
-def replay_pm(tape: Path, meta: dict):
-    """Best-quote changes per token, trades, and one-way samples (recv - server timestamp)."""
+def replay_pm(tape: Path, meta: dict, clock: str = "recv"):
+    """Best-quote changes per token, trades, and one-way samples (recv - server timestamp).
+
+    clock="server" stamps every book change and trade with the Polymarket server timestamp instead of the
+    VM receive time (messages without one are applied but not re-stamped), for location-free simulation."""
     books: dict = {}
     best_rows, trades, lat = [], [], []
     last_best: dict = {}
@@ -159,13 +163,16 @@ def replay_pm(tape: Path, meta: dict):
     for d in sorted(p for p in tape.glob("pm_*") if p.is_dir()):
         for t, msg in read_lines(d):
             items = msg if isinstance(msg, list) else [msg]
+            t_recv = t
             for it in items:
                 if not isinstance(it, dict):
                     continue
                 kind = it.get("event_type")
                 if it.get("timestamp"):
                     try:
-                        lat.append(t - float(it["timestamp"]))
+                        lat.append(t_recv - float(it["timestamp"]))
+                        if clock == "server":
+                            t = float(it["timestamp"])
                     except (TypeError, ValueError):
                         pass
                 if kind == "book":
@@ -400,6 +407,24 @@ def main() -> None:
             "pm_trades": len(trades), "pm_fee_rate_bps_seen": trades.fee_rate_bps.value_counts().head(5).to_dict()}
     bn_tr = load_binance_trades(tape)
     info["server_time_reaction"] = {f"J={j:g}bps": server_reaction(bn_tr, trades, meta, j) for j in (PRIMARY_J_BPS, 5.0)}
+    # Location-free capture: book on PM server clock, jumps on Binance exchange clock, our order reaches the
+    # engine D ms after the Binance print (D = Binance->us + us->engine; >= ~100 ms between Tokyo and Europe).
+    best_s, trades_s, _ = replay_pm(tape, meta, clock="server")
+    sv = []
+    for j in J_GRID_BPS:
+        e = evaluate({asset: find_jumps(df, j) for asset, df in bn_tr.items()}, best_s, trades_s, meta, 0.0,
+                     l_grid=SERVER_D_GRID_MS)
+        if len(e):
+            sv.append(e.assign(j_bps=j))
+    sev = pd.concat(sv, ignore_index=True) if sv else pd.DataFrame()
+    info["server_clock_capture"] = {
+        f"J={j:g}bps": {"events": int((sev.j_bps == j).sum()), "pm_led_pct": round(100 * sev[sev.j_bps == j].pm_led.mean(), 1),
+                        "stale_ms_p50": round(sev[sev.j_bps == j].stale_ms.median()),
+                        "by_D_ms": {D: {"captured": int(sev[(sev.j_bps == j) & sev[f"cap_{D}"]].shape[0]),
+                                        "net_5s": round(sev[(sev.j_bps == j) & sev[f"cap_{D}"]].net_5s.mean(), 4),
+                                        "net_60s": round(sev[(sev.j_bps == j) & sev[f"cap_{D}"]].net_60s.mean(), 4)}
+                                    for D in SERVER_D_GRID_MS}}
+        for j in sorted(sev.j_bps.unique())} if len(sev) else {}
     res = {"info": info, "summary": summarize(ev, hours, our_l)}
     print(json.dumps(res, indent=1, default=str))
     if a.out:
