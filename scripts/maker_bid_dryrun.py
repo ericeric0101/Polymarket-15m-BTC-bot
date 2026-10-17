@@ -67,9 +67,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         counts[row["event"]] = counts.get(row["event"], 0) + 1
         with log_lock, open(out / f"events_{time.strftime('%Y-%m-%d', time.gmtime(row['t']))}.jsonl", "a") as fh:
             fh.write(json.dumps(row, default=str) + "\n")
-        if row["event"] in ("FILL", "SETTLED"):
-            logger.info(f"{row['event']} {row.get('market_slug')} {row.get('outcome')} @{row.get('price')} "
-                        f"{row.get('fill_shares', row.get('shares'))} sh picked_off={row.get('picked_off')} pnl={row.get('pnl')}")
+        # PnL is written to the event file only, never to the console (blind until the confirmatory read).
+        if row["event"] == "FILL":
+            logger.info(f"FILL {row.get('market_slug')} {row.get('outcome')} @{row.get('price')} "
+                        f"{row.get('fill_shares')} sh picked_off={row.get('picked_off')}")
+        elif row["event"] == "SETTLED":
+            logger.info(f"SETTLED {row.get('market_slug')} {row.get('outcome')} (result hidden)")
 
     sim = MakerBidSim(log)
     prices = PriceHistory()
