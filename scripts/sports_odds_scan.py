@@ -5,6 +5,7 @@ Never places orders. One run = one snapshot:
     .venv/bin/python scripts/sports_odds_scan.py                  # default leagues
     .venv/bin/python scripts/sports_odds_scan.py --leagues epl,nhl
     .venv/bin/python scripts/sports_odds_scan.py --dry-credits    # show cost, call nothing paid
+    .venv/bin/python scripts/sports_odds_scan.py --closing        # only leagues with a kickoff in 1-16 min
     .venv/bin/python scripts/sports_odds_scan.py --replay data/sports_odds/raw/2026-10-17/102317Z
 
 Cost: 1 The Odds API credit per league (h2h, <=10 bookmakers). Polymarket calls are free.
@@ -12,7 +13,7 @@ The scan refuses to spend below --credit-reserve remaining credits (fail-closed)
 
 Output (data/ is gitignored), all under data/sports_odds/:
     raw/YYYY-MM-DD/<HHMMSS>Z/  odds_<league>.json.gz, pm_<league>.json.gz, books.json.gz
-    scans/YYYY-MM-DD/<HHMMSS>Z_tokens.csv   one row per matched Polymarket token
+    scans/YYYY-MM-DD/<HHMMSS>Z[_closing]_tokens.csv   one row per matched Polymarket token
     scans/YYYY-MM-DD/<HHMMSS>Z_report.md    ranking + match stats + unmatched list
     scan_log.jsonl                          one line per run (credits, counts)
 
@@ -56,7 +57,8 @@ GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 CLOB_BOOKS_URL = "https://clob.polymarket.com/books"
 OUT_ROOT = REPO_ROOT / "data" / "sports_odds"
 TIMEOUT = 20
-PREGAME_MIN = 5            # ignore games starting within this many minutes
+PREGAME_MIN = 1            # ignore games starting within this many minutes (closing needs 1-30)
+CLOSING_WINDOW_MIN = (1, 16)   # --closing: leagues with a PM kickoff this many minutes ahead
 HORIZON_DAYS = 7           # ignore games further out than this
 ODDS_STALE_MIN = 30        # flag Pinnacle prices older than this at scan time
 
@@ -156,14 +158,39 @@ def load_replay(raw_dir: pathlib.Path) -> tuple[datetime, dict, dict, dict]:
     pm = {f.name[3:-8]: _load_gz(f) for f in sorted(raw_dir.glob("pm_*.json.gz"))}
     odds = {f.name[5:-8]: _load_gz(f) for f in sorted(raw_dir.glob("odds_*.json.gz"))}
     books = _load_gz(raw_dir / "books.json.gz") if (raw_dir / "books.json.gz").exists() else {}
+    dropped = sorted(set(odds) - set(LEAGUES))
+    if dropped:
+        print(f"  replay: leagues no longer configured, skipped: {dropped}")
+    odds = {k: v for k, v in odds.items() if k in LEAGUES}
     return now, {k: v for k, v in pm.items() if k in odds}, odds, books
+
+
+def _session() -> requests.Session:
+    session = requests.Session()
+    session.headers["User-Agent"] = "s1-sports-odds-research/0.1"
+    return session
+
+
+def closing_leagues(leagues: list[str], now: datetime) -> list[str]:
+    """Leagues with a pre-game Polymarket moneyline kickoff in CLOSING_WINDOW_MIN (free calls)."""
+    session = _session()
+    series = fetch_series_ids(session)
+    lo, hi = (now + timedelta(minutes=m) for m in CLOSING_WINDOW_MIN)
+    due = []
+    for lg in leagues:
+        if lg not in series:
+            continue
+        pm_raw = fetch_pm_events(session, series[lg])
+        if any((ev := parse_pm_event(raw, lg)) is not None and ev.start is not None and lo <= ev.start <= hi
+               for raw in pm_raw):
+            due.append(lg)
+    return due
 
 
 def acquire(leagues: list[str], credit_reserve: int, raw_dir: pathlib.Path) -> tuple[dict, dict, dict]:
     """Fetch Polymarket events and book odds per league; stores raw responses."""
     key = _load_key()
-    session = requests.Session()
-    session.headers["User-Agent"] = "s1-sports-odds-research/0.1"
+    session = _session()
     series = fetch_series_ids(session)
     usage = fetch_credit_usage(session, key)
     pm_by_league: dict[str, list] = {}
@@ -176,8 +203,9 @@ def acquire(leagues: list[str], credit_reserve: int, raw_dir: pathlib.Path) -> t
         if remaining is not None and int(float(remaining)) <= credit_reserve:
             print(f"  STOP: {remaining} credits left <= reserve {credit_reserve}")
             break
-        pm_raw = fetch_pm_events(session, series[lg])
         odds_raw, usage = fetch_odds(session, lg, key)
+        # PM fetched right after the book so the pair is as close in time as possible.
+        pm_raw = fetch_pm_events(session, series[lg])
         _dump_gz(raw_dir / f"pm_{lg}.json.gz", pm_raw)
         _dump_gz(raw_dir / f"odds_{lg}.json.gz", odds_raw)
         pm_by_league[lg], odds_by_league[lg] = pm_raw, odds_raw
@@ -218,7 +246,7 @@ def analyse(now: datetime, pm_by_league: dict, odds_by_league: dict,
     return pending
 
 
-def build_rows(now: datetime, pending: list[tuple], books: dict) -> list[dict]:
+def build_rows(now: datetime, pending: list[tuple], books: dict, kind: str = "baseline") -> list[dict]:
     rows: list[dict] = []
     for ev, m, fair, tfs in pending:
         age = (now - fair.last_update).total_seconds() / 60 if fair.last_update else None
@@ -227,12 +255,14 @@ def build_rows(now: datetime, pending: list[tuple], books: dict) -> list[dict]:
             e = token_edge(tf, book)
             gap = None if e.mid is None else tf.fair - e.mid
             rows.append({
-                "scan_utc": now.isoformat(timespec="seconds"), "league": ev.league,
-                "event": ev.title, "slug": ev.slug, "start_utc": ev.start.isoformat(),
+                "scan_utc": now.isoformat(timespec="seconds"), "kind": kind, "league": ev.league,
+                "event_id": ev.event_id, "event": ev.title, "slug": ev.slug, "start_utc": ev.start.isoformat(),
                 "hours_to_start": round((ev.start - now).total_seconds() / 3600, 2),
                 "token": tf.label, "token_id": tf.token_id, "market_id": tf.market_id,
+                "book_outcome": tf.book_outcome, "side": tf.side,
                 "fair": round(tf.fair, 4), "bid": e.best_bid, "ask": e.best_ask, "mid": e.mid,
-                "ask_size": e.ask_size, "fee_rate": tf.fee_rate, "has_book": book is not None,
+                "ask_size": e.ask_size, "fee_rate": tf.fee_rate, "fee_exponent": tf.fee_exponent,
+                "accepting_orders": tf.accepting_orders, "has_book": book is not None,
                 "taker_edge": None if e.taker_edge is None else round(e.taker_edge, 4),
                 "maker_edge": None if e.maker_edge is None else round(e.maker_edge, 4),
                 "plus_ev_shares": round(e.plus_ev_shares, 2), "plus_ev_usdc": round(e.plus_ev_usdc, 2),
@@ -250,7 +280,8 @@ def build_rows(now: datetime, pending: list[tuple], books: dict) -> list[dict]:
 
 
 def run(leagues: list[str], credit_reserve: int, dry_credits: bool,
-        replay_dir: Optional[pathlib.Path] = None) -> int:
+        replay_dir: Optional[pathlib.Path] = None, closing: bool = False) -> int:
+    kind = "closing" if closing else "baseline"
     if replay_dir is not None:
         now, pm_by_league, odds_by_league, books = load_replay(replay_dir)
         usage: dict = {}
@@ -258,13 +289,18 @@ def run(leagues: list[str], credit_reserve: int, dry_credits: bool,
         print(f"replay {replay_dir}: leagues={','.join(odds_by_league)} (0 credits)")
     else:
         now = datetime.now(timezone.utc)
-        suffix = ""
+        suffix = "_closing" if closing else ""
     stamp = now.strftime("%H%M%SZ")
     day = now.strftime("%Y-%m-%d")
     raw_dir = OUT_ROOT / "raw" / day / stamp
     scan_dir = OUT_ROOT / "scans" / day
     if replay_dir is None:
-        print(f"scan {day} {stamp}: leagues={','.join(leagues)} cost={len(leagues)} credits")
+        if closing:
+            leagues = closing_leagues(leagues, now)
+            if not leagues:
+                print(f"closing {day} {stamp}: no kickoff in {CLOSING_WINDOW_MIN} min, 0 credits")
+                return 0
+        print(f"{kind} {day} {stamp}: leagues={','.join(leagues)} cost={len(leagues)} credits")
         if dry_credits:
             return 0
         pm_by_league, odds_by_league, usage = acquire(leagues, credit_reserve, raw_dir)
@@ -273,10 +309,10 @@ def run(leagues: list[str], credit_reserve: int, dry_credits: bool,
     unmatched: list[dict] = []
     pending = analyse(now, pm_by_league, odds_by_league, stats, unmatched)
     if replay_dir is None:
-        books = fetch_books(requests.Session(), [tf.token_id for *_, tfs in pending for tf in tfs])
+        books = fetch_books(_session(), [tf.token_id for *_, tfs in pending for tf in tfs])
         _dump_gz(raw_dir / "books.json.gz", books)
     # On replay, tokens matched only by newer rules have no stored book (has_book=False).
-    rows = build_rows(now, pending, books)
+    rows = build_rows(now, pending, books, kind)
 
     scan_dir.mkdir(parents=True, exist_ok=True)
     csv_path = scan_dir / f"{stamp}{suffix}_tokens.csv"
@@ -289,7 +325,7 @@ def run(leagues: list[str], credit_reserve: int, dry_credits: bool,
     report_path.write_text(render_report(now, rows, stats, unmatched, usage))
 
     if replay_dir is None:
-        log = {"scan_utc": now.isoformat(timespec="seconds"), "leagues": leagues, "stats": stats,
+        log = {"scan_utc": now.isoformat(timespec="seconds"), "kind": kind, "leagues": leagues, "stats": stats,
                "tokens": len(rows), "credits": usage, "csv": str(csv_path.relative_to(REPO_ROOT)),
                "report": str(report_path.relative_to(REPO_ROOT))}
         with open(OUT_ROOT / "scan_log.jsonl", "a") as fh:
@@ -357,6 +393,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--credit-reserve", type=int, default=50,
                     help="stop before spending when remaining credits <= this")
     ap.add_argument("--dry-credits", action="store_true", help="print the cost and exit")
+    ap.add_argument("--closing", action="store_true",
+                    help=f"only leagues with a Polymarket kickoff {CLOSING_WINDOW_MIN} minutes ahead")
     ap.add_argument("--replay", type=pathlib.Path, default=None,
                     help="re-analyse a stored raw/YYYY-MM-DD/HHMMSSZ snapshot (0 credits, no network)")
     args = ap.parse_args(argv)
@@ -365,7 +403,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if bad:
         ap.error(f"unknown leagues: {bad}")
     try:
-        return run(leagues, args.credit_reserve, args.dry_credits, args.replay)
+        return run(leagues, args.credit_reserve, args.dry_credits, args.replay, args.closing)
     except (ScanError, requests.RequestException) as exc:
         print(f"scan failed: {exc}", file=sys.stderr)
         return 2

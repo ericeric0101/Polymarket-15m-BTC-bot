@@ -174,3 +174,38 @@ def test_empty_book_has_no_edge():
 ])
 def test_aliases_and_spacing(league, pm, book, level):
     assert name_match_level((pm,), book, league) == level
+
+
+def test_shl_spellings():
+    assert name_match_level(("Djurgården",), "Djurgårdens IF", "shl") == "tokens"
+    assert name_match_level(("Bjoerkloeven",), "IF Björklöven", "shl") == "tokens"
+
+
+def test_token_fair_records_book_outcome_and_side():
+    ev = parse_pm_event(SOCCER_EVENT, "epl")
+    book = _odds_event("Everton", "Chelsea", "2026-10-17T11:30:00Z",
+                       {"Everton": 2.97, "Chelsea": 2.41, "Draw": 3.63})
+    tf = {t.token_id: t for t in token_fairs(ev, match_event(ev, [book], 20), fair_from_odds(book, True))}
+    assert (tf["e_n"].book_outcome, tf["e_n"].side) == ("Everton", "no")
+    assert (tf["d_y"].book_outcome, tf["d_y"].side) == ("Draw", "yes")
+    nhl = parse_pm_event(NHL_EVENT, "nhl")
+    b2 = _odds_event("Washington Capitals", "New Jersey Devils", "2026-10-17T17:00:00Z",
+                     {"Washington Capitals": 1.85, "New Jersey Devils": 2.04})
+    t2 = {t.token_id: t for t in token_fairs(nhl, match_event(nhl, [b2], 20), fair_from_odds(b2, False))}
+    assert (t2["nj"].book_outcome, t2["nj"].side) == ("New Jersey Devils", "outcome")
+
+
+@pytest.mark.parametrize("pm, book, level", [
+    ("Lillestrøm SK", "Lillestrom", "tokens"),
+    ("Jagiellonia Białystok", "Jagiellonia Bialystok", "exact"),
+    ("Ferencvárosi TC", "Ferencváros TC", "exact"),
+    ("RU Saint-Gilloise", "Union Saint-Gilloise", "exact"),
+    ("Stade Rennais FC 1901", "Rennes", "exact"),
+    ("Olympiakós SFP", "Olympiakos Piraeus", "exact"),
+    ("AC Sparta Praha", "Sparta Prague", "exact"),
+    ("Olympique Lyonnais", "Lyon", "exact"),
+    ("Olympique Lyonnais", "Olympique Lyonnais", "exact"),
+    ("PFK Levski Sofia", "PFC Levski Sofia", "exact"),
+])
+def test_uel_spellings(pm, book, level):
+    assert name_match_level((pm,), book, "uel") == level

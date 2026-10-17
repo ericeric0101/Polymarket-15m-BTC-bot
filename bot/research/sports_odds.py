@@ -63,10 +63,17 @@ LEAGUES: dict[str, League] = {
         League("cfb", "americanfootball_ncaaf", False),
         League("mlb", "baseball_mlb", False),
         League("ufc", "mma_mixed_martial_arts", False, kickoff_tol_min=12 * 60),
+        # Less-followed leagues that still have a Pinnacle line (direction B probe).
+        League("elc", "soccer_efl_champ", True),
+        League("shl", "icehockey_sweden_hockey_league", False),
+        League("liiga", "icehockey_liiga", False),
     )
 }
 
-DEFAULT_LEAGUES = ("epl", "lal", "bun", "sea", "fl1", "ucl", "mls", "nhl", "nba", "nfl", "ufc")
+# Prereg S1 v1 (reports/sports_odds_research_20261017/prereg.md): main + explore leagues.
+MAIN_LEAGUES = ("epl", "lal", "bun", "sea", "fl1", "ucl", "uel", "mls", "nhl", "nba", "nfl", "ufc")
+EXPLORE_LEAGUES = ("elc", "shl", "liiga")
+DEFAULT_LEAGUES = MAIN_LEAGUES + EXPLORE_LEAGUES
 
 FAIR_BOOK = "pinnacle"
 # One Odds API credit covers up to 10 bookmakers per market; the others are stored
@@ -84,7 +91,10 @@ SUSPECT_GAP = 0.20            # |fair - PM mid| above this is more likely a bad 
 # Whole tokens dropped before comparing (club-form words, never distinguishing alone).
 _DROP_TOKENS = frozenset({"fc", "afc", "cf", "sc", "ac", "cd", "ssc", "rc", "the", "club", "calcio", "1"})
 # Same word in another language; applied per token before comparing.
-_TOKEN_SYNONYMS = {"munchen": "munich", "milano": "milan", "internazionale": "inter"}
+_TOKEN_SYNONYMS = {"munchen": "munich", "milano": "milan", "internazionale": "inter", "praha": "prague"}
+# Letters NFKD does not split into base + accent (they would otherwise be deleted).
+_TRANSLIT = str.maketrans({"ø": "o", "Ø": "o", "æ": "ae", "Æ": "ae", "ß": "ss", "ł": "l", "Ł": "l",
+                           "đ": "d", "Đ": "d", "ı": "i", "œ": "oe", "Œ": "oe", "þ": "th", "ð": "d"})
 # A name made only of these cannot identify a team by itself (e.g. "City", "United").
 _GENERIC_TOKENS = frozenset({
     "city", "united", "town", "real", "athletic", "atletico", "sporting", "inter",
@@ -104,6 +114,17 @@ LEAGUE_ALIASES: dict[str, dict[str, str]] = {
         "nottm forest": "nottingham forest",
         "sporting cp": "sporting lisbon",
         "athletic": "athletic bilbao",
+        "ferencvarosi tc": "ferencvaros tc",
+        "ru saint gilloise": "union saint gilloise",
+        "stade rennais 1901": "rennes",
+        "stade rennais": "rennes",
+        "olympiakos sfp": "olympiakos piraeus",
+        "olympique lyonnais": "lyon",
+        "pfk levski sofia": "pfc levski sofia",
+    },
+    "shl": {
+        "djurgarden": "djurgardens",                # Swedish genitive in the club name
+        "bjoerkloeven": "bjorkloven",               # "oe" transliteration of "ö"
     },
     "ufc": {
         "timmy cuamba": "timothy cuamba",
@@ -114,7 +135,7 @@ LEAGUE_ALIASES: dict[str, dict[str, str]] = {
 
 def normalize_tokens(name: str) -> tuple[str, ...]:
     """Lowercase, strip accents and punctuation, '&' -> 'and', drop club-form tokens."""
-    s = unicodedata.normalize("NFKD", name or "")
+    s = unicodedata.normalize("NFKD", (name or "").translate(_TRANSLIT))
     s = "".join(c for c in s if not unicodedata.combining(c)).lower()
     s = s.replace("&", " and ")
     s = re.sub(r"\([^)]*\)", " ", s)
@@ -360,6 +381,9 @@ class TokenFair:
     fair: float
     fee_rate: float
     fee_exponent: float
+    accepting_orders: bool = True
+    book_outcome: str = ""            # outcome name on the book side ("Draw" for draw)
+    side: str = "outcome"             # "yes" | "no" (fair = 1 - p(book_outcome)) | "outcome"
 
 
 _DRAW_RE = re.compile(r"\bdraw\b", re.IGNORECASE)
@@ -379,7 +403,7 @@ def token_fairs(pm: PmEvent, match: MatchResult, fair: Fair) -> list[TokenFair]:
         lower = [o.lower() for o in m.outcomes]
         if lower == ["yes", "no"]:
             if _DRAW_RE.search(m.question) and "Draw" in fair.probs:
-                p_yes, label = fair.probs["Draw"], "Draw"
+                p_yes, label, book_name = fair.probs["Draw"], "Draw", "Draw"
             else:
                 mm = _WILL_WIN_RE.match(m.question)
                 if not mm:
@@ -394,8 +418,10 @@ def token_fairs(pm: PmEvent, match: MatchResult, fair: Fair) -> list[TokenFair]:
                 if book_name not in fair.probs:
                     continue
                 p_yes, label = fair.probs[book_name], team[0].name
-            out.append(TokenFair(m.market_id, m.token_ids[0], f"{label} YES", p_yes, m.fee_rate, m.fee_exponent))
-            out.append(TokenFair(m.market_id, m.token_ids[1], f"{label} NO", 1.0 - p_yes, m.fee_rate, m.fee_exponent))
+            out.append(TokenFair(m.market_id, m.token_ids[0], f"{label} YES", p_yes,
+                                 m.fee_rate, m.fee_exponent, m.accepting_orders, book_name, "yes"))
+            out.append(TokenFair(m.market_id, m.token_ids[1], f"{label} NO", 1.0 - p_yes,
+                                 m.fee_rate, m.fee_exponent, m.accepting_orders, book_name, "no"))
         else:
             for outcome, tok in zip(m.outcomes, m.token_ids):
                 team = [t for t in pm.teams if outcome in t.names]
@@ -404,7 +430,8 @@ def token_fairs(pm: PmEvent, match: MatchResult, fair: Fair) -> list[TokenFair]:
                 book_name = match.team_map.get(team[0].name)
                 if book_name not in fair.probs:
                     break
-                out.append(TokenFair(m.market_id, tok, outcome, fair.probs[book_name], m.fee_rate, m.fee_exponent))
+                out.append(TokenFair(m.market_id, tok, outcome, fair.probs[book_name],
+                                     m.fee_rate, m.fee_exponent, m.accepting_orders, book_name))
             else:
                 continue
             # A half-mapped two-outcome market is dropped as a whole.
