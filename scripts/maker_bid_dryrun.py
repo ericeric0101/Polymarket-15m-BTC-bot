@@ -113,6 +113,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         return bool(f and f.last_tick_monotonic and time.monotonic() - f.last_tick_monotonic <= BOOK_FEED_MAX_SILENCE_SEC)
 
     settled: set[str] = set()
+    settle_busy = threading.Event()
+
+    def settle_once(now: float) -> None:
+        try:
+            for p in sim.positions():
+                key = f"{p['market_slug']}|{p['token_id']}"
+                if key in settled or not p["end_ts"] or now < p["end_ts"] + 60:
+                    continue
+                try:
+                    oc = fetch_official_outcome(p["market_slug"])
+                except Exception:
+                    oc = None
+                if oc in ("UP", "DOWN"):
+                    settled.add(key)
+                    win = (p["outcome"] or "").upper() == oc
+                    log({"event": "SETTLED", "t": time.time(), **p, "official": oc,
+                         "pnl": round((p["shares"] if win else 0.0) - p["cost"], 6)})
+        finally:
+            settle_busy.clear()
+
     started = last_status = last_settle = time.time()
     logger.info(f"MB1 maker dry-run started streams={[f'{x[0]}-{tags[x[1]]}' for x in streams]} -> {out}")
     try:
@@ -123,21 +143,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             for tr in batch:                                   # fills first, then time advance
                 sim.on_trade(tr)
             sim.tick(now, books.market_meta(), books.best, books.level_size, prices, feed_ok)
-            if now - last_settle >= 60:
+            if now - last_settle >= 60 and not settle_busy.is_set():
                 last_settle = now
-                for p in sim.positions():
-                    key = f"{p['market_slug']}|{p['token_id']}"
-                    if key in settled or not p["end_ts"] or now < p["end_ts"] + 60:
-                        continue
-                    try:
-                        oc = fetch_official_outcome(p["market_slug"])
-                    except Exception:
-                        oc = None
-                    if oc in ("UP", "DOWN"):
-                        settled.add(key)
-                        win = (p["outcome"] or "").upper() == oc
-                        log({"event": "SETTLED", "t": now, **p, "official": oc,
-                             "pnl": round((p["shares"] if win else 0.0) - p["cost"], 6)})
+                settle_busy.set()
+                threading.Thread(target=settle_once, args=(now,), daemon=True).start()   # never block ticks
             if now - last_status >= 60:
                 last_status = now
                 (out / "_status.json").write_text(json.dumps({

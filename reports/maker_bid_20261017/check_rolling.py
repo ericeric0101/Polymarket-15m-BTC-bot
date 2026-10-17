@@ -78,7 +78,8 @@ for f in fills.itertuples():
         continue
     o = o.iloc[0]
     vol = tape[(tape.token_id == f.token_id) & (tape.side.str.upper() == "SELL") & (abs(tape.price - f.price) < 1e-9)
-               & (tape.received_ms / 1000 > o.queue_measured_ts) & (tape.received_ms / 1000 <= f.t + 1e-3)]["size"].sum()
+               & (tape.received_ms / 1000 > o.queue_measured_ts - 0.5) & (tape.received_ms / 1000 <= f.t + 0.5)]["size"].sum()
+    # (recorder and dry-run use separate sockets: their receipt clocks differ by a few ms)
     if len(tape) and vol + 1e-6 < o.queue_ahead:
         issues.append(f"fill {f.order_id}: tape SELL volume {vol:.1f} < queue_ahead {o.queue_ahead:.1f}")
 

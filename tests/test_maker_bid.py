@@ -150,3 +150,10 @@ def test_fill_cancels_the_replaced_sibling_order():
     # the old order's cancel was already sent by the requote; no extra placement afterwards
     e.tick(t0 + 6.0)
     assert sum(1 for k in kinds if k[0] == "PLACE_SENT") == 2
+
+
+def test_threshold_forward_fills_buckets_without_trades():
+    p = PriceHistory()
+    for i in range(0, 460, 3):                       # a trade only every 6 s (thin market)
+        p.add("xrp", END - 920 + 2 * i, 1.33 * (1 + (2e-4 if (i // 3) % 2 else 0.0)))
+    assert p.adverse_threshold_bps("xrp", END) is not None

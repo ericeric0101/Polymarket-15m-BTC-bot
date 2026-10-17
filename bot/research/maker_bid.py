@@ -83,8 +83,14 @@ class PriceHistory:
         last_px: dict[int, float] = {}
         for t, p in q:
             last_px[int(t // ADVERSE_LOOKBACK)] = p        # last price in each 2 s bucket
-        keys = sorted(last_px)
-        rets = [(last_px[b] / last_px[a] - 1.0) * 1e4 for a, b in zip(keys, keys[1:]) if b == a + 1]
+        # A bucket without trades keeps the previous price (no trade = no change); thin books
+        # such as XRP would otherwise never reach the sample minimum.
+        first, last = min(last_px), int(now // ADVERSE_LOOKBACK)
+        series, prev = [], None
+        for b in range(first, last + 1):
+            prev = last_px.get(b, prev)
+            series.append(prev)
+        rets = [(b / a - 1.0) * 1e4 for a, b in zip(series, series[1:])]
         if len(rets) < _MIN_SIGMA_SAMPLES:
             return None
         mu = sum(rets) / len(rets)
