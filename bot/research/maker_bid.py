@@ -22,7 +22,9 @@ WINDOW_START, WINDOW_END = 120, 10        # quote from T-120 s until T-10 s
 BID_MIN, BID_MAX, MAX_SPREAD = 0.05, 0.95, 0.03
 SIZE = 5.0
 REQUOTE_MIN_SEC = 2.0
-ADVERSE_BPS, ADVERSE_LOOKBACK = 3.0, 2.0
+ADVERSE_BPS, ADVERSE_LOOKBACK = 3.0, 2.0     # ADVERSE_BPS is superseded by the adaptive threshold (A1)
+ADVERSE_SIGMAS, ADVERSE_FLOOR_BPS, SIGMA_WINDOW_SEC = 2.0, 0.5, 900.0
+_MIN_SIGMA_SAMPLES = 120
 COOLDOWN_SEC = 2.0
 _ids = itertools.count(1)
 
@@ -60,7 +62,7 @@ class VirtualOrder:
 class PriceHistory:
     """Recent exchange prices per asset (local receipt clock) for the adverse-move cancel."""
 
-    def __init__(self, keep_sec: float = 30.0) -> None:
+    def __init__(self, keep_sec: float = SIGMA_WINDOW_SEC + 30.0) -> None:
         self._d: dict[str, deque] = {}
         self._lock = threading.Lock()
         self.keep = keep_sec
@@ -71,6 +73,23 @@ class PriceHistory:
             q.append((t, price))
             while q and q[0][0] < t - self.keep:
                 q.popleft()
+
+    def adverse_threshold_bps(self, asset: str, now: float) -> Optional[float]:
+        """MB1-A1: 2 x std of non-overlapping 2 s returns over the last 15 min (floor 0.5 bps)."""
+        with self._lock:
+            q = [(t, p) for t, p in self._d.get(asset, ()) if now - SIGMA_WINDOW_SEC <= t <= now]
+        if not q:
+            return None
+        last_px: dict[int, float] = {}
+        for t, p in q:
+            last_px[int(t // ADVERSE_LOOKBACK)] = p        # last price in each 2 s bucket
+        keys = sorted(last_px)
+        rets = [(last_px[b] / last_px[a] - 1.0) * 1e4 for a, b in zip(keys, keys[1:]) if b == a + 1]
+        if len(rets) < _MIN_SIGMA_SAMPLES:
+            return None
+        mu = sum(rets) / len(rets)
+        sd = (sum((r - mu) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
+        return max(ADVERSE_FLOOR_BPS, ADVERSE_SIGMAS * sd)
 
     def ret_bps(self, asset: str, now: float, lookback: float) -> Optional[float]:
         with self._lock:
@@ -164,11 +183,16 @@ class MakerBidSim:
                       and BID_MIN <= b["best_bid"] <= BID_MAX and b["best_ask"] - b["best_bid"] <= MAX_SPREAD + 1e-9
                       and feed_ok(slug))
                 r = prices.ret_bps(asset, now, ADVERSE_LOOKBACK)
-                adverse = r is not None and ((m["outcome"] == "Up" and r <= -ADVERSE_BPS) or
-                                             (m["outcome"] == "Down" and r >= ADVERSE_BPS))
+                thr = prices.adverse_threshold_bps(asset, now)
+                if thr is None:                       # not enough history yet: fail closed, do not quote
+                    if o is not None:
+                        self._cancel(st, now, "NO_VOL_HISTORY")
+                    continue
+                adverse = r is not None and ((m["outcome"] == "Up" and r <= -thr) or
+                                             (m["outcome"] == "Down" and r >= thr))
                 if adverse:
                     if o is not None:
-                        self._cancel(st, now, f"ADVERSE_{r:+.1f}bps")
+                        self._cancel(st, now, f"ADVERSE_{r:+.2f}bps_thr{thr:.2f}")
                     st.cooldown_until = now + COOLDOWN_SEC
                     continue
                 if not ok:

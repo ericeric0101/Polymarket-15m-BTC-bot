@@ -8,12 +8,19 @@ SLUG = f"btc-updown-5m-{int(END) - 300}"
 MKT = {"tu": {"slug": SLUG, "outcome": "Up", "end_ts": END}, "td": {"slug": SLUG, "outcome": "Down", "end_ts": END}}
 
 
+def _calm_history(prices, asset="btc", t_end=END - 100, px=100000.0):
+    """15 min of quiet prices (alternating +/-0.2 bps every 2 s): 2-sigma threshold ~0.5 bps floor."""
+    for i in range(460):
+        prices.add(asset, t_end - 920 + 2 * i, px * (1 + (0.2e-4 if i % 2 else 0.0)))
+
+
 class Env:
     def __init__(self):
         self.books = {"tu": {"best_bid": 0.60, "best_ask": 0.61}, "td": {"best_bid": 0.38, "best_ask": 0.40}}
         self.levels = {("tu", 0.60): 10.0, ("td", 0.38): 0.0}
         self.events = []
         self.prices = PriceHistory()
+        _calm_history(self.prices)
         self.sim = MakerBidSim(self.events.append)
 
     def tick(self, t, ok=True):
@@ -59,7 +66,7 @@ def test_adverse_binance_move_cancels_and_late_prints_are_picked_off_until_effec
     t0 = END - 100
     e.prices.add("btc", t0 - 5, 100000.0)
     e.tick(t0); e.tick(t0 + 0.5)                 # live, queue 10
-    e.prices.add("btc", t0 + 0.9, 99950.0)       # -5 bps within 2 s -> Up bid is adverse
+    e.prices.add("btc", t0 + 0.9, 99990.0)       # -1 bp within 2 s > ~0.5 bps threshold -> Up bid is adverse
     e.tick(t0 + 1.0)
     cancel = [x for x in e.events if x["event"] == "CANCEL_SENT" and x["token_id"] == "tu"][0]
     assert cancel["reason"].startswith("ADVERSE")
@@ -75,7 +82,7 @@ def test_cancel_effective_stops_fills():
     t0 = END - 100
     e.prices.add("btc", t0 - 5, 100000.0)
     e.tick(t0); e.tick(t0 + 0.5)
-    e.prices.add("btc", t0 + 0.9, 99950.0)
+    e.prices.add("btc", t0 + 0.9, 99990.0)
     e.tick(t0 + 1.0); e.tick(t0 + 1.0 + LATENCY_SEC + 0.01)
     e.trade(t0 + 1.5, "tu", 0.50, 5)
     assert "FILL" not in e.kinds("tu") and "CANCEL_EFFECTIVE" in e.kinds("tu")
@@ -111,4 +118,17 @@ def test_no_quotes_outside_window_or_conditions_and_window_end_cancels():
 def test_feed_down_blocks_quoting():
     e = Env()
     e.tick(END - 100, ok=False)
+    assert e.events == []
+
+
+def test_adaptive_threshold_is_two_sigma_of_2s_returns_with_floor_and_fail_closed():
+    p = PriceHistory()
+    assert p.adverse_threshold_bps("btc", END) is None                 # no history -> None
+    for i in range(460):                                               # +/-2 bps alternating 2 s moves
+        p.add("btc", END - 920 + 2 * i, 100000.0 * (1 + (2e-4 if i % 2 else 0.0)))
+    thr = p.adverse_threshold_bps("btc", END)
+    assert 3.5 < thr < 4.5                                             # sd ~2 bps -> 2 sigma ~4 bps
+    e = Env()
+    e.prices = PriceHistory()                                          # no history: no quotes
+    e.tick(END - 100)
     assert e.events == []
