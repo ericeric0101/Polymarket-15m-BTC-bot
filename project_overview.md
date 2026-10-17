@@ -20,6 +20,7 @@
   | #2 | `feat/multi-crypto-twap-z` → `main` | multi-crypto recording, TWAP-z executor |
   | #3 | `fix/binance-reference-basis` → `main` | Binance basis fix (LIVE line) |
   | #4 | `fix/late-window-latency` → `integration/entry-v3-forward-shadow` | late-window latency fixes |
+  | #7 | `fix/recorder-book-buffer` → `main` | recorder fixes, live TWAP-z executor, latency probe, MB1 (FAIL) |
 
 - **Retired branches:** `stable-live-2026-05-04`, `reference-post-eb5d32b` and
   `fix/shadow-fast-spot-provenance` are kept as `archive/*` tags.
@@ -1117,6 +1118,40 @@ verified `tar.zst` under `data/analysis_archives/` (see its README):
 - the POST-24H input snapshots went from 0.96 GB to 66 MB.
 The trade journal keeps using `scripts/journal_retention.py`, described in the
 section above.
+
+## Short-window crypto late-window strategies: conclusion (2026-10-17)
+
+**Status: both directions closed.** No MB2 and no further TWAP-z tuning. Any
+reopening needs a new pre-registration and its own worktree.
+
+- **TWAP-z (taker).** No edge.
+  - DEV mean net PnL is about 0 per share.
+  - The z model is overconfident: realised vol is 1.34× the model's.
+  - Binance and Coinbase lead Chainlink by about 2–3 s, but given the market mid
+    a lead model adds nothing (coef −0.16, t −0.4).
+  - Polymarket quotes follow Binance within about 1 s.
+  - Evidence: `reports/twap_z_dev_pnl_20261017/`.
+  - CK stopped micro-live on 2026-10-17.
+- **Speed path.** Infeasible from the home Mac.
+  - Order post and cancel take about 0.37 s each (p50), measured with
+    `scripts/clob_latency_probe.py`.
+  - A cloud-VM RTT check is pending: `reports/clob_cloud_latency_20261017/`.
+- **MB1 bid-only maker. FAIL.**
+  - Pre-registration: `reports/maker_bid_20261017/plan_mb1.md`.
+  - Result (201 positions): −0.056/share, one-sided 95% LB −0.077, −55.49 USDC.
+  - Picked-off fills are not the driver: −0.059 vs −0.054 per share.
+  - The cause is adverse selection on passive fills. Markets where both sides
+    filled paid 1.09 per pair, against a payout of 1.
+  - Details: `reports/maker_bid_20261017/result_mb1.md`.
+- **Reading.** In the last minutes of 5m/15m crypto markets the price already
+  carries the public information. What remains is a latency race this setup
+  cannot win.
+- **Research priority moves** to slower horizons:
+  - MD1, Deribit vs Polymarket daily, on branch
+    `research/deribit-vs-polymarket-daily`;
+  - S1, sports odds, on branch `research/sports-odds-scanner`.
+- **Recorder.** It keeps running until about 2026-10-22 for the 15m intraday-leg
+  question, then gets re-evaluated.
 
 ## BTC 1-second historical research data
 
