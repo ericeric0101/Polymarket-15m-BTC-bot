@@ -70,6 +70,65 @@ def load_binance(tape: Path):
     return {a: pd.DataFrame(v, columns=["t", "mid"]) for a, v in rows.items()}, lat
 
 
+def load_binance_trades(tape: Path) -> dict:
+    """asset -> DataFrame(t = Binance trade time T in ms, mid = trade price), in exchange time."""
+    rows = defaultdict(list)
+    for _, m in read_lines(tape / "binance"):
+        d, stream = m.get("data") or {}, str(m.get("stream") or "")
+        if stream.endswith("@aggTrade") and d.get("T"):
+            rows[stream.split("usdt@")[0]].append((float(d["T"]), float(d["p"])))
+    return {a: pd.DataFrame(sorted(v), columns=["t", "mid"]) for a, v in rows.items()}
+
+
+REACTION_BINS_MS = (-1000, -500, -200, 0, 25, 50, 100, 200, 500, 1000, 2000)
+
+
+def server_reaction(bn_trades: dict, trades: pd.DataFrame, meta: dict, j_bps: float) -> dict:
+    """Location-free reaction of Polymarket takers to Binance moves, on exchange clocks only.
+
+    For each Binance aggTrade jump (exchange time T0), Polymarket trades of that asset's live markets are
+    timed by their server timestamp minus T0. Aligned = taker BUY of the favoured token or taker SELL of
+    the other one; contra = the opposite. Aligned minus contra per delay bin is the informed reaction:
+    where the excess appears is how fast the fastest takers act after Binance prints.
+    """
+    by_asset = defaultdict(list)
+    for tok, m in meta.items():
+        by_asset[m["asset"]].append(tok)
+    tr = trades.dropna(subset=["server_t"])
+    tr_by_tok = {tok: g for tok, g in tr.groupby("token", sort=False)}
+    edges = np.array(REACTION_BINS_MS, dtype=float)
+    al_n, co_n = np.zeros(len(edges) - 1), np.zeros(len(edges) - 1)
+    al_sh, co_sh = np.zeros(len(edges) - 1), np.zeros(len(edges) - 1)
+    first, n_jumps = [], 0
+    for asset, df in bn_trades.items():
+        for t0, sign, _ in find_jumps(df, j_bps):
+            n_jumps += 1
+            fa = []
+            for tok in by_asset.get(asset, []):
+                m = meta[tok]
+                if not (m["start_ts"] * 1000 + 5000 <= t0 <= m["end_ts"] * 1000 - 5000):
+                    continue
+                g = tr_by_tok.get(tok)
+                if g is None:
+                    continue
+                g = g[(g.server_t >= t0 + edges[0]) & (g.server_t < t0 + edges[-1])]
+                fav = (m["outcome"].lower() == "up") == (sign > 0)
+                aligned = (g.side == "BUY") == fav
+                for mask, cnt, sh in ((aligned, al_n, al_sh), (~aligned, co_n, co_sh)):
+                    d = (g.server_t[mask] - t0).to_numpy()
+                    cnt += np.histogram(d, edges)[0]
+                    sh += np.histogram(d, edges, weights=g["size"][mask].to_numpy())[0]
+                fa += [x for x in (g.server_t[aligned] - t0) if x >= 0]
+            if fa:
+                first.append(min(fa))
+    labels = [f"{int(a)}..{int(b)}" for a, b in zip(edges[:-1], edges[1:])]
+    return {"jumps": n_jumps,
+            "first_aligned_ms_p10_p50_p90": [round(float(np.quantile(first, q)), 1) for q in (.1, .5, .9)] if first else None,
+            "aligned_minus_contra_trades": dict(zip(labels, (al_n - co_n).astype(int).tolist())),
+            "aligned_minus_contra_shares": dict(zip(labels, np.round(al_sh - co_sh, 1).tolist())),
+            "aligned_trades": dict(zip(labels, al_n.astype(int).tolist()))}
+
+
 def load_markets(tape: Path) -> dict:
     meta = {}
     for line in open(tape / "markets.jsonl"):
@@ -136,11 +195,11 @@ def replay_pm(tape: Path, meta: dict):
                     tok = str(it.get("asset_id"))
                     if tok in meta:
                         trades.append((t, tok, float(it["price"]), float(it["size"]), str(it.get("side")).upper(),
-                                       float(it.get("fee_rate_bps") or 0)))
+                                       float(it.get("fee_rate_bps") or 0), float(it.get("timestamp") or "nan")))
     best = pd.DataFrame(best_rows, columns=["t", "token", "bid", "bid_sz", "ask", "ask_sz"])
     # The same tape can hold a book twice (two sockets around a rollover): order by time, keep last per instant.
     best = best.sort_values("t", kind="stable")
-    tr = pd.DataFrame(trades, columns=["t", "token", "price", "size", "side", "fee_rate_bps"]).sort_values("t")
+    tr = pd.DataFrame(trades, columns=["t", "token", "price", "size", "side", "fee_rate_bps", "server_t"]).sort_values("t")
     tr = tr.drop_duplicates(["token", "price", "size", "side", "t"])
     return best, tr, lat
 
@@ -339,6 +398,8 @@ def main() -> None:
     info = {"tape_hours": round(hours, 2), "rtt_ms": a.rtt_ms, "our_one_way_ms": our_l,
             "d_pm_ms_measured": round(d_meas, 1), "clock_ok": clock_ok, "d_pm_ms_used": round(d_pm, 1), "binance_recv_minus_T_ms_p50": round(float(np.median(bn_lat)), 1) if bn_lat else None,
             "pm_trades": len(trades), "pm_fee_rate_bps_seen": trades.fee_rate_bps.value_counts().head(5).to_dict()}
+    bn_tr = load_binance_trades(tape)
+    info["server_time_reaction"] = {f"J={j:g}bps": server_reaction(bn_tr, trades, meta, j) for j in (PRIMARY_J_BPS, 5.0)}
     res = {"info": info, "summary": summarize(ev, hours, our_l)}
     print(json.dumps(res, indent=1, default=str))
     if a.out:

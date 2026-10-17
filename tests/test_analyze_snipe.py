@@ -85,3 +85,17 @@ def test_pm_moving_first_is_flagged(tmp_path):
     ev = an.evaluate({"btc": an.find_jumps(bn["btc"], 3.0)}, best, trades, meta, 10.0)
     (r,) = ev.to_dict("records")
     assert r["pm_led"] and r["a0"] == 0.58
+
+
+def test_server_time_reaction_uses_exchange_clocks(tmp_path):
+    import pandas as pd
+    meta = {UP: {"slug": "s", "asset": "btc", "outcome": "Up", "start_ts": START, "end_ts": START + 300, "duration": 300},
+            DOWN: {"slug": "s", "asset": "btc", "outcome": "Down", "start_ts": START, "end_ts": START + 300, "duration": 300}}
+    bn = {"btc": pd.DataFrame({"t": [T - 2000, T], "mid": [100000.0, 100050.0]})}
+    tr = pd.DataFrame([(0, UP, .52, 10, "BUY", 0, T + 30),         # aligned, 30 ms after Binance print
+                       (0, DOWN, .48, 4, "SELL", 0, T + 60),       # aligned (selling the other side)
+                       (0, DOWN, .48, 3, "BUY", 0, T + 300)],      # contra
+                      columns=["t", "token", "price", "size", "side", "fee_rate_bps", "server_t"])
+    r = an.server_reaction(bn, tr, meta, 3.0)
+    assert r["jumps"] == 1 and r["first_aligned_ms_p10_p50_p90"][1] == 30.0
+    assert r["aligned_minus_contra_trades"]["25..50"] == 1 and r["aligned_minus_contra_trades"]["200..500"] == -1
