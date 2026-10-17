@@ -144,7 +144,15 @@ def write_hour_file(root: Path, day: str, hour: str, rows: list[dict[str, Any]],
     try:
         pq.write_table(pa.Table.from_pylist(rows, schema=schema if schema is not None else _schema()),
                        temp, compression="zstd")
-        os.replace(temp, final)
+        # No-clobber publish: link() fails if the name exists, so two recorder
+        # processes overlapping during a restart can never overwrite each other.
+        while True:
+            try:
+                os.link(temp, final)
+                break
+            except FileExistsError:
+                n += 1
+                final = directory / f"{hour}_{n}.parquet"
     finally:
         temp.unlink(missing_ok=True)
     return final
@@ -178,6 +186,7 @@ class HourlyParquetStore:
         schema=None,
         count_key: str = "source",
         sort_cols: tuple[str, ...] = ("ts_sec", "source"),
+        partial_flush_sec: float = 0.0,
     ) -> None:
         self.root = Path(root)
         self.schema, self.count_key, self.sort_cols = schema, count_key, sort_cols
@@ -189,6 +198,10 @@ class HourlyParquetStore:
         self._lock = threading.Lock()
         self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._buffered = 0
+        # >0: also write the current hour as a part file (HH_n.parquet) at this
+        # cadence, or when the buffer is 80% full, so a busy store never drops rows.
+        self.partial_flush_sec = float(partial_flush_sec)
+        self._last_partial_flush = self._clock()
         self.stats = RecorderStats()
 
     def add(self, row: dict[str, Any]) -> None:
@@ -213,8 +226,13 @@ class HourlyParquetStore:
 
     def flush(self, *, include_current_hour: bool = False) -> list[Path]:
         """Write completed hours (and the current one on shutdown)."""
-        current = _hour_key(int(self._clock()))
+        now = self._clock()
+        current = _hour_key(int(now))
         with self._lock:
+            if self.partial_flush_sec > 0 and (now - self._last_partial_flush >= self.partial_flush_sec
+                                               or self._buffered >= 0.8 * self.max_buffer_rows):
+                include_current_hour = True
+                self._last_partial_flush = now
             keys = [k for k in self._rows if include_current_hour or k < current]
             batches = {k: self._rows.pop(k) for k in keys}
             self._buffered -= sum(len(v) for v in batches.values())
@@ -505,3 +523,15 @@ def parse_rtds_chainlink(payload: Any) -> list[tuple[str, str, float, int]]:
         if price is not None and price > 0 and ms:
             out.append((kind, asset, float(price), int(ms)))
     return out
+
+
+def book_stream_prefix(slug_or_stream: str) -> str:
+    """'eth-updown-5m-1792...' (or 'eth-updown-5m') -> 'eth-updown-5m-' : one CLOB socket per stream."""
+    parts = str(slug_or_stream).split("-")
+    return "-".join(parts[:3]) + "-"
+
+
+def book_feed_name(prefix: str) -> str:
+    """Status/feed name of a stream's book socket; BTC 15m keeps the original v2 name."""
+    stream = prefix.rstrip("-")
+    return "polymarket_book" if stream == "btc-updown-15m" else f"polymarket_book_{stream.replace('-updown-', '_')}"

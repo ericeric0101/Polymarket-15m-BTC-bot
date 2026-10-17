@@ -33,7 +33,9 @@ from bot.price_streams import (  # noqa: E402
     build_polymarket_chainlink_subscribe_payload,
     safe_json_loads,
 )
-from bot.research.price_recorder import MARKET_STREAMS, parse_rtds_chainlink, stream_slugs  # noqa: E402
+from bot.research.price_recorder import (  # noqa: E402
+    MARKET_STREAMS, book_feed_name, book_stream_prefix, parse_rtds_chainlink, stream_slugs,
+)
 from bot.research.twap_z_executor import (  # noqa: E402
     CHECKPOINTS,
     LiveBookSampler,
@@ -88,8 +90,7 @@ def next_checkpoint(now: float, streams=MARKET_STREAMS) -> tuple[float, int, lis
 
 
 def _book_feed_name(slug: str) -> str:
-    asset = slug.split("-", 1)[0]
-    return "polymarket_book" if asset == "btc" else f"polymarket_book_{asset}"
+    return book_feed_name(book_stream_prefix(slug))
 
 
 def disk_free_gb(path: pathlib.Path) -> float:

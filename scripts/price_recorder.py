@@ -43,6 +43,7 @@ from bot.research.price_recorder import (  # noqa: E402
     ALT_ASSETS,
     MARKET_STREAMS,
     alt_source_name,
+    book_feed_name,
     book_schema,
     market_tokens_for,
     parse_coinbase_ticker,
@@ -200,13 +201,15 @@ def build_book_feed(sampler: BookSampler, tracker: MarketTracker, stop: threadin
         sampler.apply(payload, time.time())
         return 1
 
-    name = "polymarket_book" if prefix is None or prefix == "btc-" else f"polymarket_book_{prefix.rstrip('-')}"
+    name = "polymarket_book" if prefix is None else book_feed_name(prefix)
     return Feed(name, CLOB_MARKET_WS_URL, stop, on_open, on_message, heartbeat)
 
 
 def build_book_feeds(sampler: BookSampler, tracker: MarketTracker, stop: threading.Event) -> list[Feed]:
-    assets = list(dict.fromkeys(a for a, _d in tracker.streams))
-    return [build_book_feed(sampler, tracker, stop, prefix=f"{a}-") for a in assets]
+    """One socket per (asset, length) stream. One socket per asset (BTC 5m + 15m together)
+    was still dropped ~450 times a day with 1013 slow consumer (2026-10-16/17)."""
+    tags = {900: "15m", 300: "5m"}
+    return [build_book_feed(sampler, tracker, stop, prefix=f"{a}-updown-{tags[d]}-") for a, d in tracker.streams]
 
 
 def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, stop: threading.Event) -> list[Feed]:
@@ -334,6 +337,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--retention-days", type=int, default=30)
     parser.add_argument("--min-free-disk-gb", type=float, default=10.0)
     parser.add_argument("--max-buffer-rows", type=int, default=60_000)
+    parser.add_argument("--book-max-buffer-rows", type=int, default=200_000)
+    parser.add_argument("--book-flush-sec", type=float, default=600.0,
+                        help="also write the current hour's books as a part file at this cadence")
     parser.add_argument("--duration-sec", type=float, default=0.0, help="stop after N seconds (0 = run forever)")
     args = parser.parse_args(argv)
 
@@ -341,8 +347,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                                min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.max_buffer_rows)
     bucketer = SecondBucketer(store.add)
     chainlink_bucketer = SecondBucketer(store.add, by_source_clock=True, grace_sec=5.0)
+    # 8 streams x current/next x Up/Down sample ~115k book rows per hour: the hourly
+    # 60k buffer dropped minutes 33-59 of every hour (2026-10-16/17), hence part files.
     book_store = HourlyParquetStore(args.book_dir, retention_days=args.retention_days,
-                                    min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.max_buffer_rows,
+                                    min_free_disk_gb=args.min_free_disk_gb, max_buffer_rows=args.book_max_buffer_rows,
+                                    partial_flush_sec=args.book_flush_sec,
                                     schema=book_schema(), count_key="outcome",
                                     sort_cols=("ts_sec", "market_slug", "outcome"))
     sampler = BookSampler()

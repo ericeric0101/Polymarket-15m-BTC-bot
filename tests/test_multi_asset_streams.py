@@ -73,3 +73,41 @@ def test_book_sampler_prefix_reset_keeps_other_sockets_books():
     assert s.tokens("eth-") == ["e"]
     s.reset("eth-")
     assert {r["token_id"] for r in s.sample(2.0)} == {"b"}
+
+
+def test_book_store_partial_flush_never_drops_a_busy_hour(tmp_path):
+    from bot.research.price_recorder import HourlyParquetStore, book_schema
+    clock = {"t": 1792119600.0}                      # 03:00:00Z
+    store = HourlyParquetStore(tmp_path, max_buffer_rows=1000, partial_flush_sec=600, schema=book_schema(),
+                               count_key="outcome", sort_cols=("ts_sec", "market_slug", "outcome"),
+                               free_disk_provider=lambda p: type("U", (), {"free": 1 << 50})(),
+                               clock=lambda: clock["t"])
+    for i in range(3600):                            # one row per second for a whole hour
+        clock["t"] = 1792119600.0 + i
+        store.add({"ts_sec": int(clock["t"]), "market_slug": "btc-updown-5m-1", "outcome": "Up",
+                   "token_id": "t", "best_bid": 0.4, "best_ask": 0.5, "bid_size": 1.0, "ask_size": 1.0,
+                   "n_updates": 1, "last_update_received_ms": 1, "last_event_ms": 1})
+        store.flush()
+    store.flush(include_current_hour=True)
+    assert store.stats.rows_dropped_buffer_full == 0
+    assert store.stats.rows_written == 3600 and store.stats.files_written >= 6
+
+
+def test_write_hour_file_never_overwrites_an_existing_part(tmp_path, monkeypatch):
+    import os
+    from bot.research import price_recorder as pr
+    rows = [{"source": "s", "ts_sec": 1, "close": 1.0, "high": 1.0, "low": 1.0, "n_updates": 1,
+             "last_source_ms": 1, "last_received_ms": 1}]
+    first = pr.write_hour_file(tmp_path, "2026-10-17", "03", rows)
+    real_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: False if self.name == "03.parquet" else real_exists(self))
+    second = pr.write_hour_file(tmp_path, "2026-10-17", "03", rows)   # simulates a racing second process
+    assert first.name == "03.parquet" and second.name == "03_2.parquet"
+    assert len(list((tmp_path / "2026-10-17").glob("*.parquet"))) == 2
+
+
+def test_book_stream_prefix_and_feed_names():
+    from bot.research.price_recorder import book_feed_name, book_stream_prefix
+    assert book_stream_prefix("btc-updown-5m-1792116000") == "btc-updown-5m-"
+    assert book_feed_name("btc-updown-15m-") == "polymarket_book"
+    assert book_feed_name("eth-updown-5m-") == "polymarket_book_eth_5m"
