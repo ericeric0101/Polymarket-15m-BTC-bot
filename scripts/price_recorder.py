@@ -373,12 +373,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     last_status = 0.0
     logger.info(f"price recorder started -> {args.data_dir}")
     try:
+        last_target = 0
         while True:
             # Read books ~10 ms before each wall-clock second and stamp them with that second,
             # so the row for second S is the state just before S (no post-decision updates).
-            target = int(time.time()) + 1
+            # Exactly one sample per second: the next target is always after the last one.
+            target = max(int(time.time()) + 1, last_target + 1)
             if stop.wait(max(0.0, target - BOOK_SAMPLE_LEAD_SEC - time.time())):
                 break
+            last_target = target
             now = time.time()
             for row in sampler.sample(now, ts_sec=target):
                 book_store.add(row)
