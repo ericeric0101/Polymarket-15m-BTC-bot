@@ -142,7 +142,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 last_status = now
                 (out / "_status.json").write_text(json.dumps({
                     "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "uptime_sec": round(now - started),
-                    "events": counts, "feeds": {f.feed_name: {"connects": f.connects, "ticks": f.ticks} for f in feeds}},
+                    "events": counts, "feeds": {f.feed_name: {"connects": f.connects, "ticks": f.ticks} for f in feeds},
+                    "adverse_thr_bps": {a_: prices.adverse_threshold_bps(a_, now) for a_ in ("btc", "eth", "sol", "xrp")},
+                    "ret_2s_bps": {a_: prices.ret_bps(a_, now, 2.0) for a_ in ("btc", "eth", "sol", "xrp")}},
                     indent=1))
                 logger.info(f"status {counts}")
             if a.duration_sec and now - started >= a.duration_sec:
