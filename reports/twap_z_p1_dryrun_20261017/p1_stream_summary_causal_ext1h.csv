@@ -1,0 +1,9 @@
+stream,markets,covered,exec_triggers,covered_either,same,agree_pct,same_side_diff_time,executor_only,shadow_only,diff_side,ask_med,ask_size_p10,ask_size_med,ask_size_p90,ask_size_min,n_ge_5_5,n_ge_20,n_ge_50
+btc-updown-15m,3,3,0,0,0,,0,0,0,0,,,,,,0,0,0
+btc-updown-5m,11,11,1,1,1,100.0,0,0,0,0,0.84,211.7,211.7,211.7,211.7,1,1,1
+eth-updown-15m,3,3,0,0,0,,0,0,0,0,,,,,,0,0,0
+eth-updown-5m,11,11,1,1,1,100.0,0,0,0,0,0.89,95.7,95.7,95.7,95.7,1,1,1
+sol-updown-15m,3,3,0,0,0,,0,0,0,0,,,,,,0,0,0
+sol-updown-5m,11,11,2,2,0,0.0,0,2,0,0,0.89,11.0,15.0,19.0,10.0,2,1,0
+xrp-updown-15m,3,3,0,0,0,,0,0,0,0,,,,,,0,0,0
+xrp-updown-5m,11,11,0,0,0,,0,0,0,0,,,,,,0,0,0

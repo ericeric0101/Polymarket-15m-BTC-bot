@@ -1,0 +1,26 @@
+{
+ "window_taipei": [
+  "2026-10-16 10:41:38",
+  "2026-10-17 10:57:13"
+ ],
+ "hours": 1.0,
+ "markets_full": 56,
+ "markets_book_covered": 56,
+ "exec_triggers": 4,
+ "rule_match_fail_closed": 0,
+ "latency_ms": {
+  "p50": 5.75,
+  "p99": 19.73,
+  "max": 28.85
+ },
+ "agreement_covered": {
+  "neither": 52,
+  "same": 2,
+  "executor_only": 2
+ },
+ "skip_reason_top": {
+  "BOOK_INVALID": 522,
+  "MID_OUT_OF_RANGE": 44,
+  "Z_BELOW_THRESHOLD": 26
+ }
+}

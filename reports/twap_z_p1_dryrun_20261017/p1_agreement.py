@@ -14,6 +14,9 @@ from evaluate_v2 import BookIndex, _valid  # noqa: E402
 from bot.research.twap_z_executor import CHECKPOINTS, YR3, MID_LO, MID_HI, Z_MIN  # noqa: E402
 
 EXEC_START, EXEC_STOP = 1792118498.0, 1792205833.0   # old executor process: 2026-10-16 10:41:38 -> 10-17 10:57:13 (Taipei)
+if "--window" in sys.argv:                            # e.g. --window 1792206651 1792210260 (P1 1-hour extension)
+    i = sys.argv.index("--window"); EXEC_START, EXEC_STOP = float(sys.argv[i + 1]), float(sys.argv[i + 2])
+TAG = "_ext1h" if "--window" in sys.argv else ""
 SRC = {"btc": ("chainlink_spot", "chainlink_twap60")}
 SRC.update({a: (f"chainlink_spot:{a}", f"chainlink_twap60:{a}") for a in ("eth", "sol", "xrp")})
 
@@ -101,7 +104,7 @@ def cls(r):
     if e and s: return "same" if (r.ex_cp == r.sh_cp and r.ex_side == r.sh_side) else ("same_side_diff_time" if r.ex_side == r.sh_side else "diff_side")
     return "executor_only" if e else "shadow_only"
 M["cls"] = M.apply(cls, axis=1)
-M.to_csv(O / f"p1_market_comparison{'_causal' if CAUSAL else ''}.csv")
+M.to_csv(O / f"p1_market_comparison{'_causal' if CAUSAL else ''}{TAG}.csv")
 
 # ---- per-stream summary
 trig = ex[ex.action.eq("WOULD_SUBMIT")]
@@ -124,7 +127,7 @@ for st, g in M.groupby("stream"):
                 "ask_size_min": round(float(sz.min()), 1) if len(t) else None,
                 "n_ge_5_5": int((sz >= 5.5).sum()), "n_ge_20": int((sz >= 20).sum()), "n_ge_50": int((sz >= 50).sum())})
 summ = pd.DataFrame(out)
-summ.to_csv(O / f"p1_stream_summary{'_causal' if CAUSAL else ''}.csv", index=False)
+summ.to_csv(O / f"p1_stream_summary{'_causal' if CAUSAL else ''}{TAG}.csv", index=False)
 reasons = ex[ex.action.isin(["SKIP"])].reasons.explode().value_counts()
 lat = ex.decision_latency_ms
 res = {"window_taipei": ["2026-10-16 10:41:38", "2026-10-17 10:57:13"], "hours": round((EXEC_STOP - EXEC_START) / 3600, 2),
@@ -133,5 +136,5 @@ res = {"window_taipei": ["2026-10-16 10:41:38", "2026-10-17 10:57:13"], "hours":
        "latency_ms": {"p50": round(float(lat.median()), 2), "p99": round(float(lat.quantile(.99)), 2), "max": round(float(lat.max()), 2)},
        "agreement_covered": {k: int(v) for k, v in M[M.book_covered].cls.value_counts().items()},
        "skip_reason_top": {k: int(v) for k, v in reasons.head(12).items()}}
-(O / f"p1_summary{'_causal' if CAUSAL else ''}.json").write_text(json.dumps(res, indent=1))
+(O / f"p1_summary{'_causal' if CAUSAL else ''}{TAG}.json").write_text(json.dumps(res, indent=1))
 print(json.dumps(res, indent=1)); print(summ.to_string(index=False))
