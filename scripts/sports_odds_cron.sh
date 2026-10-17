@@ -1,9 +1,9 @@
 #!/bin/bash
 # S1 collector entry point for launchd (research only, never trades).
-#   scripts/sports_odds_cron.sh baseline|closing|resolve
+#   scripts/sports_odds_cron.sh baseline|closing|resolve|health
 # One lock per mode so a slow run is skipped, not stacked. Logs: logs/sports_odds/<mode>.log
 set -u
-MODE="${1:?usage: sports_odds_cron.sh baseline|closing|resolve}"
+MODE="${1:?usage: sports_odds_cron.sh baseline|closing|resolve|health}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 LOGDIR="$ROOT/logs/sports_odds"
@@ -21,6 +21,7 @@ case "$MODE" in
   baseline) "$PY" scripts/sports_odds_scan.py --credit-reserve 2000 ;;
   closing)  "$PY" scripts/sports_odds_scan.py --closing --credit-reserve 2000 ;;
   resolve)  "$PY" scripts/sports_odds_resolve.py ;;
+  health)   "$PY" scripts/sports_odds_health.py --notify ;;
   *) echo "unknown mode $MODE"; exit 2 ;;
 esac
 echo "$(date -u +%FT%TZ) $MODE exit $?"
