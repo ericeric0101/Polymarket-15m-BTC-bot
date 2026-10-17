@@ -59,6 +59,7 @@ MARKET_REFRESH_SEC = 30.0
 COINBASE_SUBSCRIBE = {"type": "subscribe", "product_ids": ["BTC-USD"], "channels": ["ticker"]}
 SILENCE_RECONNECT_SEC = 30.0
 MAX_CONNECTION_SEC = 23 * 3600
+BOOK_SAMPLE_LEAD_SEC = 0.010
 
 
 class Feed(threading.Thread):
@@ -372,12 +373,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     last_status = 0.0
     logger.info(f"price recorder started -> {args.data_dir}")
     try:
-        while not stop.wait(1.0):
+        while True:
+            # Read books ~10 ms before each wall-clock second and stamp them with that second,
+            # so the row for second S is the state just before S (no post-decision updates).
+            target = int(time.time()) + 1
+            if stop.wait(max(0.0, target - BOOK_SAMPLE_LEAD_SEC - time.time())):
+                break
             now = time.time()
+            for row in sampler.sample(now, ts_sec=target):
+                book_store.add(row)
             bucketer.flush_older_than(now)
             chainlink_bucketer.flush_older_than(now)
-            for row in sampler.sample(now):
-                book_store.add(row)
             for st in (store, book_store):
                 for path in st.flush():  # completed UTC hours only
                     logger.info(f"wrote {path}")

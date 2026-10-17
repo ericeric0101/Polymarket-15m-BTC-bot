@@ -315,6 +315,9 @@ def book_schema():
             ("n_updates", pa.int32()),                 # book messages applied during this second
             ("last_update_received_ms", pa.int64()),   # local receipt of the last change to this book
             ("last_event_ms", pa.int64()),             # venue timestamp of that change, if given
+            # Since 2026-10-17: local time the state was read. Sampling is aligned to ~10 ms
+            # BEFORE second ts_sec, so a row's state never post-dates ts_sec (causal as-of).
+            ("sample_ms", pa.int64()),
         ])
     return _BOOK_SCHEMA
 
@@ -414,8 +417,10 @@ class BookSampler:
                         applied += 1
         return applied
 
-    def sample(self, now_ts: float) -> list[dict[str, Any]]:
-        sec = int(now_ts)
+    def sample(self, now_ts: float, ts_sec: Optional[int] = None) -> list[dict[str, Any]]:
+        """Rows stamped ``ts_sec`` (default: floor of now) holding the book state read at ``now_ts``."""
+        sec = int(now_ts) if ts_sec is None else int(ts_sec)
+        sample_ms = int(now_ts * 1000)
         rows = []
         with self._lock:
             for token, book in self._books.items():
@@ -430,7 +435,7 @@ class BookSampler:
                              "bid_size": bids.get(bb) if bb is not None else None,
                              "ask_size": asks.get(ba) if ba is not None else None,
                              "n_updates": book["n"], "last_update_received_ms": book["last_ms"],
-                             "last_event_ms": book["event_ms"]})
+                             "last_event_ms": book["event_ms"], "sample_ms": sample_ms})
                 book["n"] = 0
         return rows
 

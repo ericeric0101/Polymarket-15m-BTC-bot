@@ -111,3 +111,13 @@ def test_book_stream_prefix_and_feed_names():
     assert book_stream_prefix("btc-updown-5m-1792116000") == "btc-updown-5m-"
     assert book_feed_name("btc-updown-15m-") == "polymarket_book"
     assert book_feed_name("eth-updown-5m-") == "polymarket_book_eth_5m"
+
+
+def test_aligned_sample_is_stamped_with_the_next_second_and_records_sample_ms():
+    from bot.research.price_recorder import BookSampler
+    s = BookSampler()
+    s.set_tokens({"b": {"slug": "btc-updown-5m-1", "outcome": "Up", "end_ts": 9e9}})
+    s.apply({"event_type": "book", "asset_id": "b", "bids": [{"price": "0.4", "size": "1"}],
+             "asks": [{"price": "0.5", "size": "1"}]}, 99.0)
+    (row,) = s.sample(99.990, ts_sec=100)
+    assert row["ts_sec"] == 100 and row["sample_ms"] == 99990 and row["sample_ms"] <= row["ts_sec"] * 1000
