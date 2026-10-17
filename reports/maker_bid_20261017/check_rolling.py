@@ -62,7 +62,14 @@ print(f"fills: {len(fills)} | matched to recorder tape (tx, token, SELL, price<=
 per_order = fills.groupby("order_id").fill_shares.sum()
 if (per_order > SIZE + 1e-9).any(): issues.append("an order filled above its size")
 ftok = fills.groupby(["market_slug", "token_id"]).order_id.nunique()
-if (ftok > 1).any(): issues.append(f"{int((ftok > 1).sum())} tokens filled by more than one order")
+for (slug, tok), n in ftok[ftok > 1].items():
+    ff = fills[(fills.market_slug == slug) & (fills.token_id == tok)].sort_values("t")
+    first_t = ff.t.iloc[0]
+    late = ff[(ff.order_id != ff.order_id.iloc[0]) & (ff.t > first_t + LATENCY_SEC + 0.15)]
+    if len(late):
+        issues.append(f"{slug} {tok[:8]}: second order filled after the sibling cancel was effective")
+    else:
+        print(f"note: {slug} double fill inside cancel latency (realistic, counted)")
 
 # 5. queue consistency: SELL volume at our price after measurement must exceed queue before a non-sweep fill
 for f in fills.itertuples():

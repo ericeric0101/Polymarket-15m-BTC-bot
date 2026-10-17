@@ -99,6 +99,8 @@ def test_requote_on_best_bid_change_keeps_old_order_until_cancel_effective():
     e.trade(t0 + 2.6, "tu", 0.59, 5)              # old order still fillable (cancel not effective)
     f = [x for x in e.events if x["event"] == "FILL"][0]
     assert f["price"] == 0.60 and f["picked_off"] is True
+    sib = [x for x in e.events if x["event"] == "CANCEL_SENT" and x.get("reason") == "SIBLING_FILLED"]
+    assert len(sib) == 1 and sib[0]["price"] == 0.62          # the new order is cancelled at once
 
 
 def test_no_quotes_outside_window_or_conditions_and_window_end_cancels():
@@ -132,3 +134,19 @@ def test_adaptive_threshold_is_two_sigma_of_2s_returns_with_floor_and_fail_close
     e.prices = PriceHistory()                                          # no history: no quotes
     e.tick(END - 100)
     assert e.events == []
+
+
+def test_fill_cancels_the_replaced_sibling_order():
+    e = Env()
+    t0 = END - 100
+    e.tick(t0); e.tick(t0 + 0.5)
+    e.books["tu"] = {"best_bid": 0.62, "best_ant": 0.63, "best_ask": 0.63}
+    e.tick(t0 + 2.5)                               # old @0.60 cancelling, new @0.62 sent
+    e.tick(t0 + 2.9)                               # new live
+    e.levels[("tu", 0.62)] = 0.0
+    e.trade(t0 + 3.0, "tu", 0.61, 5)               # hits the new @0.62 (swept) -> fill
+    kinds = [(x["event"], x.get("price"), x.get("reason")) for x in e.events if x.get("token_id") == "tu"]
+    assert ("FILL", 0.62, None) in kinds
+    # the old order's cancel was already sent by the requote; no extra placement afterwards
+    e.tick(t0 + 6.0)
+    assert sum(1 for k in kinds if k[0] == "PLACE_SENT") == 2

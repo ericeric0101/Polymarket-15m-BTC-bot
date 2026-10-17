@@ -258,6 +258,15 @@ class MakerBidSim:
                 st.done = True
                 self._event("FILL", o, t, fill_shares=take, print_price=px, print_size=sz,
                             print_tx=tr.get("tx_hash"))
+                # One fill per token: cancel any other order of this token (it can still be hit
+                # during the cancel latency -- realistic, logged as a second filled order).
+                for sib in [st.order] + [x for x in self._pending_cancels if x.token_id == o.token_id]:
+                    if sib is not None and sib is not o and not sib.done and sib.cancel_sent_ts is None:
+                        sib.cancel_sent_ts, sib.cancel_reason = t, "SIBLING_FILLED"
+                        self._event("CANCEL_SENT", sib, t, reason="SIBLING_FILLED")
+                        if st.order is sib:
+                            st.order = None
+                            self._pending_cancels.append(sib)
                 if o.filled >= o.size - 1e-9:
                     o.done = True
                     if st.order is o:
