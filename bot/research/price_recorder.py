@@ -540,3 +540,23 @@ def book_feed_name(prefix: str) -> str:
     """Status/feed name of a stream's book socket; BTC 15m keeps the original v2 name."""
     stream = prefix.rstrip("-")
     return "polymarket_book" if stream == "btc-updown-15m" else f"polymarket_book_{stream.replace('-updown-', '_')}"
+
+
+BINANCE_ALT_STREAM_URL = ("wss://stream.binance.com:9443/stream?streams="
+                          + "/".join(f"{a}usdt@aggTrade" for a in ALT_ASSETS))
+
+
+def parse_binance_combined_aggtrade(payload: Any) -> Optional[tuple[str, float, Optional[int]]]:
+    """(asset, price, trade_ms) from a Binance combined-stream aggTrade frame, else None."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return None
+    d = payload["data"]
+    if d.get("e") != "aggTrade":
+        return None
+    sym = str(d.get("s") or "").lower()
+    if not sym.endswith("usdt"):
+        return None
+    price = _num(d.get("p"))
+    if price is None or price <= 0:
+        return None
+    return sym[:-4], float(price), _event_ms(d.get("T") or d.get("E"))

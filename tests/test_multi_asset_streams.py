@@ -121,3 +121,11 @@ def test_aligned_sample_is_stamped_with_the_next_second_and_records_sample_ms():
              "asks": [{"price": "0.5", "size": "1"}]}, 99.0)
     (row,) = s.sample(99.990, ts_sec=100)
     assert row["ts_sec"] == 100 and row["sample_ms"] == 99990 and row["sample_ms"] <= row["ts_sec"] * 1000
+
+
+def test_parse_binance_combined_aggtrade():
+    from bot.research.price_recorder import BINANCE_ALT_STREAM_URL, parse_binance_combined_aggtrade
+    assert "ethusdt@aggTrade" in BINANCE_ALT_STREAM_URL and "xrpusdt@aggTrade" in BINANCE_ALT_STREAM_URL
+    msg = {"stream": "solusdt@aggTrade", "data": {"e": "aggTrade", "s": "SOLUSDT", "p": "104.85", "T": 1792210000123}}
+    assert parse_binance_combined_aggtrade(msg) == ("sol", 104.85, 1792210000123)
+    assert parse_binance_combined_aggtrade({"data": {"e": "trade"}}) is None

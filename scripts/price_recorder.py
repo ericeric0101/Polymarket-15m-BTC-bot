@@ -42,10 +42,12 @@ from bot.research.price_recorder import (  # noqa: E402
     SecondBucketer,
     ALT_ASSETS,
     MARKET_STREAMS,
+    BINANCE_ALT_STREAM_URL,
     alt_source_name,
     book_feed_name,
     book_schema,
     market_tokens_for,
+    parse_binance_combined_aggtrade,
     parse_coinbase_ticker,
     parse_rtds_chainlink,
     stream_slugs,
@@ -261,8 +263,18 @@ def build_feeds(bucketer: SecondBucketer, chainlink_bucketer: SecondBucketer, st
         bucketer.observe("coinbase_btcusd", price, received, source_ms)
         return 1
 
+    def binance_alt_message(raw) -> int:
+        parsed = parse_binance_combined_aggtrade(safe_json_loads(raw))
+        if parsed is None:
+            return 0
+        asset, price, trade_ms = parsed
+        bucketer.observe(f"binance_{asset}usdt", price, time.time(), trade_ms)
+        return 1
+
     return [
         Feed("chainlink_rtds", POLYMARKET_LIVE_WS_URL, stop, rtds_open, rtds_message, rtds_heartbeat),
+        # ETH/SOL/XRP exchange prices (lead Chainlink by ~2-3 s; 2026-10-17 diagnostics).
+        Feed("binance_alt", BINANCE_ALT_STREAM_URL, stop, lambda ws: None, binance_alt_message),
         *build_alt_chainlink_feeds(chainlink_bucketer, stop),
         Feed("binance", BINANCE_AGGTRADE_WS_URL, stop, lambda ws: None, binance_message),
         Feed("coinbase", COINBASE_WS_URL, stop, coinbase_open, coinbase_message),
