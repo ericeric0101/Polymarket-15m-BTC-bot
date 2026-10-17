@@ -1,0 +1,705 @@
+[
+ {
+  "slug": "btc-updown-15m-1792056600",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792056600",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792056600",
+  "condition_id": "0xac93feb4642eae0fdf1c42b4e71021ebac31d8d7e6312adbf7acf73989df7ac3",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-15T09:45:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-15m-1792062000",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792062000",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792062000",
+  "condition_id": "0x00c0cb42280253e9f828474fcfd87e99379971fc43f7b0b3f72ef8984296c9a4",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-15T11:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-15m-1792065600",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792065600",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792065600",
+  "condition_id": "0xc5eab2a7c1a1b48e71966377273c71342472747b3754585b7c0dfa3f0a00c786",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-15T12:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "btc-updown-15m-1792093500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792093500",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792093500",
+  "condition_id": "0x1c386ee4c44d390388b77dd36c862043f604a515b635ae853203c1c9ef572315",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-15T20:00:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-15m-1792104300",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792104300",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792104300",
+  "condition_id": "0x567f96261ddee8fba701ce8c82ead292e414bb8ff8e7d534caa5cb651fcd6538",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-15T23:00:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-15m-1792131300",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792131300",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792131300",
+  "condition_id": "0xc0c4b3bbaa8c8a5c3a38fe1101a75cc6b59bef8f33f022efd750a86a6354209e",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T06:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "btc-updown-15m-1792191600",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-15m-1792191600",
+  "http_status": 200,
+  "event_slug": "btc-updown-15m-1792191600",
+  "condition_id": "0x403d255cbd88215918c16131cc3996328d21e12733365206d63e309101bdac80",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T23:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "btc-updown-5m-1792121100",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792121100",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792121100",
+  "condition_id": "0xdbacef903e0e20ccfae49b9bd4dc7f6dbc84e0dedc832d46ec9ec3d8eb8cd881",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T03:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-5m-1792138800",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792138800",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792138800",
+  "condition_id": "0x1eb5f8c6b64624f3debc639ce0f3e965dea07adedfb1074b86687d2a97193bec",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T08:25:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "btc-updown-5m-1792142400",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792142400",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792142400",
+  "condition_id": "0xf72ebcff0af403e10a75bb96f4dcf087792b8f37acc234955c1cd54413fdccfe",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T09:25:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-5m-1792185300",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792185300",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792185300",
+  "condition_id": "0x7df4c6af76d35099f1bdf8aa752c6ac07db605dec2b8bee9c79352d9f9694349",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T21:20:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "btc-updown-5m-1792192800",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792192800",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792192800",
+  "condition_id": "0xbf3ddad0cfc07f9e6940e8810c2620a2f6fbf8b28adb9e8fe2c67cb5fa6f0e6c",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T23:25:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-5m-1792195500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792195500",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792195500",
+  "condition_id": "0x53cc436dbb7fecce91f486d601d33f946b0341bdb9fc17924572b2efbd741627",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T00:10:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "btc-updown-5m-1792196100",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1792196100",
+  "http_status": 200,
+  "event_slug": "btc-updown-5m-1792196100",
+  "condition_id": "0x9ce00f60b165531db72c7eab6ed8f5645eb92f41a3b20599adabbc01bf02f29f",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T00:20:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "eth-updown-15m-1792198800",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-15m-1792198800",
+  "http_status": 200,
+  "event_slug": "eth-updown-15m-1792198800",
+  "condition_id": "0x5bd5407d756d88f3022ef983d2bb3770b5d5a3e4f621f4174acde2fdf2ef00f4",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T01:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "eth-updown-5m-1792120200",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-5m-1792120200",
+  "http_status": 200,
+  "event_slug": "eth-updown-5m-1792120200",
+  "condition_id": "0x6e10bc18642f26a01bdf42b03268836fa616eb51a0191785d90600b2b202cf8a",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T03:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "eth-updown-5m-1792123500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-5m-1792123500",
+  "http_status": 200,
+  "event_slug": "eth-updown-5m-1792123500",
+  "condition_id": "0xc5c895fbfccf1aee576e462d126981ab67214fe77e8aa3998d167c21afdc15fa",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T04:10:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "eth-updown-5m-1792135500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-5m-1792135500",
+  "http_status": 200,
+  "event_slug": "eth-updown-5m-1792135500",
+  "condition_id": "0x0ed0bd6977167595aa2b8309617083c23f101f6c7dd3cab9cca47839b96c53c1",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T07:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "eth-updown-5m-1792185300",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-5m-1792185300",
+  "http_status": 200,
+  "event_slug": "eth-updown-5m-1792185300",
+  "condition_id": "0xf5a872e619eb1810c33b58d2b70d1c43faff02a73f894bee4cc58e22ec6560dc",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T21:20:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "eth-updown-5m-1792192500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-5m-1792192500",
+  "http_status": 200,
+  "event_slug": "eth-updown-5m-1792192500",
+  "condition_id": "0xe12e5a61b46a5bb8dedb0e1d081d4ffa055a61c02b435d6e02540aee5648df28",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T23:20:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "eth-updown-5m-1792196700",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/eth-updown-5m-1792196700",
+  "http_status": 200,
+  "event_slug": "eth-updown-5m-1792196700",
+  "condition_id": "0xa51bd1a5df59a9224c71f5ff44fb7f59707936ee9b32b8bfbf13a94b1fbc84c6",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T00:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "sol-updown-15m-1792123200",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-15m-1792123200",
+  "http_status": 200,
+  "event_slug": "sol-updown-15m-1792123200",
+  "condition_id": "0xa43fdfc7faa5d5674081ac8d1096a5604a4365f011dd77a2717247a8e30e78ee",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T04:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "sol-updown-15m-1792191600",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-15m-1792191600",
+  "http_status": 200,
+  "event_slug": "sol-updown-15m-1792191600",
+  "condition_id": "0x5474869ebabea0262952147fd148e9ea9a5a9ee3b5fc072c317a0a15ccd77ffc",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T23:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "sol-updown-5m-1792157100",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-5m-1792157100",
+  "http_status": 200,
+  "event_slug": "sol-updown-5m-1792157100",
+  "condition_id": "0xc12fbf9c3f672a3be8641b24eaf1328326563cae578ef6ea8d9e2a96b47407fd",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T13:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "sol-updown-5m-1792159200",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-5m-1792159200",
+  "http_status": 200,
+  "event_slug": "sol-updown-5m-1792159200",
+  "condition_id": "0x5d4491dc2b07b7740b40dde0a08f98c21a8231dd9cebc777ccc0a72982f7aae0",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T14:05:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "sol-updown-5m-1792188600",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-5m-1792188600",
+  "http_status": 200,
+  "event_slug": "sol-updown-5m-1792188600",
+  "condition_id": "0xf0c7055e5936f2649f221db4d369b529317eb9183b73f3d15e4365db08fd15dc",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T22:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "sol-updown-5m-1792192200",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-5m-1792192200",
+  "http_status": 200,
+  "event_slug": "sol-updown-5m-1792192200",
+  "condition_id": "0x3c8fa52c1c93f0bc1569ecec722f956032eb966a95b7499e5fba67296499c631",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T23:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "sol-updown-5m-1792205700",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/sol-updown-5m-1792205700",
+  "http_status": 200,
+  "event_slug": "sol-updown-5m-1792205700",
+  "condition_id": "0x92ee7a7037005758b3285e919c852bd4e7a1d1e7f9f840f880bde203bcbb746e",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T03:00:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "xrp-updown-15m-1792199700",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-15m-1792199700",
+  "http_status": 200,
+  "event_slug": "xrp-updown-15m-1792199700",
+  "condition_id": "0x5b2745a3b8dd63b17de960aa889b0dfdde760c5ac1b9519243d8b3486c007ad3",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T01:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "xrp-updown-5m-1792128000",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792128000",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792128000",
+  "condition_id": "0x34baf24c5c9c15db89a88816c72278329dd037b49857a765c8c72af13ab362f5",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T05:25:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "xrp-updown-5m-1792135500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792135500",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792135500",
+  "condition_id": "0xe7d8a57b18603e5a58a553870c46fccaf7110ca51ae4ca71cb3902124f249077",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T07:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "xrp-updown-5m-1792142700",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792142700",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792142700",
+  "condition_id": "0x54fc729459ac0d5bd3447464cce10b3e5514f67b2e2feab42dbd43ae48848352",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T09:30:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "xrp-updown-5m-1792149300",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792149300",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792149300",
+  "condition_id": "0x001d320a6a8ed3b193b726a4a33fb0ccdd22761228c12975d6dbe4bbf06b7cb6",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T11:20:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "xrp-updown-5m-1792163400",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792163400",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792163400",
+  "condition_id": "0xb5d85275dab905d779416a2ae80f57953020662647f8e5e6a3d6010379b91feb",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T15:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "xrp-updown-5m-1792192200",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792192200",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792192200",
+  "condition_id": "0x0c7439e8430a7183135b1f9ea56ff5eb45636b301253bd284d416d57be055bed",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-16T23:15:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ },
+ {
+  "slug": "xrp-updown-5m-1792195500",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792195500",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792195500",
+  "condition_id": "0xa950bca2f056b033b726e9f42cddfd58bd514cd6b261dda8a83dbcae9069a10a",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T00:10:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "0",
+   "1"
+  ],
+  "official_outcome": "DOWN"
+ },
+ {
+  "slug": "xrp-updown-5m-1792205700",
+  "source_url": "https://gamma-api.polymarket.com/events/slug/xrp-updown-5m-1792205700",
+  "http_status": 200,
+  "event_slug": "xrp-updown-5m-1792205700",
+  "condition_id": "0xb04685db1d4494576179ae50089a64a8c45fcb9ba18e387dc737344a782c5ea4",
+  "closed": true,
+  "uma_resolution_status": "resolved",
+  "end_date": "2026-10-17T03:00:00Z",
+  "outcomes": [
+   "Up",
+   "Down"
+  ],
+  "outcome_prices": [
+   "1",
+   "0"
+  ],
+  "official_outcome": "UP"
+ }
+]
