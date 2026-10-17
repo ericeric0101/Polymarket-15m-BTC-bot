@@ -1,0 +1,25 @@
+{
+ "utc": "2026-10-17T14:10:45Z",
+ "host": "cheng-kais-MacBook-Air.local",
+ "edge_ip": "172.64.153.51",
+ "cloudflare_colo": "OSL",
+ "tcp_rtt": {
+  "p10_ms": 302.1,
+  "p50_ms": 302.9,
+  "p90_ms": 305.5,
+  "n": 30
+ },
+ "get_time": {
+  "p10_ms": 357.6,
+  "p50_ms": 361.7,
+  "p90_ms": 366.4,
+  "n": 30
+ },
+ "post_order_401": {
+  "p10_ms": 362.1,
+  "p50_ms": 366.1,
+  "p90_ms": 375.6,
+  "n": 30
+ },
+ "origin_extra_p50_ms": 63.2
+}
