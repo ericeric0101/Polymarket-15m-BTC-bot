@@ -14,6 +14,8 @@ N_PRIMARY, MAX_DAYS = 200, 7
 
 ev = [json.loads(l) for f in sorted(D.glob("events_*.jsonl")) for l in open(f)]
 df = pd.DataFrame(ev)
+if df.empty:
+    sys.exit("no confirmatory events yet")
 fills = df[(df.event == "FILL") & (df.t >= START)]
 st = df[(df.event == "SETTLED") & (df.t >= START)].drop_duplicates(["market_slug", "token_id"])
 placed = df[(df.event == "PLACE_SENT") & (df.t >= START)]
